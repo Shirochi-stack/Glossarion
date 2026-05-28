@@ -1063,15 +1063,27 @@ def _library_io_worker_count(total: int, cap: int = 8) -> int:
     return min(total, cap, max(2, cpu_count * 2))
 
 
-def _reader_worker_count(total: int, cap: int = 16) -> int:
-    """Return a bounded worker count for independent EPUB reader tasks."""
+def _reader_worker_count(total: int, config: dict | None = None) -> int:
+    """Return the user-configured worker count for EPUB reader tasks."""
     if total <= 1:
         return 1
+    cfg = config or {}
     try:
-        cpu_count = os.cpu_count() or 2
+        if cfg and not bool(cfg.get("enable_parallel_extraction", True)):
+            return 1
     except Exception:
-        cpu_count = 2
-    return min(total, cap, max(2, cpu_count * 2))
+        pass
+
+    raw_workers = None
+    if cfg and "extraction_workers" in cfg:
+        raw_workers = cfg.get("extraction_workers")
+    if raw_workers is None:
+        raw_workers = os.environ.get("EXTRACTION_WORKERS", "2")
+    try:
+        workers = int(raw_workers)
+    except (TypeError, ValueError):
+        workers = 1
+    return min(total, max(1, workers))
 
 
 def _resolve_output_roots(config: dict | None = None) -> list[str]:
@@ -11164,14 +11176,22 @@ def _parse_epub_details(epub_path: str, parse_chapter_titles: bool = True) -> di
 
             titles_by_href: dict[str, str] = {}
             if chap_raw:
-                max_workers = min(16, max(2, (os.cpu_count() or 2) * 2))
                 try:
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        hrefs = list(chap_raw.keys())
-                        datas = [chap_raw[h] for h in hrefs]
-                        for h, t in zip(hrefs, pool.map(_extract_html_title_fast, datas)):
+                    max_workers = _reader_worker_count(len(chap_raw))
+                    if max_workers <= 1:
+                        for h, data in chap_raw.items():
+                            t = _extract_html_title_fast(data)
                             if t:
                                 titles_by_href[h] = t
+                    else:
+                        hrefs = list(chap_raw.keys())
+                        datas = [chap_raw[h] for h in hrefs]
+                        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                            for h, t in zip(
+                                    hrefs,
+                                    pool.map(_extract_html_title_fast, datas)):
+                                if t:
+                                    titles_by_href[h] = t
                 except Exception:
                     logger.debug("Parallel title parse failed, falling back: %s",
                                  traceback.format_exc())
@@ -11523,10 +11543,14 @@ class _BookDetailsLoader(QThread):
             chapters_info = []
             if chapters:
                 items = list(enumerate(chapters))
-                max_workers = min(32, max(4, (os.cpu_count() or 2) * 4))
                 try:
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        chapters_info = list(pool.map(_resolve_chapter, items))
+                    max_workers = _reader_worker_count(
+                        len(items), config=self._config)
+                    if max_workers <= 1:
+                        chapters_info = [_resolve_chapter(it) for it in items]
+                    else:
+                        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                            chapters_info = list(pool.map(_resolve_chapter, items))
                 except Exception:
                     logger.debug("Parallel chapter resolve failed, falling back: %s",
                                  traceback.format_exc())
@@ -14109,13 +14133,14 @@ class _OverlayMergeThread(QThread):
     done = Signal(object, object, bool)
 
     def __init__(self, raw_chapters, images, filenames, overlay_map,
-                 extra_image_dirs, parent=None):
+                 extra_image_dirs, config: dict | None = None, parent=None):
         super().__init__(parent)
         self._raw_chapters = list(raw_chapters or [])
         self._images = dict(images or {})
         self._filenames = list(filenames or [])
         self._overlay = dict(overlay_map or {})
         self._extra_dirs = list(extra_image_dirs or [])
+        self._config = dict(config or {})
 
     def run(self):
         raw = self._raw_chapters
@@ -14155,10 +14180,13 @@ class _OverlayMergeThread(QThread):
                 return (idx, new_title, translated_html, True)
 
             try:
-                max_workers = min(32, max(4, (os.cpu_count() or 2) * 4))
                 items = list(enumerate(raw))
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    results = list(pool.map(_fetch_overlay, items))
+                workers = _reader_worker_count(len(items), config=self._config)
+                if workers <= 1:
+                    results = [_fetch_overlay(item) for item in items]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        results = list(pool.map(_fetch_overlay, items))
             except Exception:
                 logger.debug("Overlay parallel merge failed, "
                              "falling back to sequential: %s",
@@ -14212,7 +14240,8 @@ class _OverlayMergeThread(QThread):
 
             if extra_files:
                 try:
-                    workers = _reader_worker_count(len(extra_files), cap=16)
+                    workers = _reader_worker_count(
+                        len(extra_files), config=self._config)
                     if workers <= 1:
                         loaded_images = [
                             _read_extra_image(file_info)
@@ -14246,11 +14275,13 @@ class _EpubSearchThread(QThread):
     """Build the Search EPUB match list away from the Qt UI thread."""
     results_ready = Signal(int, str, object)
 
-    def __init__(self, search_id: int, query: str, chapters, parent=None):
+    def __init__(self, search_id: int, query: str, chapters,
+                 config: dict | None = None, parent=None):
         super().__init__(parent)
         self._search_id = int(search_id)
         self._query = query or ""
         self._chapters = list(chapters or [])
+        self._config = dict(config or {})
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -14296,7 +14327,7 @@ class _EpubSearchThread(QThread):
         matches = []
         items = list(enumerate(self._chapters))
         try:
-            workers = _reader_worker_count(len(items), cap=16)
+            workers = _reader_worker_count(len(items), config=self._config)
             if workers <= 1:
                 chapter_rows = [_scan_chapter(item) for item in items]
             else:
@@ -14630,7 +14661,8 @@ class _EpubLoaderThread(QThread):
                     return None
 
             try:
-                workers = _reader_worker_count(len(chapter_sources), cap=16)
+                workers = _reader_worker_count(
+                    len(chapter_sources), config=self._config)
                 if workers <= 1:
                     collected_payloads = [
                         _collect_chapter_payload(source)
@@ -14701,7 +14733,8 @@ class _EpubLoaderThread(QThread):
             chapters: list[tuple[str, str]] = []
             filenames: list[str] = []
             try:
-                workers = _reader_worker_count(len(chapter_payloads), cap=16)
+                workers = _reader_worker_count(
+                    len(chapter_payloads), config=self._config)
                 if workers <= 1:
                     parsed_chapters = [
                         _parse_chapter_payload(payload)
@@ -15681,6 +15714,7 @@ class EpubReaderDialog(QDialog):
             filenames=filenames,
             overlay_map=self._translated_overlay,
             extra_image_dirs=self._extra_image_dirs,
+            config=self._config,
             parent=self,
         )
         # Lambda-wrap so PySide6 routes the delivery directly instead
@@ -16639,7 +16673,12 @@ class EpubReaderDialog(QDialog):
             count_label.setText("Type to search")
             return
         worker = _EpubSearchThread(
-            search_id, query, list(getattr(self, "_chapters", []) or []), self)
+            search_id,
+            query,
+            list(getattr(self, "_chapters", []) or []),
+            config=self._config,
+            parent=self,
+        )
         self._search_workers.append(worker)
         worker.results_ready.connect(self._on_search_dialog_results_ready)
         worker.finished.connect(lambda w=worker: self._on_search_worker_finished(w))

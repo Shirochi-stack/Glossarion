@@ -3704,6 +3704,12 @@ def _create_response_handling_section(self, parent):
     def _on_workers_changed(text):
         try:
             self.extraction_workers_var = text
+            if bool(getattr(self, 'enable_parallel_extraction_var', False)):
+                os.environ["EXTRACTION_WORKERS"] = str(text)
+                try:
+                    self._ensure_executor()
+                except Exception:
+                    pass
         except Exception:
             pass
     self.extraction_workers_entry.textChanged.connect(_on_workers_changed)
@@ -3714,7 +3720,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(extraction_row)
     
     # Store reference to description label for enable/disable
-    self.parallel_desc_label = QLabel("Speed up EPUB extraction using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)")
+    self.parallel_desc_label = QLabel("Speed up EPUB extraction, reader loading, and reader search using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)")
     self.parallel_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.parallel_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.parallel_desc_label)
