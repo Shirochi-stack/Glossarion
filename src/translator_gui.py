@@ -26937,7 +26937,7 @@ if __name__ == "__main__":
             _load_manga_support_sync()
         
         if splash_manager:
-            splash_manager.update_status("Creating main window...")
+            splash_manager.update_status("🪟 Creating main window...")
             time.sleep(0.07)
         
         # Create main window (modules already loaded)
