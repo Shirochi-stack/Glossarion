@@ -11701,6 +11701,7 @@ class BookDetailsDialog(QDialog):
         self._populate_generation = 0
         self._chapter_row_prep_threads: list[_ChapterRowPrepThread] = []
         self._chapter_row_prep_thread: _ChapterRowPrepThread | None = None
+        self._chapter_page = 0
         # Single-selected chapter row (by spine index). ``None`` means no
         # row currently has focus.
         self._selected_chapter_idx: int | None = None
@@ -11795,6 +11796,34 @@ class BookDetailsDialog(QDialog):
                 text-align: left;
             }
             QPushButton#toc-toggle:hover { color: #e0e0e0; border-color: #6c63ff; }
+            QLabel#toc-title {
+                color: #e0e0e0; background: #17172a;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 6px 12px; font-size: 10pt; font-weight: bold;
+            }
+            QLabel#toc-page-label { color: #9aa2b8; font-size: 9pt; }
+            QPushButton#toc-page-first, QPushButton#toc-page-prev,
+            QPushButton#toc-page-next, QPushButton#toc-page-last {
+                background: #202036; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 0px 10px; font-size: 11pt; font-weight: bold;
+                min-width: 28px;
+                min-height: 34px;
+                max-height: 34px;
+            }
+            QPushButton#toc-page-first:hover, QPushButton#toc-page-prev:hover,
+            QPushButton#toc-page-next:hover, QPushButton#toc-page-last:hover {
+                border-color: #6c63ff; background: #282848;
+            }
+            QPushButton#toc-page-first:disabled, QPushButton#toc-page-prev:disabled,
+            QPushButton#toc-page-next:disabled, QPushButton#toc-page-last:disabled {
+                color: #555a70; background: #171724; border-color: #28283d;
+            }
+            QComboBox#toc-page-size {
+                background: #1e1e2e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 5px 9px; font-size: 9pt;
+            }
             QLineEdit#toc-search {
                 background: #1e1e2e; color: #e0e0e0;
                 border: 1px solid #3a3a5e; border-radius: 6px;
@@ -12000,15 +12029,66 @@ class BookDetailsDialog(QDialog):
         hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
         body_layout.addLayout(hero)
 
-        # ── Chapters section (expanded by default) ──
+        # ── Chapters section ──
         chap_header = QHBoxLayout()
         chap_header.setSpacing(10)
-        self._toc_toggle = QPushButton("\u25bc  Chapters")
-        self._toc_toggle.setObjectName("toc-toggle")
-        self._toc_toggle.setCursor(Qt.PointingHandCursor)
-        self._toc_toggle.clicked.connect(self._toggle_chapters)
-        chap_header.addWidget(self._toc_toggle)
+        self._toc_title = QLabel("Chapters")
+        self._toc_title.setObjectName("toc-title")
+        # Keep the old attribute name for helpers that only need setText().
+        self._toc_toggle = self._toc_title
+        chap_header.addWidget(self._toc_title)
         chap_header.addStretch()
+
+        self._toc_first_btn = QPushButton("\u00ab")
+        self._toc_first_btn.setObjectName("toc-page-first")
+        self._toc_first_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_first_btn.setToolTip("First chapter page")
+        self._toc_first_btn.clicked.connect(self._on_chapter_first_page)
+        chap_header.addWidget(self._toc_first_btn)
+
+        self._toc_prev_btn = QPushButton("\u2039")
+        self._toc_prev_btn.setObjectName("toc-page-prev")
+        self._toc_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_prev_btn.setToolTip("Previous chapter page")
+        self._toc_prev_btn.clicked.connect(self._on_chapter_prev_page)
+        chap_header.addWidget(self._toc_prev_btn)
+
+        self._toc_page_label = QLabel("Page 1 / 1")
+        self._toc_page_label.setObjectName("toc-page-label")
+        chap_header.addWidget(self._toc_page_label)
+
+        self._toc_next_btn = QPushButton("\u203a")
+        self._toc_next_btn.setObjectName("toc-page-next")
+        self._toc_next_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_next_btn.setToolTip("Next chapter page")
+        self._toc_next_btn.clicked.connect(self._on_chapter_next_page)
+        chap_header.addWidget(self._toc_next_btn)
+
+        self._toc_last_btn = QPushButton("\u00bb")
+        self._toc_last_btn.setObjectName("toc-page-last")
+        self._toc_last_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_last_btn.setToolTip("Last chapter page")
+        self._toc_last_btn.clicked.connect(self._on_chapter_last_page)
+        chap_header.addWidget(self._toc_last_btn)
+
+        self._toc_page_size_combo = QComboBox()
+        self._toc_page_size_combo.setObjectName("toc-page-size")
+        self._toc_page_size_combo.setToolTip("Chapter rows per page")
+        for label, value in (
+            ("20 / page", 20),
+            ("50 / page", 50),
+            ("100 / page", 100),
+            ("250 / page", 250),
+            ("500 / page", 500),
+            ("All", "all"),
+        ):
+            self._toc_page_size_combo.addItem(label, value)
+        self._toc_page_size_combo.setCurrentIndex(0)
+        self._toc_page_size_combo.currentIndexChanged.connect(
+            self._on_chapter_page_size_changed)
+        self._style_chapter_page_size_combo()
+        chap_header.addWidget(self._toc_page_size_combo)
+
         # "Show special files" toggle mirrors the Progress Manager's behavior.
         # Hidden by default for EPUBs so configured files like nav/toc/title
         # don't clutter the list; user state is persisted via config. Built via
@@ -12056,13 +12136,53 @@ class BookDetailsDialog(QDialog):
         self._chap_layout.setSpacing(4)
         # Visible by default — the TOC is the main reading entry point.
         body_layout.addWidget(self._chap_container)
-        # Separate "user intent" flag for the chapter section's
-        # visibility. The loading placeholder flips ``_chap_container``'s
-        # visibility as an implementation detail, so we can't use
-        # :meth:`isVisible` as the source of truth — we'd end up
-        # collapsing the section every time the placeholder hid the
-        # container. :meth:`_toggle_chapters` updates this flag; every
-        # other codepath (populate, refresh, search filter) consults it.
+
+        self._toc_bottom_pager = QWidget()
+        self._toc_bottom_pager.setObjectName("toc-bottom-pager")
+        bottom_pager_layout = QHBoxLayout(self._toc_bottom_pager)
+        bottom_pager_layout.setContentsMargins(4, 4, 4, 4)
+        bottom_pager_layout.setSpacing(10)
+        bottom_pager_layout.addStretch()
+
+        self._toc_bottom_first_btn = QPushButton("\u00ab")
+        self._toc_bottom_first_btn.setObjectName("toc-page-first")
+        self._toc_bottom_first_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_bottom_first_btn.setToolTip("First chapter page")
+        self._toc_bottom_first_btn.clicked.connect(self._on_chapter_first_page)
+        bottom_pager_layout.addWidget(self._toc_bottom_first_btn)
+
+        self._toc_bottom_prev_btn = QPushButton("\u2039")
+        self._toc_bottom_prev_btn.setObjectName("toc-page-prev")
+        self._toc_bottom_prev_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_bottom_prev_btn.setToolTip("Previous chapter page")
+        self._toc_bottom_prev_btn.clicked.connect(self._on_chapter_prev_page)
+        bottom_pager_layout.addWidget(self._toc_bottom_prev_btn)
+
+        self._toc_bottom_page_label = QLabel("Page 1 / 1")
+        self._toc_bottom_page_label.setObjectName("toc-page-label")
+        bottom_pager_layout.addWidget(self._toc_bottom_page_label)
+
+        self._toc_bottom_next_btn = QPushButton("\u203a")
+        self._toc_bottom_next_btn.setObjectName("toc-page-next")
+        self._toc_bottom_next_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_bottom_next_btn.setToolTip("Next chapter page")
+        self._toc_bottom_next_btn.clicked.connect(self._on_chapter_next_page)
+        bottom_pager_layout.addWidget(self._toc_bottom_next_btn)
+
+        self._toc_bottom_last_btn = QPushButton("\u00bb")
+        self._toc_bottom_last_btn.setObjectName("toc-page-last")
+        self._toc_bottom_last_btn.setCursor(Qt.PointingHandCursor)
+        self._toc_bottom_last_btn.setToolTip("Last chapter page")
+        self._toc_bottom_last_btn.clicked.connect(self._on_chapter_last_page)
+        bottom_pager_layout.addWidget(self._toc_bottom_last_btn)
+
+        bottom_pager_layout.addStretch()
+        self._toc_bottom_pager.hide()
+        body_layout.addWidget(self._toc_bottom_pager)
+
+        # The chapter section is no longer collapsible; the placeholder can
+        # temporarily hide the container while metadata is loading, so this
+        # flag remains as the stable "intended visible" state for helpers.
         self._chap_section_expanded = True
 
         # Standalone "⏳  Loading chapters…" placeholder shown only while
@@ -12149,6 +12269,8 @@ class BookDetailsDialog(QDialog):
         # the sibling placeholder in its slot.
         if getattr(self, "_chap_container", None) is not None:
             self._chap_container.hide()
+        if getattr(self, "_toc_bottom_pager", None) is not None:
+            self._toc_bottom_pager.hide()
         if getattr(self, "_chap_loading_lbl", None) is not None:
             self._chap_loading_lbl.show()
 
@@ -12418,17 +12540,10 @@ class BookDetailsDialog(QDialog):
             for c in self._chapters_info
         )
         raw_titles_applicable = has_distinct_titles
-        # Use the intent flag (not the container's live visibility) —
-        # the background loading placeholder may temporarily hide the
-        # container, so ``isVisible()`` would spuriously report
-        # "collapsed" here and the checkbox would never surface.
-        section_expanded = bool(getattr(self, "_chap_section_expanded", True))
         # Skip toggling checkbox visibility during a silent auto-refresh
         # (the user may be interacting with it right now).
         if not auto:
-            self._raw_titles_cb.setVisible(
-                raw_titles_applicable and section_expanded
-            )
+            self._raw_titles_cb.setVisible(raw_titles_applicable)
         # Keep the flag accurate: if the toggle becomes inapplicable after
         # a refresh we don't want the checkbox state to stay "checked"
         # invisibly and force raw rendering on an unrelated book.
@@ -12562,6 +12677,43 @@ class BookDetailsDialog(QDialog):
 
         return tags
 
+    def _style_chapter_page_size_combo(self) -> None:
+        icon_path = _find_halgakos_icon()
+        if not icon_path:
+            return
+        icon_url = icon_path.replace("\\", "/")
+        self._toc_page_size_combo.setStyleSheet(f"""
+            QComboBox#toc-page-size {{
+                background: #1e1e2e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 5px 30px 5px 9px; font-size: 9pt;
+            }}
+            QComboBox#toc-page-size:hover {{
+                border-color: #6c63ff; background: #24243a;
+            }}
+            QComboBox#toc-page-size::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 28px;
+                border-left: 1px solid #3a3a5e;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+                background: #202036;
+            }}
+            QComboBox#toc-page-size::down-arrow {{
+                image: url("{icon_url}");
+                width: 16px;
+                height: 16px;
+            }}
+            QComboBox#toc-page-size QAbstractItemView {{
+                background: #1e1e2e;
+                color: #e0e0e0;
+                border: 1px solid #3a3a5e;
+                selection-background-color: #2a2d5a;
+                selection-color: #ffffff;
+            }}
+        """)
+
     # Per-tick batch size for :meth:`_populate_chapters` — small enough
     # that one tick fits comfortably inside a Qt event-loop iteration
     # (so mouse / keyboard / scroll events aren't starved) but big
@@ -12618,7 +12770,7 @@ class BookDetailsDialog(QDialog):
         # container's live visibility — the placeholder may hide the
         # container while the background loader is still running, so
         # isVisible() would incorrectly report "collapsed" on every load.
-        target_visible = bool(getattr(self, "_chap_section_expanded", True))
+        target_visible = True
         # Initial loads used to hide the container until the final batch,
         # which made large books feel stuck. Now the placeholder disappears
         # once row data exists and every batch paints as soon as it is
@@ -12628,6 +12780,8 @@ class BookDetailsDialog(QDialog):
                 self._chap_loading_lbl.hide()
             if getattr(self, "_chap_container", None) is not None:
                 self._chap_container.setVisible(bool(target_visible))
+            if getattr(self, "_toc_bottom_pager", None) is not None:
+                self._toc_bottom_pager.setVisible(bool(target_visible))
         # Clear previous rows (placeholder now lives outside this layout).
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
@@ -12638,7 +12792,12 @@ class BookDetailsDialog(QDialog):
 
         # Snapshot the state the worker uses so a mid-flight toggle
         # change can't cross-contaminate the rendering flavor.
-        populate_infos = [dict(info or {}) for info in self._chapters_info]
+        filtered_infos = self._filtered_chapter_infos()
+        self._update_chapter_pagination_controls(len(filtered_infos))
+        populate_infos = [
+            dict(info or {})
+            for info in self._current_chapter_page_infos(filtered_infos)
+        ]
         self._populate_row_specs = []
         self._populate_idx = 0
         self._populate_prep_done = False
@@ -12743,13 +12902,14 @@ class BookDetailsDialog(QDialog):
         if timer is not None and timer.isActive():
             timer.stop()
         self._chap_layout.addStretch()
-        self._apply_chapter_filter(self._toc_search.text())
         self._update_toc_toggle_label()
         if not bool(getattr(self, "_populate_silent", False)):
             if getattr(self, "_chap_loading_lbl", None) is not None:
                 self._chap_loading_lbl.hide()
             if getattr(self, "_populate_target_visible", True):
                 self._chap_container.show()
+                if getattr(self, "_toc_bottom_pager", None) is not None:
+                    self._toc_bottom_pager.show()
         self._chapters_loaded = True
         self._refresh_chapter_stream_geometry()
 
@@ -12812,12 +12972,7 @@ class BookDetailsDialog(QDialog):
         Gallery pages are unconditionally excluded — they're
         translator-generated artefacts, not real source chapters.
         """
-        if self._show_special_files:
-            items = [c for c in self._chapters_info
-                     if not c.get("is_gallery")]
-        else:
-            items = [c for c in self._chapters_info
-                     if not c.get("is_special") and not c.get("is_gallery")]
+        items = self._chapter_base_infos()
         total = len(items)
         done = sum(1 for c in items if c.get("status") == "completed")
         return done, total
@@ -12828,10 +12983,7 @@ class BookDetailsDialog(QDialog):
 
     def _update_toc_toggle_label(self):
         done, total = self._visible_counts()
-        # Use the intent flag (not the container's live visibility) so
-        # the arrow glyph doesn't flip to ▶ while the background loading
-        # placeholder is temporarily masking the container.
-        prefix = "\u25bc  Chapters" if self._chap_section_expanded else "\u25b6  Chapters"
+        prefix = "Chapters"
         if not total:
             suffix = "  (\u2014)"
         elif self._has_progress_context():
@@ -12841,26 +12993,155 @@ class BookDetailsDialog(QDialog):
             # misleading completed/total fraction.
             suffix = f"  ({total})"
         self._toc_toggle.setText(prefix + suffix)
+        self._update_chapter_pagination_controls()
+
+    def _chapter_base_infos(self) -> list[dict]:
+        if self._show_special_files:
+            return [
+                c for c in self._chapters_info
+                if not c.get("is_gallery")
+            ]
+        return [
+            c for c in self._chapters_info
+            if not c.get("is_special") and not c.get("is_gallery")
+        ]
+
+    def _filtered_chapter_infos(self) -> list[dict]:
+        items = self._chapter_base_infos()
+        search = getattr(self, "_toc_search", None)
+        needle = (search.text() if search is not None else "")
+        needle = (needle or "").strip().lower()
+        if not needle:
+            return items
+        filtered = []
+        for info in items:
+            hay = " ".join(str(x) for x in (
+                info.get("raw_title", ""),
+                info.get("translated_title", ""),
+                info.get("filename", ""),
+            )).lower()
+            if needle in hay:
+                filtered.append(info)
+        return filtered
+
+    def _chapter_page_size(self) -> int:
+        combo = getattr(self, "_toc_page_size_combo", None)
+        value = combo.currentData() if combo is not None else 20
+        if value == "all":
+            return 0
+        try:
+            size = int(value)
+        except (TypeError, ValueError):
+            size = 20
+        return max(1, size)
+
+    def _chapter_page_bounds(self, total: int) -> tuple[int, int, int]:
+        total = max(0, int(total or 0))
+        page_size = self._chapter_page_size()
+        if total <= 0:
+            self._chapter_page = 0
+            return 0, 0, 1
+        if page_size <= 0:
+            self._chapter_page = 0
+            return 0, total, 1
+        page_count = max(1, (total + page_size - 1) // page_size)
+        page = max(0, min(int(getattr(self, "_chapter_page", 0) or 0),
+                          page_count - 1))
+        self._chapter_page = page
+        start = page * page_size
+        end = min(total, start + page_size)
+        return start, end, page_count
+
+    def _current_chapter_page_infos(self, filtered_infos=None) -> list[dict]:
+        if filtered_infos is None:
+            filtered_infos = self._filtered_chapter_infos()
+        start, end, _ = self._chapter_page_bounds(len(filtered_infos))
+        return list(filtered_infos[start:end])
+
+    def _update_chapter_pagination_controls(self, filtered_count: int | None = None):
+        if filtered_count is None:
+            filtered_count = len(self._filtered_chapter_infos())
+        start, end, page_count = self._chapter_page_bounds(filtered_count)
+        page = int(getattr(self, "_chapter_page", 0) or 0)
+
+        if filtered_count <= 0:
+            detail = "0 of 0"
+        elif self._chapter_page_size() <= 0:
+            detail = f"All {filtered_count}"
+        else:
+            detail = f"{start + 1}-{end} of {filtered_count}"
+        label_text = f"Page {page + 1} / {page_count} \u00b7 {detail}"
+        for label_name in ("_toc_page_label", "_toc_bottom_page_label"):
+            label = getattr(self, label_name, None)
+            if label is not None:
+                label.setText(label_text)
+
+        can_go_back = filtered_count > 0 and page > 0
+        can_go_forward = filtered_count > 0 and page < page_count - 1
+
+        for button_name in ("_toc_first_btn", "_toc_bottom_first_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(can_go_back)
+        for button_name in ("_toc_prev_btn", "_toc_bottom_prev_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(can_go_back)
+        for button_name in ("_toc_next_btn", "_toc_bottom_next_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(can_go_forward)
+        for button_name in ("_toc_last_btn", "_toc_bottom_last_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(can_go_forward)
+
+        bottom_pager = getattr(self, "_toc_bottom_pager", None)
+        if bottom_pager is not None:
+            bottom_pager.setVisible(filtered_count > 0)
+
+    def _on_chapter_first_page(self):
+        if int(getattr(self, "_chapter_page", 0) or 0) <= 0:
+            return
+        self._chapter_page = 0
+        self._populate_chapters(silent=True)
+
+    def _on_chapter_prev_page(self):
+        if int(getattr(self, "_chapter_page", 0) or 0) <= 0:
+            return
+        self._chapter_page -= 1
+        self._populate_chapters(silent=True)
+
+    def _on_chapter_next_page(self):
+        filtered_count = len(self._filtered_chapter_infos())
+        _, _, page_count = self._chapter_page_bounds(filtered_count)
+        if int(getattr(self, "_chapter_page", 0) or 0) >= page_count - 1:
+            return
+        self._chapter_page += 1
+        self._populate_chapters(silent=True)
+
+    def _on_chapter_last_page(self):
+        filtered_count = len(self._filtered_chapter_infos())
+        _, _, page_count = self._chapter_page_bounds(filtered_count)
+        last_page = max(0, page_count - 1)
+        if int(getattr(self, "_chapter_page", 0) or 0) >= last_page:
+            return
+        self._chapter_page = last_page
+        self._populate_chapters(silent=True)
+
+    def _on_chapter_page_size_changed(self, _index=None):
+        self._chapter_page = 0
+        if self._chapters_info:
+            self._populate_chapters(silent=True)
+        else:
+            self._update_toc_toggle_label()
 
     def _apply_chapter_filter(self, text: str):
-        needle = (text or "").strip().lower()
-        for i in range(self._chap_layout.count()):
-            w = self._chap_layout.itemAt(i).widget()
-            if not isinstance(w, _ChapterRow):
-                continue
-            info = w.info
-            # Hide special files unless the toggle is on.
-            if not self._show_special_files and info.get("is_special"):
-                w.setVisible(False)
-                continue
-            if not needle:
-                w.setVisible(True)
-                continue
-            hay = " ".join(str(x) for x in (info.get("raw_title", ""),
-                                            info.get("translated_title", ""),
-                                            info.get("filename", ""))).lower()
-            w.setVisible(needle in hay)
-        self._update_toc_toggle_label()
+        self._chapter_page = 0
+        if self._chapters_info:
+            self._populate_chapters(silent=True)
+        else:
+            self._update_toc_toggle_label()
 
     def _on_special_files_toggled(self, checked: bool):
         self._show_special_files = bool(checked)
@@ -12869,7 +13150,11 @@ class BookDetailsDialog(QDialog):
             self._config["epub_details_show_special_files"] = self._show_special_files
         except Exception:
             pass
-        self._apply_chapter_filter(self._toc_search.text())
+        self._chapter_page = 0
+        if self._chapters_info:
+            self._populate_chapters(silent=True)
+        else:
+            self._update_toc_toggle_label()
         # The "Translation in progress — X/Y" strip now reflects this
         # toggle's state too, so refresh its fraction whenever the user
         # flips the checkbox.
@@ -12892,16 +13177,14 @@ class BookDetailsDialog(QDialog):
             self._populate_chapters()
 
     def _toggle_chapters(self):
-        # Flip user intent, then apply it to the actual widgets.
-        show = not bool(getattr(self, "_chap_section_expanded", True))
-        self._chap_section_expanded = show
-        self._chap_container.setVisible(show)
-        # Loading placeholder never survives a manual toggle — if the
-        # user collapsed mid-load, it makes no sense to keep showing it.
+        # Kept as a compatibility no-op for older signal paths. The chapter
+        # section is paginated now, not collapsible.
+        self._chap_section_expanded = True
+        self._chap_container.setVisible(True)
         if getattr(self, "_chap_loading_lbl", None) is not None:
             self._chap_loading_lbl.hide()
-        self._toc_search.setVisible(show)
-        self._special_cb.setVisible(show)
+        self._toc_search.setVisible(True)
+        self._special_cb.setVisible(True)
         # Mirror the applicability rule used in :meth:`_on_details_ready`
         # so the toggle surfaces for any book — in-progress OR library
         # — whose chapter rows carry distinct raw + translated titles.
@@ -12911,7 +13194,7 @@ class BookDetailsDialog(QDialog):
             and (c.get("raw_title") or "") != (c.get("translated_title") or "")
             for c in self._chapters_info
         )
-        self._raw_titles_cb.setVisible(show and has_distinct_titles)
+        self._raw_titles_cb.setVisible(has_distinct_titles)
         self._update_toc_toggle_label()
 
     @Slot(str)
