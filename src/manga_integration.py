@@ -906,83 +906,28 @@ class MangaTranslationTab(QObject):
         
         # flag to skip status checks during init
         self._initializing_gui = True
+        self._manga_interface_build_started = False
+        self._manga_interface_build_complete = False
         
         # Build interface AFTER loading settings
         self._build_interface()
 
-        # Now allow status checks
-        self._initializing_gui = False
-        
-        # Do one status check after everything is built
-        # Use QTimer for PySide6 dialog
-        QTimer.singleShot(100, self._check_provider_status)
-        
-        # Add additional status refresh with longer delay to ensure correct status on startup
-        # This fixes cases where bubble detection settings aren't reflected immediately
-        QTimer.singleShot(500, self._check_provider_status)
-        
-        # DISABLED BY DEFAULT: Model preloading causes RAM spikes and 'event' errors
-        # Users can enable via Advanced Settings > preload_local_models_on_open
-        # QTimer.singleShot(200, self._start_model_preloading)
-        
-        # Now that everything is initialized, allow saving
-        self._initializing = False
-        
-        # Preload shared models in background to avoid lag on first use
-        # This spawns worker processes/loads models ahead of time so GUI stays responsive
+        # Preload tracking is initialized now, but actual preload starts only
+        # after the deferred GUI body exists.
         self._preload_complete = False
         self._inpainter_preload_failed = False
         self._inpainter_preload_error = ""
         self._inpainter_preload_failure_notified = False
-        try:
-            def _bg_preload_models():
-                try:
-                    # Check shutdown flag before preloading
-                    if self._shutting_down:
-                        return
-                    # Preload bubble detector first (lighter)
-                    ImageRenderer._preload_shared_bubble_detector(self)
-                    # Check again before second preload
-                    if self._shutting_down:
-                        return
-                    # Then preload inpainter (heavier, C++ worker process)
-                    result = ImageRenderer._preload_shared_inpainter(self)
-                    self._record_inpainter_preload_result(result, "startup")
-                except Exception as e:
-                    print(f"[INIT_PRELOAD] Background model preload failed: {e}")
-                    self._record_inpainter_preload_result(False, "startup", str(e))
-                finally:
-                    # Mark preload complete regardless of success/failure
-                    self._preload_complete = True
-            
-            self._preload_thread = threading.Thread(target=_bg_preload_models, daemon=True)
-            self._preload_thread.start()
-            
-            # Start monitoring preload status to update button states
-            QTimer.singleShot(100, self._check_preload_status)
-        except Exception:
-            self._preload_complete = True  # Mark complete on error so buttons aren't stuck
         
         # Circle mode for selections and pipeline masks (rect by default)
         self._use_circle_shapes = False
-        
-        # Load persisted manga image list from previous session
-        QTimer.singleShot(200, self._load_persisted_files)
-        
-        # Attach logging bridge so library logs appear in our log area
-        self._attach_logging_bridge()
         
         # Connect OCR signals to handlers
         self.ocr_result_signal.connect(lambda recognized_texts, rect_item, region_index, bbox, ocr_provider: ImageRenderer._process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, ocr_provider))
         self.ocr_error_signal.connect(lambda error, rect_item, region_index: ImageRenderer._handle_ocr_error(self, error, rect_item, region_index))
 
-        # Start update loop
-        self._process_updates()
-        
-        # Install event filter for F11 fullscreen toggle
-        self._install_fullscreen_handler()
-        
-        # Connect dialog close event to cleanup
+        # Connect dialog close event to cleanup even if the deferred UI body is
+        # still rendering or fails to render.
         if self.dialog:
             self.dialog.finished.connect(self.cleanup)
 
@@ -3731,8 +3676,120 @@ class MangaTranslationTab(QObject):
         main_layout = QVBoxLayout(self.parent_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(6)
-        self._build_pyside6_interface(main_layout)
-    
+        self._manga_main_layout = main_layout
+
+        self._manga_loading_frame = QWidget()
+        loading_layout = QVBoxLayout(self._manga_loading_frame)
+        loading_layout.setContentsMargins(10, 10, 10, 10)
+        loading_layout.setSpacing(6)
+
+        loading_title = QLabel("🎌 Manga Translation")
+        loading_title_font = QFont("Arial", 13)
+        loading_title_font.setBold(True)
+        loading_title.setFont(loading_title_font)
+        loading_layout.addWidget(loading_title)
+
+        loading_label = QLabel("Loading manga tools...")
+        loading_label.setStyleSheet("color: #b8c7d9;")
+        loading_layout.addWidget(loading_label)
+        main_layout.addWidget(self._manga_loading_frame)
+
+        QTimer.singleShot(0, self._start_deferred_manga_interface_build)
+
+    def _clear_manga_loading_shell(self):
+        frame = getattr(self, '_manga_loading_frame', None)
+        if frame is None:
+            return
+        try:
+            layout = getattr(self, '_manga_main_layout', None)
+            if layout is not None:
+                layout.removeWidget(frame)
+            frame.deleteLater()
+        except Exception:
+            pass
+        self._manga_loading_frame = None
+
+    def _start_deferred_manga_interface_build(self):
+        if getattr(self, '_manga_interface_build_started', False):
+            return
+        self._manga_interface_build_started = True
+        self._clear_manga_loading_shell()
+        try:
+            self._build_pyside6_interface(self._manga_main_layout)
+        except Exception as exc:
+            print(f"[MANGA_UI_BUILD] Failed to build manga interface: {exc}")
+            try:
+                error_label = QLabel(f"Failed to load manga interface: {exc}")
+                error_label.setWordWrap(True)
+                error_label.setStyleSheet("color: red;")
+                self._manga_main_layout.addWidget(error_label)
+            except Exception:
+                pass
+            return
+        self._finalize_deferred_manga_interface_build()
+
+    def _yield_manga_interface_render(self):
+        try:
+            self.parent_widget.update()
+            if self.dialog:
+                self.dialog.update()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _finalize_deferred_manga_interface_build(self):
+        self._manga_interface_build_complete = True
+
+        # Now allow status checks.
+        self._initializing_gui = False
+
+        # Do status checks after the widgets they update have been built.
+        QTimer.singleShot(100, self._check_provider_status)
+        QTimer.singleShot(500, self._check_provider_status)
+
+        # DISABLED BY DEFAULT: Model preloading causes RAM spikes and 'event' errors.
+        # Users can enable via Advanced Settings > preload_local_models_on_open.
+        # QTimer.singleShot(200, self._start_model_preloading)
+
+        # Now that everything is initialized, allow saving.
+        self._initializing = False
+
+        try:
+            def _bg_preload_models():
+                try:
+                    if self._shutting_down:
+                        return
+                    ImageRenderer._preload_shared_bubble_detector(self)
+                    if self._shutting_down:
+                        return
+                    result = ImageRenderer._preload_shared_inpainter(self)
+                    self._record_inpainter_preload_result(result, "startup")
+                except Exception as e:
+                    print(f"[INIT_PRELOAD] Background model preload failed: {e}")
+                    self._record_inpainter_preload_result(False, "startup", str(e))
+                finally:
+                    self._preload_complete = True
+
+            self._preload_thread = threading.Thread(target=_bg_preload_models, daemon=True)
+            self._preload_thread.start()
+            QTimer.singleShot(100, self._check_preload_status)
+        except Exception:
+            self._preload_complete = True
+
+        # Load persisted manga image list from previous session.
+        QTimer.singleShot(200, self._load_persisted_files)
+
+        # Attach logging bridge so library logs appear in our log area.
+        self._attach_logging_bridge()
+
+        # Start update loop.
+        self._process_updates()
+
+        # Install event filter for F11 fullscreen toggle.
+        self._install_fullscreen_handler()
+
+        self._yield_manga_interface_render()
+
     def _build_pyside6_interface(self, main_layout):
         # Import QSizePolicy for layout management
         from PySide6.QtWidgets import QSizePolicy
@@ -3883,6 +3940,7 @@ class MangaTranslationTab(QObject):
         title_layout.addWidget(status_label)
         
         main_layout.addWidget(title_frame)
+        self._yield_manga_interface_render()
         
         # Store reference for updates
         self.status_label = status_label
@@ -3933,6 +3991,7 @@ class MangaTranslationTab(QObject):
         
         self.preload_progress_frame.setVisible(False)  # Hidden by default
         main_layout.addWidget(self.preload_progress_frame)
+        self._yield_manga_interface_render()
         
         # Add instructions based on selected provider
         if not is_ready:
@@ -3962,11 +4021,13 @@ class MangaTranslationTab(QObject):
                 req_label.setAlignment(Qt.AlignLeft)
                 req_layout.addWidget(req_label)
                 main_layout.addWidget(req_frame)
+                self._yield_manga_interface_render()
         else:
             # Create empty frame to maintain layout consistency
             req_frame = QWidget()
             req_frame.setVisible(False)
             main_layout.addWidget(req_frame)
+            self._yield_manga_interface_render()
         
         # File selection frame - SPANS BOTH COLUMNS
         file_frame = QGroupBox("Select Manga Images")
@@ -4182,6 +4243,7 @@ class MangaTranslationTab(QObject):
         file_frame_layout.addWidget(file_btn_frame)
         
         main_layout.addWidget(file_frame)
+        self._yield_manga_interface_render()
         
         # Connect file list selection to image preview
         self.file_listbox.itemSelectionChanged.connect(self._on_file_selection_changed)
@@ -4206,6 +4268,9 @@ class MangaTranslationTab(QObject):
         columns_layout = QHBoxLayout(columns_container)
         columns_layout.setContentsMargins(0, 0, 0, 0)
         columns_layout.setSpacing(10)
+        columns_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        main_layout.addWidget(columns_container)
+        self._yield_manga_interface_render()
         
         # Create a container for tabs + advanced settings button
         tabs_container = QWidget()
@@ -6596,15 +6661,11 @@ class MangaTranslationTab(QObject):
         
         # Add tabs container (with advanced button on top) to main columns layout
         columns_layout.addWidget(tabs_container, stretch=1)
+        self._yield_manga_interface_render()
         
         # Add image preview widget directly (always visible) with higher stretch priority
         columns_layout.addWidget(self.image_preview_widget, stretch=2)
-        
-        # Make the columns container itself have proper size policy
-        columns_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        
-        # Add columns container to main layout
-        main_layout.addWidget(columns_container)
+        self._yield_manga_interface_render()
         
         # Progress frame
         progress_frame = QGroupBox("Progress")
@@ -6667,6 +6728,7 @@ class MangaTranslationTab(QObject):
         self.pool_update_timer.start(2000)  # Update every 2 seconds
         
         main_layout.addWidget(progress_frame)
+        self._yield_manga_interface_render()
         
         # Log frame
         log_frame = QGroupBox("Translation Log")
@@ -6708,6 +6770,7 @@ class MangaTranslationTab(QObject):
         QTimer.singleShot(0, self._update_log_scroll_button)
         
         main_layout.addWidget(log_frame)
+        self._yield_manga_interface_render()
         
         # Restore persistent log from previous sessions
         self._restore_persistent_log()
