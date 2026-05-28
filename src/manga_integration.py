@@ -796,6 +796,9 @@ class MangaTranslationTab(QObject):
         self.stop_flag = threading.Event()
         self.translation_thread = None
         self.translation_future = None
+        self._translation_start_token = 0
+        self._translation_startup_pending = False
+        self._translation_start_cancel_requested = False
         # Shared executor from main GUI if available
         try:
             if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
@@ -848,6 +851,7 @@ class MangaTranslationTab(QObject):
         # Auto-scroll control: delay forcing scroll on new runs
         self._autoscroll_delay_until = 0.0  # epoch seconds
         self._user_scrolled_up = False  # Track if user manually scrolled up
+        self._log_autoscroll_pending = False
         
         # Flags for stdio redirection to avoid duplicate GUI logs
         self._stdout_redirect_on = False
@@ -13587,6 +13591,24 @@ class MangaTranslationTab(QObject):
             self._user_scrolled_up = False
         except Exception:
             self._autoscroll_delay_until = 0.0
+
+    def _schedule_log_autoscroll(self, scrollbar):
+        """Coalesce log autoscroll timers so heavy logging does not flood the UI."""
+        try:
+            if getattr(self, '_log_autoscroll_pending', False):
+                return
+            self._log_autoscroll_pending = True
+
+            def scroll_once():
+                try:
+                    if self._should_autoscroll() and scrollbar:
+                        scrollbar.setValue(scrollbar.maximum())
+                finally:
+                    self._log_autoscroll_pending = False
+
+            QTimer.singleShot(50, scroll_once)
+        except Exception:
+            self._log_autoscroll_pending = False
     
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console with enhanced stop suppression"""
@@ -13663,12 +13685,9 @@ class MangaTranslationTab(QObject):
                         
                         if self._should_autoscroll():
                             self.log_text.ensureCursorVisible()
-                            # AGGRESSIVE: Set scrollbar to max now and repeatedly with more frequent intervals
                             scrollbar = self.log_text.verticalScrollBar()
                             scrollbar.setValue(scrollbar.maximum())
-                            # More aggressive timing: 10ms, 25ms, 50ms, 75ms, 100ms, 150ms, 200ms, 300ms
-                            for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
-                                QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
+                            self._schedule_log_autoscroll(scrollbar)
                     except Exception:
                         pass
                 except Exception:
@@ -13709,9 +13728,6 @@ class MangaTranslationTab(QObject):
                     if hasattr(self, 'progress_label'):
                         self.progress_label.setText(f"Starting… {c}")
                         self.progress_label.setStyleSheet("color: white;")
-                        # Force update to ensure it's visible
-                        from PySide6.QtWidgets import QApplication
-                        QApplication.processEvents()
                 except Exception:
                     pass
                 self._heartbeat_idx += 1
@@ -13736,9 +13752,12 @@ class MangaTranslationTab(QObject):
     
     def _process_updates(self):
         """Process queued GUI updates"""
+        processed = 0
+        max_updates_per_tick = 80
         try:
-            while True:
+            while processed < max_updates_per_tick:
                 update = self.update_queue.get_nowait()
+                processed += 1
                 
                 if update[0] == 'log':
                     _, message, level = update
@@ -13771,11 +13790,9 @@ class MangaTranslationTab(QObject):
                         try:
                             if self._should_autoscroll():
                                 self.log_text.ensureCursorVisible()
-                                # Force scrollbar to max repeatedly to fight fast log updates
                                 scrollbar = self.log_text.verticalScrollBar()
                                 scrollbar.setValue(scrollbar.maximum())
-                                for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
-                                    QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
+                                self._schedule_log_autoscroll(scrollbar)
                         except Exception:
                             pass
                     except Exception:
@@ -14390,12 +14407,18 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         self._log(f"❌ Failed to set translated folder: {str(e)}", "error")
                     
-        except Exception:
-            # Queue is empty or some other exception
+        except Empty:
+            # Queue is empty.
             pass
-        
-        # Schedule next update with QTimer
-        QTimer.singleShot(100, self._process_updates)
+        except Exception:
+            pass
+        finally:
+            # Keep large update bursts from monopolizing the event loop.
+            try:
+                delay = 10 if not self.update_queue.empty() else 100
+            except Exception:
+                delay = 100
+            QTimer.singleShot(delay, self._process_updates)
 
     # Periodic demoter to keep UI responsive by lowering new worker thread priorities (Windows-only).
     def _start_periodic_thread_demoter(self):
@@ -14455,7 +14478,11 @@ class MangaTranslationTab(QObject):
             
     def _toggle_translation(self):
         """Toggle between start and stop translation"""
-        if self.is_running or getattr(self, '_graceful_stop_pending', False):
+        if (
+            self.is_running
+            or getattr(self, '_graceful_stop_pending', False)
+            or getattr(self, '_translation_startup_pending', False)
+        ):
             self._stop_translation()
         else:
             self._start_translation()
@@ -14573,6 +14600,49 @@ class MangaTranslationTab(QObject):
             self._log(traceback.format_exc(), "debug")
             return False
     
+    def _is_translation_start_cancelled(self, start_token=None) -> bool:
+        """Return True if the pending startup was superseded or stopped."""
+        try:
+            if start_token is not None and getattr(self, '_translation_start_token', None) != start_token:
+                return True
+            if getattr(self, '_translation_start_cancel_requested', False):
+                return True
+            if not getattr(self, 'is_running', False):
+                return True
+        except Exception:
+            return True
+        return False
+
+    def _wait_for_previous_translation_to_finish(self, previous_future=None, previous_thread=None):
+        """Cancel/wait for stale workers without blocking the GUI thread."""
+        try:
+            if previous_future:
+                try:
+                    if not previous_future.done():
+                        self._log("Canceling previous translation future...", "info")
+                        previous_future.cancel()
+                        try:
+                            previous_future.result(timeout=3.0)
+                        except Exception:
+                            pass
+                    if getattr(self, 'translation_future', None) is previous_future:
+                        self.translation_future = None
+                except Exception as fut_err:
+                    self._log(f"Warning: error canceling previous translation future: {fut_err}", "debug")
+
+            if previous_thread and previous_thread.is_alive():
+                try:
+                    self._log("Waiting for previous translation thread to finish...", "info")
+                    previous_thread.join(timeout=5.0)
+                    if previous_thread.is_alive():
+                        self._log("Previous translation thread did not stop cleanly", "warning")
+                    elif getattr(self, 'translation_thread', None) is previous_thread:
+                        self.translation_thread = None
+                except Exception as thread_err:
+                    self._log(f"Warning: error waiting for previous translation thread: {thread_err}", "debug")
+        except Exception as e:
+            self._log(f"Warning: error checking previous translation worker: {e}", "debug")
+
     def _start_translation(self):
         """Start the translation process"""
         # Check files BEFORE redirecting stdout to avoid deadlock
@@ -14604,13 +14674,6 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[START_TRANSLATION] Error disabling workflow buttons: {e}")
         
-        # FIRST: Refresh from main GUI to ensure we have latest settings
-        try:
-            if hasattr(self, 'refresh_btn'):
-                self.refresh_btn.click()
-        except Exception as e:
-            self._log(f"⚠️ Warning: Could not refresh from main GUI: {e}", "debug")
-        
         # Immediately update button to Stop state (red)
         try:
             if hasattr(self, 'start_button') and self.start_button:
@@ -14633,9 +14696,6 @@ class MangaTranslationTab(QObject):
                     "}"
                 )
                 self.start_button.setEnabled(True)
-                # Force immediate GUI update
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents()
                 # Start spinning animation immediately
                 if hasattr(self, 'start_icon_spin_animation') and hasattr(self, 'start_button_icon'):
                     if self.start_icon_spin_animation.state() != QPropertyAnimation.Running:
@@ -14673,44 +14733,17 @@ class MangaTranslationTab(QObject):
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
-        # CRITICAL: Wait for any previous worker thread/future to finish before starting new translation
-        # This prevents race conditions where old worker is still checking stop flags
-        try:
-            # Check executor-based future first (preferred path)
-            if hasattr(self, 'translation_future') and self.translation_future:
-                try:
-                    if not self.translation_future.done():
-                        self._log("⏳ Canceling previous translation future...", "info")
-                        self.translation_future.cancel()
-                        # Wait briefly for it to actually stop
-                        try:
-                            self.translation_future.result(timeout=3.0)
-                        except Exception:
-                            pass  # Canceled or timed out
-                    self.translation_future = None
-                except Exception as fut_err:
-                    self._log(f"⚠️ Error canceling translation future: {fut_err}", "debug")
-            
-            # Also check thread-based fallback
-            if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
-                self._log("⏳ Waiting for previous translation thread to finish...", "info")
-                self.translation_thread.join(timeout=5.0)  # Wait up to 5 seconds
-                if self.translation_thread.is_alive():
-                    self._log("⚠️ Previous translation thread did not stop cleanly", "warning")
-        except Exception as e:
-            self._log(f"⚠️ Error checking previous thread: {e}", "debug")
-        
-        # CRITICAL: Set is_running=True IMMEDIATELY so toggle button works
+        previous_future = getattr(self, 'translation_future', None)
+        previous_thread = getattr(self, 'translation_thread', None)
+        self._translation_start_token = int(getattr(self, '_translation_start_token', 0) or 0) + 1
+        start_token = self._translation_start_token
+        self._translation_startup_pending = True
+        self._translation_start_cancel_requested = False
+
+        # Mark the startup as active immediately so the same button can cancel it.
+        # Stop/cancellation flags are cleared later in MangaStartHeavy, after any
+        # stale worker has actually finished.
         self.is_running = True
-        if hasattr(self, 'stop_flag'):
-            self.stop_flag.clear()
-        self._reset_global_cancellation()
-        
-        # Reset graceful stop mode from any previous translation
-        os.environ['GRACEFUL_STOP'] = '0'
-        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-        if hasattr(self, 'main_gui') and self.main_gui:
-            self.main_gui.graceful_stop_active = False
         
         # Log start directly to GUI
         try:
@@ -14756,13 +14789,6 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         
-        # Force GUI update
-        try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.processEvents()
-        except Exception:
-            pass
-        
         # Begin periodic demotion of background threads while translation runs (Windows only)
         try:
             self._start_periodic_thread_demoter()
@@ -14770,10 +14796,15 @@ class MangaTranslationTab(QObject):
             pass
         
         # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
-        threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
+        threading.Thread(
+            target=self._start_translation_heavy,
+            args=(previous_future, previous_thread, start_token),
+            name="MangaStartHeavy",
+            daemon=True
+        ).start()
         return
     
-    def _start_translation_heavy(self):
+    def _start_translation_heavy(self, previous_future=None, previous_thread=None, start_token=None):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
         try:
             # Lower priority & restrict affinity for this launcher thread (Windows)
@@ -14781,6 +14812,20 @@ class MangaTranslationTab(QObject):
                 _lower_current_thread_priority_and_affinity('MANGA_RESERVE_CORES')
             except Exception:
                 pass
+
+            self._wait_for_previous_translation_to_finish(previous_future, previous_thread)
+            if self._is_translation_start_cancelled(start_token):
+                self._log("Translation startup canceled before worker launch", "warning")
+                self._translation_startup_pending = False
+                self.update_queue.put(('ui_state', 'translation_complete'))
+                return
+
+            # Reset graceful stop mode from any previous translation only after
+            # stale workers have had a chance to observe the old stop flags.
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+            if hasattr(self, 'main_gui') and self.main_gui:
+                self.main_gui.graceful_stop_active = False
             
             # CRITICAL: Reset ALL cancellation flags including inpainter worker restart.
             # After stop+resume the inpainter worker is dead (killed by psutil cleanup).
@@ -14790,6 +14835,11 @@ class MangaTranslationTab(QObject):
                 ImageRenderer._reset_cancellation_flags(self)
             except Exception as e:
                 print(f"[START_HEAVY] _reset_cancellation_flags failed: {e}")
+            if self._is_translation_start_cancelled(start_token):
+                self._log("Translation startup canceled before configuration", "warning")
+                self._translation_startup_pending = False
+                self.update_queue.put(('ui_state', 'translation_complete'))
+                return
             # Set thread limits based on parallel processing settings
             try:
                 advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
@@ -15598,12 +15648,11 @@ class MangaTranslationTab(QObject):
         self.failed_files = 0
         self.current_file_index = 0
         
-        # Reset all global cancellation flags for new translation
-        self._reset_global_cancellation()
-        
-        # Note: is_running is already True from _start_translation()
-        # Just ensure stop_flag is clear
-        self.stop_flag.clear()
+        if self._is_translation_start_cancelled(start_token):
+            self._log("Translation startup canceled before file processing", "warning")
+            self._translation_startup_pending = False
+            self.update_queue.put(('ui_state', 'translation_complete'))
+            return
         # Queue UI updates to be processed by main thread (just for file list disable)
         self.update_queue.put(('ui_state', 'translation_started'))
         
@@ -15652,7 +15701,14 @@ class MangaTranslationTab(QObject):
         # Update progress to show we're starting the translation worker
         self._log("🚀 Launching translation worker...", "info")
         self._update_progress(0, self.total_files, "Starting translation...")
-        
+
+        if self._is_translation_start_cancelled(start_token):
+            self._log("Translation startup canceled before worker launch", "warning")
+            self._translation_startup_pending = False
+            self.update_queue.put(('ui_state', 'translation_complete'))
+            return
+        self._translation_startup_pending = False
+
         # Start translation via executor
         try:
             # Sync with main GUI executor if possible and update EXTRACTION_WORKERS
@@ -18038,7 +18094,14 @@ class MangaTranslationTab(QObject):
     
     def _stop_translation(self):
         """Stop the translation process"""
-        if self.is_running or getattr(self, '_graceful_stop_pending', False):
+        if (
+            self.is_running
+            or getattr(self, '_graceful_stop_pending', False)
+            or getattr(self, '_translation_startup_pending', False)
+        ):
+            startup_pending = bool(getattr(self, '_translation_startup_pending', False))
+            if startup_pending:
+                self._translation_start_cancel_requested = True
             # Check if graceful stop is enabled (from main GUI settings)
             graceful_stop = False
             try:
@@ -18046,6 +18109,8 @@ class MangaTranslationTab(QObject):
                     graceful_stop = getattr(self.main_gui, 'graceful_stop_var', False)
             except Exception:
                 pass
+            if startup_pending:
+                graceful_stop = False
             
             # Double-click detection for force stop during graceful stop
             import time as _time
@@ -18336,6 +18401,8 @@ class MangaTranslationTab(QObject):
             # Reset running flag and graceful stop state
             self.is_running = False
             self._graceful_stop_pending = False
+            self._translation_startup_pending = False
+            self._translation_start_cancel_requested = False
             self._stop_click_times = []
             
             # Reset start button to original Start state (green)
