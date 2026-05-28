@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QWidget, QLineEdit, QFrame, QSplitter, QTextBrowser,
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
-    QApplication, QMenu, QComboBox, QStackedWidget
+    QApplication, QMenu, QComboBox, QStackedWidget, QStyledItemDelegate,
+    QStyle, QStyleOptionViewItem
 )
 from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
@@ -14331,6 +14332,117 @@ class _EpubSearchLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _EpubSearchResultDelegate(QStyledItemDelegate):
+    """Paint search result rows with lightweight query highlighting."""
+
+    _HIGHLIGHT_BG = QColor("#ffd966")
+    _HIGHLIGHT_FG = QColor("#101010")
+
+    def sizeHint(self, option, index):
+        return QSize(0, 42)
+
+    def _draw_highlighted_line(self, painter, rect: QRect, text: str,
+                               query: str, font: QFont, color: QColor) -> None:
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        line = metrics.elidedText(str(text or ""), Qt.ElideRight,
+                                  max(0, rect.width()))
+        if not line:
+            return
+        needle = str(query or "").strip()
+        if not needle:
+            painter.setPen(color)
+            painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, line)
+            return
+
+        pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        x = rect.left()
+        pos = 0
+        matched = False
+        for match in pattern.finditer(line):
+            matched = True
+            before = line[pos:match.start()]
+            if before:
+                width = metrics.horizontalAdvance(before)
+                painter.setPen(color)
+                painter.drawText(
+                    QRect(x, rect.top(), width, rect.height()),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    before,
+                )
+                x += width
+            hit = line[match.start():match.end()]
+            width = metrics.horizontalAdvance(hit)
+            if width > 0:
+                bg_rect = QRect(x - 1, rect.top() + 2,
+                                width + 2, max(4, rect.height() - 4))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self._HIGHLIGHT_BG)
+                painter.drawRoundedRect(bg_rect, 2, 2)
+                painter.setPen(self._HIGHLIGHT_FG)
+                painter.drawText(
+                    QRect(x, rect.top(), width, rect.height()),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    hit,
+                )
+                x += width
+            pos = match.end()
+        tail = line[pos:]
+        if tail:
+            painter.setPen(color)
+            painter.drawText(
+                QRect(x, rect.top(), rect.right() - x + 1, rect.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                tail,
+            )
+        elif not matched:
+            painter.setPen(color)
+            painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, line)
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text or ""
+        opt.text = ""
+        widget = option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+
+        painter.save()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+
+        lines = text.splitlines()
+        title = lines[0] if lines else ""
+        excerpt = lines[1] if len(lines) > 1 else ""
+        data = index.data(Qt.UserRole)
+        query = data.get("text", "") if isinstance(data, dict) else ""
+
+        selected = bool(option.state & QStyle.State_Selected)
+        base_color = (
+            option.palette.highlightedText().color()
+            if selected else option.palette.text().color()
+        )
+        muted = QColor(base_color)
+        muted.setAlpha(215 if selected else 225)
+
+        title_font = QFont(option.font)
+        excerpt_font = QFont(option.font)
+        if excerpt_font.pointSizeF() > 0:
+            excerpt_font.setPointSizeF(max(7.5, excerpt_font.pointSizeF() - 0.2))
+
+        rect = option.rect.adjusted(6, 2, -6, -2)
+        title_h = QFontMetrics(title_font).height()
+        excerpt_h = QFontMetrics(excerpt_font).height()
+        title_rect = QRect(rect.left(), rect.top(),
+                           rect.width(), title_h + 2)
+        excerpt_rect = QRect(rect.left(), rect.top() + title_h + 2,
+                             rect.width(), excerpt_h + 2)
+        self._draw_highlighted_line(
+            painter, title_rect, title, query, title_font, base_color)
+        self._draw_highlighted_line(
+            painter, excerpt_rect, excerpt, query, excerpt_font, muted)
+        painter.restore()
+
+
 class _EpubSearchResultsList(QListWidget):
     """Search result list where Return/Enter means activate next result."""
     enterPressed = Signal()
@@ -16287,6 +16399,7 @@ class EpubReaderDialog(QDialog):
 
         results = _EpubSearchResultsList()
         results.setObjectName("readerSearchResults")
+        results.setItemDelegate(_EpubSearchResultDelegate(results))
         results.setWordWrap(False)
         results.setUniformItemSizes(True)
         results.setSpacing(0)
