@@ -6528,6 +6528,8 @@ class EpubLibraryDialog(QDialog):
             }
         """)
         self._size_options = [
+            (SIZE_2XS,     "2XS", "2XS thumbnails"),
+            (SIZE_XS,      "XS",  "Extra small thumbnails"),
             (SIZE_COMPACT, "S",   "Compact thumbnails"),
             (SIZE_NORMAL,  "M",   "Normal thumbnails"),
             (SIZE_LARGE,   "L",   "Large thumbnails"),
