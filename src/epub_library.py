@@ -11544,6 +11544,135 @@ class _BookDetailsLoader(QThread):
             self.error.emit(f"{exc}")
 
 
+_CHAPTER_PRIMARY_STYLES = {
+    "raw": "color: #c8cbe0; font-size: 10pt; font-weight: bold;",
+    "translated": "color: #e0e0e0; font-size: 10pt; font-weight: bold;",
+}
+
+_CHAPTER_BADGE_STYLES = {
+    "completed": (
+        "color: #7ec87e; background: rgba(126, 200, 126, 0.12);"
+        " border: 1px solid #7ec87e; border-radius: 10px;"
+        " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+    ),
+    "failed": (
+        "color: #ff9e6d; background: rgba(255, 158, 109, 0.12);"
+        " border: 1px solid #ff9e6d; border-radius: 10px;"
+        " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+    ),
+    "in_progress": (
+        "color: #ffd166; background: rgba(255, 209, 102, 0.12);"
+        " border: 1px solid #ffd166; border-radius: 10px;"
+        " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
+    ),
+    "pending": (
+        "color: #7a8599; background: #2a2a3e;"
+        " border: 1px solid #3a3a5e; border-radius: 10px;"
+        " padding: 2px 10px; font-size: 8pt;"
+    ),
+}
+
+_CHAPTER_BADGE_TEXT = {
+    "completed": "\u2714 Translated",
+    "failed": "\u26a0 Failed",
+    "qa_failed": "\u26a0 QA failed",
+    "in_progress": "\u23f3 Working",
+    "pending": "Pending",
+}
+
+
+def _prepare_chapter_row_spec(info: dict, show_raw_title: bool = False) -> dict:
+    """Build the pure-Python display model for a chapter row."""
+    info = dict(info or {})
+    status = info.get("status", "") or ""
+    translated = info.get("translated_title") or ""
+    raw = info.get("raw_title") or ""
+    filename = info.get("filename", "") or ""
+
+    if show_raw_title:
+        primary_text = raw or filename
+        primary_class = "raw"
+    elif translated and status == "completed":
+        primary_text = translated
+        primary_class = "translated"
+    else:
+        primary_text = raw or filename
+        primary_class = "raw"
+
+    primary_tooltip = ""
+    if show_raw_title and translated and translated != raw:
+        primary_tooltip = f"Translated: {translated}"
+    elif (
+        not show_raw_title
+        and translated
+        and status == "completed"
+        and raw
+        and raw != translated
+    ):
+        primary_tooltip = f"Raw: {raw}"
+
+    badge_text = ""
+    badge_style = ""
+    if not bool(info.get("is_gallery")):
+        badge_key = status
+        if status == "qa_failed":
+            badge_key = "failed"
+        badge_text = _CHAPTER_BADGE_TEXT.get(status, "")
+        badge_style = _CHAPTER_BADGE_STYLES.get(badge_key, "")
+
+    return {
+        "info": info,
+        "primary_text": primary_text,
+        "primary_class": primary_class,
+        "primary_style": _CHAPTER_PRIMARY_STYLES.get(primary_class, ""),
+        "primary_tooltip": primary_tooltip,
+        "filename": filename,
+        "badge_text": badge_text,
+        "badge_style": badge_style,
+    }
+
+
+class _ChapterRowPrepThread(QThread):
+    """Prepare chapter-row display specs away from the Qt UI thread."""
+    batch_ready = Signal(int, object, bool)
+
+    def __init__(self, generation: int, infos, show_raw_title: bool = False,
+                 parent=None):
+        super().__init__(parent)
+        self._generation = int(generation)
+        self._infos = [dict(info or {}) for info in (infos or [])]
+        self._show_raw_title = bool(show_raw_title)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def run(self):
+        batch: list[dict] = []
+        prepared_count = 0
+        try:
+            for info in self._infos:
+                if self._cancelled or self.isInterruptionRequested():
+                    return
+                batch.append(_prepare_chapter_row_spec(
+                    info, self._show_raw_title))
+                prepared_count += 1
+                if len(batch) >= 80:
+                    self.batch_ready.emit(self._generation, batch, False)
+                    batch = []
+            if not (self._cancelled or self.isInterruptionRequested()):
+                self.batch_ready.emit(self._generation, batch, True)
+        except Exception:
+            logger.debug("Chapter row prep failed: %s", traceback.format_exc())
+            if not (self._cancelled or self.isInterruptionRequested()):
+                fallback = [
+                    _prepare_chapter_row_spec(info, self._show_raw_title)
+                    for info in self._infos[prepared_count:]
+                ]
+                self.batch_ready.emit(self._generation, fallback, True)
+
+
 # ---------------------------------------------------------------------------
 # Book Details Dialog
 # ---------------------------------------------------------------------------
@@ -11569,6 +11698,9 @@ class BookDetailsDialog(QDialog):
         # list. Prevents stray double-clicks during the "Loading chapters…"
         # phase from being dispatched to a half-populated chapter list.
         self._chapters_loaded = False
+        self._populate_generation = 0
+        self._chapter_row_prep_threads: list[_ChapterRowPrepThread] = []
+        self._chapter_row_prep_thread: _ChapterRowPrepThread | None = None
         # Single-selected chapter row (by spine index). ``None`` means no
         # row currently has focus.
         self._selected_chapter_idx: int | None = None
@@ -11933,13 +12065,10 @@ class BookDetailsDialog(QDialog):
         # other codepath (populate, refresh, search filter) consults it.
         self._chap_section_expanded = True
 
-        # Standalone "⏳  Loading chapters…" placeholder that sits in the
-        # same body slot as the chapter container. Kept as a SIBLING
-        # widget (not inside ``_chap_layout``) so it stays on screen
-        # uninterrupted while :meth:`_populate_chapters` clears the
-        # layout + batches in the new rows — the user sees one loading
-        # state that ends with all rows appearing at once, instead of
-        # watching rows pop in over multiple seconds.
+        # Standalone "⏳  Loading chapters…" placeholder shown only while
+        # the background details loader is still collecting chapter info.
+        # Once rows are available, :meth:`_populate_chapters` hides this
+        # label and streams the batched row widgets directly into view.
         self._chap_loading_lbl = QLabel("\u23f3  Loading chapters\u2026")
         self._chap_loading_lbl.setAlignment(Qt.AlignCenter)
         self._chap_loading_lbl.setMinimumHeight(60)
@@ -12004,10 +12133,9 @@ class BookDetailsDialog(QDialog):
         list isn't ready to display.
 
         Toggles the standalone :attr:`_chap_loading_lbl` sibling widget
-        instead of stuffing a label inside ``_chap_layout`` — that way
-        the clear-and-rebuild inside :meth:`_populate_chapters` can
-        happen silently behind the hidden container while the user
-        still sees a steady loading message.
+        instead of stuffing a label inside ``_chap_layout``. This is only
+        for the background metadata/spine load; once chapter row data is
+        ready, rows stream into the real container in batches.
         """
         # Clear any stale rows (e.g. leftover from a previous open)
         # without resurrecting a per-layout placeholder label.
@@ -12291,9 +12419,9 @@ class BookDetailsDialog(QDialog):
         )
         raw_titles_applicable = has_distinct_titles
         # Use the intent flag (not the container's live visibility) —
-        # :meth:`_populate_chapters` hides the container while the
-        # loading placeholder is up, so ``isVisible()`` would spuriously
-        # report "collapsed" here and the checkbox would never surface.
+        # the background loading placeholder may temporarily hide the
+        # container, so ``isVisible()`` would spuriously report
+        # "collapsed" here and the checkbox would never surface.
         section_expanded = bool(getattr(self, "_chap_section_expanded", True))
         # Skip toggling checkbox visibility during a silent auto-refresh
         # (the user may be interacting with it right now).
@@ -12437,22 +12565,29 @@ class BookDetailsDialog(QDialog):
     # Per-tick batch size for :meth:`_populate_chapters` — small enough
     # that one tick fits comfortably inside a Qt event-loop iteration
     # (so mouse / keyboard / scroll events aren't starved) but big
-    # enough that a 700-chapter book finishes in a handful of ticks.
-    _POPULATE_BATCH_SIZE = 40
+    # enough that a 700-chapter book still fills quickly.
+    _POPULATE_BATCH_SIZE = 24
+    _POPULATE_TICK_MS = 16
+
+    def _cancel_chapter_row_prep(self) -> None:
+        for thread in list(getattr(self, "_chapter_row_prep_threads", []) or []):
+            try:
+                thread.cancel()
+            except Exception:
+                pass
 
     def _populate_chapters(self, silent: bool = False):
         """Rebuild the chapter row list, yielding between batches.
 
         A compiled EPUB with hundreds of chapters used to freeze the
         UI for multiple seconds while every :class:`_ChapterRow` widget
-        was constructed synchronously. We now build the rows in batches
-        of :data:`_POPULATE_BATCH_SIZE` per tick via a zero-interval
-        ``QTimer``, so the Qt event loop keeps dispatching in between.
+        was constructed synchronously. We now prepare row display specs
+        on a worker thread, then build the Qt widgets in small timed
+        batches so the event loop keeps dispatching in between.
 
-        In **initial** (non-silent) mode, the chapter container stays
-        hidden behind the "⏳  Loading chapters…" placeholder while the
-        batches land, so the user sees one steady loading state that
-        flips to the fully built list in a single swap.
+        In **initial** (non-silent) mode, the "⏳  Loading chapters…"
+        placeholder is hidden as soon as row data is ready, then each
+        batch is painted into the visible chapter container immediately.
 
         In **silent** mode (auto-refresh), the loading placeholder is
         NOT shown — the existing rows stay visible while the new
@@ -12468,6 +12603,11 @@ class BookDetailsDialog(QDialog):
         # :meth:`_on_chapter_activated` to squash spurious clicks that
         # might land while Phase 2 is still populating rows.
         self._chapters_loaded = False
+        self._populate_generation = (
+            int(getattr(self, "_populate_generation", 0) or 0) + 1
+        )
+        generation = self._populate_generation
+        self._cancel_chapter_row_prep()
         # Cancel any in-flight batch timer from a previous call. Users
         # can retrigger this via the Show-raw-titles toggle or a scan
         # refresh while the previous batch is still rendering.
@@ -12475,28 +12615,19 @@ class BookDetailsDialog(QDialog):
         if populate_timer is not None and populate_timer.isActive():
             populate_timer.stop()
         # Read user intent from the toggle flag rather than the
-        # container's live visibility — the placeholder hides the
-        # container as an implementation detail, so isVisible() would
-        # incorrectly report "collapsed" on every load.
+        # container's live visibility — the placeholder may hide the
+        # container while the background loader is still running, so
+        # isVisible() would incorrectly report "collapsed" on every load.
         target_visible = bool(getattr(self, "_chap_section_expanded", True))
-        # Hide the container while we clear + rebuild it, and show the
-        # sibling loading placeholder in its slot so the user isn't
-        # staring at an empty space or flickering rows.
-        # In silent mode (auto-refresh), keep the container visible so
-        # the user doesn't see the existing rows disappear + the
-        # placeholder flash between every 2s tick — they just see the
-        # new rows replace the old ones in place.
+        # Initial loads used to hide the container until the final batch,
+        # which made large books feel stuck. Now the placeholder disappears
+        # once row data exists and every batch paints as soon as it is
+        # constructed. Silent refreshes keep the same no-placeholder path.
         if not silent:
-            try:
-                self._chap_container.hide()
-            except Exception:
-                pass
             if getattr(self, "_chap_loading_lbl", None) is not None:
-                # Only show the placeholder when the user currently expects
-                # the chapter section to be visible. For a collapsed TOC we
-                # leave it hidden too — otherwise clicking Refresh would
-                # surprise the user with an unwanted reveal.
-                self._chap_loading_lbl.setVisible(bool(target_visible))
+                self._chap_loading_lbl.hide()
+            if getattr(self, "_chap_container", None) is not None:
+                self._chap_container.setVisible(bool(target_visible))
         # Clear previous rows (placeholder now lives outside this layout).
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
@@ -12507,39 +12638,120 @@ class BookDetailsDialog(QDialog):
 
         # Snapshot the state the worker uses so a mid-flight toggle
         # change can't cross-contaminate the rendering flavor.
-        self._populate_infos = list(self._chapters_info)
+        populate_infos = [dict(info or {}) for info in self._chapters_info]
+        self._populate_row_specs = []
         self._populate_idx = 0
+        self._populate_prep_done = False
         self._populate_show_raw_title = bool(self._show_raw_titles)
         self._populate_target_visible = bool(target_visible)
         self._populate_silent = bool(silent)
 
-        if not self._populate_infos:
-            self._chap_layout.addStretch()
-            self._apply_chapter_filter(self._toc_search.text())
-            self._update_toc_toggle_label()
-            # Nothing to build — flip the loading placeholder back off
-            # and reveal the (empty) container if the user expects it.
-            if not silent:
-                if getattr(self, "_chap_loading_lbl", None) is not None:
-                    self._chap_loading_lbl.hide()
-                if target_visible:
-                    self._chap_container.show()
-            self._chapters_loaded = True
+        if not populate_infos:
+            self._populate_prep_done = True
+            self._finish_chapter_population()
             return
 
         if populate_timer is None:
             populate_timer = QTimer(self)
             populate_timer.setSingleShot(False)
-            populate_timer.setInterval(0)  # yield every event-loop tick
+            populate_timer.setInterval(self._POPULATE_TICK_MS)
             populate_timer.timeout.connect(self._populate_chapters_batch_tick)
             self._populate_timer = populate_timer
 
-        # Kick the first batch off asynchronously so the loading
-        # placeholder actually paints before we start building rows
-        # behind it. Starting the timer triggers the first tick on the
-        # next event-loop iteration, by which point the UI has already
-        # had a chance to swap in the "⏳ Loading chapters…" label.
-        populate_timer.start()
+        prep_thread = _ChapterRowPrepThread(
+            generation,
+            populate_infos,
+            bool(self._populate_show_raw_title),
+            self,
+        )
+        prep_thread.batch_ready.connect(self._on_chapter_row_specs_batch)
+        prep_thread.finished.connect(
+            lambda t=prep_thread: self._on_chapter_row_prep_finished(t))
+        self._chapter_row_prep_thread = prep_thread
+        self._chapter_row_prep_threads.append(prep_thread)
+        prep_thread.start()
+
+    def _on_chapter_row_specs_batch(self, generation: int, specs, done: bool):
+        if generation != getattr(self, "_populate_generation", 0):
+            return
+        if specs:
+            self._populate_row_specs.extend(list(specs))
+        if done:
+            self._populate_prep_done = True
+
+        populate_timer = getattr(self, "_populate_timer", None)
+        if populate_timer is not None and not populate_timer.isActive():
+            populate_timer.start()
+
+    def _on_chapter_row_prep_finished(self, thread) -> None:
+        try:
+            threads = getattr(self, "_chapter_row_prep_threads", [])
+            if thread in threads:
+                threads.remove(thread)
+        except Exception:
+            pass
+        if getattr(self, "_chapter_row_prep_thread", None) is thread:
+            self._chapter_row_prep_thread = None
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+
+    def _refresh_chapter_stream_geometry(self) -> None:
+        if getattr(self, "_refreshing_chapter_geometry", False):
+            return
+        self._refreshing_chapter_geometry = True
+        try:
+            layout = getattr(self, "_chap_layout", None)
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+
+            container = getattr(self, "_chap_container", None)
+            if container is not None:
+                container.updateGeometry()
+                container.adjustSize()
+
+            scroll = getattr(self, "_scroll", None)
+            body = scroll.widget() if scroll is not None else None
+            if body is not None:
+                body_layout = body.layout()
+                if body_layout is not None:
+                    body_layout.invalidate()
+                    body_layout.activate()
+                body.updateGeometry()
+                body.adjustSize()
+
+            if scroll is not None:
+                scroll.updateGeometry()
+                viewport = scroll.viewport()
+                if viewport is not None:
+                    viewport.update()
+
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
+        finally:
+            self._refreshing_chapter_geometry = False
+
+    def _finish_chapter_population(self):
+        if self._chapters_loaded:
+            return
+        timer = getattr(self, "_populate_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._chap_layout.addStretch()
+        self._apply_chapter_filter(self._toc_search.text())
+        self._update_toc_toggle_label()
+        if not bool(getattr(self, "_populate_silent", False)):
+            if getattr(self, "_chap_loading_lbl", None) is not None:
+                self._chap_loading_lbl.hide()
+            if getattr(self, "_populate_target_visible", True):
+                self._chap_container.show()
+        self._chapters_loaded = True
+        self._refresh_chapter_stream_geometry()
 
     def _populate_chapters_batch_tick(self):
         """Render the next :data:`_POPULATE_BATCH_SIZE` chapter rows.
@@ -12547,17 +12759,22 @@ class BookDetailsDialog(QDialog):
         Stops the driving ``QTimer`` and finalizes the TOC state once
         every row has been appended to the layout.
         """
-        infos = getattr(self, "_populate_infos", None) or []
+        specs = getattr(self, "_populate_row_specs", None) or []
         start = int(getattr(self, "_populate_idx", 0) or 0)
-        end = min(start + self._POPULATE_BATCH_SIZE, len(infos))
-        show_raw_title = bool(getattr(self, "_populate_show_raw_title", False))
+        if start >= len(specs):
+            if bool(getattr(self, "_populate_prep_done", False)):
+                self._finish_chapter_population()
+            return
+
+        end = min(start + self._POPULATE_BATCH_SIZE, len(specs))
         selected_idx = self._selected_chapter_idx
         for i in range(start, end):
-            info = infos[i]
+            row_spec = specs[i]
+            info = row_spec.get("info", {})
             row = _ChapterRow(
                 info,
                 parent=self._chap_container,
-                show_raw_title=show_raw_title,
+                row_spec=row_spec,
             )
             row.activated.connect(self._on_chapter_activated)
             row.clicked.connect(self._on_chapter_clicked)
@@ -12565,27 +12782,9 @@ class BookDetailsDialog(QDialog):
                 row.set_selected(True)
             self._chap_layout.addWidget(row)
         self._populate_idx = end
-        if end >= len(infos):
-            # Final tick: cap the layout with the stretch, apply any
-            # active filter, refresh the "(done/total)" TOC header, and
-            # unlock activation so double-clicks open the reader.
-            timer = getattr(self, "_populate_timer", None)
-            if timer is not None and timer.isActive():
-                timer.stop()
-            self._chap_layout.addStretch()
-            self._apply_chapter_filter(self._toc_search.text())
-            self._update_toc_toggle_label()
-            # Swap: hide the loading placeholder and reveal the fully
-            # built chapter container in one go, so the user sees the
-            # whole list appear at once instead of the per-batch pop-in.
-            # For silent auto-refresh runs the container was never hidden
-            # and the placeholder was never shown, so the reveal is a no-op.
-            if not bool(getattr(self, "_populate_silent", False)):
-                if getattr(self, "_chap_loading_lbl", None) is not None:
-                    self._chap_loading_lbl.hide()
-                if getattr(self, "_populate_target_visible", True):
-                    self._chap_container.show()
-            self._chapters_loaded = True
+        self._refresh_chapter_stream_geometry()
+        if end >= len(specs) and bool(getattr(self, "_populate_prep_done", False)):
+            self._finish_chapter_population()
 
     def _on_chapter_clicked(self, idx: int):
         """Update the single-select focus to the clicked chapter row."""
@@ -12630,8 +12829,8 @@ class BookDetailsDialog(QDialog):
     def _update_toc_toggle_label(self):
         done, total = self._visible_counts()
         # Use the intent flag (not the container's live visibility) so
-        # the arrow glyph doesn't flip to ▶ while the loading
-        # placeholder is masking the container during a batched build.
+        # the arrow glyph doesn't flip to ▶ while the background loading
+        # placeholder is temporarily masking the container.
         prefix = "\u25bc  Chapters" if self._chap_section_expanded else "\u25b6  Chapters"
         if not total:
             suffix = "  (\u2014)"
@@ -13039,6 +13238,15 @@ class BookDetailsDialog(QDialog):
     # -- Qt lifecycle --------------------------------------------------------
 
     def closeEvent(self, event):
+        populate_timer = getattr(self, "_populate_timer", None)
+        if populate_timer is not None and populate_timer.isActive():
+            populate_timer.stop()
+        self._cancel_chapter_row_prep()
+        for thread in list(getattr(self, "_chapter_row_prep_threads", []) or []):
+            try:
+                thread.wait(100)
+            except Exception:
+                pass
         if self._loader is not None:
             try:
                 self._loader.quit()
@@ -13075,9 +13283,12 @@ class _ChapterRow(QFrame):
         "QFrame#chapterRow:hover { border: 2px solid #c0b8ff; background: #343670; }"
     )
 
-    def __init__(self, info: dict, parent=None, show_raw_title: bool = False):
+    def __init__(self, info: dict, parent=None, show_raw_title: bool = False,
+                 row_spec: dict | None = None):
         super().__init__(parent)
-        self.info = info
+        if row_spec is None:
+            row_spec = _prepare_chapter_row_spec(info, show_raw_title)
+        self.info = row_spec.get("info", info)
         self._selected = False
         self.setObjectName("chapterRow")
         self.setCursor(Qt.PointingHandCursor)
@@ -13092,78 +13303,24 @@ class _ChapterRow(QFrame):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        status = info.get("status", "") or ""
-        translated = info.get("translated_title") or ""
-        raw = info.get("raw_title") or ""
-        # When the caller asks for raw titles explicitly, we always show the
-        # source-language title as the primary text (falling back to filename
-        # if the spine parse couldn't extract one). Otherwise the normal rule
-        # applies: translated title when the chapter is complete, raw title
-        # while it's still pending.
-        if show_raw_title:
-            primary = QLabel(raw or info.get("filename", ""))
-            primary.setProperty("class", "raw")
-            primary.setStyleSheet("color: #c8cbe0; font-size: 10pt; font-weight: bold;")
-        elif translated and status == "completed":
-            primary = QLabel(translated)
-            primary.setProperty("class", "translated")
-            primary.setStyleSheet("color: #e0e0e0; font-size: 10pt; font-weight: bold;")
-        else:
-            primary = QLabel(raw or info.get("filename", ""))
-            primary.setProperty("class", "raw")
-            primary.setStyleSheet("color: #c8cbe0; font-size: 10pt; font-weight: bold;")
+        primary = QLabel(row_spec.get("primary_text", ""))
+        primary.setProperty("class", row_spec.get("primary_class", "raw"))
+        primary.setStyleSheet(row_spec.get("primary_style", ""))
         primary.setWordWrap(True)
-        # If both titles exist and we're in raw-titles mode, expose the
-        # translated version as a tooltip so the user still has one-click
-        # access to it without flipping the checkbox.
-        if show_raw_title and translated and translated != raw:
-            primary.setToolTip(f"Translated: {translated}")
-        elif (not show_raw_title) and translated and status == "completed" and raw and raw != translated:
-            primary.setToolTip(f"Raw: {raw}")
+        if row_spec.get("primary_tooltip"):
+            primary.setToolTip(row_spec["primary_tooltip"])
         text_col.addWidget(primary)
 
-        sub = QLabel(info.get("filename", ""))
+        sub = QLabel(row_spec.get("filename", ""))
         sub.setProperty("class", "filename")
         sub.setStyleSheet("color: #8a8fa8; font-size: 8.5pt; font-family: 'Consolas','Menlo',monospace;")
         text_col.addWidget(sub)
         layout.addLayout(text_col, 1)
 
-        badge = None
-        # Gallery rows render without any badge — they're auto-generated
-        # artefacts, not real source chapters.
-        is_gallery = bool(info.get("is_gallery"))
-        if is_gallery:
-            status = ""
-        if status == "completed":
-            badge = QLabel("\u2714 Translated")
-            badge.setStyleSheet(
-                "color: #7ec87e; background: rgba(126, 200, 126, 0.12);"
-                " border: 1px solid #7ec87e; border-radius: 10px;"
-                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
-            )
-        elif status in ("failed", "qa_failed"):
-            badge = QLabel("\u26a0 " + ("QA failed" if status == "qa_failed" else "Failed"))
-            badge.setStyleSheet(
-                "color: #ff9e6d; background: rgba(255, 158, 109, 0.12);"
-                " border: 1px solid #ff9e6d; border-radius: 10px;"
-                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
-            )
-        elif status == "in_progress":
-            badge = QLabel("\u23f3 Working")
-            badge.setStyleSheet(
-                "color: #ffd166; background: rgba(255, 209, 102, 0.12);"
-                " border: 1px solid #ffd166; border-radius: 10px;"
-                " padding: 2px 10px; font-size: 8pt; font-weight: bold;"
-            )
-        elif status == "pending":
-            badge = QLabel("Pending")
-            badge.setStyleSheet(
-                "color: #7a8599; background: #2a2a3e;"
-                " border: 1px solid #3a3a5e; border-radius: 10px;"
-                " padding: 2px 10px; font-size: 8pt;"
-            )
-        # Empty/unknown status → no badge at all (book has no progress context).
-        if badge is not None:
+        badge_text = row_spec.get("badge_text", "")
+        if badge_text:
+            badge = QLabel(badge_text)
+            badge.setStyleSheet(row_spec.get("badge_style", ""))
             layout.addWidget(badge, 0, Qt.AlignRight)
 
     def set_selected(self, selected: bool) -> None:

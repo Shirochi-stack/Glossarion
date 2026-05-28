@@ -34,6 +34,21 @@ _stylesheet_scale_factor = 1.0
 DEFAULT_SCALE_FACTOR = 1.0
 DEFAULT_FONT_SCALE = 1.0
 
+# Chromium (used by QtWebEngine) logs noisy "Unsupported scale factor"
+# warnings for arbitrary fractional device scales such as 0.92, even though
+# normal Qt widgets can render at that effective scale.
+_CHROMIUM_SUPPORTED_SCALE_FACTORS = (
+    1.0,
+    1.25,
+    1.3333,
+    1.4,
+    1.5,
+    1.8,
+    2.0,
+    2.5,
+    3.0,
+)
+
 
 def _ensure_dpi_aware():
     """Make the process DPI-aware on Windows (idempotent, no-op on other platforms)."""
@@ -572,6 +587,50 @@ def _qgui_application_exists():
         return False
 
 
+def _nearest_chromium_scale_factor(scale):
+    """Return a Chromium-friendly device scale factor near *scale*."""
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    if scale <= 0:
+        return 1.0
+    return min(
+        _CHROMIUM_SUPPORTED_SCALE_FACTORS,
+        key=lambda candidate: abs(candidate - scale),
+    )
+
+
+def _format_chromium_scale_factor(scale):
+    text = f"{float(scale):.4f}".rstrip("0").rstrip(".")
+    return text or "1"
+
+
+def _append_qtwebengine_chromium_flag(flag):
+    """Append a QtWebEngine Chromium flag without clobbering user flags."""
+    try:
+        existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
+        parts = existing.split() if existing else []
+        name = flag.split("=", 1)[0]
+        if any(part == flag or part.startswith(name + "=") for part in parts):
+            return
+        parts.append(flag)
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(parts)
+    except Exception:
+        pass
+
+
+def _configure_qtwebengine_scale(qt_scale):
+    """Keep Chromium away from unsupported fractional display scales."""
+    safe_scale = _nearest_chromium_scale_factor(qt_scale)
+    if abs(float(qt_scale) - safe_scale) < 0.01:
+        return
+    _append_qtwebengine_chromium_flag(
+        "--force-device-scale-factor="
+        + _format_chromium_scale_factor(safe_scale)
+    )
+
+
 def configure():
     """Enable Qt6 native high-DPI rendering and apply the user's scale factor.
 
@@ -611,5 +670,6 @@ def configure():
         qt_scale = factor / system_scale if system_scale > 0.5 else factor
     qt_scale = max(0.25, min(4.0, qt_scale))
     os.environ["QT_SCALE_FACTOR"] = str(round(qt_scale, 4))
+    _configure_qtwebengine_scale(qt_scale)
 
     print(f"✅ DPI scaling configured (target={factor}, system={system_scale:.2f}, QT_SCALE_FACTOR={qt_scale:.4f})")
