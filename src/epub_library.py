@@ -16445,29 +16445,13 @@ class EpubReaderDialog(QDialog):
             safe,
         )
 
-    def _set_search_result_widget(self, item, title: str, excerpt: str, query: str) -> None:
-        results = getattr(self, "_search_dialog_results", None)
-        if results is None:
-            return
-        label = QLabel()
-        label.setTextFormat(Qt.RichText)
-        label.setWordWrap(False)
-        label.setTextInteractionFlags(Qt.NoTextInteraction)
-        try:
-            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        except Exception:
-            pass
-        import html as html_lib
-        t = self._get_theme()
-        safe_title = html_lib.escape(title or "")
-        highlighted = self._highlight_search_excerpt(excerpt, query)
-        label.setText(
-            f"<div style='color:{t['fg']}; font-size:8.8pt; line-height:1.05;'>{safe_title}</div>"
-            f"<div style='color:{t['fg']}; font-size:8.8pt; line-height:1.05;'>{highlighted}</div>"
-        )
-        label.setContentsMargins(6, 2, 6, 2)
+    def _set_search_result_widget(self, item, title: str, excerpt: str,
+                                  query: str, match_count: int = 1) -> None:
+        clean_title = " ".join(str(title or "").split())
+        clean_excerpt = " ".join(str(excerpt or "").split())
+        item.setText(f"{clean_title}\n{clean_excerpt}" if clean_excerpt else clean_title)
+        item.setToolTip(clean_excerpt or clean_title)
         item.setSizeHint(QSize(0, 42))
-        results.setItemWidget(item, label)
 
     def _cancel_search_dialog_workers(self) -> None:
         timer = getattr(self, "_search_debounce_timer", None)
@@ -16597,22 +16581,27 @@ class EpubReaderDialog(QDialog):
         query = getattr(self, "_search_pending_render_query", "") or ""
         idx = int(getattr(self, "_search_pending_render_index", 0) or 0)
         end = min(len(rows), idx + 75)
-        for row in rows[idx:end]:
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, {
-                "chapter_idx": int(row.get("chapter_idx", 0) or 0),
-                "local_occurrence": int(row.get("local_occurrence", 0) or 0),
-                "global_occurrence": int(row.get("global_occurrence", 0) or 0),
-                "match_count": int(row.get("match_count", 1) or 1),
-                "text": row.get("text", query),
-            })
-            results.addItem(item)
-            self._set_search_result_widget(
-                item,
-                str(row.get("title", "") or ""),
-                str(row.get("excerpt", "") or ""),
-                query,
-            )
+        results.setUpdatesEnabled(False)
+        try:
+            for row in rows[idx:end]:
+                item = QListWidgetItem()
+                item.setData(Qt.UserRole, {
+                    "chapter_idx": int(row.get("chapter_idx", 0) or 0),
+                    "local_occurrence": int(row.get("local_occurrence", 0) or 0),
+                    "global_occurrence": int(row.get("global_occurrence", 0) or 0),
+                    "match_count": int(row.get("match_count", 1) or 1),
+                    "text": row.get("text", query),
+                })
+                self._set_search_result_widget(
+                    item,
+                    str(row.get("title", "") or ""),
+                    str(row.get("excerpt", "") or ""),
+                    query,
+                    int(row.get("match_count", 1) or 1),
+                )
+                results.addItem(item)
+        finally:
+            results.setUpdatesEnabled(True)
         self._search_pending_render_index = end
         total = int(getattr(self, "_search_dialog_total_matches", len(rows)) or 0)
         result_count = int(getattr(self, "_search_dialog_total_results", len(rows)) or 0)
