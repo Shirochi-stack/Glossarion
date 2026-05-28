@@ -14806,6 +14806,7 @@ class MangaTranslationTab(QObject):
     
     def _start_translation_heavy(self, previous_future=None, previous_thread=None, start_token=None):
         """Heavy part of start: build configs, init client/translator, and launch worker (runs off-main-thread)."""
+        import os
         try:
             # Lower priority & restrict affinity for this launcher thread (Windows)
             try:
