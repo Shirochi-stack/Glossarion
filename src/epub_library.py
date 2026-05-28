@@ -2244,7 +2244,7 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
     # at 98/100 forever because two special files were skipped by design.
     exclude_special = not _resolve_translate_special_files(config)
 
-    results: list[dict] = []
+    folder_items: list[tuple[str, str]] = []
     seen_folders: set[str] = set()
     for root in roots:
         try:
@@ -2260,275 +2260,162 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 if key in seen_folders:
                     continue
                 seen_folders.add(key)
+                folder_items.append((entry.name, folder))
 
-                progress_file = os.path.join(folder, "translation_progress.json")
-                metadata_file = os.path.join(folder, "metadata.json")
-                # Walk EVERY compiled output so we can warn the user
-                # when a folder contains more than one (e.g. a stale
-                # ``*.epub`` from a previous compile left next to a new
-                # one, or a ``*_translated.html`` paired with a
-                # compiled ``.epub``). The first entry keeps its usual
-                # "primary compiled output" role.
-                compiled_outputs = _list_compiled_outputs(folder)
-                compiled = compiled_outputs[0] if compiled_outputs else None
-                output_epub = compiled[0] if (compiled and compiled[1] == "epub") else None
-                compiled_path = compiled[0] if compiled else None
-                compiled_kind = compiled[1] if compiled else None
-                # Conflicts = every compiled file beyond the primary.
-                # We record (basename, kind) so the _BookCard tooltip
-                # can name each one without showing full absolute paths.
-                compiled_conflicts = [
-                    (os.path.basename(p), k)
-                    for p, k in compiled_outputs[1:]
-                ]
-                has_progress = os.path.isfile(progress_file)
-                has_metadata = os.path.isfile(metadata_file)
+    if not folder_items:
+        return []
 
-                # Eagerly load the progress summary so we can tell a *seed*
-                # progress file (created when the user loaded a glossary but
-                # never ran a translation) apart from an active one. Pass
-                # ``exclude_special`` so the sidecar's counts line up with
-                # the spine / filesystem counts — otherwise the translate-
-                # special-files toggle shifts the denominator without
-                # budging the numerator and the card reads as 100 % no
-                # matter what the user does.
-                summary = _read_progress_summary(
-                    progress_file, exclude_special=exclude_special,
-                    config=config,
-                ) if has_progress else None
-                # Track the distinction between "parse worked, book has
-                # zero chapters" and "parse failed entirely" — the latter
-                # indicates an outdated / incompatible progress file
-                # written by an older build of the program, and the UI
-                # needs to surface that with a dedicated warning pill.
-                progress_unparseable = has_progress and summary is None
-                progress_total = summary["total"] if summary else 0
-                progress_done = summary["completed"] if summary else 0
-                failed = summary["failed"] if summary else 0
+    raw_abs = os.path.normcase(os.path.normpath(
+        os.path.abspath(get_library_raw_dir())))
 
-                # Raw source must be resolvable for the In Progress tab.
-                # Cards whose source EPUB is missing (moved/deleted/offline)
-                # are hidden rather than shown as ghost cards.
-                raw_source_path = _find_raw_source_for_folder(folder)
-                raw_abs = os.path.normcase(os.path.normpath(
-                    os.path.abspath(get_library_raw_dir())))
-                raw_in_library = bool(raw_source_path) and (
-                    os.path.normcase(os.path.normpath(
-                        os.path.abspath(os.path.dirname(raw_source_path)))) == raw_abs
-                )
+    def _scan_output_folder(entry_name: str, folder: str) -> dict | None:
+        progress_file = os.path.join(folder, "translation_progress.json")
+        metadata_file = os.path.join(folder, "metadata.json")
+        compiled_outputs = _list_compiled_outputs(folder)
+        compiled = compiled_outputs[0] if compiled_outputs else None
+        output_epub = compiled[0] if (compiled and compiled[1] == "epub") else None
+        compiled_path = compiled[0] if compiled else None
+        compiled_kind = compiled[1] if compiled else None
+        compiled_conflicts = [
+            (os.path.basename(p), k)
+            for p, k in compiled_outputs[1:]
+        ]
+        has_progress = os.path.isfile(progress_file)
+        has_metadata = os.path.isfile(metadata_file)
 
-                # Enrich the card fraction with richer data sources than
-                # translation_progress.json alone:
-                #   * total = authoritative spine count from the source EPUB's
-                #             content.opf (the progress file only tracks
-                #             chapters the translator has processed, so it
-                #             under-reports for fresh / early-progress novels).
-                #   * done  = progress file's "completed" count when the
-                #             sidecar has real entries (authoritative —
-                #             status="in_progress" entries don't count as
-                #             done, which is what the user expects for
-                #             specials still being translated). Filesystem
-                #             response_*.html count is only used as a
-                #             fallback when the progress file is missing or
-                #             empty. The filesystem count also respects
-                #             exclude_special so partial stub files for
-                #             skipped specials can't inflate the fraction.
-                fs_done = _count_translated_response_files(
-                    folder, exclude_special=exclude_special, config=config)
-                spine_total = 0
-                if raw_source_path and raw_source_path.lower().endswith(".epub"):
-                    spine_total = _count_epub_spine_items(
-                        raw_source_path, exclude_special=exclude_special,
-                        config=config)
-                total = max(progress_total, spine_total)
-                if progress_total > 0:
-                    # Progress file is authoritative — in-progress specials
-                    # have ``status="in_progress"`` and don't get counted
-                    # here, so a book whose only pending chapters are
-                    # specials stays below 100% until they're done (when
-                    # ``translate_special_files`` is on).
-                    done = progress_done
-                else:
-                    done = fs_done
+        summary = _read_progress_summary(
+            progress_file, exclude_special=exclude_special, config=config,
+        ) if has_progress else None
+        progress_unparseable = has_progress and summary is None
+        progress_total = summary["total"] if summary else 0
+        progress_done = summary["completed"] if summary else 0
+        failed = summary["failed"] if summary else 0
 
-                # Workspace must prove it's a real translation candidate.
-                # Keep any folder that has at least one actionable
-                # signal: a compiled output, a progress file (even if
-                # unparseable), a resolvable raw source, or translated
-                # response files on disk. The old strict gate hid
-                # legacy workspaces whose progress file predates the
-                # current schema — those now surface with an
-                # "outdated_progress" state + warning badge so the user
-                # can see and deal with them.
-                if (not compiled and not has_progress
-                        and not raw_source_path
-                        and fs_done == 0 and not raw_in_library):
+        raw_source_path = _find_raw_source_for_folder(folder)
+        raw_in_library = bool(raw_source_path) and (
+            os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(raw_source_path)))) == raw_abs
+        )
+
+        fs_done = _count_translated_response_files(
+            folder, exclude_special=exclude_special, config=config)
+        spine_total = 0
+        if raw_source_path and raw_source_path.lower().endswith(".epub"):
+            spine_total = _count_epub_spine_items(
+                raw_source_path, exclude_special=exclude_special, config=config)
+        total = max(progress_total, spine_total)
+        done = progress_done if progress_total > 0 else fs_done
+
+        if (not compiled and not has_progress
+                and not raw_source_path
+                and fs_done == 0 and not raw_in_library):
+            return None
+
+        missing_raw_file = bool(not raw_source_path and (
+            compiled or has_progress or fs_done > 0))
+
+        fully_translated = done >= total and total > 0
+        if progress_unparseable:
+            translation_state = "outdated_progress"
+        elif fully_translated:
+            translation_state = "completed" if compiled else "ready_to_compile"
+        elif progress_total <= 0 and fs_done == 0:
+            translation_state = "not_started"
+        else:
+            translation_state = "in_progress"
+
+        if translation_state == "not_started" and missing_raw_file:
+            return None
+
+        workspace_kind = _detect_workspace_kind(folder, raw_source_path or "")
+        metadata_json: dict = {}
+        if has_metadata:
+            try:
+                with open(metadata_file, "r", encoding="utf-8") as f:
+                    loaded = _json.load(f)
+                if isinstance(loaded, dict):
+                    metadata_json = loaded
+            except (OSError, _json.JSONDecodeError):
+                metadata_json = {}
+
+        raw_title = (
+            metadata_json.get("title")
+            or metadata_json.get("original_title")
+            or entry_name
+        )
+
+        promote_to_compiled = bool(compiled) and translation_state == "completed"
+        if promote_to_compiled:
+            card_path = compiled_path
+            card_type = compiled_kind
+            is_in_progress = False
+            try:
+                stat = os.stat(compiled_path)
+            except OSError:
+                return None
+        else:
+            card_path = folder
+            card_type = "in_progress"
+            is_in_progress = (
+                translation_state != "completed"
+                or translation_state == "outdated_progress"
+            )
+            try:
+                stat = os.stat(folder)
+            except OSError:
+                return None
+
+        return {
+            "name": raw_title,
+            "folder_name": entry_name,
+            "path": card_path,
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "in_library": False,
+            "type": card_type,
+            "raw_source_path": raw_source_path or "",
+            "workspace_kind": workspace_kind,
+            "translation_state": translation_state,
+            "is_in_progress": is_in_progress,
+            "output_folder": folder,
+            "progress_file": progress_file if has_progress else "",
+            "metadata_json_path": metadata_file if has_metadata else "",
+            "metadata_json": metadata_json,
+            "total_chapters": total,
+            "completed_chapters": done,
+            "failed_chapters": failed,
+            "pending_chapters": max(0, total - done),
+            "has_output_epub": bool(output_epub),
+            "output_epub_path": output_epub or "",
+            "has_compiled_output": bool(compiled),
+            "compiled_output_path": compiled_path or "",
+            "compiled_output_kind": compiled_kind or "",
+            "compiled_conflicts": compiled_conflicts,
+            "missing_raw_file": missing_raw_file,
+        }
+
+    results: list[dict] = []
+    workers = _library_io_worker_count(len(folder_items), cap=8)
+    if workers <= 1:
+        for entry_name, folder in folder_items:
+            row = _scan_output_folder(entry_name, folder)
+            if row:
+                results.append(row)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_scan_output_folder, entry_name, folder)
+                for entry_name, folder in folder_items
+            ]
+            for future in as_completed(futures):
+                try:
+                    row = future.result()
+                except Exception:
+                    logger.debug("Output folder scan failed: %s",
+                                 traceback.format_exc())
                     continue
-
-                # Missing raw file flag — set when the folder has
-                # meaningful content (compiled / progress / responses)
-                # but the original raw EPUB can't be resolved. The UI
-                # surfaces this as a ``⚠ missing raw file`` badge; the
-                # card stays on whatever tab its other signals land it
-                # on (Completed when a compiled artefact exists, In
-                # Progress otherwise) instead of being hidden.
-                missing_raw_file = bool(not raw_source_path and (
-                    compiled or has_progress or fs_done > 0))
-
-                # Compute translation_state for the UI. Drives both the
-                # pill label on :class:`_BookCard` AND which tab the
-                # card lands on.
-                #
-                # PROGRESS is the priority signal — the compile gate
-                # only fires AFTER progress says the workspace is at
-                # 100 %%. Partial or zero-progress workspaces are never
-                # promoted by the presence of a stray compiled file:
-                #
-                #   * unparseable progress      → "outdated_progress"
-                #     (pinned to In Progress tab regardless of compile)
-                #   * partial progress          → "in_progress"
-                #   * no progress + no response → "not_started"
-                #   * 100 %% + compiled artefact → "completed"
-                #   * 100 %% + no compiled       → "ready_to_compile"
-                #
-                # The "ready_to_compile" state lives on the In Progress
-                # tab with a distinct pill so users know the next step
-                # is Build, not Translate. "outdated_progress" also
-                # lives on the In Progress tab — the user explicitly
-                # asked that we NEVER promote a card whose percentage
-                # can't be parsed to the Completed tab, even if a
-                # stale compiled EPUB happens to sit next to the
-                # broken progress file.
-                fully_translated = done >= total and total > 0
-                if progress_unparseable:
-                    translation_state = "outdated_progress"
-                elif fully_translated:
-                    if compiled:
-                        translation_state = "completed"
-                    else:
-                        translation_state = "ready_to_compile"
-                elif progress_total <= 0 and fs_done == 0:
-                    # Partial / zero progress: compile state is
-                    # deliberately IGNORED here. A stray compiled
-                    # EPUB in an otherwise-empty workspace no longer
-                    # silently promotes the card to Completed.
-                    translation_state = "not_started"
-                else:
-                    translation_state = "in_progress"
-
-                # Not-started + missing raw = nothing to render and
-                # nothing the user can do with the card (can't open
-                # the raw for reading, can't load it for translation,
-                # no translated output to show). Hide it entirely
-                # rather than surfacing a dead entry on the In
-                # Progress tab.
-                if (translation_state == "not_started"
-                        and missing_raw_file):
-                    continue
-
-                # Classify source kind (epub / txt / pdf / image / other) so
-                # the card can show a meaningful type badge. We prefer the
-                # resolved raw source extension, then fall back to the
-                # filesystem heuristic applied to the output folder.
-                workspace_kind = _detect_workspace_kind(folder, raw_source_path or "")
-
-                metadata_json: dict = {}
-                if has_metadata:
-                    try:
-                        with open(metadata_file, "r", encoding="utf-8") as f:
-                            loaded = _json.load(f)
-                        if isinstance(loaded, dict):
-                            metadata_json = loaded
-                    except (OSError, _json.JSONDecodeError):
-                        metadata_json = {}
-
-                # Title precedence: metadata.json title → folder basename.
-                raw_title = (metadata_json.get("title")
-                             or metadata_json.get("original_title")
-                             or entry.name)
-
-                # Card shape follows the real translation state, NOT the
-                # mere presence of a compiled ``.epub``. A compiled file
-                # next to an in-progress translation (partial run / user
-                # recompiled mid-way with specials still pending) keeps
-                # the folder-based card so ribbons + progress pills still
-                # render. Only a genuinely completed workspace promotes
-                # the card to a plain EPUB/PDF/TXT/HTML entry.
-                promote_to_compiled = bool(compiled) and translation_state == "completed"
-                if promote_to_compiled:
-                    card_path = compiled_path
-                    card_type = compiled_kind  # "epub" / "pdf" / "txt" / "html"
-                    is_in_progress = False
-                    try:
-                        stat = os.stat(compiled_path)
-                    except OSError:
-                        continue
-                else:
-                    card_path = folder
-                    card_type = "in_progress"
-                    # Outdated-progress cards are pinned to the In
-                    # Progress tab regardless of compile state — the
-                    # user asked that we never promote a card whose
-                    # percentage we can't parse to the Completed tab.
-                    is_in_progress = (
-                        translation_state != "completed"
-                        or translation_state == "outdated_progress"
-                    )
-                    try:
-                        stat = os.stat(folder)
-                    except OSError:
-                        continue
-
-                results.append({
-                    "name": raw_title,
-                    "folder_name": entry.name,
-                    "path": card_path,
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                    "in_library": False,
-                    "type": card_type,
-                    # Source file on disk (resolved via source_epub.txt,
-                    # Library/Raw match, or raw-inputs registry). Used by
-                    # the "Load for translation" action.
-                    "raw_source_path": raw_source_path or "",
-                    # The workspace kind is the *source* type (epub/txt/pdf
-                    # /image/other). Independent of ``type`` (which may be
-                    # the compiled output kind). Used by the card to pick
-                    # the right badge for in-progress folders.
-                    "workspace_kind": workspace_kind,
-                    # Translation lifecycle: not_started / in_progress /
-                    # completed. Drives the pill label on the card.
-                    "translation_state": translation_state,
-                    "is_in_progress": is_in_progress,
-                    "output_folder": folder,
-                    "progress_file": progress_file if has_progress else "",
-                    "metadata_json_path": metadata_file if has_metadata else "",
-                    "metadata_json": metadata_json,
-                    "total_chapters": total,
-                    "completed_chapters": done,
-                    "failed_chapters": failed,
-                    "pending_chapters": max(0, total - done),
-                    "has_output_epub": bool(output_epub),
-                    "output_epub_path": output_epub or "",
-                    "has_compiled_output": bool(compiled),
-                    "compiled_output_path": compiled_path or "",
-                    "compiled_output_kind": compiled_kind or "",
-                    # List of ``(basename, kind)`` tuples for compiled
-                    # artefacts in the folder BEYOND the primary one.
-                    # Empty list for normal single-output folders;
-                    # populated when the scanner detected stale or
-                    # duplicate compiled files so the card can show
-                    # a ⚠ warning badge.
-                    "compiled_conflicts": compiled_conflicts,
-                    # Warning badges the card surfaces next to the
-                    # progress pill. ``missing_raw_file`` flags a
-                    # workspace whose original source EPUB is no
-                    # longer resolvable on disk (the user moved /
-                    # deleted / renamed it). ``translation_state ==
-                    # "outdated_progress"`` implicitly surfaces its
-                    # own badge via the pill.
-                    "missing_raw_file": missing_raw_file,
-                })
+                if row:
+                    results.append(row)
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
 
