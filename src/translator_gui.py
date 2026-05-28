@@ -3329,7 +3329,7 @@ Text to analyze:
         self.default_assistant_prompt = ""
 
         self.default_refinement_system_prompt = (
-            "You are refining an existing English translation. Improve clarity, flow, consistency, "
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
             "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
@@ -3338,11 +3338,23 @@ Text to analyze:
         self.default_refinement_user_prompt = ""
         self.default_refinement_qa_issue_prompt = "{QA_Issues}"
         self.default_refinement_failed_system_prompt = (
-            f"{self.default_refinement_system_prompt}\n\n{self.default_refinement_qa_issue_prompt}"
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "{QA_Issues}"
         )
         self.default_refinement_failed_user_prompt = ""
         self.default_refinement_partial_system_prompt = (
-            f"{self.default_refinement_system_prompt}\n\n{self.default_refinement_qa_issue_prompt}"
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML.\n"
+            "{QA_Issues}"
         )
         self.default_refinement_partial_user_prompt = ""
         

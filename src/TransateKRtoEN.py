@@ -657,28 +657,49 @@ class TranslationConfig:
             self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_SYSTEM_PROMPT = os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_USER_PROMPT = os.getenv("REFINEMENT_USER_PROMPT", "").strip()
+        default_refinement_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML."
+        )
+        default_refinement_failed_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "{QA_Issues}"
+        )
+        default_refinement_partial_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML.\n"
+            "{QA_Issues}"
+        )
         if not self.REFINEMENT_SYSTEM_PROMPT:
-            self.REFINEMENT_SYSTEM_PROMPT = (
-                "You are refining an existing English translation. Improve clarity, flow, consistency, "
-                "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-                "Retain the original meaning of the translation, while retaining the original translation style. "
-                "Convert any foreign onomatopoeia to romaji. "
-                "Return only the refined HTML."
-            )
-        _qa_issue_prompt_default = "{QA_Issues}"
-        _qa_issue_system_default = f"{self.REFINEMENT_SYSTEM_PROMPT}\n\n{_qa_issue_prompt_default}"
+            self.REFINEMENT_SYSTEM_PROMPT = default_refinement_system_prompt
         _failed_system = _prompt_env_raw("REFINEMENT_FAILED_SYSTEM_PROMPT")
         _failed_user = _prompt_env_raw("REFINEMENT_FAILED_USER_PROMPT")
         _partial_system = _prompt_env_raw("REFINEMENT_PARTIAL_SYSTEM_PROMPT")
         _partial_user = _prompt_env_raw("REFINEMENT_PARTIAL_USER_PROMPT")
         failed_system_prompt = (
-            str(_failed_system).strip() if _failed_system is not None and str(_failed_system).strip()
-            else _qa_issue_system_default
+            default_refinement_failed_system_prompt
+            if _failed_system is None
+            or not str(_failed_system).strip()
+            else str(_failed_system).strip()
         )
         failed_user_prompt = str(_failed_user).strip() if _failed_user is not None else ""
         partial_system_prompt = (
-            str(_partial_system).strip() if _partial_system is not None and str(_partial_system).strip()
-            else _qa_issue_system_default
+            default_refinement_partial_system_prompt
+            if _partial_system is None
+            or not str(_partial_system).strip()
+            else str(_partial_system).strip()
         )
         partial_user_prompt = str(_partial_user).strip() if _partial_user is not None else ""
         self.REFINEMENT_FAILED_SYSTEM_PROMPT = failed_system_prompt
