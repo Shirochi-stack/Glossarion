@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import platform
 import traceback
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QApplication, QMenu, QComboBox, QStackedWidget
 )
 from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop
-from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption
+from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
@@ -11673,6 +11674,219 @@ class _ChapterRowPrepThread(QThread):
                 self.batch_ready.emit(self._generation, fallback, True)
 
 
+class _ChapterVirtualList(QWidget):
+    """Paint a large chapter list without creating one QWidget per row."""
+
+    clicked = Signal(int)
+    activated = Signal(int)
+
+    _ROW_HEIGHT = 66
+    _ROW_GAP = 6
+    _SIDE_MARGIN = 4
+    _BADGE_PALETTE = {
+        "completed": (QColor(126, 200, 126), QColor(126, 200, 126, 31),
+                      QColor(126, 200, 126)),
+        "failed": (QColor(255, 158, 109), QColor(255, 158, 109, 31),
+                   QColor(255, 158, 109)),
+        "qa_failed": (QColor(255, 158, 109), QColor(255, 158, 109, 31),
+                      QColor(255, 158, 109)),
+        "in_progress": (QColor(255, 209, 102), QColor(255, 209, 102, 31),
+                        QColor(255, 209, 102)),
+        "pending": (QColor("#7a8599"), QColor("#2a2a3e"),
+                    QColor("#3a3a5e")),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._row_specs: list[dict] = []
+        self._selected_idx: int | None = None
+        self._hover_row = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def count(self) -> int:
+        return len(self._row_specs)
+
+    def clear(self) -> None:
+        self._row_specs = []
+        self._hover_row = -1
+        self._selected_idx = None
+        self._sync_height()
+        self.update()
+
+    def append_specs(self, specs, selected_idx: int | None = None) -> None:
+        if selected_idx is not None:
+            self._selected_idx = selected_idx
+        if specs:
+            self._row_specs.extend(list(specs))
+        self._sync_height()
+        self.update()
+
+    def set_selected_index(self, idx: int | None) -> None:
+        self._selected_idx = idx
+        self.update()
+
+    def _sync_height(self) -> None:
+        height = len(self._row_specs) * self._ROW_HEIGHT
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:
+        return QSize(640, len(self._row_specs) * self._ROW_HEIGHT)
+
+    def _row_at(self, y: int) -> int:
+        row = int(y // self._ROW_HEIGHT)
+        if 0 <= row < len(self._row_specs):
+            return row
+        return -1
+
+    def _chapter_index_for_row(self, row: int) -> int:
+        if not (0 <= row < len(self._row_specs)):
+            return 0
+        info = self._row_specs[row].get("info", {}) or {}
+        return int(info.get("index", 0) or 0)
+
+    def mouseMoveEvent(self, event):
+        row = self._row_at(int(event.position().y()))
+        if row != self._hover_row:
+            old = self._hover_row
+            self._hover_row = row
+            for candidate in (old, row):
+                if candidate >= 0:
+                    self.update(0, candidate * self._ROW_HEIGHT,
+                                self.width(), self._ROW_HEIGHT)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        old = self._hover_row
+        self._hover_row = -1
+        if old >= 0:
+            self.update(0, old * self._ROW_HEIGHT,
+                        self.width(), self._ROW_HEIGHT)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            row = self._row_at(int(event.position().y()))
+            if row >= 0:
+                idx = self._chapter_index_for_row(row)
+                self._selected_idx = idx
+                self.clicked.emit(idx)
+                self.update()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            row = self._row_at(int(event.position().y()))
+            if row >= 0:
+                self.activated.emit(self._chapter_index_for_row(row))
+        super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        visible = event.rect()
+        start = max(0, int(visible.top() // self._ROW_HEIGHT) - 1)
+        end = min(
+            len(self._row_specs),
+            int(visible.bottom() // self._ROW_HEIGHT) + 2,
+        )
+        title_font = QFont(self.font())
+        title_font.setPointSizeF(10.0)
+        meta_font = QFont(self.font())
+        meta_font.setPointSizeF(8.5)
+        badge_font = QFont(self.font())
+        badge_font.setPointSizeF(8.0)
+        badge_font.setBold(True)
+        row_width = max(10, self.width() - (self._SIDE_MARGIN * 2))
+
+        for row in range(start, end):
+            spec = self._row_specs[row]
+            info = spec.get("info", {}) or {}
+            chapter_idx = int(info.get("index", 0) or 0)
+            selected = chapter_idx == self._selected_idx
+            hovered = row == self._hover_row
+
+            y = row * self._ROW_HEIGHT + (self._ROW_GAP // 2)
+            rect = QRect(
+                self._SIDE_MARGIN,
+                y,
+                row_width,
+                self._ROW_HEIGHT - self._ROW_GAP,
+            )
+            bg = QColor("#2a2d5a" if selected else
+                        "#232340" if hovered else "#1a1a2a")
+            border = QColor("#a097ff" if selected else
+                            "#6c63ff" if hovered else "#242438")
+            painter.setPen(QPen(border, 2))
+            painter.setBrush(bg)
+            painter.drawRoundedRect(rect, 6, 6)
+
+            text_rect = rect.adjusted(18, 10, -18, -8)
+            badge = str(spec.get("badge_text", "") or "")
+            badge_rect = QRect()
+            if badge:
+                status = str(info.get("status", "") or "")
+                palette = self._BADGE_PALETTE.get(status)
+                if palette is None and status == "qa_failed":
+                    palette = self._BADGE_PALETTE.get("failed")
+                if palette is None:
+                    palette = self._BADGE_PALETTE.get("pending")
+                badge_metrics = QFontMetrics(badge_font)
+                badge_w = min(
+                    max(74, badge_metrics.horizontalAdvance(badge) + 22),
+                    max(74, rect.width() // 3),
+                )
+                badge_h = 24
+                badge_rect = QRect(
+                    rect.right() - badge_w - 14,
+                    rect.center().y() - (badge_h // 2),
+                    badge_w,
+                    badge_h,
+                )
+                text_rect.setRight(max(text_rect.left() + 40,
+                                       badge_rect.left() - 14))
+
+            painter.setFont(title_font)
+            title_color = "#ffffff" if selected else (
+                "#e0e0e0" if spec.get("primary_class") == "translated"
+                else "#c8cbe0"
+            )
+            painter.setPen(QColor(title_color))
+            title = str(spec.get("primary_text", "") or "")
+            title_metrics = QFontMetrics(title_font)
+            painter.drawText(
+                text_rect,
+                Qt.AlignLeft | Qt.AlignTop,
+                title_metrics.elidedText(title, Qt.ElideRight,
+                                         max(20, text_rect.width())),
+            )
+
+            filename = str(spec.get("filename", "") or "")
+            meta = filename
+            if meta:
+                painter.setFont(meta_font)
+                painter.setPen(QColor("#e5e7ff" if selected else "#9aa2b8"))
+                meta_metrics = QFontMetrics(meta_font)
+                painter.drawText(
+                    text_rect.adjusted(0, 28, 0, 0),
+                    Qt.AlignLeft | Qt.AlignTop,
+                    meta_metrics.elidedText(meta, Qt.ElideRight,
+                                            max(20, text_rect.width())),
+                )
+            if badge and not badge_rect.isNull():
+                text_color, badge_bg, badge_border = palette
+                painter.setFont(badge_font)
+                painter.setPen(QPen(badge_border, 1))
+                painter.setBrush(badge_bg)
+                painter.drawRoundedRect(badge_rect, 10, 10)
+                painter.setPen(text_color)
+                painter.drawText(badge_rect, Qt.AlignCenter, badge)
+
+
 # ---------------------------------------------------------------------------
 # Book Details Dialog
 # ---------------------------------------------------------------------------
@@ -11702,6 +11916,7 @@ class BookDetailsDialog(QDialog):
         self._chapter_row_prep_threads: list[_ChapterRowPrepThread] = []
         self._chapter_row_prep_thread: _ChapterRowPrepThread | None = None
         self._chapter_page = 0
+        self._details_config_persist_timer: QTimer | None = None
         # Single-selected chapter row (by spine index). ``None`` means no
         # row currently has focus.
         self._selected_chapter_idx: int | None = None
@@ -11830,6 +12045,29 @@ class BookDetailsDialog(QDialog):
                 padding: 6px 10px; font-size: 9.5pt;
             }
             QScrollArea { border: none; background: transparent; }
+            QListWidget#chapterList {
+                background: transparent;
+                border: none;
+                outline: none;
+                padding: 0px;
+            }
+            QListWidget#chapterList::item {
+                background: #1a1a2a;
+                color: #c8cbe0;
+                border: 2px solid #242438;
+                border-radius: 6px;
+                margin: 2px 4px;
+                padding: 8px 12px;
+            }
+            QListWidget#chapterList::item:hover {
+                background: #232340;
+                border-color: #6c63ff;
+            }
+            QListWidget#chapterList::item:selected {
+                background: #2a2d5a;
+                border-color: #a097ff;
+                color: #ffffff;
+            }
             QScrollBar:vertical { width: 10px; background: #12121e; }
             QScrollBar::handle:vertical { background: #3a3a5e; border-radius: 5px;
                                           min-height: 24px; }
@@ -12147,6 +12385,13 @@ class BookDetailsDialog(QDialog):
         # Visible by default — the TOC is the main reading entry point.
         body_layout.addWidget(self._chap_container)
 
+        self._chap_list = _ChapterVirtualList()
+        self._chap_list.setObjectName("chapterList")
+        self._chap_list.clicked.connect(self._on_chapter_virtual_clicked)
+        self._chap_list.activated.connect(self._on_chapter_activated)
+        self._chap_list.hide()
+        body_layout.addWidget(self._chap_list)
+
         self._toc_bottom_pager = QWidget()
         self._toc_bottom_pager.setObjectName("toc-bottom-pager")
         bottom_pager_layout = QHBoxLayout(self._toc_bottom_pager)
@@ -12279,6 +12524,10 @@ class BookDetailsDialog(QDialog):
         # the sibling placeholder in its slot.
         if getattr(self, "_chap_container", None) is not None:
             self._chap_container.hide()
+        chap_list = getattr(self, "_chap_list", None)
+        if chap_list is not None:
+            chap_list.clear()
+            chap_list.hide()
         if getattr(self, "_toc_bottom_pager", None) is not None:
             self._toc_bottom_pager.hide()
         if getattr(self, "_chap_loading_lbl", None) is not None:
@@ -12724,12 +12973,24 @@ class BookDetailsDialog(QDialog):
             }}
         """)
 
+    def _schedule_details_config_persist(self) -> None:
+        timer = getattr(self, "_details_config_persist_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: _persist_config_via_parent(self))
+            self._details_config_persist_timer = timer
+        timer.start(750)
+
     # Per-tick batch size for :meth:`_populate_chapters` — small enough
-    # that one tick fits comfortably inside a Qt event-loop iteration
-    # (so mouse / keyboard / scroll events aren't starved) but big
-    # enough that a 700-chapter book still fills quickly.
-    _POPULATE_BATCH_SIZE = 24
+    # The virtual list path is used for every page-size option so
+    # 250 / 500 / All don't regress into hundreds of live child widgets.
+    _POPULATE_BATCH_SIZE = 10
+    _POPULATE_LIST_BATCH_SIZE = 180
     _POPULATE_TICK_MS = 16
+    _POPULATE_FRAME_BUDGET_SEC = 0.006
+    _POPULATE_LIST_FRAME_BUDGET_SEC = 0.008
+    _CHAPTER_GEOMETRY_REFRESH_INTERVAL_SEC = 0.12
 
     def _cancel_chapter_row_prep(self) -> None:
         for thread in list(getattr(self, "_chapter_row_prep_threads", []) or []):
@@ -12742,10 +13003,10 @@ class BookDetailsDialog(QDialog):
         """Rebuild the chapter row list, yielding between batches.
 
         A compiled EPUB with hundreds of chapters used to freeze the
-        UI for multiple seconds while every :class:`_ChapterRow` widget
-        was constructed synchronously. We now prepare row display specs
-        on a worker thread, then build the Qt widgets in small timed
-        batches so the event loop keeps dispatching in between.
+        UI for multiple seconds while every row widget was constructed
+        synchronously. We now prepare row display specs on a worker
+        thread, then stream them into a lightweight painted list so the
+        event loop keeps dispatching in between.
 
         In **initial** (non-silent) mode, the "⏳  Loading chapters…"
         placeholder is hidden as soon as row data is ready, then each
@@ -12781,6 +13042,7 @@ class BookDetailsDialog(QDialog):
         # container while the background loader is still running, so
         # isVisible() would incorrectly report "collapsed" on every load.
         target_visible = True
+        use_list_view = True
         # Initial loads used to hide the container until the final batch,
         # which made large books feel stuck. Now the placeholder disappears
         # once row data exists and every batch paints as soon as it is
@@ -12789,7 +13051,11 @@ class BookDetailsDialog(QDialog):
             if getattr(self, "_chap_loading_lbl", None) is not None:
                 self._chap_loading_lbl.hide()
             if getattr(self, "_chap_container", None) is not None:
-                self._chap_container.setVisible(bool(target_visible))
+                self._chap_container.setVisible(
+                    bool(target_visible and not use_list_view))
+            if getattr(self, "_chap_list", None) is not None:
+                self._chap_list.setVisible(
+                    bool(target_visible and use_list_view))
             if getattr(self, "_toc_bottom_pager", None) is not None:
                 self._toc_bottom_pager.setVisible(bool(target_visible))
         # Clear previous rows (placeholder now lives outside this layout).
@@ -12799,6 +13065,13 @@ class BookDetailsDialog(QDialog):
             if w:
                 w.setParent(None)
                 w.deleteLater()
+        chap_list = getattr(self, "_chap_list", None)
+        if chap_list is not None:
+            chap_list.clear()
+            chap_list.setVisible(bool(target_visible and use_list_view))
+        if getattr(self, "_chap_container", None) is not None:
+            self._chap_container.setVisible(
+                bool(target_visible and not use_list_view))
 
         # Snapshot the state the worker uses so a mid-flight toggle
         # change can't cross-contaminate the rendering flavor.
@@ -12814,6 +13087,8 @@ class BookDetailsDialog(QDialog):
         self._populate_show_raw_title = bool(self._show_raw_titles)
         self._populate_target_visible = bool(target_visible)
         self._populate_silent = bool(silent)
+        self._populate_use_list = bool(use_list_view)
+        self._last_chapter_geometry_refresh = 0.0
 
         if not populate_infos:
             self._populate_prep_done = True
@@ -12866,7 +13141,7 @@ class BookDetailsDialog(QDialog):
         except Exception:
             pass
 
-    def _refresh_chapter_stream_geometry(self) -> None:
+    def _refresh_chapter_stream_geometry(self, final: bool = False) -> None:
         if getattr(self, "_refreshing_chapter_geometry", False):
             return
         self._refreshing_chapter_geometry = True
@@ -12879,7 +13154,18 @@ class BookDetailsDialog(QDialog):
             container = getattr(self, "_chap_container", None)
             if container is not None:
                 container.updateGeometry()
-                container.adjustSize()
+                if final:
+                    container.adjustSize()
+
+            chap_list = getattr(self, "_chap_list", None)
+            if chap_list is not None:
+                chap_list.updateGeometry()
+                viewport_fn = getattr(chap_list, "viewport", None)
+                viewport = viewport_fn() if callable(viewport_fn) else None
+                if viewport is not None:
+                    viewport.update()
+                else:
+                    chap_list.update()
 
             scroll = getattr(self, "_scroll", None)
             body = scroll.widget() if scroll is not None else None
@@ -12889,21 +13175,26 @@ class BookDetailsDialog(QDialog):
                     body_layout.invalidate()
                     body_layout.activate()
                 body.updateGeometry()
-                body.adjustSize()
+                if final:
+                    body.adjustSize()
 
             if scroll is not None:
                 scroll.updateGeometry()
                 viewport = scroll.viewport()
                 if viewport is not None:
                     viewport.update()
-
-            app = QApplication.instance()
-            if app is not None:
-                app.processEvents(QEventLoop.ExcludeUserInputEvents)
         except Exception:
             pass
         finally:
             self._refreshing_chapter_geometry = False
+
+    def _maybe_refresh_chapter_stream_geometry(self, force: bool = False) -> None:
+        now = time.perf_counter()
+        last = float(getattr(self, "_last_chapter_geometry_refresh", 0.0) or 0.0)
+        if not force and now - last < self._CHAPTER_GEOMETRY_REFRESH_INTERVAL_SEC:
+            return
+        self._last_chapter_geometry_refresh = now
+        self._refresh_chapter_stream_geometry(final=False)
 
     def _finish_chapter_population(self):
         if self._chapters_loaded:
@@ -12911,17 +13202,28 @@ class BookDetailsDialog(QDialog):
         timer = getattr(self, "_populate_timer", None)
         if timer is not None and timer.isActive():
             timer.stop()
-        self._chap_layout.addStretch()
+        use_list_view = bool(getattr(self, "_populate_use_list", False))
+        if not use_list_view:
+            self._chap_layout.addStretch()
         self._update_toc_toggle_label()
         if not bool(getattr(self, "_populate_silent", False)):
             if getattr(self, "_chap_loading_lbl", None) is not None:
                 self._chap_loading_lbl.hide()
             if getattr(self, "_populate_target_visible", True):
-                self._chap_container.show()
+                if use_list_view and getattr(self, "_chap_list", None) is not None:
+                    self._chap_list.show()
+                    self._chap_container.hide()
+                else:
+                    self._chap_container.show()
+                    if getattr(self, "_chap_list", None) is not None:
+                        self._chap_list.hide()
                 if getattr(self, "_toc_bottom_pager", None) is not None:
                     self._toc_bottom_pager.show()
         self._chapters_loaded = True
-        self._refresh_chapter_stream_geometry()
+        self._refresh_chapter_stream_geometry(final=True)
+
+    def _on_chapter_virtual_clicked(self, idx: int) -> None:
+        self._selected_chapter_idx = int(idx)
 
     def _populate_chapters_batch_tick(self):
         """Render the next :data:`_POPULATE_BATCH_SIZE` chapter rows.
@@ -12936,29 +13238,55 @@ class BookDetailsDialog(QDialog):
                 self._finish_chapter_population()
             return
 
-        end = min(start + self._POPULATE_BATCH_SIZE, len(specs))
+        use_list_view = bool(getattr(self, "_populate_use_list", False))
+        batch_size = (self._POPULATE_LIST_BATCH_SIZE if use_list_view
+                      else self._POPULATE_BATCH_SIZE)
+        frame_budget = (self._POPULATE_LIST_FRAME_BUDGET_SEC if use_list_view
+                        else self._POPULATE_FRAME_BUDGET_SEC)
+        end_limit = min(start + batch_size, len(specs))
         selected_idx = self._selected_chapter_idx
-        for i in range(start, end):
-            row_spec = specs[i]
-            info = row_spec.get("info", {})
-            row = _ChapterRow(
-                info,
-                parent=self._chap_container,
-                row_spec=row_spec,
-            )
-            row.activated.connect(self._on_chapter_activated)
-            row.clicked.connect(self._on_chapter_clicked)
-            if info.get("index") == selected_idx:
-                row.set_selected(True)
-            self._chap_layout.addWidget(row)
+        end = start
+        deadline = time.perf_counter() + frame_budget
+        if use_list_view:
+            chap_list = getattr(self, "_chap_list", None)
+            if chap_list is None:
+                self._finish_chapter_population()
+                return
+            batch = []
+            for i in range(start, end_limit):
+                batch.append(specs[i])
+                end = i + 1
+                if end > start and time.perf_counter() >= deadline:
+                    break
+            chap_list.append_specs(batch, selected_idx)
+        else:
+            for i in range(start, end_limit):
+                row_spec = specs[i]
+                info = row_spec.get("info", {})
+                row = _ChapterRow(
+                    info,
+                    parent=self._chap_container,
+                    row_spec=row_spec,
+                )
+                row.activated.connect(self._on_chapter_activated)
+                row.clicked.connect(self._on_chapter_clicked)
+                if info.get("index") == selected_idx:
+                    row.set_selected(True)
+                self._chap_layout.addWidget(row)
+                end = i + 1
+                if end > start and time.perf_counter() >= deadline:
+                    break
         self._populate_idx = end
-        self._refresh_chapter_stream_geometry()
+        self._maybe_refresh_chapter_stream_geometry()
         if end >= len(specs) and bool(getattr(self, "_populate_prep_done", False)):
             self._finish_chapter_population()
 
     def _on_chapter_clicked(self, idx: int):
         """Update the single-select focus to the clicked chapter row."""
         self._selected_chapter_idx = idx
+        chap_list = getattr(self, "_chap_list", None)
+        if chap_list is not None:
+            chap_list.set_selected_index(idx)
         for i in range(self._chap_layout.count()):
             w = self._chap_layout.itemAt(i).widget()
             if isinstance(w, _ChapterRow):
@@ -13145,7 +13473,7 @@ class BookDetailsDialog(QDialog):
             try:
                 value = combo.currentData()
                 self._config["epub_details_chapter_page_size"] = value
-                _persist_config_via_parent(self)
+                self._schedule_details_config_persist()
             except Exception:
                 pass
         self._chapter_page = 0
@@ -13198,7 +13526,9 @@ class BookDetailsDialog(QDialog):
         # Kept as a compatibility no-op for older signal paths. The chapter
         # section is paginated now, not collapsible.
         self._chap_section_expanded = True
-        self._chap_container.setVisible(True)
+        self._chap_container.setVisible(False)
+        if getattr(self, "_chap_list", None) is not None:
+            self._chap_list.setVisible(True)
         if getattr(self, "_chap_loading_lbl", None) is not None:
             self._chap_loading_lbl.hide()
         self._toc_search.setVisible(True)
@@ -13539,6 +13869,10 @@ class BookDetailsDialog(QDialog):
     # -- Qt lifecycle --------------------------------------------------------
 
     def closeEvent(self, event):
+        persist_timer = getattr(self, "_details_config_persist_timer", None)
+        if persist_timer is not None and persist_timer.isActive():
+            persist_timer.stop()
+            _persist_config_via_parent(self)
         populate_timer = getattr(self, "_populate_timer", None)
         if populate_timer is not None and populate_timer.isActive():
             populate_timer.stop()
