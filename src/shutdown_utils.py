@@ -47,7 +47,7 @@ def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> 
     if duration_ms <= 0:
         return
     try:
-        from PySide6.QtCore import QCoreApplication, QEventLoop, QThread
+        from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QThread
     except Exception:
         return
 
@@ -65,7 +65,10 @@ def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> 
         slice_ms = max(1, int(slice_ms or 1))
         while time.monotonic() < deadline:
             try:
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                QCoreApplication.sendPostedEvents(None, 0)
                 app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, slice_ms)
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             except Exception:
                 try:
                     app.processEvents()

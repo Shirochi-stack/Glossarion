@@ -674,6 +674,16 @@ def _configure_qtwebengine_scale(qt_scale):
     )
 
 
+def _configure_windows_d3d_vblank_thread():
+    """Disable Qt's D3D vblank helper thread that can warn on shutdown."""
+    if sys.platform != "win32":
+        return
+    if os.environ.get(
+            "GLOSSARION_ENABLE_QT_D3D_VBLANK_THREAD", "").strip():
+        return
+    os.environ.setdefault("QT_D3D_NO_VBLANK_THREAD", "1")
+
+
 def configure():
     """Enable Qt6 native high-DPI rendering and apply the user's scale factor.
 
@@ -692,6 +702,7 @@ def configure():
 
     # ── Enable Qt6 native high-DPI scaling (sharp text rendering) ─────────
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    _configure_windows_d3d_vblank_thread()
 
     # Do NOT set QT_FONT_DPI — let Qt derive font DPI from the device pixel
     # ratio so glyphs are rasterised at the correct resolution (not 96 DPI
