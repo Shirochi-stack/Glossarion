@@ -17195,6 +17195,11 @@ class EpubReaderDialog(QDialog):
             return False
         if not query.text().strip():
             return False
+        debounce_timer = getattr(self, "_search_debounce_timer", None)
+        if debounce_timer is not None and debounce_timer.isActive():
+            debounce_timer.stop()
+            self._start_search_dialog_worker()
+            return True
         if results is not None and results.count() > 0:
             row = results.currentRow()
             row = 0 if row < 0 else (row + 1) % results.count()
