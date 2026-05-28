@@ -2342,6 +2342,7 @@ class MultiAPIKeyDialog(QDialog):
         scrollable_layout.addWidget(self.multikey_desc_label)
 
         self._create_rotation_settings_section(scrollable_layout)
+        self._create_translation_key_pool_section(scrollable_layout)
         self._prepare_deferred_key_pool_sections(scrollable_layout)
 
         # Add stretch to fill remaining space in scroll area
@@ -2418,7 +2419,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _deferred_key_pool_section_builders(self):
         return (
-            self._create_translation_key_pool_section,
             self._create_fallback_section,
             self._create_truncation_retry_section,
             self._create_glossary_section,
@@ -2441,6 +2441,7 @@ class MultiAPIKeyDialog(QDialog):
         self._deferred_key_pool_host_layout.setContentsMargins(0, 0, 0, 0)
         self._deferred_key_pool_host_layout.setSpacing(10)
         parent_layout.addWidget(self._deferred_key_pool_host)
+        self._refresh_deferred_key_pool_geometry()
 
     def _start_deferred_key_pool_render(self):
         if getattr(self, 'preview_pool', None):
@@ -2466,13 +2467,39 @@ class MultiAPIKeyDialog(QDialog):
         if parent_layout is not None:
             try:
                 build_section(parent_layout)
+                self._refresh_deferred_key_pool_geometry()
             except Exception as exc:
                 print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
 
         if pending_builders:
-            QTimer.singleShot(0, self._render_next_deferred_key_pool_section)
+            QTimer.singleShot(16, self._render_next_deferred_key_pool_section)
         else:
             self._finish_key_pool_render()
+
+    def _refresh_deferred_key_pool_geometry(self):
+        try:
+            host_layout = getattr(self, '_deferred_key_pool_host_layout', None)
+            if host_layout is not None:
+                host_layout.activate()
+
+            host = getattr(self, '_deferred_key_pool_host', None)
+            if host is not None:
+                host.updateGeometry()
+                host.adjustSize()
+
+            scrollable_layout = getattr(self, 'scrollable_layout', None)
+            if scrollable_layout is not None:
+                scrollable_layout.activate()
+
+            for widget_name in ('scrollable_frame', 'main_frame'):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.updateGeometry()
+                    widget.adjustSize()
+
+            QApplication.processEvents()
+        except Exception:
+            pass
 
     def _create_translation_key_pool_section(self, parent_layout):
         self.translation_key_pool_frame = QGroupBox("Translation Keys (Main Pool)")
@@ -2539,7 +2566,6 @@ class MultiAPIKeyDialog(QDialog):
 
         self._create_key_list_section(translation_pool_layout)
         parent_layout.addWidget(self.translation_key_pool_frame)
-        parent_layout.addStretch(0)
 
         self._refresh_key_list()
         self._toggle_multi_key_mode()
