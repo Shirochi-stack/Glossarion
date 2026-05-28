@@ -25,6 +25,14 @@ def _normalize_exit_code(code) -> int:
     return 1
 
 
+def _cpu_worker_cap() -> int:
+    """Return the user's logical CPU count as a safe worker ceiling."""
+    try:
+        return max(1, int(os.cpu_count() or 1))
+    except Exception:
+        return 1
+
+
 def _run_cleanup_fns(cleanup_fns: Optional[Iterable[Callable[[], None]]]) -> None:
     if not cleanup_fns:
         return
@@ -769,7 +777,14 @@ def restore_in_progress_rows_for_shutdown(
     if not cleanup_tasks:
         return
 
-    workers = min(max(1, int(max_workers or 1)), len(cleanup_tasks))
+    cpu_cap = _cpu_worker_cap()
+    requested_workers = max(1, int(max_workers or 1))
+    workers = min(requested_workers, len(cleanup_tasks), cpu_cap)
+    print(
+        f"[CLOSE] Shutdown progress cleanup workers: {workers} "
+        f"(cpu_cap={cpu_cap}, tasks={len(cleanup_tasks)}, "
+        f"requested={requested_workers})"
+    )
     try:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=workers,
