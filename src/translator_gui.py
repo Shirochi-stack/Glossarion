@@ -105,10 +105,15 @@ def _kill_child_process_tree(timeout=1.5):
             except Exception:
                 pass
     except Exception:
-        # Best-effort fallback using taskkill without raising (Windows only)
+        # Last-resort fallback. Disabled by default for the GUI process because
+        # taskkill /F on our own PID can interrupt native Qt/PySide teardown and
+        # trigger Windows' "memory could not be read" dialog.
         try:
             import subprocess, os
-            if os.name == 'nt':
+            if (
+                os.name == 'nt'
+                and os.environ.get("GLOSSARION_TASKKILL_SELF_ON_EXIT", "").strip().lower() in ("1", "true", "yes", "on")
+            ):
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
@@ -2768,15 +2773,41 @@ Text to analyze:
                     dlg.deleteLater()
                 except Exception:
                     pass
+
+            def _stop_thread_like(label, thread_obj, timeout_ms=1500):
+                try:
+                    if not thread_obj:
+                        return
+                    print(f"[CLEANUP] Stopping {label}...")
+                    if hasattr(thread_obj, 'requestInterruption'):
+                        try:
+                            thread_obj.requestInterruption()
+                        except Exception:
+                            pass
+                    if hasattr(thread_obj, 'quit'):
+                        try:
+                            thread_obj.quit()
+                        except Exception:
+                            pass
+                    if hasattr(thread_obj, 'wait'):
+                        try:
+                            if thread_obj.wait(timeout_ms) is False:
+                                print(f"[CLEANUP] {label} did not stop before shutdown")
+                        except TypeError:
+                            thread_obj.wait()
+                        return
+                    if hasattr(thread_obj, 'join'):
+                        thread_obj.join(timeout=timeout_ms / 1000.0)
+                except Exception:
+                    pass
             
             # Stop any translation operations
             if hasattr(self, '_translation_thread') and self._translation_thread:
                 try:
                     print("[CLEANUP] Stopping translation thread...")
-                    if hasattr(self._translation_thread, 'terminate'):
+                    if hasattr(self._translation_thread, 'wait'):
                         # QThread path
-                        self._translation_thread.terminate()
-                        self._translation_thread.wait(1000)
+                        _stop_thread_like("translation thread", self._translation_thread)
                     elif hasattr(self._translation_thread, 'join'):
                         # threading.Thread path — cannot force-terminate, just wait briefly
                         self._translation_thread.join(timeout=1.0)
@@ -2787,10 +2818,9 @@ Text to analyze:
             if hasattr(self, '_glossary_thread') and self._glossary_thread:
                 try:
                     print("[CLEANUP] Stopping glossary thread...")
-                    if hasattr(self._glossary_thread, 'terminate'):
+                    if hasattr(self._glossary_thread, 'wait'):
                         # QThread path
-                        self._glossary_thread.terminate()
-                        self._glossary_thread.wait(1000)
+                        _stop_thread_like("glossary thread", self._glossary_thread)
                     elif hasattr(self._glossary_thread, 'join'):
                         # threading.Thread path — cannot force-terminate, just wait briefly
                         self._glossary_thread.join(timeout=1.0)

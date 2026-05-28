@@ -85,6 +85,7 @@ class SplashManager(QObject):
         self.app = None
         self._status_text = "Initializing..."
         self.progress_value = 0  # Track actual progress 0-100
+        self._progress_target = 0
         self.timer = None
         self.status_label = None
         self.progress_bar = None
@@ -96,6 +97,7 @@ class SplashManager(QObject):
         self._closed = False
         self._manual_progress_auto_cap = None
         self._manual_progress_auto_boost = 1.0
+        self._startup_manga_available = None
         
         # Connect signals to slots
         self._status_update_signal.connect(self._do_update_status)
@@ -470,13 +472,28 @@ class SplashManager(QObject):
         """Update progress animation"""
         try:
             manual_auto_cap = getattr(self, '_manual_progress_auto_cap', None)
+            progress_target = getattr(self, '_progress_target', self.progress_value)
 
             # Manual mode normally means real milestones own progress. During
             # heavy imports, allow a capped crawl so the splash stays alive.
-            if getattr(self, '_manual_progress', False) and manual_auto_cap is None:
+            if (
+                getattr(self, '_manual_progress', False)
+                and manual_auto_cap is None
+                and progress_target <= self.progress_value
+            ):
                 return
                 
             if self.splash_window and self.progress_value < 100:
+                if progress_target > self.progress_value:
+                    self.progress_value = min(progress_target, self.progress_value + 1.4)
+                    if self.progress_bar:
+                        self.progress_bar.setValue(int(self.progress_value))
+                    if self.progress_label:
+                        self.progress_label.setText(f"{int(self.progress_value)}%")
+                    if self.app:
+                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    return
+
                 if manual_auto_cap is not None:
                     if self.progress_value < manual_auto_cap:
                         if self.progress_value < 70:
@@ -573,9 +590,9 @@ class SplashManager(QObject):
             
             # Startup module loading is weighted around the expensive imports:
             # TransateKRtoEN/unified API setup, then manga/vision/OCR tooling.
-            "⚙️ Initializing startup modules...": 24,
-            "Loading startup modules...": 24,
-            "Loading translation modules...": 24,
+            "⚙️ Initializing startup modules...": 25,
+            "Loading startup modules...": 25,
+            "Loading translation modules...": 25,
             "⚙️ Initializing module system...": 25,
             "Initializing module system...": 25,
             "Loading translation engine...": 25,
@@ -602,6 +619,30 @@ class SplashManager(QObject):
             "Creating main window...": 94,
             "Ready!": 100
         }
+
+        if getattr(self, '_startup_manga_available', None) is False:
+            progress_map.update({
+                "⚙️ Initializing startup modules...": 50,
+                "Loading startup modules...": 50,
+                "Loading translation modules...": 50,
+                "⚙️ Initializing module system...": 50,
+                "Initializing module system...": 50,
+                "Loading translation engine...": 50,
+                "Validating translation engine...": 56,
+                "✅ translation engine loaded": 90,
+                "Loading glossary extractor...": 50,
+                "Validating glossary extractor...": 56,
+                "✅ glossary extractor loaded": 68,
+                "Loading EPUB converter...": 50,
+                "✅ EPUB converter loaded": 58,
+                "Loading QA scanner...": 50,
+                "🔍 QA scanner loaded": 62,
+                "✅ QA scanner loaded": 62,
+                "Finalizing module initialization...": 92,
+                "✅ All modules loaded successfully": 92,
+                "All startup modules loaded successfully": 92,
+                "All core modules loaded successfully": 92,
+            })
         
         # Use thread-safe signal to update UI
         try:
@@ -637,17 +678,27 @@ class SplashManager(QObject):
             pass
     
     def set_progress(self, value):
-        """Manually set progress value (0-100) - thread-safe, monotonic (never goes backwards)"""
+        """Move progress toward a new target (0-100), never backwards."""
         if self._closed:
             return
         
         value = max(0, min(100, value))
-        # Only allow forward progress — never jump backwards
-        if value <= self.progress_value:
+        current_target = max(getattr(self, '_progress_target', self.progress_value), self.progress_value)
+        if value <= current_target and value <= self.progress_value:
             return
-        self.progress_value = value
-        
-        # Use thread-safe signal to update UI
+        self._progress_target = max(current_target, value)
+
+        timer_active = False
+        try:
+            timer_active = bool(self.timer and self.timer.isActive())
+        except Exception:
+            timer_active = False
+
+        if timer_active and self.splash_window:
+            return
+
+        # Validation mode stops the timer; keep that path immediate.
+        self.progress_value = self._progress_target
         try:
             self._progress_update_signal.emit(int(self.progress_value))
         except Exception:
@@ -675,6 +726,8 @@ class SplashManager(QObject):
             import metadata_batch_translator  # noqa: F401
         except Exception:
             pass
+        if getattr(self, '_startup_manga_available', None) is False:
+            return
         try:
             from bubble_detector import BubbleDetector as _BD
             try:
@@ -690,9 +743,19 @@ class SplashManager(QObject):
         except Exception as e:
             print(f"Warning: background ML module load failed: {e}")
 
+    def _is_startup_module_available(self, module_name):
+        try:
+            return importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError, AttributeError):
+            return False
+
     def load_startup_modules_parallel(self, max_workers=None):
         """Load core startup modules concurrently while keeping the splash responsive."""
         self._manual_progress = True
+        self._manual_progress_auto_cap = None
+        self._manual_progress_auto_boost = 1.0
+        manga_available = self._is_startup_module_available("manga_integration")
+        self._startup_manga_available = manga_available
         results = {}
         specs = [
             {
@@ -739,7 +802,9 @@ class SplashManager(QObject):
                 "required": ("scan_html_folder",),
                 "result": lambda mod: mod.scan_html_folder,
             },
-            {
+        ]
+        if manga_available:
+            specs.append({
                 "key": "manga",
                 "module": "manga_integration",
                 "display": "manga tools",
@@ -748,8 +813,7 @@ class SplashManager(QObject):
                 "required": ("MangaTranslationTab",),
                 "optional": True,
                 "result": lambda mod: mod.MangaTranslationTab,
-            },
-        ]
+            })
 
         def _load_spec(spec):
             module = importlib.import_module(spec["module"])

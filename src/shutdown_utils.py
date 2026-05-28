@@ -151,6 +151,8 @@ def _terminate_psutil_children(timeout: float = 1.5) -> None:
 def _taskkill_self_tree() -> None:
     if os.name != "nt":
         return
+    if os.environ.get("GLOSSARION_TASKKILL_SELF_ON_EXIT", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return
     try:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
@@ -771,7 +773,8 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     """
     Best-effort cleanup then forcefully exit the current process.
     Terminates child processes (multiprocessing + psutil if available) and
-    falls back to taskkill on Windows to ensure no background process remains.
+    can optionally fall back to taskkill on Windows via
+    GLOSSARION_TASKKILL_SELF_ON_EXIT=1.
 
     Ordering note: children must be terminated BEFORE we exit so that any
     DLLs they loaded from PyInstaller's `_MEIPASS` are unmapped. Otherwise
@@ -787,6 +790,10 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     _terminate_multiprocessing_children()
     _terminate_psutil_children()
     _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
+    # Disabled by default. Killing our own process tree with taskkill can
+    # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and
+    # show Windows' "memory could not be read" dialog. Child processes are
+    # already handled above; this remains available as an opt-in last resort.
     _taskkill_self_tree()
     try:
         os._exit(code)
