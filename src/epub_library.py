@@ -12083,7 +12083,17 @@ class BookDetailsDialog(QDialog):
             ("All", "all"),
         ):
             self._toc_page_size_combo.addItem(label, value)
-        self._toc_page_size_combo.setCurrentIndex(0)
+        stored_page_size = self._config.get("epub_details_chapter_page_size", 20)
+        if str(stored_page_size).strip().lower() == "all":
+            page_size_index = self._toc_page_size_combo.findData("all")
+        else:
+            try:
+                page_size_index = self._toc_page_size_combo.findData(
+                    int(stored_page_size))
+            except (TypeError, ValueError):
+                page_size_index = 0
+        self._toc_page_size_combo.setCurrentIndex(
+            page_size_index if page_size_index >= 0 else 0)
         self._toc_page_size_combo.currentIndexChanged.connect(
             self._on_chapter_page_size_changed)
         self._style_chapter_page_size_combo()
@@ -13130,6 +13140,14 @@ class BookDetailsDialog(QDialog):
         self._populate_chapters(silent=True)
 
     def _on_chapter_page_size_changed(self, _index=None):
+        combo = getattr(self, "_toc_page_size_combo", None)
+        if combo is not None:
+            try:
+                value = combo.currentData()
+                self._config["epub_details_chapter_page_size"] = value
+                _persist_config_via_parent(self)
+            except Exception:
+                pass
         self._chapter_page = 0
         if self._chapters_info:
             self._populate_chapters(silent=True)
