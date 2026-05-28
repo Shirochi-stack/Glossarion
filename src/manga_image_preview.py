@@ -1026,8 +1026,16 @@ class CompactImageViewer(QGraphicsView):
         self.image_loading.emit(image_path)
         
         try:
-            # Load directly with QPixmap on main thread
-            pixmap = QPixmap(image_path)
+            # Decode from fresh file bytes instead of QPixmap(path). The path-based
+            # loader can reuse Qt's internal cache when a rendered preview is
+            # overwritten in place, which makes rectangle moves show stale pixels.
+            image = QImage()
+            with open(image_path, 'rb') as image_file:
+                image_data = image_file.read()
+            if not image.loadFromData(image_data):
+                pixmap = QPixmap()
+            else:
+                pixmap = QPixmap.fromImage(image)
             
             if pixmap.isNull():
                 print(f"Failed to load: {image_path}")

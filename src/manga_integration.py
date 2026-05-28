@@ -5550,7 +5550,7 @@ class MangaTranslationTab(QObject):
                 dpr = self.dialog.devicePixelRatio() if hasattr(self, 'dialog') and self.dialog else 1.0
             except Exception:
                 dpr = 1.0
-            target_logical = 250
+            target_logical = 125
             fitted = icon_pixmap.scaled(int(target_logical * dpr), int(target_logical * dpr),
                                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
             try:
