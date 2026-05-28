@@ -1050,6 +1050,17 @@ def _open_folder_in_explorer(path: str):
 # Scanner
 # ---------------------------------------------------------------------------
 
+def _library_io_worker_count(total: int, cap: int = 8) -> int:
+    """Return a conservative thread count for independent library disk reads."""
+    if total <= 1:
+        return 1
+    try:
+        cpu_count = os.cpu_count() or 2
+    except Exception:
+        cpu_count = 2
+    return min(total, cap, max(2, cpu_count * 2))
+
+
 def _resolve_output_roots(config: dict | None = None) -> list[str]:
     """Return every directory the translator may have written output folders into.
 
@@ -2088,12 +2099,6 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 stat = os.stat(entry.path)
                             except OSError:
                                 continue
-                            # Resolve a possible raw counterpart in
-                            # Library/Raw so the reader's "Raw" toggle
-                            # can flip between compiled and source
-                            # without re-picking the file manually.
-                            raw_counterpart = _find_raw_source_for_library_epub(
-                                entry.path)
                             results.append({
                                 "name": os.path.splitext(entry.name)[0],
                                 "path": entry.path,
@@ -2101,7 +2106,8 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 "mtime": stat.st_mtime,
                                 "in_library": True,
                                 "type": "epub",
-                                "raw_source_path": raw_counterpart or "",
+                                "raw_source_path": "",
+                                "_needs_raw_source_lookup": True,
                                 # Library-filed cards need the same
                                 # ``missing_raw_file`` flag as
                                 # workspace cards so the \u26a0
@@ -2118,8 +2124,7 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 # itself (since the raw file was
                                 # unresolvable) without a
                                 # corresponding warning.
-                                "missing_raw_file": not bool(
-                                    raw_counterpart),
+                                "missing_raw_file": True,
                             })
                         elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
                             _walk(entry.path, max_depth, depth + 1)
@@ -2130,6 +2135,43 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
 
     if os.path.isdir(library_dir):
         _walk(library_dir)
+
+    pending_raw_lookup = [
+        row for row in results
+        if row.pop("_needs_raw_source_lookup", False)
+    ]
+    if pending_raw_lookup:
+        try:
+            _load_origins()
+        except Exception:
+            pass
+
+        def _resolve_library_raw(row: dict) -> tuple[dict, str]:
+            raw_path = _find_raw_source_for_library_epub(row.get("path", ""))
+            return row, raw_path or ""
+
+        workers = _library_io_worker_count(len(pending_raw_lookup), cap=8)
+        if workers <= 1:
+            resolved_iter = [
+                _resolve_library_raw(row)
+                for row in pending_raw_lookup
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_resolve_library_raw, row)
+                    for row in pending_raw_lookup
+                ]
+                resolved_iter = []
+                for future in as_completed(futures):
+                    try:
+                        resolved_iter.append(future.result())
+                    except Exception:
+                        logger.debug("Library raw lookup failed: %s",
+                                     traceback.format_exc())
+        for row, raw_counterpart in resolved_iter:
+            row["raw_source_path"] = raw_counterpart
+            row["missing_raw_file"] = not bool(raw_counterpart)
 
     # Source 2: registered-in-place translated EPUBs. These were
     # dropped / imported onto the Completed tab but deliberately left
@@ -3349,16 +3391,25 @@ class _DualScannerThread(QThread):
         self._config = config or {}
 
     def run(self):
-        try:
-            output_rows = scan_output_folders(self._config)
-        except Exception:
-            logger.debug("Output scan failed: %s", traceback.format_exc())
-            output_rows = []
-        try:
-            library_rows = scan_library_completed(self._config)
-        except Exception:
-            logger.debug("Library scan failed: %s", traceback.format_exc())
-            library_rows = []
+        output_rows = []
+        library_rows = []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            scan_jobs = {
+                pool.submit(scan_output_folders, self._config): "output",
+                pool.submit(scan_library_completed, self._config): "library",
+            }
+            for future in as_completed(scan_jobs):
+                scan_kind = scan_jobs[future]
+                try:
+                    rows = future.result()
+                except Exception:
+                    logger.debug("%s scan failed: %s",
+                                 scan_kind.title(), traceback.format_exc())
+                    rows = []
+                if scan_kind == "output":
+                    output_rows = rows
+                else:
+                    library_rows = rows
 
         completed_from_output, in_progress = split_output_folders_by_status(output_rows)
 
