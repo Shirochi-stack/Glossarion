@@ -10451,7 +10451,51 @@ Recent translations to summarize:
             return relative_output
         return helper_output
 
-    def _collect_translation_qa_failures(self, files=None):
+    def _flatten_translation_qa_issue_text(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            parts = []
+            for key, item in value.items():
+                parts.append(self._flatten_translation_qa_issue_text(key))
+                parts.append(self._flatten_translation_qa_issue_text(item))
+            return " ".join(part for part in parts if part)
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(
+                part
+                for part in (self._flatten_translation_qa_issue_text(item) for item in value)
+                if part
+            )
+        return str(value)
+
+    def _is_foreign_character_translation_qa_issue(self, issue) -> bool:
+        text = self._flatten_translation_qa_issue_text(issue).strip()
+        if not text:
+            return False
+        normalized = text.lower().replace("-", "_").replace(" ", "_")
+        return "_text_found_" in normalized and "_chars_" in normalized
+
+    def _entry_has_foreign_character_qa_failure(self, entry) -> bool:
+        seen = set()
+        current = entry
+        while isinstance(current, dict) and id(current) not in seen:
+            seen.add(id(current))
+            status = str(current.get("status", "") or "").strip().lower()
+            issues = []
+            for key in ("qa_issues_found", "qa_issues", "failure_reason", "error_message"):
+                value = current.get(key)
+                if isinstance(value, (list, tuple, set)):
+                    issues.extend(value)
+                elif value is not None:
+                    issues.append(value)
+            if status == "qa_failed" and any(
+                self._is_foreign_character_translation_qa_issue(issue) for issue in issues
+            ):
+                return True
+            current = current.get("previous_progress_entry")
+        return False
+
+    def _collect_translation_qa_failures(self, files=None, *, foreign_character_only=False):
         """Collect qa_failed chapters from translation_progress.json files."""
         files = files or getattr(self, 'selected_files', []) or []
         failures = []
@@ -10480,8 +10524,14 @@ Recent translations to summarize:
                 if not isinstance(chapter_info, dict):
                     continue
                 status = str(chapter_info.get("status", "")).lower()
+                if foreign_character_only and not self._entry_has_foreign_character_qa_failure(chapter_info):
+                    continue
                 issues = chapter_info.get("qa_issues_found") or []
-                if status not in {"qa_failed", "failed"} and not chapter_info.get("qa_issues"):
+                if (
+                    not foreign_character_only
+                    and status not in {"qa_failed", "failed"}
+                    and not chapter_info.get("qa_issues")
+                ):
                     continue
                 if isinstance(issues, str):
                     issues = [issues]
@@ -10507,6 +10557,50 @@ Recent translations to summarize:
                 })
 
         return failures
+
+    def _active_translation_output_mode(self) -> str:
+        override = getattr(self, '_translation_run_output_mode_override', None)
+        if override:
+            return str(override).lower().strip()
+        return self._get_output_mode()
+
+    def _prepare_partial_multipass_refinement_run(self, multipass_enabled, multipass_refinement_mode):
+        self._translation_run_output_mode_override = None
+        self._translation_run_is_multipass_partial_refinement = False
+        self._translation_run_partial_qa_failures = []
+
+        if not multipass_enabled or multipass_refinement_mode != "partial":
+            return []
+        if self._get_output_mode() in ("refinement", "audio", "image", "video"):
+            return []
+
+        failures = self._collect_translation_qa_failures(foreign_character_only=True)
+        if not failures:
+            return []
+
+        self._translation_run_output_mode_override = "refinement"
+        self._translation_run_is_multipass_partial_refinement = True
+        self._translation_run_partial_qa_failures = failures
+        os.environ['OUTPUT_MODE'] = 'refinement'
+        os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1'
+        os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = '0'
+        os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '0'
+        os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = '0'
+        return failures
+
+    def _clear_translation_run_overrides(self):
+        self._translation_run_output_mode_override = None
+        self._translation_run_is_multipass_partial_refinement = False
+        self._translation_run_partial_qa_failures = []
+        try:
+            mode = self._get_output_mode()
+            os.environ['OUTPUT_MODE'] = mode
+            os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1' if mode == 'refinement' else '0'
+            os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = '1' if mode == 'audio' else '0'
+            os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
+            os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
+        except Exception:
+            pass
 
     def _format_chapter_list(self, chapters):
         def _sort_key(value):
@@ -14391,12 +14485,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             os.environ['GLOSSARION_RUN_ID'] = str(int(time.time()))
 
+        self._clear_translation_run_overrides()
         try:
             multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
+            partial_refinement_failures = self._prepare_partial_multipass_refinement_run(
+                multipass_enabled,
+                multipass_refinement_mode,
+            )
             if multipass_enabled:
                 self.append_log(
                     f"Multipass refinement mode: {multipass_refinement_mode.title()} "
                     "(exported for translation)"
+                )
+            if partial_refinement_failures:
+                chapters = [failure["chapter"] for failure in partial_refinement_failures]
+                self.append_log(
+                    "Partial multipass: existing foreign-character QA failures found; "
+                    "running refinement instead of translation "
+                    f"(chapters: {self._format_chapter_list(chapters)})"
                 )
         except Exception as e:
             self.append_log(f"Warning: Could not export multipass refinement mode: {e}")
@@ -14464,7 +14570,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Delay auto-scroll so first log is readable (set to 0 for immediate scrolling)
         self._start_autoscroll_delay(0)
         # Show immediate feedback that translation is starting
-        self.append_log("🚀 Initializing translation process...")
+        if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
+            self.append_log("🚀 Initializing partial multipass refinement...")
+        else:
+            self.append_log("🚀 Initializing translation process...")
         
         # Debug: Log stop behavior settings
         graceful_stop = getattr(self, 'graceful_stop_var', False)
@@ -14568,7 +14677,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self._current_auto_glossary_mode()
 
-                current_output_mode = self._get_output_mode()
+                current_output_mode = self._active_translation_output_mode()
                 if current_output_mode == 'audio' and auto_glossary_mode in ('balanced', 'full'):
                     self.append_log("📑 Skipping auto glossary extraction for Audio output mode")
                     auto_glossary_mode = 'off'
@@ -14668,7 +14777,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ===== END PRE-TRANSLATION GLOSSARY EXTRACTION =====
                 
                 # Call the direct function
-                self.append_log("🚀 Starting translation...")
+                if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
+                    self.append_log("🚀 Starting partial multipass refinement...")
+                else:
+                    self.append_log("🚀 Starting translation...")
                 translation_completed = self.run_translation_direct()
                 
                 # Post-translation scanning phase
@@ -14688,7 +14800,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
                     elif image_files:
                         self.append_log("🖼️ Skipping post-translation scanning for image files")
-                    elif self._get_output_mode() == 'image':
+                    current_run_output_mode = self._active_translation_output_mode()
+                    if csv_json_files or image_files:
+                        pass
+                    elif current_run_output_mode == 'refinement':
+                        self.append_log("✨ Skipping post-translation scanning for refinement mode")
+                    elif current_run_output_mode == 'image':
                         self.append_log("🖼️ Skipping post-translation scanning for image output mode")
                     elif (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
                         translation_completed and not self.stop_requested):
@@ -14716,6 +14833,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     if var in os.environ:
                         del os.environ[var]
                 
+                self._clear_translation_run_overrides()
                 self.translation_thread = None
                 # Emit signal to update button (thread-safe)
                 self.thread_complete_signal.emit()
@@ -16934,7 +17052,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set sys.argv to match what TransateKRtoEN.py expects
                 sys.argv = ['TransateKRtoEN.py', file_path]
                 
-                self.append_log("🚀 Starting translation...")
+                if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
+                    self.append_log("🚀 Starting partial multipass refinement...")
+                else:
+                    self.append_log("🚀 Starting translation...")
                 
                 # Ensure Payloads directory exists (non-fatal if it fails)
                 try:
@@ -16949,7 +17070,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
                 
                 if not self.stop_requested:
-                    self.append_log("✅ Translation completed successfully!")
+                    if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
+                        self.append_log("✅ Partial multipass refinement completed successfully!")
+                    else:
+                        self.append_log("✅ Translation completed successfully!")
                     return True
                 else:
                     return False
@@ -17063,7 +17187,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 except:
                     pass
                     
-        output_mode = self._get_output_mode()
+        output_mode = self._active_translation_output_mode()
 
         # Handle extraction mode - check which variables exist
         if hasattr(self, 'text_extraction_method_var'):
@@ -17389,7 +17513,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REFINEMENT_FAILED_USER_PROMPT': getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', ''))),
             'REFINEMENT_PARTIAL_SYSTEM_PROMPT': getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', ''),
             'REFINEMENT_PARTIAL_USER_PROMPT': getattr(self, 'refinement_partial_user_prompt', self.config.get('refinement_partial_user_prompt', getattr(self, 'default_refinement_partial_user_prompt', ''))),
-            'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
+            'ENABLE_IMAGE_TRANSLATION': "1" if (self.enable_image_translation_var and output_mode not in ('refinement', 'audio')) else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
             'MAX_IMAGES_PER_CHAPTER': str(self.max_images_per_chapter_var),

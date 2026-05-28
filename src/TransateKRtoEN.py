@@ -18572,6 +18572,14 @@ def main(log_callback=None, stop_callback=None):
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
     
     if config.OUTPUT_MODE in ("refinement", "audio"):
+        direct_multipass_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
+        if direct_multipass_mode not in ("full", "failed", "partial"):
+            direct_multipass_mode = "full"
+        direct_multipass_enabled = (
+            config.OUTPUT_MODE == "refinement"
+            and bool(getattr(config, "MULTIPASS_MODE", False))
+            and direct_multipass_mode in ("failed", "partial")
+        )
         post_mode_chapters = []
         for _idx, _chapter in enumerate(chapters):
             _actual = _chapter.get('actual_chapter_num', _chapter.get('num'))
@@ -18594,7 +18602,16 @@ def main(log_callback=None, stop_callback=None):
             payloads_dir = out
             os.environ["EPUB_OUTPUT_DIR"] = out
             progress_manager = ProgressManager(payloads_dir)
-        _process_refinement_or_tts_mode(config, client, post_mode_chapters, out, progress_manager, check_stop)
+        _process_refinement_or_tts_mode(
+            config,
+            client,
+            post_mode_chapters,
+            out,
+            progress_manager,
+            check_stop,
+            multipass_failed_mode=direct_multipass_enabled,
+            multipass_partial_mode=direct_multipass_enabled and direct_multipass_mode == "partial",
+        )
         return
 
     # ── Image output mode passthrough for EPUB/PDF inputs ──
