@@ -3759,7 +3759,7 @@ def _create_response_handling_section(self, parent):
     multi_key_h.setContentsMargins(0, 0, 0, 15)
     
     # Create status labels and store references for dynamic updates
-    self.multi_key_status_label1 = QLabel("🔑 Multi-Key Mode:")
+    self.multi_key_status_label1 = QLabel("🔑 Translation Keys (Main Pool):")
     self.multi_key_status_label1.setStyleSheet("font-weight: bold; font-size: 11pt;")
     multi_key_h.addWidget(self.multi_key_status_label1)
     
@@ -3773,7 +3773,7 @@ def _create_response_handling_section(self, parent):
     
     section_v.addWidget(multi_key_row)
     
-    multi_key_desc = QLabel("Manage multiple API keys with automatic rotation and rate limit handling")
+    multi_key_desc = QLabel("Manage the main translation key rotation pool. Dedicated key pools are configured independently.")
     multi_key_desc.setStyleSheet("color: gray; font-size: 10pt;")
     multi_key_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(multi_key_desc)
@@ -5028,7 +5028,7 @@ def open_multi_api_key_manager(self):
 #     return frame
             
 def _update_multi_key_status_label(self):
-    """Update the multi-key mode status label dynamically"""
+    """Update the translation key pool status label dynamically."""
     try:
         if not hasattr(self, 'multi_key_status_label2'):
             return
@@ -5045,7 +5045,7 @@ def _update_multi_key_status_label(self):
         pass
 
 def _toggle_multi_key_setting(self):
-    """Toggle multi-key mode from settings dialog"""
+    """Toggle the main translation key pool from settings dialog."""
     self.config['use_multi_api_keys'] = self.use_multi_api_keys_var
     # Don't save immediately, let the dialog's save button handle it
 
@@ -9661,10 +9661,25 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(sep_opts3)
     
     # API Safety Settings
+    safety_title_row = QWidget()
+    safety_title_h = QHBoxLayout(safety_title_row)
+    safety_title_h.setContentsMargins(0, 5, 0, 5)
+    safety_title_h.setSpacing(10)
+
     safety_title = QLabel("API Safety Settings")
     safety_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
-    safety_title.setContentsMargins(0, 5, 0, 5)
-    section_v.addWidget(safety_title)
+    safety_title_h.addWidget(safety_title)
+
+    fallback_keys_btn = _create_preview_pool_button(
+        self,
+        'fallback',
+        "Fallback Keys",
+        "Open the Multi API Key Manager focused on fallback keys for blocked content.",
+        section_box,
+    )
+    safety_title_h.addWidget(fallback_keys_btn)
+    safety_title_h.addStretch()
+    section_v.addWidget(safety_title_row)
     
     if not hasattr(self, 'disable_gemini_safety_var'):
         self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', True)
@@ -12036,7 +12051,7 @@ def _check_azure_endpoint(self, *args):
         else:
             if hasattr(self, 'api_key_label'):
                 try:
-                    self.api_key_label.setText("OpenAI/Gemini/... API Key:")
+                    self.api_key_label.setText("API Key:")
                 except Exception:
                     pass
             
@@ -12101,7 +12116,7 @@ def toggle_custom_endpoint_ui(self, user_interaction=False):
             else:
                 if hasattr(self, 'api_key_label'):
                     try:
-                        self.api_key_label.setText("OpenAI/Gemini/... API Key:")
+                        self.api_key_label.setText("API Key:")
                     except Exception:
                         pass
             # Only print when user actually interacts with the toggle
@@ -12110,7 +12125,7 @@ def toggle_custom_endpoint_ui(self, user_interaction=False):
         else:
             if hasattr(self, 'api_key_label'):
                 try:
-                    self.api_key_label.setText("OpenAI/Gemini/... API Key:")
+                    self.api_key_label.setText("API Key:")
                 except Exception:
                     pass
             # Only print when user actually interacts with the toggle

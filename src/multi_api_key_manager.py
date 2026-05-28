@@ -1989,10 +1989,39 @@ class MultiAPIKeyDialog(QDialog):
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
+        title_layout.addStretch()
+
+        scrollable_layout.addWidget(title_frame)
+
+        # Store reference to description label for hide/show
+        self.multikey_desc_label = QLabel(
+                "Manage translation, fallback, and dedicated task-specific API key pools.\n"
+                "Each pool below is controlled independently.")
+        self.multikey_desc_label.setStyleSheet("color: gray; padding-bottom: 10px;")
+        self.multikey_desc_label.setWordWrap(True)
+        scrollable_layout.addWidget(self.multikey_desc_label)
+
+        self.translation_key_pool_frame = QGroupBox("Translation Keys (Main Pool)")
+        translation_pool_layout = QVBoxLayout(self.translation_key_pool_frame)
+        translation_pool_layout.setContentsMargins(15, 15, 15, 15)
+        translation_pool_layout.setSpacing(10)
+
+        translation_pool_desc = QLabel(
+            "Configure the main translation key rotation pool used by normal translation requests.\n"
+            "Dedicated pools below, such as fallback, glossary, metadata, vision, and image keys, are not restricted by this toggle."
+        )
+        translation_pool_desc.setStyleSheet("color: gray;")
+        translation_pool_desc.setWordWrap(True)
+        translation_pool_layout.addWidget(translation_pool_desc)
+
+        translation_pool_enable_row = QWidget()
+        translation_pool_enable_layout = QHBoxLayout(translation_pool_enable_row)
+        translation_pool_enable_layout.setContentsMargins(0, 0, 0, 0)
+        translation_pool_enable_layout.setSpacing(8)
 
         # Enable/Disable toggle with spinning icon
         self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
-        self.enabled_checkbox = self._create_styled_checkbox("Enable Multi-Key Mode")
+        self.enabled_checkbox = self._create_styled_checkbox("Enable Translation Keys")
         self.enabled_checkbox.setChecked(self.enabled_var)
         self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
 
@@ -2024,20 +2053,10 @@ class MultiAPIKeyDialog(QDialog):
         self.multikey_icon.setAlignment(Qt.AlignCenter)
         self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
 
-        title_layout.addStretch()
-        title_layout.addWidget(self.multikey_icon)
-        title_layout.addWidget(self.enabled_checkbox)
-
-        scrollable_layout.addWidget(title_frame)
-
-        # Store reference to description label for hide/show
-        self.multikey_desc_label = QLabel(
-                "Manage multiple API keys with automatic rotation and rate limit handling.\n"
-                "Keys can be rotated automatically to distribute load evenly.\n"
-                "Rate-limited keys are automatically cooled down and skipped in rotation.")
-        self.multikey_desc_label.setStyleSheet("color: gray; padding-bottom: 10px;")
-        self.multikey_desc_label.setWordWrap(True)
-        scrollable_layout.addWidget(self.multikey_desc_label)
+        translation_pool_enable_layout.addWidget(self.multikey_icon)
+        translation_pool_enable_layout.addWidget(self.enabled_checkbox)
+        translation_pool_enable_layout.addStretch()
+        translation_pool_layout.addWidget(translation_pool_enable_row)
 
         # Rotation settings frame - store reference for enabling/disabling
         self.rotation_frame = QGroupBox("Rotation Settings")
@@ -2077,19 +2096,20 @@ class MultiAPIKeyDialog(QDialog):
         rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
 
-        scrollable_layout.addWidget(self.rotation_frame)
+        translation_pool_layout.addWidget(self.rotation_frame)
 
         # Add key section
-        self._create_add_key_section(scrollable_layout)
+        self._create_add_key_section(translation_pool_layout)
 
         # Separator - store reference to hide when multi-key mode is off
         self.multikey_separator = QFrame()
         self.multikey_separator.setFrameShape(QFrame.HLine)
         self.multikey_separator.setFrameShadow(QFrame.Sunken)
-        scrollable_layout.addWidget(self.multikey_separator)
+        translation_pool_layout.addWidget(self.multikey_separator)
 
         # Key list section
-        self._create_key_list_section(scrollable_layout)
+        self._create_key_list_section(translation_pool_layout)
+        scrollable_layout.addWidget(self.translation_key_pool_frame)
 
         # Add stretch before fallback that only appears when multi-key is enabled
         # This will be removed when multi-key is disabled to bring fallback closer
@@ -2133,8 +2153,12 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_preview_dialog(self):
         """Create a one-pool manager view using the normal dedicated-pool UI."""
-        spec = self._dedicated_pool_spec(self.preview_pool)
-        self.setWindowTitle(f"{spec['title']} - Multi API Key Manager")
+        if self.preview_pool == 'fallback':
+            title = "Fallback Keys"
+        else:
+            spec = self._dedicated_pool_spec(self.preview_pool)
+            title = spec['title']
+        self.setWindowTitle(f"{title} - Multi API Key Manager")
         screen = QApplication.primaryScreen().geometry()
         self.resize(int(screen.width() * 0.46), int(screen.height() * 0.54))
 
@@ -2159,14 +2183,17 @@ class MultiAPIKeyDialog(QDialog):
         self.main_layout = scrollable_layout
         self.scrollable_layout = scrollable_layout
 
-        title_label = QLabel(f"{spec['title']}")
+        title_label = QLabel(title)
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
         title_label.setFont(title_font)
         scrollable_layout.addWidget(title_label)
 
-        self._create_dedicated_key_pool_section(scrollable_layout, self.preview_pool)
+        if self.preview_pool == 'fallback':
+            self._create_fallback_section(scrollable_layout)
+        else:
+            self._create_dedicated_key_pool_section(scrollable_layout, self.preview_pool)
         scrollable_layout.addStretch(1)
         self._create_button_bar(dialog_layout)
         self._set_icon(self)
@@ -2230,7 +2257,7 @@ class MultiAPIKeyDialog(QDialog):
         desc_label = QLabel(
                 "Configure fallback keys that will be used when content is blocked.\n"
                 "These should use different API keys or models that are less restrictive.\n"
-                "In Multi-Key Mode: tried when main rotation encounters prohibited content.\n"
+                "With Translation Keys enabled: tried when the main rotation encounters prohibited content.\n"
                 "In Single-Key Mode: tried directly when main key fails, bypassing main key retry.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
@@ -6464,7 +6491,7 @@ class MultiAPIKeyDialog(QDialog):
                         UnifiedClient.clear_in_memory_multi_keys()
                     except Exception:
                         pass
-                    msg = "🔑 Multi-key pool: disabled"
+                    msg = "🔑 Translation key pool: disabled"
                     if hasattr(self.translator_gui, 'append_log'):
                         try:
                             self.translator_gui.append_log(msg)
@@ -6539,7 +6566,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Show status message
         status = "enabled" if enabled else "disabled"
-        self._show_status(f"Multi-Key Mode {status}")
+        self._show_status(f"Translation Keys (Main Pool) {status}")
 
         # Update multi-key status labels in other settings and manga integration
         if hasattr(self.translator_gui, '_update_multi_key_status_label'):

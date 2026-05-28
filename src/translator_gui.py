@@ -4467,8 +4467,23 @@ Recent translations to summarize:
 
     def show_refinement_prompt_dialog(self):
         """Open dialog to edit prompts used by refinement output mode and multipass."""
+        if hasattr(self, '_refinement_prompt_dialog') and self._refinement_prompt_dialog is not None:
+            try:
+                self._refinement_prompt_dialog.show()
+                self._refinement_prompt_dialog.raise_()
+                self._refinement_prompt_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._refinement_prompt_dialog = None
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Refinement Prompt")
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        self._refinement_prompt_dialog = dialog
+        dialog.finished.connect(lambda _result: setattr(self, '_refinement_prompt_dialog', None))
+
         screen = QApplication.primaryScreen().geometry()
         dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.55))
 
@@ -4686,7 +4701,9 @@ Recent translations to summarize:
         button_layout.setStretch(2, 1)
 
         layout.addLayout(button_layout)
-        dialog.exec()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def show_assistant_prompt_dialog(self):
         """Show dialog to edit the optional assistant prompt"""
@@ -10419,17 +10436,39 @@ Recent translations to summarize:
 
     def _create_api_section(self):
         """Create API key section"""
-        # API Key Label (row 8)
-        self.api_key_label = QLabel("OpenAI/Gemini/... API Key:")
-        self.frame.addWidget(self.api_key_label, 8, 0, Qt.AlignLeft)
+        self.multi_keys_button = QPushButton("Multi Keys")
+        self.multi_keys_button.setToolTip("Open the Multi API Key Manager.")
+        try:
+            from multi_api_key_manager import style_preview_pool_button
+            style_preview_pool_button(self.multi_keys_button)
+        except Exception:
+            self.multi_keys_button.setStyleSheet("background-color: #0d6efd; color: white; font-weight: bold;")
+
+        def _open_multi_keys_from_main():
+            try:
+                from multi_api_key_manager import MultiAPIKeyDialog
+                MultiAPIKeyDialog.show_dialog(self, self)
+            except Exception as exc:
+                QMessageBox.critical(self, "Error", f"Failed to open key pool manager: {exc}")
+
+        self.multi_keys_button.clicked.connect(_open_multi_keys_from_main)
+        self.frame.addWidget(self.multi_keys_button, 8, 0, Qt.AlignLeft)
+
+        api_key_input_container = QWidget()
+        api_key_input_layout = QHBoxLayout(api_key_input_container)
+        api_key_input_layout.setContentsMargins(10, 0, 0, 0)
+        api_key_input_layout.setSpacing(6)
+
+        self.api_key_label = QLabel("API Key:")
+        api_key_input_layout.addWidget(self.api_key_label)
         
-        # API Key Entry (row 8, spans 3 columns)
         self.api_key_entry = QLineEdit()
         self.api_key_entry.setEchoMode(QLineEdit.Password)  # Show '*' instead of text
         initial_key = self.config.get('api_key', '')
         if initial_key:
             self.api_key_entry.setText(initial_key)
-        self.frame.addWidget(self.api_key_entry, 8, 1, 1, 3)  # row, col, rowspan, colspan
+        api_key_input_layout.addWidget(self.api_key_entry, 1)
+        self.frame.addWidget(api_key_input_container, 8, 1, 1, 3)
         
         # Show/Hide API Key button (row 8)
         self.show_api_btn = QPushButton("Show")
@@ -10466,7 +10505,6 @@ Recent translations to summarize:
         self.frame.addWidget(other_settings_btn, 7, 4)
         
         # Remove AI Artifacts dropdown (row 7) — packed into a compact container
-        from PySide6.QtWidgets import QHBoxLayout, QWidget
         artifacts_container = QWidget()
         artifacts_layout = QHBoxLayout(artifacts_container)
         artifacts_layout.setContentsMargins(0, 0, 0, 0)

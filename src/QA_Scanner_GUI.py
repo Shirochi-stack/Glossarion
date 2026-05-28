@@ -3619,6 +3619,11 @@ class QAScannerMixin:
         ai_api_layout.setContentsMargins(20, 10, 20, 10)
         ai_api_layout.setSpacing(8)
 
+        ai_api_desc_row = QWidget()
+        ai_api_desc_layout = QHBoxLayout(ai_api_desc_row)
+        ai_api_desc_layout.setContentsMargins(0, 0, 0, 0)
+        ai_api_desc_layout.setSpacing(8)
+
         ai_api_desc = QLabel(
             "Override the global API settings for AI truncation detection only.\n"
             "Leave API key blank to use your main key. Set temperature or output tokens to -1 to use global defaults."
@@ -3626,7 +3631,22 @@ class QAScannerMixin:
         ai_api_desc.setFont(QFont('Arial', 9))
         ai_api_desc.setStyleSheet("color: #808080;")
         ai_api_desc.setWordWrap(True)
-        ai_api_layout.addWidget(ai_api_desc)
+        ai_api_desc_layout.addWidget(ai_api_desc, 1)
+
+        try:
+            from multi_api_key_manager import create_preview_pool_button
+            qa_scan_keys_btn = create_preview_pool_button(
+                dialog,
+                self,
+                'ai_truncation_detection',
+                "QA Scan Keys",
+                "Open the Multi API Key Manager focused on the QA Scan key pool for AI truncation detection.",
+            )
+            ai_api_desc_layout.addWidget(qa_scan_keys_btn)
+        except Exception:
+            pass
+
+        ai_api_layout.addWidget(ai_api_desc_row)
 
         # ─── Row 1: API Key ───
         ai_key_row = QWidget()
