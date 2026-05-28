@@ -2586,6 +2586,8 @@ Text to analyze:
         """Handle window close event properly"""
         try:
             print("[CLOSE] Window closing...")
+
+            self._request_hard_stop_for_shutdown()
             
             # Save all settings before shutdown so they persist across restarts
             try:
@@ -2596,6 +2598,7 @@ Text to analyze:
             
             # Stop any background operations first
             self.stop_all_operations()
+            self._restore_in_progress_rows_for_shutdown()
 
             # Aggressively free PyInstaller temp dir to avoid warning message box
             try:
@@ -2664,10 +2667,59 @@ Text to analyze:
             except:
                 pass
     
+    def _request_hard_stop_for_shutdown(self):
+        """Set stop flags synchronously before close-time cleanup starts."""
+        try:
+            from shutdown_utils import request_hard_stop_for_shutdown
+            request_hard_stop_for_shutdown(
+                owner=self,
+                translation_stop_flag=globals().get('translation_stop_flag'),
+                glossary_stop_flag=globals().get('glossary_stop_flag'),
+            )
+        except Exception:
+            pass
+
+    def _selected_input_files_for_shutdown(self):
+        files = list(getattr(self, 'selected_files', []) or [])
+        try:
+            entry_value = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ""
+            if entry_value and os.path.isfile(entry_value):
+                files.append(entry_value)
+        except Exception:
+            pass
+        return [
+            file_path for file_path in files
+            if file_path and file_path != "__generative_mode__"
+        ]
+
+    def _restore_in_progress_rows_for_shutdown(self):
+        """Best-effort parallel cleanup for progress rows before force exit."""
+        entry_file = ""
+        try:
+            entry_file = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ""
+        except Exception as e:
+            entry_file = ""
+        try:
+            from shutdown_utils import restore_in_progress_rows_for_shutdown
+            restore_in_progress_rows_for_shutdown(
+                input_files=self._selected_input_files_for_shutdown(),
+                entry_file=entry_file,
+                output_dir_resolver=self._resolve_translation_output_dir,
+                config=getattr(self, 'config', {}),
+                app_dir=_get_app_dir(),
+                image_progress_managers=[
+                    ("image_progress_manager", getattr(self, 'image_progress_manager', None)),
+                    ("glossary_progress_manager", getattr(self, 'glossary_progress_manager', None)),
+                ],
+            )
+        except Exception as e:
+            print(f"[CLOSE] Warning: shutdown progress cleanup failed: {e}")
+
     def stop_all_operations(self):
         """Stop all background operations and threads"""
         try:
             print("[CLEANUP] Stopping all background operations...")
+            self._request_hard_stop_for_shutdown()
 
             # Shut down the persistent extraction daemon
             try:
