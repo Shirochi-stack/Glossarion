@@ -78,6 +78,7 @@ except ImportError:
     animate_icon = lambda *args, **kwargs: None
 import json
 import threading
+import copy
 import time
 import queue
 from typing import Dict, List, Optional, Tuple
@@ -1740,6 +1741,15 @@ class MultiAPIKeyDialog(QDialog):
             or model == 'google-translate'
         )
 
+    def _model_affects_parent_provider_controls(self, model: str) -> bool:
+        model = (model or '').strip().lower()
+        return (
+            self._model_needs_google_creds(model)
+            or model.startswith('authgpt')
+            or model.startswith('authcd')
+            or model.startswith('authgem')
+        )
+
     def _has_pending_google_creds_model(self):
         """Check live add-key model fields before they have been saved as keys."""
         widget_names = [
@@ -2029,10 +2039,7 @@ class MultiAPIKeyDialog(QDialog):
             return
         self._pending_key_pool_config_flush = None
 
-        try:
-            self.translator_gui.save_config(show_message=False)
-        except Exception:
-            pass
+        self._save_key_pool_config_snapshot_async()
 
         if pending.get('all'):
             self._broadcast_key_pool_config_changed(None, refresh_keys=bool(pending.get('all_refresh_keys')))
@@ -2042,6 +2049,32 @@ class MultiAPIKeyDialog(QDialog):
 
         if pending.get('refresh_parent'):
             self._refresh_parent_model_requirements(save_config=False)
+
+    def _save_key_pool_config_snapshot_async(self):
+        """Persist the already-updated config without running the full GUI save path."""
+        try:
+            config_snapshot = copy.deepcopy(getattr(self.translator_gui, 'config', {}) or {})
+            config_path = getattr(self.translator_gui, 'config_file_path', None)
+            if not config_path:
+                return
+        except Exception:
+            return
+
+        def _write_snapshot():
+            try:
+                from api_key_encryption import encrypt_config
+                encrypted_config = encrypt_config(config_snapshot)
+                google_creds_path = config_snapshot.get('google_cloud_credentials')
+                if google_creds_path:
+                    encrypted_config['google_cloud_credentials'] = google_creds_path
+                tmp_path = f"{config_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, config_path)
+            except Exception as exc:
+                print(f"[MULTI_KEY_SAVE] Warning: lightweight config save failed: {exc}")
+
+        threading.Thread(target=_write_snapshot, daemon=True).start()
 
     def _coerce_bool_config_value(self, value, default=False):
         """Coerce persisted config values without treating non-empty strings as True."""
@@ -3292,7 +3325,11 @@ class MultiAPIKeyDialog(QDialog):
         self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
-        self._schedule_key_pool_config_flush('fallback', refresh_keys=True, refresh_parent=True)
+        self._schedule_key_pool_config_flush(
+            'fallback',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
 
     def _move_fallback_key(self, direction):
         """Move selected fallback key up or down"""
@@ -5844,7 +5881,11 @@ class MultiAPIKeyDialog(QDialog):
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
 
-        self._schedule_key_pool_config_flush('glossary', refresh_keys=True, refresh_parent=True)
+        self._schedule_key_pool_config_flush(
+            'glossary',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
 
     def _move_glossary_key(self, direction):
         """Move selected glossary key up or down"""
@@ -7160,7 +7201,11 @@ class MultiAPIKeyDialog(QDialog):
         self._show_status(f"Added key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
-        self._schedule_key_pool_config_flush('main', refresh_keys=True, refresh_parent=True)
+        self._schedule_key_pool_config_flush(
+            'main',
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
 
     # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
 
@@ -8524,7 +8569,11 @@ class MultiAPIKeyDialog(QDialog):
         self._dedicated_widget(pool_name, 'individual_endpoint_toggle').setChecked(False)
         self._dedicated_load_keys(pool_name)
         self._dedicated_status(pool_name, f"Added {spec['label']} key for model: {model}")
-        self._schedule_key_pool_config_flush(pool_name, refresh_keys=True, refresh_parent=True)
+        self._schedule_key_pool_config_flush(
+            pool_name,
+            refresh_keys=True,
+            refresh_parent=self._model_affects_parent_provider_controls(model),
+        )
 
     def _dedicated_move_key(self, pool_name: str, direction: str):
         tree = self._dedicated_widget(pool_name, 'tree')
