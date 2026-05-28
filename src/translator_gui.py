@@ -9019,31 +9019,33 @@ Recent translations to summarize:
         _multipass_mode_index = {"full": 0, "failed": 1, "partial": 2}.get(self.multipass_refinement_mode_var, 0)
         self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
         self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
-        self.multipass_refinement_mode_combo.setFixedWidth(58)
+        self.multipass_refinement_mode_combo.setFixedWidth(67)
+        multipass_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
+        multipass_disabled_icon_path = _get_disabled_halgakos_icon_path(multipass_icon_path)
         self.multipass_refinement_mode_combo.setStyleSheet(f"""
             QComboBox {{
-                padding-right: 0px;
+                padding-right: 2px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 0px;
-                border: none;
+                width: 22px;
+                border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                width: 0px;
-                height: 0px;
+                image: url({multipass_icon_path});
+                width: 14px;
+                height: 14px;
                 border: none;
             }}
             QComboBox::down-arrow:disabled {{
-                image: none;
-                width: 0px;
-                height: 0px;
+                image: url({multipass_disabled_icon_path});
+                width: 14px;
+                height: 14px;
                 border: none;
             }}
             QComboBox::down-arrow:on {{
-                top: 0px;
+                top: 1px;
             }}
         """)
         self.multipass_refinement_mode_combo.currentIndexChanged.connect(

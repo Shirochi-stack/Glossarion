@@ -3960,7 +3960,7 @@ class UnifiedClient:
                         masked_key = "***"
                     
                     # Only log key assignment for non-glossary keys (glossary rotation is too noisy)
-                    if not _is_glossary_pool:
+                    if os.getenv("BATCH_TRANSLATION", "0") == "1" and not _is_glossary_pool:
                         defer_batch_log(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
                     # Setup client with new key. For per-key endpoints, apply the
@@ -4127,12 +4127,14 @@ class UnifiedClient:
                         masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
                     else:
                         masked_key = self.api_key or "***"
-                    print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
+                    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                        print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
                     
                     # Setup client for this key
                     self._setup_client()
                     self._apply_custom_endpoint_if_needed()
-                    print(f"[THREAD-{thread_name}] 🔄 Key assignment: Client setup completed, ready for requests...")
+                    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                        print(f"[THREAD-{thread_name}] 🔄 Key assignment: Client setup completed, ready for requests...")
                     time.sleep(0.1)  # Brief pause after key assignment for stability
                     return
             
@@ -4244,7 +4246,8 @@ class UnifiedClient:
                 if self._api_key_pool and hasattr(self._api_key_pool, '_rate_limit_cache'):
                     is_limited = self._api_key_pool._rate_limit_cache.is_rate_limited(key_id)
                 if key.is_available() and not is_limited:
-                    print(f"[{thread_name}] 🔑 Assigned {key_id} (fallback)")
+                    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                        print(f"[{thread_name}] 🔑 Assigned {key_id} (fallback)")
                     return (key, current_idx)
             
             # No available keys
