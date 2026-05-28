@@ -95,7 +95,48 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# Models/prefixes that don't require an API key — delegates to UnifiedClient's authoritative list
+
+def preview_pool_button_stylesheet() -> str:
+    return (
+        "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
+        "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
+        "border-radius: 3px; } "
+        "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
+        "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; }"
+    )
+
+
+def style_preview_pool_button(button):
+    """Apply the shared one-pool preview button style."""
+    if not HAS_GUI or button is None:
+        return button
+    button.setObjectName("previewPoolButton")
+    button.setStyleSheet(preview_pool_button_stylesheet())
+    try:
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+    except Exception:
+        pass
+    return button
+
+
+def open_multi_api_key_pool_preview(parent, translator_gui, pool_name: str):
+    """Open the Multi API Key Manager focused on one dedicated pool."""
+    return MultiAPIKeyDialog.show_dialog(parent, translator_gui, preview_pool=pool_name)
+
+
+def create_preview_pool_button(parent, translator_gui, pool_name: str, text: str, tooltip: str = None):
+    """Create a styled button that opens one dedicated key pool."""
+    button = QPushButton(text)
+    if tooltip:
+        button.setToolTip(tooltip)
+    style_preview_pool_button(button)
+    button.clicked.connect(lambda: open_multi_api_key_pool_preview(parent, translator_gui, pool_name))
+    return button
+
+
+# Models/prefixes that don't require an API key - delegates to UnifiedClient's authoritative list
 def _model_needs_api_key(model: str) -> bool:
     """Return False for models that authenticate without an API key."""
     try:

@@ -5443,10 +5443,30 @@ Do not stop after the glossary."""
         desc.setStyleSheet("color: #aaa;")
         layout.addWidget(desc)
 
+        refinement_enable_row = QWidget()
+        refinement_enable_layout = QHBoxLayout(refinement_enable_row)
+        refinement_enable_layout.setContentsMargins(0, 0, 0, 0)
+        refinement_enable_layout.setSpacing(10)
+
         self.glossary_refinement_enabled_checkbox = self._create_styled_checkbox("Enable Glossary Refinement")
         self.glossary_refinement_enabled_checkbox.setChecked(bool(self.config.get('glossary_refinement_enabled', False)))
         self.glossary_refinement_enabled_checkbox.setToolTip("Run a final refinement API pass after glossary extraction completes.")
-        layout.addWidget(self.glossary_refinement_enabled_checkbox)
+        refinement_enable_layout.addWidget(self.glossary_refinement_enabled_checkbox)
+
+        try:
+            from multi_api_key_manager import create_preview_pool_button
+            refinement_keys_btn = create_preview_pool_button(
+                getattr(self, '_glossary_dialog', None) or parent,
+                self,
+                'glossary_refinement',
+                "Refinement Keys",
+                "Open the Multi API Key Manager focused on the Refinement key pool.",
+            )
+            refinement_enable_layout.addWidget(refinement_keys_btn)
+        except Exception:
+            pass
+        refinement_enable_layout.addStretch()
+        layout.addWidget(refinement_enable_row)
 
         options_box = QGroupBox("Refinement Scope")
         options_layout = QVBoxLayout(options_box)

@@ -77,6 +77,14 @@ def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
 class ConnTestBridge(QObject):
     finished = Signal(list)
 
+
+def _create_preview_pool_button(gui, pool_name: str, text: str, tooltip: str = None, parent=None):
+    """Create a shared one-pool key manager preview button."""
+    from multi_api_key_manager import create_preview_pool_button
+    pool_parent = parent or getattr(gui, '_other_settings_dialog', None) or getattr(gui, 'master', None)
+    return create_preview_pool_button(pool_parent, gui, pool_name, text, tooltip)
+
+
 # Import dependencies for RotatableLabel
 from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QTransform
@@ -4256,6 +4264,20 @@ def _create_response_handling_section(self, parent):
     retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum\nSet token constraint to -1 to use the global output token limit")
     retry_desc.setContentsMargins(20, 0, 0, 10)
 
+    retry_keys_w = QWidget()
+    retry_keys_h = QHBoxLayout(retry_keys_w)
+    retry_keys_h.setContentsMargins(20, 0, 0, 10)
+    retry_keys_h.setSpacing(8)
+    truncation_keys_btn = _create_preview_pool_button(
+        self,
+        'truncation_retry',
+        "Truncation Keys",
+        "Open the Multi API Key Manager focused on the Truncation Retry key pool.",
+        section_box,
+    )
+    retry_keys_h.addWidget(truncation_keys_btn)
+    retry_keys_h.addStretch()
+
     # Char-ratio truncation controls (silent truncation detector)
     char_ratio_cb = self._create_styled_checkbox("Auto-retry Silent Truncation (Char-ratio)")
     char_ratio_cb.setContentsMargins(20, 0, 0, 0)
@@ -4429,6 +4451,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(retry_truncated_cb)
     section_v.addWidget(retry_frame_w)
     section_v.addWidget(retry_desc)
+    section_v.addWidget(retry_keys_w)
     section_v.addWidget(char_ratio_cb)
     section_v.addWidget(char_ratio_frame_w)
     section_v.addWidget(char_ratio_frame_w2)
@@ -6444,6 +6467,17 @@ def _create_prompt_management_section(self, parent):
     btn_custom_metadata.setFixedWidth(150)
     btn_custom_metadata.clicked.connect(lambda: self.metadata_batch_ui.configure_metadata_fields())
     title_h.addWidget(btn_custom_metadata)
+
+    title_h.addSpacing(5)
+
+    metadata_keys_btn = _create_preview_pool_button(
+        self,
+        'metadata',
+        "Metadata Keys",
+        "Open the Multi API Key Manager focused on the Metadata key pool.",
+        section_box,
+    )
+    title_h.addWidget(metadata_keys_btn)
     
     title_h.addStretch()
     section_v.addWidget(title_w)
@@ -10144,6 +10178,14 @@ def _create_image_translation_section(self, parent):
             pass
     resolution_combo.currentTextChanged.connect(_on_resolution_changed)
     resolution_h.addWidget(resolution_combo)
+    image_keys_btn = _create_preview_pool_button(
+        self,
+        'inpainter',
+        "Image Keys",
+        "Open the Multi API Key Manager focused on the Image Gen/Edit key pool.",
+        section_box,
+    )
+    resolution_h.addWidget(image_keys_btn)
     resolution_h.addStretch()
     img_sub_v.addWidget(resolution_w)
     res_desc = QLabel("Higher resolution = better quality but slower generation")
@@ -10243,10 +10285,25 @@ def _create_image_translation_section(self, parent):
     vision_sub_v = QVBoxLayout(vision_sub)
     vision_sub_v.setContentsMargins(10, 0, 0, 0)
     vision_sub_v.setSpacing(4)
+
+    vision_prompt_row = QWidget()
+    vision_prompt_h = QHBoxLayout(vision_prompt_row)
+    vision_prompt_h.setContentsMargins(0, 0, 0, 0)
+    vision_prompt_h.setSpacing(8)
     btn_vision_ocr = QPushButton("Configure Vision OCR Prompt")
     btn_vision_ocr.setFixedWidth(230)
     btn_vision_ocr.clicked.connect(lambda: self.configure_vision_ocr_prompt())
-    vision_sub_v.addWidget(btn_vision_ocr)
+    vision_prompt_h.addWidget(btn_vision_ocr)
+    vision_keys_btn = _create_preview_pool_button(
+        self,
+        'qa_scan',
+        "Vision Keys",
+        "Open the Multi API Key Manager focused on the Vision key pool.",
+        section_box,
+    )
+    vision_prompt_h.addWidget(vision_keys_btn)
+    vision_prompt_h.addStretch()
+    vision_sub_v.addWidget(vision_prompt_row)
     vision_ocr_desc = QLabel("Vision mode OCRs images first, then translates the extracted text")
     vision_ocr_desc.setStyleSheet("color: gray; font-size: 10pt;")
     vision_ocr_desc.setWordWrap(True)

@@ -3655,30 +3655,19 @@ class MangaTranslationTab(QObject):
     def _open_multi_api_key_pool_preview(self, pool_name: str):
         """Open the multi-key manager with only one dedicated pool rendered."""
         try:
-            from multi_api_key_manager import MultiAPIKeyDialog
+            from multi_api_key_manager import open_multi_api_key_pool_preview
             parent = getattr(self, 'dialog', None) or getattr(self, 'parent_widget', None)
-            MultiAPIKeyDialog.show_dialog(parent, self.main_gui, preview_pool=pool_name)
+            open_multi_api_key_pool_preview(parent, self.main_gui, pool_name)
         except Exception as exc:
             QMessageBox.critical(self.dialog if hasattr(self, 'dialog') else None, "Error", f"Failed to open key pool manager: {exc}")
 
     def _preview_pool_button_stylesheet(self) -> str:
-        return (
-            "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
-            "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
-            "border-radius: 3px; } "
-            "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
-            "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; }"
-        )
+        from multi_api_key_manager import preview_pool_button_stylesheet
+        return preview_pool_button_stylesheet()
 
     def _style_preview_pool_button(self, button):
-        button.setObjectName("previewPoolButton")
-        button.setStyleSheet(self._preview_pool_button_stylesheet())
-        try:
-            button.style().unpolish(button)
-            button.style().polish(button)
-            button.update()
-        except Exception:
-            pass
+        from multi_api_key_manager import style_preview_pool_button
+        style_preview_pool_button(button)
     
     def _update_main_status_label(self):
         """Update the main status label at the top based on current provider and credentials"""

@@ -4515,7 +4515,22 @@ Recent translations to summarize:
                 border-top-left-radius: 6px;
             }
             QTabBar::tab:last {
-                border-top-right-radius: 6px;
+                background: #0d6efd;
+                color: #ffffff;
+                border: 1px solid #64a5ff;
+                border-radius: 3px;
+                margin-left: 18px;
+                margin-right: 0px;
+                min-width: 116px;
+            }
+            QTabBar::tab:last:hover {
+                background: #2f80ff;
+                border-color: #8fc2ff;
+            }
+            QTabBar::tab:last:selected {
+                background: #0d6efd;
+                color: #ffffff;
+                border: 1px solid #64a5ff;
             }
         """)
         editors = {}
@@ -4565,6 +4580,37 @@ Recent translations to summarize:
             "refinement_partial_system_prompt", "refinement_partial_user_prompt",
             "default_refinement_partial_system_prompt", "default_refinement_partial_user_prompt",
         )
+
+        key_preview_tab = QWidget()
+        key_preview_index = tabs.addTab(key_preview_tab, "Refinement Keys")
+        tabs.setTabToolTip(key_preview_index, "Open the Multi API Key Manager focused on the Refinement key pool.")
+        previous_prompt_tab = {"index": 0, "opening": False}
+
+        def _open_refinement_keys_from_tab(index):
+            if index != key_preview_index:
+                previous_prompt_tab["index"] = index
+                return
+            if previous_prompt_tab["opening"]:
+                return
+            previous_prompt_tab["opening"] = True
+            try:
+                from multi_api_key_manager import open_multi_api_key_pool_preview
+                open_multi_api_key_pool_preview(dialog, self, 'glossary_refinement')
+            except Exception as exc:
+                QMessageBox.critical(dialog, "Error", f"Failed to open key pool manager: {exc}")
+
+            def _restore_prompt_tab():
+                try:
+                    restore_index = max(0, min(previous_prompt_tab["index"], tabs.count() - 1))
+                    tabs.blockSignals(True)
+                    tabs.setCurrentIndex(restore_index)
+                    tabs.blockSignals(False)
+                finally:
+                    previous_prompt_tab["opening"] = False
+
+            QTimer.singleShot(0, _restore_prompt_tab)
+
+        tabs.currentChanged.connect(_open_refinement_keys_from_tab)
         layout.addWidget(tabs)
 
         button_layout = QHBoxLayout()
