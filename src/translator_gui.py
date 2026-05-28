@@ -3578,7 +3578,8 @@ Text to analyze:
             "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML."
+            "Return only the refined HTML.\n\n"
+            "{QA_Issues}"
         )
         self.default_refinement_user_prompt = ""
         self.default_refinement_qa_issue_prompt = "{QA_Issues}"
@@ -4764,7 +4765,7 @@ Recent translations to summarize:
             "Edit prompts sent only to refinement requests. "
             "Use {target_lang} for the selected target language. "
             "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
-            "In Failed and Partial prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
+            "In All, Failed, and Partial prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
@@ -10564,34 +10565,57 @@ Recent translations to summarize:
             return str(override).lower().strip()
         return self._get_output_mode()
 
-    def _prepare_partial_multipass_refinement_run(self, multipass_enabled, multipass_refinement_mode):
-        self._translation_run_output_mode_override = None
-        self._translation_run_is_multipass_partial_refinement = False
-        self._translation_run_partial_qa_failures = []
+    def _translation_qa_failure_key(self, failure):
+        return (
+            str(failure.get("source", "")),
+            str(failure.get("chapter", "")),
+            str(failure.get("output_file", "")),
+        )
 
-        if not multipass_enabled or multipass_refinement_mode != "partial":
+    def _prepare_multipass_qa_refinement_run(self, multipass_enabled, multipass_refinement_mode):
+        self._translation_run_output_mode_override = None
+        self._translation_run_is_multipass_qa_refinement = False
+        self._translation_run_qa_refinement_mode = ""
+        self._translation_run_targeted_qa_failures = []
+        self._translation_run_skipped_qa_failures = []
+        self._translation_run_followup_translation_after_refinement = False
+
+        if not multipass_enabled or multipass_refinement_mode not in ("failed", "partial"):
             return []
         if self._get_output_mode() in ("refinement", "audio", "image", "video"):
             return []
 
-        failures = self._collect_translation_qa_failures(foreign_character_only=True)
-        if not failures:
+        all_failures = self._collect_translation_qa_failures()
+        targeted_failures = self._collect_translation_qa_failures(foreign_character_only=True)
+        if not targeted_failures:
             return []
 
+        targeted_keys = {self._translation_qa_failure_key(failure) for failure in targeted_failures}
+        skipped_failures = [
+            failure
+            for failure in all_failures
+            if self._translation_qa_failure_key(failure) not in targeted_keys
+        ]
         self._translation_run_output_mode_override = "refinement"
-        self._translation_run_is_multipass_partial_refinement = True
-        self._translation_run_partial_qa_failures = failures
+        self._translation_run_is_multipass_qa_refinement = True
+        self._translation_run_qa_refinement_mode = multipass_refinement_mode
+        self._translation_run_targeted_qa_failures = targeted_failures
+        self._translation_run_skipped_qa_failures = skipped_failures
+        self._translation_run_followup_translation_after_refinement = bool(skipped_failures)
         os.environ['OUTPUT_MODE'] = 'refinement'
         os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1'
         os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = '0'
         os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '0'
         os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = '0'
-        return failures
+        return targeted_failures
 
     def _clear_translation_run_overrides(self):
         self._translation_run_output_mode_override = None
-        self._translation_run_is_multipass_partial_refinement = False
-        self._translation_run_partial_qa_failures = []
+        self._translation_run_is_multipass_qa_refinement = False
+        self._translation_run_qa_refinement_mode = ""
+        self._translation_run_targeted_qa_failures = []
+        self._translation_run_skipped_qa_failures = []
+        self._translation_run_followup_translation_after_refinement = False
         try:
             mode = self._get_output_mode()
             os.environ['OUTPUT_MODE'] = mode
@@ -14488,7 +14512,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._clear_translation_run_overrides()
         try:
             multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
-            partial_refinement_failures = self._prepare_partial_multipass_refinement_run(
+            targeted_refinement_failures = self._prepare_multipass_qa_refinement_run(
                 multipass_enabled,
                 multipass_refinement_mode,
             )
@@ -14497,13 +14521,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     f"Multipass refinement mode: {multipass_refinement_mode.title()} "
                     "(exported for translation)"
                 )
-            if partial_refinement_failures:
-                chapters = [failure["chapter"] for failure in partial_refinement_failures]
+            if targeted_refinement_failures:
+                chapters = [failure["chapter"] for failure in targeted_refinement_failures]
                 self.append_log(
-                    "Partial multipass: existing foreign-character QA failures found; "
+                    f"{multipass_refinement_mode.title()} multipass: existing foreign-character QA failures found; "
                     "running refinement instead of translation "
                     f"(chapters: {self._format_chapter_list(chapters)})"
                 )
+                skipped_failures = getattr(self, '_translation_run_skipped_qa_failures', [])
+                if skipped_failures:
+                    skipped_chapters = [failure["chapter"] for failure in skipped_failures]
+                    self.append_log(
+                        "Other QA-failed entries will be retried through normal translation after refinement "
+                        f"(chapters: {self._format_chapter_list(skipped_chapters)})"
+                    )
         except Exception as e:
             self.append_log(f"Warning: Could not export multipass refinement mode: {e}")
 
@@ -14570,8 +14601,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Delay auto-scroll so first log is readable (set to 0 for immediate scrolling)
         self._start_autoscroll_delay(0)
         # Show immediate feedback that translation is starting
-        if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
-            self.append_log("🚀 Initializing partial multipass refinement...")
+        if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
+            mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
+            self.append_log(f"🚀 Initializing {mode_label} multipass refinement...")
         else:
             self.append_log("🚀 Initializing translation process...")
         
@@ -14678,7 +14710,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 auto_glossary_mode = self._current_auto_glossary_mode()
 
                 current_output_mode = self._active_translation_output_mode()
-                if current_output_mode == 'audio' and auto_glossary_mode in ('balanced', 'full'):
+                if current_output_mode == 'refinement' and auto_glossary_mode in ('balanced', 'full'):
+                    self.append_log("✨ Skipping auto glossary extraction for refinement mode")
+                    auto_glossary_mode = 'off'
+                elif current_output_mode == 'audio' and auto_glossary_mode in ('balanced', 'full'):
                     self.append_log("📑 Skipping auto glossary extraction for Audio output mode")
                     auto_glossary_mode = 'off'
                 
@@ -14777,11 +14812,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ===== END PRE-TRANSLATION GLOSSARY EXTRACTION =====
                 
                 # Call the direct function
-                if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
-                    self.append_log("🚀 Starting partial multipass refinement...")
+                if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
+                    mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
+                    self.append_log(f"🚀 Starting {mode_label} multipass refinement...")
                 else:
                     self.append_log("🚀 Starting translation...")
                 translation_completed = self.run_translation_direct()
+                if (
+                    translation_completed
+                    and not self.stop_requested
+                    and getattr(self, '_translation_run_followup_translation_after_refinement', False)
+                ):
+                    skipped_failures = list(getattr(self, '_translation_run_skipped_qa_failures', []))
+                    skipped_chapters = [failure["chapter"] for failure in skipped_failures]
+                    self._clear_translation_run_overrides()
+                    self.append_log(
+                        "🚀 Starting regular translation retry for skipped QA-failed entries "
+                        f"(chapters: {self._format_chapter_list(skipped_chapters)})"
+                    )
+                    translation_completed = self.run_translation_direct()
                 
                 # Post-translation scanning phase
                 # If scanning phase toggle is enabled, launch scanner after translation
@@ -17052,8 +17101,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set sys.argv to match what TransateKRtoEN.py expects
                 sys.argv = ['TransateKRtoEN.py', file_path]
                 
-                if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
-                    self.append_log("🚀 Starting partial multipass refinement...")
+                if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
+                    mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
+                    self.append_log(f"🚀 Starting {mode_label} multipass refinement...")
                 else:
                     self.append_log("🚀 Starting translation...")
                 
@@ -17070,8 +17120,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
                 
                 if not self.stop_requested:
-                    if getattr(self, '_translation_run_is_multipass_partial_refinement', False):
-                        self.append_log("✅ Partial multipass refinement completed successfully!")
+                    if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
+                        mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'Multipass').title()
+                        self.append_log(f"✅ {mode_label} multipass refinement completed successfully!")
                     else:
                         self.append_log("✅ Translation completed successfully!")
                     return True

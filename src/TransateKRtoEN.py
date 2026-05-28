@@ -662,7 +662,8 @@ class TranslationConfig:
             "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML."
+            "Return only the refined HTML.\n\n"
+            "{QA_Issues}"
         )
         default_refinement_failed_system_prompt = (
             "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
@@ -13982,10 +13983,23 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
         pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
         pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
+        multipass_refinement_active = (
+            mode == "refinement"
+            and bool(getattr(config, "MULTIPASS_MODE", False))
+        )
         preserve_failed_mode_qa_status = (
             mode == "refinement"
             and multipass_failed_mode
             and pre_existing_qa_source_entry is not None
+            and pre_existing_has_foreign_qa_issue
+        )
+        preserve_full_mode_qa_status = (
+            mode == "refinement"
+            and multipass_refinement_active
+            and not multipass_failed_mode
+            and not multipass_partial_mode
+            and pre_existing_qa_source_entry is not None
+            and pre_existing_has_foreign_qa_issue
         )
         preserve_partial_mode_qa_status = (
             mode == "refinement"
@@ -13993,9 +14007,23 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             and pre_existing_qa_source_entry is not None
             and pre_existing_has_foreign_qa_issue
         )
-        preserve_multipass_qa_status = preserve_failed_mode_qa_status or preserve_partial_mode_qa_status
+        preserve_multipass_qa_status = (
+            preserve_failed_mode_qa_status
+            or preserve_full_mode_qa_status
+            or preserve_partial_mode_qa_status
+        )
 
         if mode == "refinement":
+            if (
+                multipass_refinement_active
+                and pre_existing_qa_source_entry is not None
+                and not pre_existing_has_foreign_qa_issue
+            ):
+                return "excluded", None, {
+                    "kind": "not_targeted",
+                    "chapter": actual_num,
+                    "reason": "non foreign-character QA issue",
+                }
             skip_reason = _refinement_skip_reason_for_qa(
                 pre_existing_entry,
                 html_content,
