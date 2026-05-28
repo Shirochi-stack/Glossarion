@@ -13693,7 +13693,7 @@ class _EpubLoaderThread(QThread):
                 for item in book.get_items():
                     _add_item(item, False)
 
-            chapter_payloads: list[tuple[str, bool, str]] = []
+            chapter_sources: list[tuple[object, str, bool]] = []
             for item, authoritative in chapter_items:
                 try:
                     # "Show special files" toggle: when OFF, drop configured
@@ -13706,11 +13706,47 @@ class _EpubLoaderThread(QThread):
                             item_name, self._config):
                         continue
 
-                    content = item.get_content().decode("utf-8", errors="replace")
-                    chapter_payloads.append((item_name, authoritative, content))
+                    chapter_sources.append((item, item_name, authoritative))
+                except Exception:
+                    logger.debug("Skipped chapter source: %s",
+                                 traceback.format_exc())
+
+            def _collect_chapter_payload(source):
+                item, item_name, authoritative = source
+                try:
+                    raw_content = item.get_content()
+                    if isinstance(raw_content, bytes):
+                        content = raw_content.decode("utf-8", errors="replace")
+                    else:
+                        content = str(raw_content or "")
+                    return item_name, authoritative, content
                 except Exception:
                     logger.debug("Skipped chapter payload: %s",
                                  traceback.format_exc())
+                    return None
+
+            try:
+                workers = _reader_worker_count(len(chapter_sources), cap=16)
+                if workers <= 1:
+                    collected_payloads = [
+                        _collect_chapter_payload(source)
+                        for source in chapter_sources
+                    ]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        collected_payloads = list(pool.map(
+                            _collect_chapter_payload, chapter_sources))
+            except Exception:
+                logger.debug("Parallel EPUB content collection failed, "
+                             "falling back: %s", traceback.format_exc())
+                collected_payloads = [
+                    _collect_chapter_payload(source)
+                    for source in chapter_sources
+                ]
+
+            chapter_payloads: list[tuple[str, bool, str]] = [
+                payload for payload in collected_payloads if payload
+            ]
 
             def _parse_chapter_payload(payload):
                 item_name, authoritative, content = payload
