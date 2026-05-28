@@ -567,8 +567,9 @@ class SplashManager(QObject):
         if "Loading manga tools" in message:
             self._manual_progress_auto_cap = 92
         elif "QA scanner loaded" in message:
+            no_manga_startup = getattr(self, '_startup_manga_available', None) is False
             self._manual_progress_auto_cap = 92
-            self._manual_progress_auto_boost = 5.4 if getattr(self, '_startup_manga_available', None) is False else 1.35
+            self._manual_progress_auto_boost = 12.0 if no_manga_startup else 1.35
         elif (
             "Manga tools loaded" in message
             or "Finalizing module initialization" in message
@@ -638,10 +639,12 @@ class SplashManager(QObject):
                 "Loading QA scanner...": 50,
                 "🔍 QA scanner loaded": 62,
                 "✅ QA scanner loaded": 62,
-                "Finalizing module initialization...": 92,
-                "✅ All modules loaded successfully": 92,
-                "All startup modules loaded successfully": 92,
-                "All core modules loaded successfully": 92,
+                "Finalizing module initialization...": 94,
+                "✅ All modules loaded successfully": 96,
+                "All startup modules loaded successfully": 96,
+                "All core modules loaded successfully": 96,
+                "🪟 Creating main window...": 98,
+                "Creating main window...": 98,
             })
         
         # Use thread-safe signal to update UI
@@ -748,6 +751,25 @@ class SplashManager(QObject):
             return importlib.util.find_spec(module_name) is not None
         except (ImportError, ValueError, AttributeError):
             return False
+
+    def _settle_startup_progress_before_finalizing(self, deadline=0.45) -> None:
+        """Let a capped startup crawl visibly advance before final status jumps."""
+        if self._closed or getattr(self, '_manual_progress_auto_cap', None) is None:
+            return
+        try:
+            end_time = time.time() + max(0.0, float(deadline))
+        except Exception:
+            end_time = time.time() + 0.45
+        while (
+            not self._closed
+            and getattr(self, '_manual_progress_auto_cap', None) is not None
+            and self.progress_value < min(float(getattr(self, '_manual_progress_auto_cap') or 0), 91.5)
+            and time.time() < end_time
+        ):
+            self._update_progress()
+            if self.app:
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            time.sleep(0.01)
 
     def load_startup_modules_parallel(self, max_workers=None):
         """Load core startup modules concurrently while keeping the splash responsive."""
@@ -888,6 +910,7 @@ class SplashManager(QObject):
                 if future_to_spec:
                     time.sleep(0.01)
 
+        self._settle_startup_progress_before_finalizing()
         return results
 
     def validate_all_scripts(self, base_dir=None):
