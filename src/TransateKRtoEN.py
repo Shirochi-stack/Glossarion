@@ -13258,7 +13258,6 @@ _PARTIAL_REFINEMENT_SKIP_TAGS = {
     "html", "head", "body", "script", "style", "meta", "link", "title", "svg",
     "math", "noscript", "template",
 }
-_PARTIAL_REFINEMENT_GROUP_MARKER_PREFIX = "GLOSSARION_PARTIAL_TARGET"
 
 try:
     from html_tag_entities import VALID_ENTITY_TAGS as _PARTIAL_VALID_HTML_TAGS
@@ -13558,10 +13557,6 @@ def _strip_refinement_code_fence(text):
     return cleaned.strip()
 
 
-def _partial_refinement_group_marker(index, side):
-    return f"[[{_PARTIAL_REFINEMENT_GROUP_MARKER_PREFIX}_{index}_{side}]]"
-
-
 def _partial_refinement_tag_inner_html(tag):
     return "".join(str(child) for child in getattr(tag, "contents", []))
 
@@ -13570,33 +13565,33 @@ def _partial_refinement_tag_outer_html(tag):
     return str(tag)
 
 
-def _partial_refinement_unpad_marker_content(text):
-    value = str(text or "")
-    for ending in ("\r\n", "\n", "\r"):
-        if value.startswith(ending):
-            value = value[len(ending):]
-            break
-    for ending in ("\r\n", "\n", "\r"):
-        if value.endswith(ending):
-            value = value[:-len(ending)]
-            break
-    return value
+def _partial_refinement_top_level_nodes(fragment_html):
+    cleaned = _strip_refinement_code_fence(fragment_html)
+    fragment_soup = BeautifulSoup(cleaned, "html.parser")
+    container = fragment_soup.body if fragment_soup.body is not None else fragment_soup
+    return [
+        node
+        for node in container.contents
+        if not (isinstance(node, NavigableString) and not str(node).strip())
+    ]
 
 
-def _partial_refinement_response_parts(refined_fragment, tag_count):
+def _partial_refinement_response_parts(refined_fragment, original_tags):
     cleaned = _strip_refinement_code_fence(refined_fragment)
-    if tag_count <= 1:
+    if not original_tags:
         return [cleaned]
 
-    parts = []
-    for index in range(1, tag_count + 1):
-        start_marker = re.escape(_partial_refinement_group_marker(index, "START"))
-        end_marker = re.escape(_partial_refinement_group_marker(index, "END"))
-        match = re.search(f"{start_marker}(.*?){end_marker}", cleaned, flags=re.DOTALL)
-        if not match:
-            raise RuntimeError("Partial refinement response did not preserve adjacent tag markers")
-        parts.append(_partial_refinement_unpad_marker_content(match.group(1)))
-    return parts
+    nodes = _partial_refinement_top_level_nodes(cleaned)
+    expected_names = [_partial_refinement_tag_name(tag) for tag in original_tags]
+    actual_names = [_partial_refinement_tag_name(node) for node in nodes if getattr(node, "name", None)]
+    if len(nodes) != len(original_tags) or actual_names != expected_names:
+        expected = ", ".join(f"<{name}>" for name in expected_names)
+        actual = ", ".join(f"<{name}>" for name in actual_names) or "none"
+        raise RuntimeError(
+            "Partial refinement response did not preserve adjacent HTML tags "
+            f"(expected {expected}; got {actual})"
+        )
+    return [_partial_refinement_tag_inner_html(node) for node in nodes]
 
 
 def _strip_matching_partial_outer_tag(refined_inner, original_tag):
@@ -13630,14 +13625,7 @@ def _partial_refinement_target_fragment(target, document):
         lines = document.get("lines", [])
         return "".join(lines[target["start"]:target["end"] + 1])
     tags = target.get("tags", [])
-    if len(tags) <= 1:
-        return _partial_refinement_tag_outer_html(tags[0]) if tags else ""
-    chunks = []
-    for index, tag in enumerate(tags, start=1):
-        start_marker = _partial_refinement_group_marker(index, "START")
-        end_marker = _partial_refinement_group_marker(index, "END")
-        chunks.append(f"{start_marker}\n{_partial_refinement_tag_outer_html(tag)}\n{end_marker}")
-    return "\n\n".join(chunks)
+    return "\n".join(_partial_refinement_tag_outer_html(tag) for tag in tags)
 
 
 def _partial_refinement_target_count(targets):
@@ -13664,7 +13652,7 @@ def _apply_partial_refinement_response(document, target, refined_fragment):
         return
 
     tag_group = target.get("tags", [])
-    response_parts = _partial_refinement_response_parts(refined_fragment, len(tag_group))
+    response_parts = _partial_refinement_response_parts(refined_fragment, tag_group)
     for tag, response_part in zip(tag_group, response_parts):
         _replace_partial_refinement_tag_contents(tag, response_part)
 
