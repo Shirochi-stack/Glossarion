@@ -15,6 +15,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional
 
@@ -180,6 +181,55 @@ def _atomic_replace_file(src: str, dst: str, atomic_replace_fn: Optional[Callabl
         os.replace(src, dst)
 
 
+@contextmanager
+def locked_progress_file(progress_file: Optional[str]):
+    """Serialize progress JSON mutations across processes."""
+    if not progress_file:
+        yield
+        return
+
+    progress_dir = os.path.dirname(progress_file) or "."
+    os.makedirs(progress_dir, exist_ok=True)
+    lock_path = f"{progress_file}.lock"
+    lock_f = open(lock_path, "a+b")
+    locked = False
+    try:
+        if lock_f.seek(0, os.SEEK_END) == 0:
+            lock_f.write(b"\0")
+            lock_f.flush()
+            os.fsync(lock_f.fileno())
+        lock_f.seek(0)
+
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    lock_f.seek(0)
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            locked = True
+
+        yield
+    finally:
+        try:
+            if locked:
+                lock_f.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_f.close()
+
+
 def load_refinement_progress(progress_file: Optional[str]) -> Dict:
     if not progress_file or not os.path.exists(progress_file):
         return {}
@@ -202,39 +252,40 @@ def update_refinement_progress(
     if not progress_file:
         return
     with _progress_lock:
-        data = {}
-        if os.path.exists(progress_file):
-            try:
-                with open(progress_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = {}
-        if not isinstance(data, dict):
+        with locked_progress_file(progress_file):
             data = {}
-        refinement = data.setdefault("refinement", {})
-        if not isinstance(refinement, dict):
-            refinement = {}
-            data["refinement"] = refinement
-        existing = refinement.get(key, {}) if isinstance(refinement.get(key), dict) else {}
-        merged = dict(existing)
-        merged.update(entry or {})
-        merged["last_updated"] = time.time()
-        refinement[key] = merged
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
+                data = {}
+            refinement = data.setdefault("refinement", {})
+            if not isinstance(refinement, dict):
+                refinement = {}
+                data["refinement"] = refinement
+            existing = refinement.get(key, {}) if isinstance(refinement.get(key), dict) else {}
+            merged = dict(existing)
+            merged.update(entry or {})
+            merged["last_updated"] = time.time()
+            refinement[key] = merged
 
-        progress_dir = os.path.dirname(progress_file) or "."
-        os.makedirs(progress_dir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=progress_dir,
-            delete=False,
-            suffix=".tmp",
-        ) as temp_f:
-            temp_path = temp_f.name
-            json.dump(data, temp_f, ensure_ascii=False, indent=2)
-            temp_f.flush()
-            os.fsync(temp_f.fileno())
-        _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
+            progress_dir = os.path.dirname(progress_file) or "."
+            os.makedirs(progress_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=progress_dir,
+                delete=False,
+                suffix=".tmp",
+            ) as temp_f:
+                temp_path = temp_f.name
+                json.dump(data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())
+            _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
 
 
 def remove_refinement_progress(
@@ -246,32 +297,33 @@ def remove_refinement_progress(
     if not progress_file or not key or not os.path.exists(progress_file):
         return
     with _progress_lock:
-        try:
-            with open(progress_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return
-        if not isinstance(data, dict):
-            return
-        refinement = data.get("refinement")
-        if not isinstance(refinement, dict) or key not in refinement:
-            return
-        refinement.pop(key, None)
+        with locked_progress_file(progress_file):
+            try:
+                with open(progress_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                return
+            if not isinstance(data, dict):
+                return
+            refinement = data.get("refinement")
+            if not isinstance(refinement, dict) or key not in refinement:
+                return
+            refinement.pop(key, None)
 
-        progress_dir = os.path.dirname(progress_file) or "."
-        os.makedirs(progress_dir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=progress_dir,
-            delete=False,
-            suffix=".tmp",
-        ) as temp_f:
-            temp_path = temp_f.name
-            json.dump(data, temp_f, ensure_ascii=False, indent=2)
-            temp_f.flush()
-            os.fsync(temp_f.fileno())
-        _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
+            progress_dir = os.path.dirname(progress_file) or "."
+            os.makedirs(progress_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=progress_dir,
+                delete=False,
+                suffix=".tmp",
+            ) as temp_f:
+                temp_path = temp_f.name
+                json.dump(data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())
+            _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
 
 
 def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type: str, chunk_idx=None, total_chunks=None, active_entry_types: Optional[List[str]] = None) -> str:

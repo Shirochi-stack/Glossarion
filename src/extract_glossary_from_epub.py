@@ -27,6 +27,7 @@ from glossary_paths import (
 )
 from glossary_refinement import (
     DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
+    locked_progress_file as _locked_glossary_progress_file,
     refine_glossary_entries,
     refinement_enabled as _glossary_refinement_enabled,
 )
@@ -8012,8 +8013,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     progress_file = _resolved_glossary_progress_file(context)
     _progress_file, output_file, positions, numbers, filenames, total_chapters = _progress_context_values(context)
 
-    # Acquire lock to prevent concurrent writes
-    with _progress_lock:
+    # Acquire local and cross-process locks to prevent concurrent writers from
+    # replacing each other's chapter/refinement progress.
+    with _progress_lock, _locked_glossary_progress_file(progress_file):
         completed_clean = _unique_int_list(completed)
         failed_clean = _unique_int_list(failed or [])
         requested_failed_set = set(failed_clean)
@@ -8343,11 +8345,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 temp_f.flush()
                 os.fsync(temp_f.fileno())  # Ensure data is written to disk
             
-            # Atomic rename
+            # Atomic replace
             try:
-                if os.path.exists(progress_file):
-                    os.remove(progress_file)
-                os.rename(temp_path, progress_file)
+                _atomic_replace_file(temp_path, progress_file)
             except Exception as e:
                 if os.path.exists(temp_path):
                     try:
