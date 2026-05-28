@@ -2808,6 +2808,8 @@ FORMAT_PDF = "pdf"
 FORMAT_HTML = "html"
 FORMAT_IMAGE = "image"
 
+SIZE_2XS = "2xs"
+SIZE_XS = "xs"
 SIZE_COMPACT = "compact"
 SIZE_NORMAL = "normal"
 SIZE_LARGE = "large"
@@ -2818,7 +2820,10 @@ SIZE_4XL = "4xl"
 SIZE_5XL = "5xl"
 SIZE_6XL = "6xl"
 
-_ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL, SIZE_5XL, SIZE_6XL]
+_ALL_SIZES = [
+    SIZE_2XS, SIZE_XS, SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE,
+    SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL, SIZE_5XL, SIZE_6XL,
+]
 
 # Title rendering: there's no hard character cap anymore — the title is
 # rendered at ``title_size`` first; if it overflows ``title_max_h`` vertically
@@ -2831,6 +2836,8 @@ _ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL
 # (still via ``KeepAspectRatio``, so wider covers letterbox a
 # little less) while leaving the text rows below it untouched.
 _SIZE_PRESETS = {
+    SIZE_2XS:     {"card_w": 78,  "cover_h": 115, "title_size": "7.5pt",  "title_min_size": "5.5pt", "title_max_h": 42,  "spacing": 2},
+    SIZE_XS:      {"card_w": 92,  "cover_h": 136, "title_size": "8pt",    "title_min_size": "6pt",   "title_max_h": 46,  "spacing": 2},
     SIZE_COMPACT: {"card_w": 110, "cover_h": 162, "title_size": "8.5pt",  "title_min_size": "6.5pt", "title_max_h": 50,  "spacing": 3},
     SIZE_NORMAL:  {"card_w": 140, "cover_h": 203, "title_size": "9pt",    "title_min_size": "7pt",   "title_max_h": 55,  "spacing": 4},
     SIZE_LARGE:   {"card_w": 180, "cover_h": 260, "title_size": "9.5pt",  "title_min_size": "7.5pt", "title_max_h": 61,  "spacing": 5},
@@ -14501,6 +14508,7 @@ class _OverlayMergeThread(QThread):
 class _EpubSearchThread(QThread):
     """Build the Search EPUB match list away from the Qt UI thread."""
     results_ready = Signal(int, str, object)
+    results_batch_ready = Signal(int, str, object, bool)
 
     def __init__(self, search_id: int, query: str, chapters,
                  config: dict | None = None, parent=None):
@@ -14528,12 +14536,12 @@ class _EpubSearchThread(QThread):
         if self._should_stop():
             return
         if not query:
-            self.results_ready.emit(self._search_id, query, [])
+            self.results_batch_ready.emit(self._search_id, query, [], True)
             return
         try:
             pattern = re.compile(re.escape(query), re.IGNORECASE)
         except re.error:
-            self.results_ready.emit(self._search_id, query, [])
+            self.results_batch_ready.emit(self._search_id, query, [], True)
             return
 
         def _scan_chapter(item):
@@ -14562,28 +14570,62 @@ class _EpubSearchThread(QThread):
                 local_occurrence += 1
             return rows
 
-        matches = []
+        batch: list[dict] = []
+        total_matches = 0
+
+        def _flush_batch(done: bool = False) -> None:
+            nonlocal batch
+            if self._should_stop():
+                return
+            if batch or done:
+                self.results_batch_ready.emit(
+                    self._search_id, query, list(batch), bool(done))
+                batch = []
+
+        def _append_rows(rows) -> None:
+            nonlocal total_matches
+            for row in rows or []:
+                if self._should_stop():
+                    return
+                row["global_occurrence"] = total_matches
+                total_matches += 1
+                batch.append(row)
+                if len(batch) >= 120:
+                    _flush_batch(False)
+
         items = list(enumerate(self._chapters))
         try:
             workers = _reader_worker_count(len(items), config=self._config)
             if workers <= 1:
-                chapter_rows = []
                 for item in items:
                     if self._should_stop():
                         return
-                    chapter_rows.append(_scan_chapter(item))
+                    _append_rows(_scan_chapter(item))
             else:
                 pool = ThreadPoolExecutor(max_workers=workers)
                 futures = {
                     pool.submit(_scan_chapter, item): idx
                     for idx, item in enumerate(items)
                 }
-                completed = []
+                pending: dict[int, list] = {}
+                next_idx = 0
                 try:
                     for future in as_completed(futures):
                         if self._should_stop():
                             break
-                        completed.append((futures[future], future.result()))
+                        idx = futures[future]
+                        try:
+                            pending[idx] = future.result()
+                        except Exception:
+                            logger.debug(
+                                "EPUB search chapter failed: %s",
+                                traceback.format_exc())
+                            pending[idx] = []
+                        while next_idx in pending:
+                            if self._should_stop():
+                                break
+                            _append_rows(pending.pop(next_idx))
+                            next_idx += 1
                 finally:
                     if self._should_stop():
                         for future in futures:
@@ -14596,29 +14638,17 @@ class _EpubSearchThread(QThread):
                         pool.shutdown(wait=True)
                 if self._should_stop():
                     return
-                chapter_rows = [
-                    rows for _, rows in sorted(completed, key=lambda item: item[0])
-                ]
         except Exception:
             logger.debug("Parallel EPUB search failed, falling back: %s",
                          traceback.format_exc())
-            chapter_rows = []
             for item in items:
                 if self._should_stop():
                     return
-                chapter_rows.append(_scan_chapter(item))
+                _append_rows(_scan_chapter(item))
 
         if self._should_stop():
             return
-        for rows in chapter_rows:
-            for row in rows:
-                row["global_occurrence"] = len(matches)
-                matches.append(row)
-        total = len(matches)
-        for row in matches:
-            row["total_matches"] = total
-        if not self._should_stop():
-            self.results_ready.emit(self._search_id, query, matches)
+        _flush_batch(True)
 
 
 class _EpubSearchLineEdit(QLineEdit):
@@ -16938,6 +16968,12 @@ class EpubReaderDialog(QDialog):
         self._cancel_search_dialog_workers()
         results.clear()
         query = (text or "").strip()
+        self._search_pending_render_rows = []
+        self._search_pending_render_query = query
+        self._search_pending_render_index = 0
+        self._search_dialog_total_matches = 0
+        self._search_dialog_total_results = 0
+        self._search_scan_done = False
         if not query:
             count_label.setText("Type to search")
             return
@@ -16992,6 +17028,8 @@ class EpubReaderDialog(QDialog):
             parent=self,
         )
         self._search_workers.append(worker)
+        worker.results_batch_ready.connect(
+            self._on_search_dialog_results_batch)
         worker.results_ready.connect(self._on_search_dialog_results_ready)
         worker.finished.connect(lambda w=worker: self._on_search_worker_finished(w))
         worker.start()
@@ -17020,6 +17058,7 @@ class EpubReaderDialog(QDialog):
         self._search_pending_render_rows = rows
         self._search_pending_render_query = query
         self._search_pending_render_index = 0
+        self._search_scan_done = True
         total = int(rows[0].get("total_matches", len(rows)) or 0) if rows else 0
         self._search_dialog_total_matches = total
         self._search_dialog_total_results = len(rows)
@@ -17035,6 +17074,47 @@ class EpubReaderDialog(QDialog):
         count_label.setText(text + (" - rendering..." if result_count else ""))
         if result_count:
             self._search_render_timer.start()
+
+    @Slot(int, str, object, bool)
+    def _on_search_dialog_results_batch(self, search_id: int, query: str,
+                                        rows, done: bool):
+        current_id = int(getattr(self, "_search_dialog_generation", 0) or 0)
+        query_widget = getattr(self, "_search_dialog_query", None)
+        results = getattr(self, "_search_dialog_results", None)
+        count_label = getattr(self, "_search_dialog_count", None)
+        if query_widget is None or results is None or count_label is None:
+            return
+        if search_id != current_id or query != query_widget.text().strip():
+            return
+        rows = list(rows or [])
+        pending = getattr(self, "_search_pending_render_rows", None)
+        if pending is None or getattr(self, "_search_pending_render_query", "") != query:
+            pending = []
+            self._search_pending_render_rows = pending
+            self._search_pending_render_query = query
+            self._search_pending_render_index = 0
+        if rows:
+            pending.extend(rows)
+        self._search_scan_done = bool(done)
+        total = len(pending)
+        self._search_dialog_total_matches = total
+        self._search_dialog_total_results = total
+        rendered = int(getattr(self, "_search_pending_render_index", 0) or 0)
+        if total:
+            suffix = ""
+            if rendered < total:
+                suffix = " - rendering..."
+            elif not done:
+                suffix = " - searching..."
+            count_label.setText(
+                f"{total} match{'es' if total != 1 else ''}{suffix}")
+            timer = getattr(self, "_search_render_timer", None)
+            if timer is not None and rows and not timer.isActive():
+                timer.start()
+        elif done:
+            count_label.setText("No matches")
+        else:
+            count_label.setText("Searching...")
 
     def _render_search_result_batch(self):
         results = getattr(self, "_search_dialog_results", None)
@@ -17069,6 +17149,7 @@ class EpubReaderDialog(QDialog):
         self._search_pending_render_index = end
         total = int(getattr(self, "_search_dialog_total_matches", len(rows)) or 0)
         result_count = int(getattr(self, "_search_dialog_total_results", len(rows)) or 0)
+        scan_done = bool(getattr(self, "_search_scan_done", False))
         if total and result_count != total:
             label_text = (
                 f"{total} match{'es' if total != 1 else ''} in "
@@ -17078,7 +17159,10 @@ class EpubReaderDialog(QDialog):
             label_text = f"{total} match{'es' if total != 1 else ''}"
         if end >= len(rows):
             self._search_render_timer.stop()
-            count_label.setText(label_text)
+            if scan_done:
+                count_label.setText(label_text if total else "No matches")
+            else:
+                count_label.setText(label_text + " - searching...")
         else:
             count_label.setText(
                 f"{label_text} - showing {end}")
@@ -18397,7 +18481,8 @@ class EpubReaderDialog(QDialog):
         for worker in list(getattr(self, "_search_workers", []) or []):
             _stop_qthread_safely(
                 worker, timeout_ms=1200,
-                signal_names=("results_ready", "finished"),
+                signal_names=("results_ready", "results_batch_ready",
+                              "finished"),
             )
         self._search_workers = []
         _stop_qthread_safely(
