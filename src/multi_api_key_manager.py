@@ -2461,7 +2461,7 @@ class MultiAPIKeyDialog(QDialog):
             title = spec['title']
         self.setWindowTitle(f"{title} - Multi API Key Manager")
         screen = QApplication.primaryScreen().geometry()
-        self.resize(int(screen.width() * 0.46), int(screen.height() * 0.54))
+        self.resize(int(screen.width() * 0.50), int(screen.height() * 0.54))
 
         scroll_area = QScrollArea(self)
         scroll_area.setWidgetResizable(True)

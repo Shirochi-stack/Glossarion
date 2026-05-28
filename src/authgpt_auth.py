@@ -1416,13 +1416,6 @@ def send_chat_completion(
     logger.info("AuthGPT: POST %s  model=%s", url, model)
     if max_tokens is not None:
         _log(f"📏 AuthGPT max_output_tokens={max_tokens}")
-    if reasoning:
-        effort = reasoning.get("effort", "none")
-        summary = reasoning.get("summary") or reasoning.get("generate_summary")
-        if summary:
-            _log(f"🧠 AuthGPT reasoning payload: effort={effort}, summary={summary}")
-        else:
-            _log(f"🧠 AuthGPT reasoning payload: effort={effort}")
 
     # AuthGPT always streams (the API requires it), so streaming log is on
     # by default.  During batch translation, silence it unless the user
