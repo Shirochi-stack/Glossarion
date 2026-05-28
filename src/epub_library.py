@@ -1061,6 +1061,17 @@ def _library_io_worker_count(total: int, cap: int = 8) -> int:
     return min(total, cap, max(2, cpu_count * 2))
 
 
+def _reader_worker_count(total: int, cap: int = 16) -> int:
+    """Return a bounded worker count for independent EPUB reader tasks."""
+    if total <= 1:
+        return 1
+    try:
+        cpu_count = os.cpu_count() or 2
+    except Exception:
+        cpu_count = 2
+    return min(total, cap, max(2, cpu_count * 2))
+
+
 def _resolve_output_roots(config: dict | None = None) -> list[str]:
     """Return every directory the translator may have written output folders into.
 
@@ -6705,10 +6716,10 @@ class EpubLibraryDialog(QDialog):
         # _rotate_spinner()' not found`` on ``QTimer.timeout`` dispatch
         # even when the method exists and is ``@Slot()``-decorated.
         self._spin_timer.timeout.connect(lambda: self._rotate_spinner())
-        loading_text = QLabel("Scanning library\u2026")
-        loading_text.setAlignment(Qt.AlignCenter)
-        loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
-        loading_layout.addWidget(loading_text, 0, Qt.AlignCenter)
+        self._loading_text = QLabel("Scanning library\u2026")
+        self._loading_text.setAlignment(Qt.AlignCenter)
+        self._loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
+        loading_layout.addWidget(self._loading_text, 0, Qt.AlignCenter)
         from PySide6.QtWidgets import QProgressBar
         self._loading_bar = QProgressBar()
         self._loading_bar.setRange(0, 0)  # indeterminate
@@ -6800,6 +6811,7 @@ class EpubLibraryDialog(QDialog):
 
     def _show_loading(self):
         """Show the spinner overlay and hide both tab grids."""
+        self._set_loading_text("Scanning library\u2026")
         self._spin_angle = 0
         self._spin_timer.start()
         self._tabs.hide()
@@ -6807,11 +6819,25 @@ class EpubLibraryDialog(QDialog):
         self._comp_empty_label.hide()
         self._loading_widget.show()
 
+    def _set_loading_text(self, text: str) -> None:
+        label = getattr(self, "_loading_text", None)
+        if label is not None:
+            label.setText(text)
+
     def _hide_loading(self):
         """Hide the spinner overlay and restore the tab widget."""
         self._spin_timer.stop()
         self._loading_widget.hide()
         self._tabs.show()
+
+    def _pump_loading_events(self) -> None:
+        """Let the loading spinner repaint while the main thread builds cards."""
+        loading = getattr(self, "_loading_widget", None)
+        if loading is None or not loading.isVisible():
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def _schedule_grid_reflow(self):
         """Refresh card columns after Qt has settled scroll-area geometry."""
@@ -8654,6 +8680,9 @@ class EpubLibraryDialog(QDialog):
         if (self._delete_thread is not None
                 and self._delete_thread.isRunning()):
             return
+        loading = getattr(self, "_loading_widget", None)
+        if loading is not None and loading.isVisible():
+            return
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._scanner_thread = _DualScannerThread(self._config, self)
@@ -8730,11 +8759,17 @@ class EpubLibraryDialog(QDialog):
     def _on_initial_scan_done(self, in_progress: list[dict], completed: list[dict]):
         self._in_progress_books = in_progress
         self._completed_books = completed
-        self._hide_loading()
+        self._set_loading_text("Loading books\u2026")
+        self._pump_loading_events()
         self._refresh_view()
         self._update_organize_counts()
-        if getattr(self, "_hide_after_initial_prewarm", False):
-            self._finish_hidden_prewarm(hide=True)
+
+        def _finish_initial_render():
+            self._hide_loading()
+            if getattr(self, "_hide_after_initial_prewarm", False):
+                self._finish_hidden_prewarm(hide=True)
+
+        QTimer.singleShot(0, _finish_initial_render)
         # Schedule deferred re-layouts so the grid sees the scroll
         # viewport's real dimensions after Qt finishes processing the
         # pending show / layout events. Without this the initial column
@@ -8809,6 +8844,10 @@ class EpubLibraryDialog(QDialog):
         """
         selected_paths = selected_paths if selected_paths is not None else set()
         card_cache = card_cache if card_cache is not None else {}
+        loading_visible = bool(
+            getattr(self, "_loading_widget", None) is not None
+            and self._loading_widget.isVisible()
+        )
         grid_widget = grid_layout.parentWidget()
         _grid_updates_were_enabled = None
         if grid_widget is not None:
@@ -8875,6 +8914,8 @@ class EpubLibraryDialog(QDialog):
                     grid_widget.update()
                 except Exception:
                     pass
+            if loading_visible:
+                self._pump_loading_events()
             return
 
         empty_label.hide()
@@ -8939,6 +8980,8 @@ class EpubLibraryDialog(QDialog):
 
         show_raw_title = bool(getattr(self, "_show_raw_titles", False))
         for idx, book in enumerate(books):
+            if loading_visible and idx and idx % 4 == 0:
+                self._pump_loading_events()
             path = book.get("path", "") or ""
             sig = self._card_signature(book)
             cached = card_cache.get(path)
@@ -9026,6 +9069,8 @@ class EpubLibraryDialog(QDialog):
             row, col = divmod(idx, cols)
             grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
             card.show()
+        if loading_visible:
+            self._pump_loading_events()
 
         for c in range(grid_layout.columnCount()):
             grid_layout.setColumnStretch(c, 0)
@@ -9046,6 +9091,8 @@ class EpubLibraryDialog(QDialog):
                 grid_widget.update()
             except Exception:
                 pass
+        if loading_visible:
+            self._pump_loading_events()
 
     def _populate_in_progress(self, books: list[dict]):
         if not hasattr(self, "_ip_card_cache"):
@@ -13343,6 +13390,7 @@ class _OverlayMergeThread(QThread):
             merged_imgs = dict(images)
             _img_exts = (".jpg", ".jpeg", ".png", ".gif",
                          ".webp", ".svg", ".bmp")
+            extra_files: list[tuple[str, str, str]] = []
             for dir_path in self._extra_dirs:
                 if not dir_path or not os.path.isdir(dir_path):
                     continue
@@ -13352,18 +13400,50 @@ class _OverlayMergeThread(QThread):
                             continue
                         if not entry.name.lower().endswith(_img_exts):
                             continue
-                        try:
-                            with open(entry.path, "rb") as f:
-                                data = f.read()
-                        except OSError:
-                            continue
-                        merged_imgs.setdefault(entry.name, data)
-                        rel = os.path.basename(dir_path) + "/" + entry.name
-                        merged_imgs.setdefault(rel, data)
-                        merged_imgs.setdefault(
-                            "images/" + entry.name, data)
+                        extra_files.append((
+                            entry.path,
+                            entry.name,
+                            os.path.basename(dir_path),
+                        ))
                 except (PermissionError, OSError):
                     continue
+
+            def _read_extra_image(file_info):
+                path, name, dir_name = file_info
+                try:
+                    with open(path, "rb") as f:
+                        data = f.read()
+                except OSError:
+                    return None
+                return name, dir_name, data
+
+            if extra_files:
+                try:
+                    workers = _reader_worker_count(len(extra_files), cap=16)
+                    if workers <= 1:
+                        loaded_images = [
+                            _read_extra_image(file_info)
+                            for file_info in extra_files
+                        ]
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as pool:
+                            loaded_images = list(pool.map(
+                                _read_extra_image, extra_files))
+                except Exception:
+                    logger.debug("Parallel extra image read failed, "
+                                 "falling back: %s", traceback.format_exc())
+                    loaded_images = [
+                        _read_extra_image(file_info)
+                        for file_info in extra_files
+                    ]
+                for loaded in loaded_images:
+                    if not loaded:
+                        continue
+                    name, dir_name, data = loaded
+                    merged_imgs.setdefault(name, data)
+                    rel = dir_name + "/" + name
+                    merged_imgs.setdefault(rel, data)
+                    merged_imgs.setdefault("images/" + name, data)
             images = merged_imgs
 
         self.done.emit(overlaid, images, overlay_applied)
@@ -13394,29 +13474,53 @@ class _EpubSearchThread(QThread):
             self.results_ready.emit(self._search_id, query, [])
             return
 
-        matches = []
-        total = 0
-        for chapter_idx, (title, html) in enumerate(self._chapters):
+        def _scan_chapter(item):
+            chapter_idx, chapter = item
+            title, html = chapter
             if self._cancelled:
-                return
+                return []
             plain = _epub_plain_chapter_text(html)
+            if self._cancelled:
+                return []
+            rows = []
             local_occurrence = 0
             display_title = title or f"Chapter {chapter_idx + 1}"
             for match in pattern.finditer(plain):
                 if self._cancelled:
-                    return
-                matches.append({
+                    return []
+                rows.append({
                     "chapter_idx": chapter_idx,
                     "local_occurrence": local_occurrence,
-                    "global_occurrence": total,
                     "match_count": 1,
                     "text": query,
                     "title": display_title,
                     "excerpt": _epub_search_excerpt(
                         plain, match.start(), match.end(), radius=34),
                 })
-                total += 1
                 local_occurrence += 1
+            return rows
+
+        matches = []
+        items = list(enumerate(self._chapters))
+        try:
+            workers = _reader_worker_count(len(items), cap=16)
+            if workers <= 1:
+                chapter_rows = [_scan_chapter(item) for item in items]
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    chapter_rows = list(pool.map(_scan_chapter, items))
+        except Exception:
+            logger.debug("Parallel EPUB search failed, falling back: %s",
+                         traceback.format_exc())
+            chapter_rows = [_scan_chapter(item) for item in items]
+
+        if self._cancelled:
+            return
+        for rows in chapter_rows:
+            for row in rows:
+                row["global_occurrence"] = len(matches)
+                matches.append(row)
+        total = len(matches)
         for row in matches:
             row["total_matches"] = total
         if not self._cancelled:
@@ -13589,8 +13693,7 @@ class _EpubLoaderThread(QThread):
                 for item in book.get_items():
                     _add_item(item, False)
 
-            chapters: list[tuple[str, str]] = []
-            filenames: list[str] = []
+            chapter_payloads: list[tuple[str, bool, str]] = []
             for item, authoritative in chapter_items:
                 try:
                     # "Show special files" toggle: when OFF, drop configured
@@ -13598,11 +13701,20 @@ class _EpubLoaderThread(QThread):
                     # translator considers real chapters. This still
                     # respects spine ordering for the chapters that DO
                     # survive — we just prune the specials.
+                    item_name = item.get_name() or ""
                     if not self._show_special_files and _is_special_spine_item(
-                            item.get_name() or "", self._config):
+                            item_name, self._config):
                         continue
 
                     content = item.get_content().decode("utf-8", errors="replace")
+                    chapter_payloads.append((item_name, authoritative, content))
+                except Exception:
+                    logger.debug("Skipped chapter payload: %s",
+                                 traceback.format_exc())
+
+            def _parse_chapter_payload(payload):
+                item_name, authoritative, content = payload
+                try:
                     soup = BeautifulSoup(content, "html.parser")
                     text = soup.get_text(strip=True)
                     # Non-authoritative items (pass 3) must clear a minimum
@@ -13613,7 +13725,7 @@ class _EpubLoaderThread(QThread):
                     # (just an <img>) or a navigation/TOC page whose visible
                     # text is mostly the chapter titles themselves.
                     if not authoritative and (not text or len(text) < 10):
-                        continue
+                        return None
                     # Authoritative-but-totally-empty items (no text AND no
                     # images AND no links) are still dropped — they're
                     # almost always accidental spine entries (e.g. a
@@ -13623,7 +13735,7 @@ class _EpubLoaderThread(QThread):
                         has_svg = bool(soup.find("svg"))
                         has_link = bool(soup.find("a"))
                         if not (has_img or has_svg or has_link):
-                            continue
+                            return None
 
                     title = None
                     title_tag = soup.find("title")
@@ -13636,17 +13748,46 @@ class _EpubLoaderThread(QThread):
                                 title = ht
                                 break
                     if not title:
-                        title = os.path.splitext(os.path.basename(item.get_name()))[0]
+                        title = os.path.splitext(os.path.basename(item_name))[0]
                         title = title.replace("_", " ").replace("-", " ").title()
                     if len(title) > 50:
                         title = title[:47] + "\u2026"
-                    chapters.append((title, content))
-                    # Record the source item name (e.g. 'OEBPS/chapter0001.xhtml')
-                    # in parallel so downstream code can correlate reader
-                    # chapters with spine filenames.
-                    filenames.append(item.get_name() or "")
+                    return title, content, item_name
                 except Exception:
-                    logger.debug("Skipped chapter: %s", traceback.format_exc())
+                    logger.debug("Skipped chapter parse: %s",
+                                 traceback.format_exc())
+                    return None
+
+            chapters: list[tuple[str, str]] = []
+            filenames: list[str] = []
+            try:
+                workers = _reader_worker_count(len(chapter_payloads), cap=16)
+                if workers <= 1:
+                    parsed_chapters = [
+                        _parse_chapter_payload(payload)
+                        for payload in chapter_payloads
+                    ]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        parsed_chapters = list(pool.map(
+                            _parse_chapter_payload, chapter_payloads))
+            except Exception:
+                logger.debug("Parallel EPUB chapter parse failed, "
+                             "falling back: %s", traceback.format_exc())
+                parsed_chapters = [
+                    _parse_chapter_payload(payload)
+                    for payload in chapter_payloads
+                ]
+
+            for parsed in parsed_chapters:
+                if not parsed:
+                    continue
+                title, content, item_name = parsed
+                chapters.append((title, content))
+                # Record the source item name (e.g. 'OEBPS/chapter0001.xhtml')
+                # in parallel so downstream code can correlate reader
+                # chapters with spine filenames.
+                filenames.append(item_name)
 
             # Write to cache (avoids emitting large data through Qt signals).
             # Key-scoped by the Show-special-files state so the two
