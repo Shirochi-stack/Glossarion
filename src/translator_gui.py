@@ -397,6 +397,8 @@ try:
 except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
 try:
+    # Importing splash_utils first warms QtCore/QtGui/QtWidgets in parallel.
+    from splash_utils import SplashManager
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
                                     QTextEdit, QVBoxLayout, QHBoxLayout, QBoxLayout, QGridLayout, QFrame,
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
@@ -415,7 +417,6 @@ except ImportError as e:
 
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
-from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 
 
@@ -26872,144 +26873,8 @@ if __name__ == "__main__":
                     splash_manager.splash_window.update()
                     time.sleep(0.09)
             
-            # Actually load modules during splash with real feedback - THREADED for smoothness
-            splash_callback("Loading translation modules...")
-            
-            import threading
-            import queue
-            
-            loading_queue = queue.Queue()
-            loading_results = {}
-            
-            def load_modules_thread():
-                # Silent background loader for optional ML modules (bubble_detector, manga_translator).
-                # These run in parallel with the visible splash steps so the user never sees them.
-                def _bg_load_ml_modules():
-                    try:
-                        import metadata_batch_translator  # pre-import (78ms)
-                    except Exception:
-                        pass
-                    try:
-                        from bubble_detector import BubbleDetector as _BD
-                        try:
-                            import manga_translator as _mt
-                            _mt.BubbleDetector = _BD
-                        except Exception:
-                            pass
-                    except ImportError:
-                        # Not bundled in .exe — that's fine
-                        try:
-                            import manga_translator  # still pre-import cv2
-                        except ImportError:
-                            pass
-                    except Exception as e:
-                        print(f"Warning: background ML module load failed: {e}")
-
-                bg_ml_thread = threading.Thread(target=_bg_load_ml_modules, daemon=True)
-                bg_ml_thread.start()
-
-                try:
-                    # Load TranslateKRtoEN
-                    loading_queue.put("Loading translation engine...")
-                    try:
-                        loading_queue.put("Validating translation engine...")
-                        import TransateKRtoEN
-                        if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
-                            from TransateKRtoEN import main as tm, set_stop_flag as tsf, is_stop_requested as tsc
-                            loading_results['translation'] = (tm, tsf, tsc)
-                            loading_queue.put("✅ translation engine loaded")
-                        else:
-                            loading_queue.put("⚠️ translation engine incomplete")
-                    except Exception as e:
-                        loading_queue.put(f"ERROR: translation engine failed: {e}")
-                        print(f"Warning: Could not import TransateKRtoEN: {e}")
-
-                    # Load extract_glossary_from_epub
-                    loading_queue.put("Loading glossary extractor...")
-                    try:
-                        loading_queue.put("Validating glossary extractor...")
-                        import extract_glossary_from_epub
-                        if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                            from extract_glossary_from_epub import main as gm, set_stop_flag as gsf, is_stop_requested as gsc
-                            loading_results['glossary'] = (gm, gsf, gsc)
-                            loading_queue.put("✅ glossary extractor loaded")
-                        else:
-                            loading_queue.put("⚠️ glossary extractor incomplete")
-                    except Exception as e:
-                        loading_queue.put(f"ERROR: glossary extractor failed: {e}")
-                        print(f"Warning: Could not import extract_glossary_from_epub: {e}")
-
-                    # Load epub_converter
-                    loading_queue.put("Loading EPUB converter...")
-                    try:
-                        import epub_converter
-                        if hasattr(epub_converter, 'fallback_compile_epub'):
-                            from epub_converter import fallback_compile_epub
-                            loading_results['epub'] = fallback_compile_epub
-                            loading_queue.put("✅ EPUB converter loaded")
-                        else:
-                            loading_queue.put("⚠️ EPUB converter incomplete")
-                    except Exception as e:
-                        loading_queue.put(f"ERROR: EPUB converter failed: {e}")
-                        print(f"Warning: Could not import epub_converter: {e}")
-
-                    # Load scan_html_folder
-                    loading_queue.put("Loading QA scanner...")
-                    try:
-                        import scan_html_folder
-                        if hasattr(scan_html_folder, 'scan_html_folder'):
-                            from scan_html_folder import scan_html_folder as shf
-                            loading_results['scan'] = shf
-                            loading_queue.put("✅ QA scanner loaded")
-                        else:
-                            loading_queue.put("⚠️ QA scanner incomplete")
-                    except Exception as e:
-                        loading_queue.put(f"ERROR: QA scanner failed: {e}")
-                        print(f"Warning: Could not import scan_html_folder: {e}")
-
-                    # Wait for background ML modules to finish before declaring done
-                    bg_ml_thread.join(timeout=30)
-
-                except Exception as e:
-                    print(f"Critical error in module loader thread: {e}")
-                finally:
-                    loading_queue.put("DONE")
-
-            # Start the thread
-            loader_thread = threading.Thread(target=load_modules_thread, daemon=True)
-            loader_thread.start()
-            
-            # Process events loop
-            import time
-            while loader_thread.is_alive():
-                # Process queue messages
-                try:
-                    while True:
-                        msg = loading_queue.get_nowait()
-                        if msg == "DONE":
-                            break
-                        if msg.startswith("ERROR:"): 
-                             # Don't update status for errors in splash, just log
-                             pass
-                        else:
-                             splash_callback(msg)
-                except queue.Empty:
-                    pass
-                
-                # Keep splash alive
-                if splash_manager and splash_manager.app:
-                    splash_manager.app.processEvents(QEventLoop.ExcludeUserInputEvents)
-                
-                time.sleep(0.01) # Small sleep to prevent CPU hogging
-            
-            # Process any remaining messages
-            try:
-                while True:
-                    msg = loading_queue.get_nowait()
-                    if msg != "DONE" and not msg.startswith("ERROR:"):
-                        splash_callback(msg)
-            except queue.Empty:
-                pass
+            # Load core startup modules in parallel while the splash remains responsive.
+            loading_results = splash_manager.load_startup_modules_parallel()
             
             # Retrieve results
             translation_main, translation_stop_flag, translation_stop_check = loading_results.get('translation', (None, None, None))

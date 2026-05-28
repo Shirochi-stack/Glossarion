@@ -4,6 +4,8 @@ import os
 import time
 import atexit
 import threading
+import importlib
+import concurrent.futures
 from app_version import APP_DISPLAY_NAME, APP_USER_MODEL_ID
 
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
@@ -22,9 +24,53 @@ try:
 except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
 
-from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
-from PySide6.QtCore import Qt, QTimer, QEventLoop, QObject, Signal, QMetaObject, Q_ARG
-from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QFontMetrics
+def _load_pyside6_modules():
+    module_names = ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
+    if os.environ.get("GLOSSARION_SERIAL_QT_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return {name: importlib.import_module(name) for name in module_names}
+
+    try:
+        modules = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(module_names),
+            thread_name_prefix="qt-import",
+        ) as pool:
+            future_to_name = {
+                pool.submit(importlib.import_module, name): name
+                for name in module_names
+            }
+            for future in concurrent.futures.as_completed(future_to_name):
+                name = future_to_name[future]
+                modules[name] = future.result()
+        return modules
+    except Exception:
+        return {name: importlib.import_module(name) for name in module_names}
+
+
+_qt_modules = _load_pyside6_modules()
+_QtCore = _qt_modules["PySide6.QtCore"]
+_QtGui = _qt_modules["PySide6.QtGui"]
+_QtWidgets = _qt_modules["PySide6.QtWidgets"]
+
+QApplication = _QtWidgets.QApplication
+QWidget = _QtWidgets.QWidget
+QLabel = _QtWidgets.QLabel
+QProgressBar = _QtWidgets.QProgressBar
+QVBoxLayout = _QtWidgets.QVBoxLayout
+
+Qt = _QtCore.Qt
+QTimer = _QtCore.QTimer
+QEventLoop = _QtCore.QEventLoop
+QObject = _QtCore.QObject
+Signal = _QtCore.Signal
+QMetaObject = _QtCore.QMetaObject
+Q_ARG = _QtCore.Q_ARG
+
+QFont = _QtGui.QFont
+QPalette = _QtGui.QPalette
+QColor = _QtGui.QColor
+QPixmap = _QtGui.QPixmap
+QFontMetrics = _QtGui.QFontMetrics
 
 class SplashManager(QObject):
     """PySide6 splash screen manager - thread-safe with signals"""
@@ -573,6 +619,140 @@ class SplashManager(QObject):
         except (RuntimeError, AttributeError):
             # Widget deleted or not available
             pass
+
+    def _preload_optional_startup_modules(self):
+        """Warm optional heavy modules without blocking the main startup path."""
+        try:
+            import metadata_batch_translator  # noqa: F401
+        except Exception:
+            pass
+        try:
+            from bubble_detector import BubbleDetector as _BD
+            try:
+                import manga_translator as _mt
+                _mt.BubbleDetector = _BD
+            except Exception:
+                pass
+        except ImportError:
+            try:
+                import manga_translator  # noqa: F401
+            except ImportError:
+                pass
+        except Exception as e:
+            print(f"Warning: background ML module load failed: {e}")
+
+    def load_startup_modules_parallel(self, max_workers=None):
+        """Load core startup modules concurrently while keeping the splash responsive."""
+        results = {}
+        specs = [
+            {
+                "key": "translation",
+                "module": "TransateKRtoEN",
+                "display": "translation engine",
+                "loading": "Loading translation engine...",
+                "loaded": "✅ translation engine loaded",
+                "required": ("main", "set_stop_flag"),
+                "result": lambda mod: (
+                    mod.main,
+                    mod.set_stop_flag,
+                    getattr(mod, "is_stop_requested", None),
+                ),
+            },
+            {
+                "key": "glossary",
+                "module": "extract_glossary_from_epub",
+                "display": "glossary extractor",
+                "loading": "Loading glossary extractor...",
+                "loaded": "✅ glossary extractor loaded",
+                "required": ("main", "set_stop_flag"),
+                "result": lambda mod: (
+                    mod.main,
+                    mod.set_stop_flag,
+                    getattr(mod, "is_stop_requested", None),
+                ),
+            },
+            {
+                "key": "epub",
+                "module": "epub_converter",
+                "display": "EPUB converter",
+                "loading": "Loading EPUB converter...",
+                "loaded": "✅ EPUB converter loaded",
+                "required": ("fallback_compile_epub",),
+                "result": lambda mod: mod.fallback_compile_epub,
+            },
+            {
+                "key": "scan",
+                "module": "scan_html_folder",
+                "display": "QA scanner",
+                "loading": "Loading QA scanner...",
+                "loaded": "✅ QA scanner loaded",
+                "required": ("scan_html_folder",),
+                "result": lambda mod: mod.scan_html_folder,
+            },
+        ]
+
+        def _load_spec(spec):
+            module = importlib.import_module(spec["module"])
+            missing = [name for name in spec["required"] if not hasattr(module, name)]
+            if missing:
+                raise ImportError(f"{spec['module']} missing required attribute(s): {', '.join(missing)}")
+            return spec["key"], spec["result"](module), spec["loaded"]
+
+        try:
+            threading.Thread(
+                target=self._preload_optional_startup_modules,
+                daemon=True,
+                name="optional-startup-preload",
+            ).start()
+        except Exception:
+            pass
+
+        if os.environ.get("GLOSSARION_SERIAL_SPLASH_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            for spec in specs:
+                self.update_status(spec["loading"])
+                try:
+                    key, value, loaded_message = _load_spec(spec)
+                    results[key] = value
+                    self.update_status(loaded_message)
+                except Exception as e:
+                    print(f"Warning: Could not import {spec['module']}: {e}")
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            return results
+
+        workers = max_workers
+        if workers is None:
+            workers = min(len(specs), max(2, int(os.cpu_count() or 2)))
+        workers = max(1, min(int(workers), len(specs)))
+
+        self.update_status("Loading translation modules...")
+        for spec in specs:
+            self.update_status(spec["loading"])
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="splash-import",
+        ) as pool:
+            future_to_spec = {
+                pool.submit(_load_spec, spec): spec
+                for spec in specs
+            }
+            while future_to_spec:
+                done = [future for future in future_to_spec if future.done()]
+                for future in done:
+                    spec = future_to_spec.pop(future)
+                    try:
+                        key, value, loaded_message = future.result()
+                        results[key] = value
+                        self.update_status(loaded_message)
+                    except Exception as e:
+                        print(f"Warning: Could not import {spec['module']}: {e}")
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                if future_to_spec:
+                    time.sleep(0.01)
+
+        return results
 
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
