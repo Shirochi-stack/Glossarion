@@ -15232,6 +15232,8 @@ _READER_THEMES = [
 class EpubReaderDialog(QDialog):
     """EPUB reader with chapter navigation, layout modes, and theme support."""
 
+    _SEARCH_DEBOUNCE_MS = 650
+
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
                  initial_chapter: int | None = None,
                  initial_chapter_filename: str | None = None,
@@ -16979,10 +16981,10 @@ class EpubReaderDialog(QDialog):
         if not query:
             count_label.setText("Type to search")
             return
-        count_label.setText("Searching...")
+        count_label.setText("Waiting...")
         timer = getattr(self, "_search_debounce_timer", None)
         if timer is not None:
-            timer.start(180)
+            timer.start(self._SEARCH_DEBOUNCE_MS)
         else:
             self._start_search_dialog_worker()
 
@@ -17022,6 +17024,7 @@ class EpubReaderDialog(QDialog):
         if not query:
             count_label.setText("Type to search")
             return
+        count_label.setText("Searching...")
         worker = _EpubSearchThread(
             search_id,
             query,
