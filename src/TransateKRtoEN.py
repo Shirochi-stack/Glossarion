@@ -13318,6 +13318,43 @@ def _text_has_foreign_characters_for_partial_refinement(text, qa_settings) -> bo
         return False
 
 
+def _foreign_character_qa_issues_for_partial_refinement_text(text, qa_settings):
+    if not text or not str(text).strip():
+        return []
+    try:
+        from scan_html_folder import detect_non_english_content
+        has_issue, issues = detect_non_english_content(
+            str(text),
+            _partial_refinement_detection_settings(qa_settings),
+        )
+    except Exception:
+        return []
+    if not has_issue:
+        return []
+
+    filtered = []
+    seen = set()
+    for issue in issues:
+        for issue_text in _foreign_character_qa_issue_prompt_texts(issue):
+            if not issue_text or issue_text.lower() in {"true", "false", "none", "null"}:
+                continue
+            if issue_text in seen:
+                continue
+            seen.add(issue_text)
+            filtered.append(issue_text)
+    return filtered
+
+
+def _partial_refinement_qa_entry_for_fragment(entry, fragment_html, qa_settings):
+    issues = _foreign_character_qa_issues_for_partial_refinement_text(fragment_html, qa_settings)
+    if not issues:
+        return None
+    fragment_entry = dict(entry or {})
+    fragment_entry["status"] = "qa_failed"
+    fragment_entry["qa_issues_found"] = issues
+    return fragment_entry
+
+
 def _partial_refinement_tag_name(tag) -> str:
     name = str(getattr(tag, "name", "") or "").lower().strip()
     if ":" in name:
@@ -13964,11 +14001,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
                         fragment_html = _partial_refinement_target_fragment(target, partial_document)
                         target_kind = target.get("kind", "tags")
+                        fragment_qa_entry = _partial_refinement_qa_entry_for_fragment(
+                            pre_existing_qa_source_entry or pre_existing_entry,
+                            fragment_html,
+                            qa_settings,
+                        )
                         messages = _build_refinement_messages(
                             fragment_html,
                             partial=True,
                             partial_kind=target_kind,
-                            qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
+                            qa_entry=fragment_qa_entry,
                         )
                         partial_requests.append((target_index, target, messages))
 
