@@ -175,7 +175,8 @@ class MangaSettingsDialog(QDialog):
                 'translate_prompt': 'output only the {language} translation of this text:',  # Prompt template with {language} placeholder
                 'translate_target_language': 'English',  # Default language
                 'manga_output_token_limit': -1,  # -1 or 0 = use main GUI's output token limit
-                'translate_this_text_tokens': 2048  # Token limit for "Translate This Text" context menu action
+                'translate_this_text_tokens': 2048,  # Token limit for "Translate This Text" context menu action
+                'translate_this_text_disable_thinking': True
             }
         }
         
@@ -1952,7 +1953,7 @@ class MangaSettingsDialog(QDialog):
             """Create cloud API settings tab"""
             # Create tab widget and add to tab widget
             tab_widget = QWidget()
-            self.tab_widget.addTab(tab_widget, "Cloud API")
+            self.tab_widget.addTab(tab_widget, "Replicate API")
             
             # Create scroll area for content
             scroll_area = QScrollArea()
@@ -2242,9 +2243,20 @@ class MangaSettingsDialog(QDialog):
         lang_help.setStyleSheet("color: gray;")
         lang_help.setWordWrap(True)
         translate_layout.addWidget(lang_help)
+
+        translate_layout.addSpacing(8)
+        self.translate_this_text_disable_thinking = self._create_styled_checkbox("Disable all thinking")
+        self.translate_this_text_disable_thinking.setChecked(
+            bool(self.settings.get('manual_edit', {}).get('translate_this_text_disable_thinking', True))
+        )
+        self.translate_this_text_disable_thinking.setToolTip(
+            "Temporarily disables provider thinking/reasoning settings for the 'Translate This Text' context menu action."
+        )
+        translate_layout.addWidget(self.translate_this_text_disable_thinking)
+        translate_layout.addSpacing(8)
         
         # Translate This Text Token Limit (context menu action)
-        ttt_label = QLabel("Translate This Text Tokens:")
+        ttt_label = QLabel("Translate This Text Output Token Limit:")
         ttt_label.setToolTip("Token limit for 'Translate This Text'. Set to -1 to use manga output token limit.")
         translate_layout.addWidget(ttt_label)
         
@@ -4200,7 +4212,7 @@ class MangaSettingsDialog(QDialog):
         self.render_parallel_checkbox.setChecked(self.settings.get('advanced', {}).get('render_parallel', True))
         perf_layout.addWidget(self.render_parallel_checkbox)
         
-        self.parallel_processing_checkbox = self._create_styled_checkbox("Enable parallel processing (experimental)")
+        self.parallel_processing_checkbox = self._create_styled_checkbox("Enable parallel processing")
         self.parallel_processing_checkbox.setChecked(self.settings['advanced']['parallel_processing'])
         self.parallel_processing_checkbox.toggled.connect(self._toggle_workers)
         perf_layout.addWidget(self.parallel_processing_checkbox)
@@ -4227,30 +4239,6 @@ class MangaSettingsDialog(QDialog):
         # Initialize workers state
         self._toggle_workers()
         
-        # Memory management section
-        memory_group = QGroupBox("Memory Management")
-        main_layout.addWidget(memory_group)
-        memory_layout = QVBoxLayout(memory_group)
-        memory_layout.setContentsMargins(8, 8, 8, 6)
-        memory_layout.setSpacing(4)
-        
-        self.auto_cleanup_models_checkbox = self._create_styled_checkbox("Automatically cleanup models after translation to free RAM")
-        self.auto_cleanup_models_checkbox.setChecked(self.settings.get('advanced', {}).get('auto_cleanup_models', False))
-        memory_layout.addWidget(self.auto_cleanup_models_checkbox)
-        
-        # Unload models after translation (disabled by default)
-        self.unload_models_checkbox = self._create_styled_checkbox("Unload models after translation (reset translator instance)")
-        self.unload_models_checkbox.setChecked(self.settings.get('advanced', {}).get('unload_models_after_translation', False))
-        memory_layout.addWidget(self.unload_models_checkbox)
-        
-        # Add a note about parallel processing
-        note_label = QLabel("Note: When parallel panel translation is enabled, cleanup happens after ALL panels complete.")
-        note_font = QFont('Arial', 9)
-        note_label.setFont(note_font)
-        note_label.setStyleSheet("color: gray;")
-        note_label.setWordWrap(True)
-        memory_layout.addWidget(note_label)
-
         # Panel-level parallel translation
         panel_group = QGroupBox("Parallel Panel Translation")
         main_layout.addWidget(panel_group)
@@ -4371,9 +4359,38 @@ class MangaSettingsDialog(QDialog):
         # Initialize panel controls state
         self._toggle_panel_controls()
 
+        # Experimental / legacy features. Keep these grouped together because
+        # the legacy model conversion and memory controls can destabilize runs.
+        experimental_group = QGroupBox("Experimental Features")
+        experimental_group.setObjectName("experimentalFeaturesGroup")
+        experimental_group.setStyleSheet("""
+            QGroupBox#experimentalFeaturesGroup {
+                color: #ff6b6b;
+                font-weight: bold;
+                border: 1px solid #ff6b6b;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+            }
+            QGroupBox#experimentalFeaturesGroup::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        main_layout.addWidget(experimental_group)
+        experimental_layout = QVBoxLayout(experimental_group)
+        experimental_layout.setContentsMargins(8, 8, 8, 6)
+        experimental_layout.setSpacing(6)
+
+        warning_label = QLabel("WARNING: Legacy features below are unstable and may cause crashes or unexpected behavior.")
+        warning_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
+        warning_label.setWordWrap(True)
+        experimental_layout.addWidget(warning_label)
+
         # ONNX conversion settings
         onnx_group = QGroupBox("ONNX Conversion")
-        main_layout.addWidget(onnx_group)
+        experimental_layout.addWidget(onnx_group)
         onnx_layout = QVBoxLayout(onnx_group)
         onnx_layout.setContentsMargins(8, 8, 8, 6)
         onnx_layout.setSpacing(4)
@@ -4394,7 +4411,7 @@ class MangaSettingsDialog(QDialog):
         
         # Model memory optimization (quantization)
         quant_group = QGroupBox("Model Memory Optimization")
-        main_layout.addWidget(quant_group)
+        experimental_layout.addWidget(quant_group)
         quant_layout = QVBoxLayout(quant_group)
         quant_layout.setContentsMargins(8, 8, 8, 6)
         quant_layout.setSpacing(4)
@@ -4441,10 +4458,34 @@ class MangaSettingsDialog(QDialog):
         precision_help.setStyleSheet("color: gray;")
         precision_layout.addWidget(precision_help)
         precision_layout.addStretch()
+
+        # Memory management section
+        memory_group = QGroupBox("Memory Management")
+        experimental_layout.addWidget(memory_group)
+        memory_layout = QVBoxLayout(memory_group)
+        memory_layout.setContentsMargins(8, 8, 8, 6)
+        memory_layout.setSpacing(4)
+
+        self.auto_cleanup_models_checkbox = self._create_styled_checkbox("Automatically cleanup models after translation to free RAM")
+        self.auto_cleanup_models_checkbox.setChecked(self.settings.get('advanced', {}).get('auto_cleanup_models', False))
+        memory_layout.addWidget(self.auto_cleanup_models_checkbox)
+
+        # Unload models after translation (disabled by default)
+        self.unload_models_checkbox = self._create_styled_checkbox("Unload models after translation (reset translator instance)")
+        self.unload_models_checkbox.setChecked(self.settings.get('advanced', {}).get('unload_models_after_translation', False))
+        memory_layout.addWidget(self.unload_models_checkbox)
+
+        # Add a note about parallel processing
+        note_label = QLabel("Note: When parallel panel translation is enabled, cleanup happens after ALL panels complete.")
+        note_font = QFont('Arial', 9)
+        note_label.setFont(note_font)
+        note_label.setStyleSheet("color: gray;")
+        note_label.setWordWrap(True)
+        memory_layout.addWidget(note_label)
         
         # Aggressive memory cleanup
-        cleanup_group = QGroupBox("Memory & Cleanup")
-        main_layout.addWidget(cleanup_group)
+        cleanup_group = QGroupBox("Memory Cleanup")
+        experimental_layout.addWidget(cleanup_group)
         cleanup_layout = QVBoxLayout(cleanup_group)
         cleanup_layout.setContentsMargins(8, 8, 8, 6)
         cleanup_layout.setSpacing(4)
@@ -4552,34 +4593,6 @@ class MangaSettingsDialog(QDialog):
         # Update RT-DETR concurrency control visibility based on current detector type
         # This is called after the Advanced tab is fully created to sync with OCR tab state
         QTimer.singleShot(0, self._sync_rtdetr_concurrency_visibility)
-        
-        # Experimental Features section
-        experimental_group = QGroupBox("⚠️ Experimental Features")
-        experimental_group.setStyleSheet("""
-            QGroupBox {
-                color: #ff6b6b;
-                font-weight: bold;
-                border: 1px solid #ff6b6b;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
-        main_layout.addWidget(experimental_group)
-        experimental_layout = QVBoxLayout(experimental_group)
-        experimental_layout.setContentsMargins(8, 8, 8, 6)
-        experimental_layout.setSpacing(4)
-        
-        # Warning label
-        warning_label = QLabel("⚠️ WARNING: These features are unstable and may cause crashes or unexpected behavior!")
-        warning_label.setStyleSheet("color: #ff6b6b; font-weight: bold;")
-        warning_label.setWordWrap(True)
-        experimental_layout.addWidget(warning_label)
         
         # Experimental tools checkbox (Brush, Eraser - Translate All is now stable)
         self.experimental_translate_all_checkbox = self._create_styled_checkbox("Enable experimental editing tools (Brush, Eraser)")
@@ -5186,6 +5199,10 @@ class MangaSettingsDialog(QDialog):
                 self.settings['manual_edit']['manga_output_token_limit'] = self.manga_output_token_limit.value()
             if hasattr(self, 'translate_this_text_tokens'):
                 self.settings['manual_edit']['translate_this_text_tokens'] = self.translate_this_text_tokens.value()
+            if hasattr(self, 'translate_this_text_disable_thinking'):
+                self.settings['manual_edit']['translate_this_text_disable_thinking'] = bool(
+                    self.translate_this_text_disable_thinking.isChecked()
+                )
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

@@ -8664,6 +8664,46 @@ def _handle_translate_this_text(self, region_index: int, prompt: str):
         import traceback
         traceback.print_exc()
 
+def _apply_translate_this_text_thinking_override(self) -> Optional[Dict[str, Optional[str]]]:
+    """Temporarily disable thinking for the manual Translate This Text action."""
+    try:
+        manual_edit = ((self.main_gui.config.get('manga_settings', {}) or {}).get('manual_edit', {}) or {})
+        disable_thinking = bool(manual_edit.get('translate_this_text_disable_thinking', True))
+    except Exception:
+        disable_thinking = True
+    if not disable_thinking:
+        return None
+    if os.environ.get('MANGA_MANUAL_TRANSLATE_THINKING_OVERRIDE_ACTIVE') == '1':
+        return None
+
+    keys = (
+        'MANGA_MANUAL_TRANSLATE_THINKING_OVERRIDE_ACTIVE',
+        'ENABLE_ANTHROPIC_THINKING',
+        'ENABLE_GEMINI_THINKING',
+        'ENABLE_DEEPSEEK_THINKING',
+        'ENABLE_GPT_THINKING',
+        'GEMINI_THINKING_LEVEL',
+        'THINKING_BUDGET',
+    )
+    original = {key: os.environ.get(key) for key in keys}
+    os.environ['MANGA_MANUAL_TRANSLATE_THINKING_OVERRIDE_ACTIVE'] = '1'
+    os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+    os.environ['ENABLE_GEMINI_THINKING'] = '0'
+    os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+    os.environ['ENABLE_GPT_THINKING'] = '0'
+    os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+    os.environ.pop('THINKING_BUDGET', None)
+    return original
+
+def _restore_translate_this_text_thinking_override(original: Optional[Dict[str, Optional[str]]]) -> None:
+    if original is None:
+        return
+    for key, value in original.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
 def _translate_this_text_background(self, message: str, region_index: int):
     """Send text for translation using MangaTranslator in background"""
     try:
@@ -8783,11 +8823,18 @@ def _translate_this_text_background(self, message: str, region_index: int):
         except Exception as pool_err:
             print(f"[TRANSLATE_THIS] setup_multi_key_pool failed: {pool_err}")
         
-        # Get token limit from manga settings
-        max_tokens = 2048  # default
+        manga_settings = {}
+        manual_edit = {}
         try:
             manga_settings = self.main_gui.config.get('manga_settings', {}) or {}
             manual_edit = manga_settings.get('manual_edit', {}) or {}
+        except Exception:
+            manga_settings = {}
+            manual_edit = {}
+
+        # Get token limit from manga settings
+        max_tokens = 2048  # default
+        try:
             ttt_tokens = int(manual_edit.get('translate_this_text_tokens', 2048))
             
             if ttt_tokens <= 0:
@@ -8807,11 +8854,15 @@ def _translate_this_text_background(self, message: str, region_index: int):
         print(f"[TRANSLATE_THIS] Temperature: {temperature}, Max tokens: {max_tokens}")
         
         # Use unified_client.send() method which returns (content, finish_reason)
-        translation_result, finish_reason = unified_client.send(
-            messages=[{"role": "user", "content": message}],
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        original_thinking_env = _apply_translate_this_text_thinking_override(self)
+        try:
+            translation_result, finish_reason = unified_client.send(
+                messages=[{"role": "user", "content": message}],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+        finally:
+            _restore_translate_this_text_thinking_override(original_thinking_env)
         
         # Check if we got a valid translation
         if not translation_result or not translation_result.strip():
