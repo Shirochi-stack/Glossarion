@@ -2567,7 +2567,8 @@ class ProgressManager:
                 continue
             status = str(entry.get("status", "")).lower()
             if status in ("completed", "merged", "pending", "in_progress"):
-                failed = self.failed_from_in_progress_entry(entry)
+                restored = self.restore_in_progress_entry(entry) if status == "in_progress" else None
+                failed = restored or self.failed_from_in_progress_entry(entry)
                 if failed:
                     self.prog["chapters"][key] = failed
         self._progress_file_delete_invalidated = True
@@ -2912,21 +2913,42 @@ class ProgressManager:
                     if (
                         disk_status == "failed"
                         and isinstance(local_restored, dict)
-                        and str(local_restored.get("status", "")).lower() == "qa_failed"
+                        and str(local_restored.get("status", "")).lower() != "failed"
                     ):
                         disk_entry = local_restored
-                        disk_status = "qa_failed"
                     if disk_key and str(disk_key) != str(chapter_key):
                         self.prog["chapters"].pop(chapter_key, None)
                     self.prog["chapters"][disk_key or chapter_key] = disk_entry
                     return True
 
-            failed = self.failed_from_in_progress_entry(chapter_info)
-            if failed:
-                self.prog["chapters"][chapter_key] = failed
+            restored = self.restore_in_progress_entry(chapter_info)
+            if restored:
+                self.prog["chapters"][chapter_key] = restored
+            else:
+                failed = self.failed_from_in_progress_entry(chapter_info)
+                if failed:
+                    self.prog["chapters"][chapter_key] = failed
             return True
-        restored = self.restore_in_progress_entry(chapter_info)
+        disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+        restore_source = chapter_info
+        if isinstance(disk_entry, dict) and str(disk_entry.get("status", "")).lower() == "in_progress":
+            disk_has_previous = (
+                isinstance(disk_entry.get("previous_progress_entry"), dict)
+                or bool(disk_entry.get("previous_status"))
+                or bool(disk_entry.get("previous_status_unknown"))
+            )
+            memory_has_previous = (
+                isinstance(chapter_info.get("previous_progress_entry"), dict)
+                or bool(chapter_info.get("previous_status"))
+                or bool(chapter_info.get("previous_status_unknown"))
+            )
+            if disk_has_previous or not memory_has_previous:
+                restore_source = disk_entry
+        restored = self.restore_in_progress_entry(restore_source)
         if restored:
+            if disk_key and str(disk_key) != str(chapter_key):
+                self.prog["chapters"].pop(chapter_key, None)
+                chapter_key = disk_key
             self.prog["chapters"][chapter_key] = restored
         else:
             failed = self.failed_from_in_progress_entry(chapter_info)
@@ -2939,19 +2961,74 @@ class ProgressManager:
         chapters = self.prog.get("chapters", {})
         if not isinstance(chapters, dict):
             return 0
+        if not os.path.exists(self.PROGRESS_FILE):
+            before = len(chapters)
+            self._mark_all_known_progress_failed_after_file_delete()
+            return before
         changed = 0
         for chapter_key, chapter_info in list(chapters.items()):
             if not isinstance(chapter_info, dict):
                 continue
             if str(chapter_info.get("status", "")).lower() != "in_progress":
                 continue
-            restored = self.restore_in_progress_entry(chapter_info)
-            if restored:
-                chapters[chapter_key] = restored
+            if not self._disk_entry_is_still_in_progress(chapter_key, chapter_info):
+                disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+                if isinstance(disk_entry, dict):
+                    disk_status = ProgressManager._status_with_qa_marker(disk_entry.get("status", ""), disk_entry)
+                    if disk_status and disk_status != "in_progress":
+                        disk_entry["status"] = disk_status
+                        local_restored = self.restore_in_progress_entry(chapter_info)
+                        if (
+                            disk_status == "failed"
+                            and isinstance(local_restored, dict)
+                            and str(local_restored.get("status", "")).lower() != "failed"
+                        ):
+                            disk_entry = local_restored
+                        if disk_key and str(disk_key) != str(chapter_key):
+                            chapters.pop(chapter_key, None)
+                        chapters[disk_key or chapter_key] = disk_entry
+                    else:
+                        restored = self.restore_in_progress_entry(chapter_info)
+                        if restored:
+                            chapters[chapter_key] = restored
+                        else:
+                            failed = self.failed_from_in_progress_entry(chapter_info)
+                            if failed:
+                                chapters[chapter_key] = failed
+                else:
+                    restored = self.restore_in_progress_entry(chapter_info)
+                    if restored:
+                        chapters[chapter_key] = restored
+                    else:
+                        failed = self.failed_from_in_progress_entry(chapter_info)
+                        if failed:
+                            chapters[chapter_key] = failed
             else:
-                failed = self.failed_from_in_progress_entry(chapter_info)
-                if failed:
-                    chapters[chapter_key] = failed
+                disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+                restore_source = chapter_info
+                if isinstance(disk_entry, dict) and str(disk_entry.get("status", "")).lower() == "in_progress":
+                    disk_has_previous = (
+                        isinstance(disk_entry.get("previous_progress_entry"), dict)
+                        or bool(disk_entry.get("previous_status"))
+                        or bool(disk_entry.get("previous_status_unknown"))
+                    )
+                    memory_has_previous = (
+                        isinstance(chapter_info.get("previous_progress_entry"), dict)
+                        or bool(chapter_info.get("previous_status"))
+                        or bool(chapter_info.get("previous_status_unknown"))
+                    )
+                    if disk_has_previous or not memory_has_previous:
+                        restore_source = disk_entry
+                restored = self.restore_in_progress_entry(restore_source)
+                if restored:
+                    if disk_key and str(disk_key) != str(chapter_key):
+                        chapters.pop(chapter_key, None)
+                        chapter_key = disk_key
+                    chapters[chapter_key] = restored
+                else:
+                    failed = self.failed_from_in_progress_entry(chapter_info)
+                    if failed:
+                        chapters[chapter_key] = failed
             changed += 1
         return changed
 
@@ -5577,7 +5654,8 @@ class BatchTranslationProcessor:
     
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
-                 image_translator=None, is_text_file=False, history_manager=None):
+                 image_translator=None, is_text_file=False, history_manager=None,
+                 restore_progress_fn=None):
         self.config = config
         self.client = client
         self.base_msg = base_msg
@@ -5585,6 +5663,7 @@ class BatchTranslationProcessor:
         self.progress_lock = progress_lock
         self.save_progress_fn = save_progress_fn
         self.update_progress_fn = update_progress_fn
+        self.restore_progress_fn = restore_progress_fn
         self.check_stop_fn = check_stop_fn
         self.image_translator = image_translator
         self.chapters_completed = 0
@@ -5618,6 +5697,22 @@ class BatchTranslationProcessor:
         """Get the rolling summary snapshot (thread-safe)."""
         with self._batch_rolling_summary_lock:
             return self._batch_rolling_summary_text
+
+    def _restore_cancelled_chapter_progress(self, idx, actual_num, content_hash, chapter):
+        fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+        restored = False
+        if callable(self.restore_progress_fn):
+            restored = bool(
+                self.restore_progress_fn(
+                    actual_num,
+                    fname,
+                    chapter_obj=chapter,
+                    content_hash=content_hash,
+                )
+            )
+        if not restored and not callable(self.restore_progress_fn):
+            self.update_progress_fn(idx, actual_num, content_hash, fname, status="pending", chapter_obj=chapter)
+        return fname
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
@@ -7141,6 +7236,8 @@ class BatchTranslationProcessor:
             # Graceful-stop pre-send cancellations are expected (they prevent queued calls from starting).
             # Do not spam per-chapter "failed" logs, and do not mark these chapters as failed.
             error_msg = str(e)
+            error_lower = (error_msg or "").lower()
+            error_type = getattr(e, 'error_type', None)
             if chapter_fatal_qa_issue:
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -7157,8 +7254,8 @@ class BatchTranslationProcessor:
                 return False, actual_num, None, None, None
 
             is_graceful_stop_skip = (
-                "graceful stop active - not starting new api call" in (error_msg or "").lower()
-                or (hasattr(e, 'error_type') and getattr(e, 'error_type', None) == 'cancelled' and os.environ.get('GRACEFUL_STOP') == '1')
+                "graceful stop active - not starting new api call" in error_lower
+                or (error_type == 'cancelled' and os.environ.get('GRACEFUL_STOP') == '1')
             )
 
             if is_graceful_stop_skip:
@@ -7192,12 +7289,26 @@ class BatchTranslationProcessor:
                     pass
                 return False, actual_num, None, None, None
 
+            is_cancelled_stop = (
+                error_type == 'cancelled'
+                or "translation stopped by user" in error_lower
+                or "operation cancelled by user" in error_lower
+                or "stopped by user" in error_lower
+                or "stop requested" in error_lower
+                or "cancelled" in error_lower
+                or "canceled" in error_lower
+            )
+
+            if is_cancelled_stop:
+                with self.progress_lock:
+                    self._restore_cancelled_chapter_progress(chapter_progress_idx, actual_num, content_hash, chapter)
+                    self.save_progress_fn()
+                return False, actual_num, None, None, None
+
             with self.progress_lock:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 # Check if it's a timeout failure
-                error_lower = (error_msg or "").lower()
-                error_type = getattr(e, 'error_type', None)
                 if "[TIMEOUT]" in error_msg or error_type == 'timeout':
                     self.update_progress_fn(
                         chapter_progress_idx, actual_num, content_hash, fname,
@@ -8118,7 +8229,37 @@ class BatchTranslationProcessor:
             raise RuntimeError("Merged translation exited retry loop without returning a result")
             
         except Exception as e:
-            print(f"❌ Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
+            error_msg = str(e)
+            error_lower = (error_msg or "").lower()
+            error_type = getattr(e, 'error_type', None)
+            is_cancelled_stop = (
+                error_type == 'cancelled'
+                or "translation stopped by user" in error_lower
+                or "operation cancelled by user" in error_lower
+                or "stopped by user" in error_lower
+                or "stop requested" in error_lower
+                or "cancelled" in error_lower
+                or "canceled" in error_lower
+            )
+            if is_cancelled_stop:
+                results = []
+                restore_items = [
+                    (actual_num, idx, chapter, content_hash)
+                    for actual_num, _, idx, chapter, content_hash in chapters_data
+                ]
+                if not restore_items:
+                    for idx, chapter in merge_group:
+                        actual_num = chapter.get('actual_chapter_num', chapter['num'])
+                        content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+                        restore_items.append((actual_num, idx, chapter, content_hash))
+                with self.progress_lock:
+                    for actual_num, idx, chapter, content_hash in restore_items:
+                        self._restore_cancelled_chapter_progress(idx, actual_num, content_hash, chapter)
+                        results.append((False, actual_num, None, None, None))
+                    self.save_progress_fn()
+                return results
+
+            print(f"Merged group failed: {e} (NOTE: API Error triggered cancellation logic)")
             # Mark all chapters as failed
             results = []
             for actual_num, _, idx, chapter, content_hash in chapters_data:
@@ -19425,7 +19566,8 @@ def main(log_callback=None, stop_callback=None):
             check_stop,
             image_translator,
             is_text_file=is_text_file,
-            history_manager=history_manager
+            history_manager=history_manager,
+            restore_progress_fn=progress_manager.restore_in_progress
         )
 
         # Batch-mode rolling summary: updated once per batch and injected into the NEXT batch.
