@@ -37,6 +37,45 @@ def _run_cleanup_fns(cleanup_fns: Optional[Iterable[Callable[[], None]]]) -> Non
             pass
 
 
+def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> None:
+    """Let Qt process close/deleteLater work before a hard process exit.
+
+    QtWebEngine keeps native GPU/VSync helper threads alive behind the
+    widgets. A tiny event drain after closing WebEngine views gives those
+    threads a chance to unwind before ``os._exit`` cuts the process off.
+    """
+    if duration_ms <= 0:
+        return
+    try:
+        from PySide6.QtCore import QCoreApplication, QEventLoop, QThread
+    except Exception:
+        return
+
+    try:
+        app = QCoreApplication.instance()
+        if app is None:
+            return
+        try:
+            if QThread.currentThread() != app.thread():
+                return
+        except Exception:
+            pass
+
+        deadline = time.monotonic() + (duration_ms / 1000.0)
+        slice_ms = max(1, int(slice_ms or 1))
+        while time.monotonic() < deadline:
+            try:
+                app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, slice_ms)
+            except Exception:
+                try:
+                    app.processEvents()
+                except Exception:
+                    return
+            time.sleep(0.01)
+    except Exception:
+        pass
+
+
 def _terminate_multiprocessing_children(timeout: float = 1.5) -> None:
     try:
         import multiprocessing as mp
@@ -785,6 +824,7 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     code = _normalize_exit_code(exit_code)
     _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
+    drain_qt_events_for_shutdown(duration_ms=350)
     # Kill descendants first so their handles to _MEIPASS drop before the
     # bootloader tries to rmtree it after we return.
     _terminate_multiprocessing_children()

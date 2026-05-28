@@ -2624,7 +2624,7 @@ Text to analyze:
                 print(f"[CLOSE] Warning: Could not save config on close: {e}")
             
             # Stop any background operations first
-            self.stop_all_operations()
+            self.stop_all_operations(kill_child_processes=False)
             self._restore_in_progress_rows_for_shutdown()
 
             # Aggressively free PyInstaller temp dir to avoid warning message box
@@ -2657,30 +2657,6 @@ Text to analyze:
                 app.quit()
             
             print("[CLOSE] Close event handling completed")
-            
-            # Use immediate hard exit to prevent lingering background processes (especially for .exe)
-            # This is safer than relying on Python shutdown which waits for non-daemon threads.
-            # NOTE: force_shutdown() ends with os._exit(), which SKIPS atexit handlers.
-            # Run the [CLEANUP] logging hooks explicitly here so they always fire
-            # on the normal close path (the atexit registration is a fallback for
-            # exit paths that don't go through force_shutdown).
-            try:
-                _sweep_large_caches(phase="exit")
-            except Exception:
-                pass
-            try:
-                _log_mei_cleanup_on_exit()
-            except Exception:
-                pass
-            try:
-                from shutdown_utils import force_shutdown
-                force_shutdown(0)
-            except Exception:
-                try:
-                    import os
-                    os._exit(0)
-                except Exception:
-                    pass
             
         except Exception as e:
             print(f"[CLOSE] Error during close: {e}")
@@ -2742,7 +2718,7 @@ Text to analyze:
         except Exception as e:
             print(f"[CLOSE] Warning: shutdown progress cleanup failed: {e}")
 
-    def stop_all_operations(self):
+    def stop_all_operations(self, kill_child_processes=True):
         """Stop all background operations and threads"""
         try:
             print("[CLEANUP] Stopping all background operations...")
@@ -2964,40 +2940,43 @@ Text to analyze:
                 except Exception:
                     pass
 
-            # Kill stray QtWebEngine child processes that can lock the PyInstaller _MEI temp dir
-            try:
-                import psutil, sys
-                meipass = getattr(sys, "_MEIPASS", "").lower()
-                victims = []
-                for proc in psutil.process_iter(["name", "exe"]):
-                    name = (proc.info.get("name") or "").lower()
-                    exe = (proc.info.get("exe") or "").lower()
-                    if "qtwebengineprocess" in name or "qtwebengineprocess" in exe:
-                        if not meipass or meipass in exe:
-                            victims.append(proc)
-                for p in victims:
-                    try:
-                        p.terminate()
-                    except Exception:
-                        pass
-                if victims:
-                    psutil.wait_procs(victims, timeout=1)
-            except Exception:
-                # Fallback to taskkill if psutil unavailable (Windows only)
-                if os.name == 'nt':
-                    try:
-                        import subprocess
-                        subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except Exception:
-                        pass
+            if kill_child_processes:
+                # Kill stray QtWebEngine child processes that can lock the PyInstaller _MEI temp dir.
+                # Normal GUI close leaves this to shutdown_utils.force_shutdown() after Qt has had
+                # a chance to drain WebEngine teardown events.
+                try:
+                    import psutil, sys
+                    meipass = getattr(sys, "_MEIPASS", "").lower()
+                    victims = []
+                    for proc in psutil.process_iter(["name", "exe"]):
+                        name = (proc.info.get("name") or "").lower()
+                        exe = (proc.info.get("exe") or "").lower()
+                        if "qtwebengineprocess" in name or "qtwebengineprocess" in exe:
+                            if not meipass or meipass in exe:
+                                victims.append(proc)
+                    for p in victims:
+                        try:
+                            p.terminate()
+                        except Exception:
+                            pass
+                    if victims:
+                        psutil.wait_procs(victims, timeout=1)
+                except Exception:
+                    # Fallback to taskkill if psutil unavailable (Windows only)
+                    if os.name == 'nt':
+                        try:
+                            import subprocess
+                            subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except Exception:
+                            pass
 
-            # Sweep any remaining children (helper workers, Qt subprocesses)
-            # so their handles to DLLs under _MEIPASS drop before we exit.
-            try:
-                _kill_child_process_tree()
-            except Exception:
-                pass
+                # Sweep any remaining children (helper workers, Qt subprocesses)
+                # so their handles to DLLs under _MEIPASS drop before we exit.
+                try:
+                    _kill_child_process_tree()
+                except Exception:
+                    pass
             # Remove temporary CBZ extraction folder if it exists
             try:
                 temp_root = getattr(self, 'cbz_temp_root', None)
@@ -27095,14 +27074,18 @@ if __name__ == "__main__":
             exit_code = 1
         except KeyboardInterrupt:
             print("[MAIN] Keyboard interrupt received")
-            main_window.stop_all_operations()
+            main_window.stop_all_operations(kill_child_processes=False)
             exit_code = 0
         
         # Ensure proper Qt cleanup
         try:
             print("[MAIN] Performing final Qt cleanup...")
-            main_window.stop_all_operations()
-            qapp.processEvents()  # Process any remaining events
+            main_window.stop_all_operations(kill_child_processes=False)
+            try:
+                from shutdown_utils import drain_qt_events_for_shutdown
+                drain_qt_events_for_shutdown(duration_ms=500)
+            except Exception:
+                qapp.processEvents()
             print("[MAIN] Qt cleanup completed")
         except Exception as e:
             print(f"[MAIN] Error during Qt cleanup: {e}")
@@ -27111,11 +27094,20 @@ if __name__ == "__main__":
         
         # Force hard exit to prevent lingering background threads
         try:
+            _sweep_large_caches(phase="exit")
+        except Exception:
+            pass
+        try:
+            _log_mei_cleanup_on_exit()
+        except Exception:
+            pass
+        try:
             from shutdown_utils import force_shutdown
             cleanup_fns = []
             try:
                 if 'main_window' in locals() and main_window:
-                    cleanup_fns.append(main_window.stop_all_operations)
+                    cleanup_fns.append(lambda: main_window.stop_all_operations(
+                        kill_child_processes=False))
             except Exception:
                 pass
             force_shutdown(exit_code, cleanup_fns=cleanup_fns)

@@ -18474,7 +18474,7 @@ class EpubReaderDialog(QDialog):
                     pass
                 if timer_name == "_overlay_refresh_timer":
                     self._overlay_refresh_timer = None
-        for browser_name in ("_reader", "_reader2", "_reader_all"):
+        for browser_name in ("_reader", "_reader_left", "_reader_right"):
             browser = getattr(self, browser_name, None)
             if browser is not None:
                 try:
