@@ -78,7 +78,6 @@ except ImportError:
     animate_icon = lambda *args, **kwargs: None
 import json
 import threading
-import copy
 import time
 import queue
 from typing import Dict, List, Optional, Tuple
@@ -1714,6 +1713,42 @@ class MultiAPIKeyDialog(QDialog):
         """Disable mousewheel scrolling on a combobox (PySide6)"""
         combobox.wheelEvent = lambda event: None
 
+    def _set_combo_text_silently(self, combo, text):
+        """Set editable combo text without triggering live model refresh/completer work."""
+        if combo is None:
+            return
+        previous_suspend = getattr(self, '_suspend_model_requirement_refresh', False)
+        self._suspend_model_requirement_refresh = True
+        combo_blocked = False
+        line_blocked = None
+        try:
+            combo_blocked = combo.blockSignals(True)
+            line_edit = combo.lineEdit() if hasattr(combo, 'lineEdit') else None
+            if line_edit is not None:
+                line_blocked = line_edit.blockSignals(True)
+                line_edit.setText(text)
+            else:
+                combo.setCurrentText(text)
+            timer = getattr(combo, '_model_completer_search_timer', None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+        except RuntimeError:
+            pass
+        except Exception:
+            try:
+                combo.setCurrentText(text)
+            except Exception:
+                pass
+        finally:
+            try:
+                line_edit = combo.lineEdit() if hasattr(combo, 'lineEdit') else None
+                if line_edit is not None and line_blocked is not None:
+                    line_edit.blockSignals(line_blocked)
+                combo.blockSignals(combo_blocked)
+            except Exception:
+                pass
+            self._suspend_model_requirement_refresh = previous_suspend
+
     def _get_model_options_for_dropdown(self):
         """Return the same model list shape used by the main translator dropdown."""
         models = None
@@ -1818,6 +1853,8 @@ class MultiAPIKeyDialog(QDialog):
 
     def _on_model_requirement_input_changed(self, immediate=False):
         """Debounce live model-field edits so typing in key pools stays responsive."""
+        if getattr(self, '_suspend_model_requirement_refresh', False):
+            return
         if immediate:
             try:
                 timer = getattr(self, '_model_requirement_refresh_timer', None)
@@ -2053,7 +2090,7 @@ class MultiAPIKeyDialog(QDialog):
     def _save_key_pool_config_snapshot_async(self):
         """Persist the already-updated config without running the full GUI save path."""
         try:
-            config_snapshot = copy.deepcopy(getattr(self.translator_gui, 'config', {}) or {})
+            config_snapshot = dict(getattr(self.translator_gui, 'config', {}) or {})
             config_path = getattr(self.translator_gui, 'config_file_path', None)
             if not config_path:
                 return
@@ -3301,7 +3338,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Clear inputs
         self.fallback_key_entry.clear()
-        self.fallback_model_combo.setCurrentText("")
+        self._set_combo_text_silently(self.fallback_model_combo, "")
         self.fallback_google_creds_entry.clear()
         self.fallback_azure_endpoint_entry.clear()
         self.fallback_google_region_entry.setText("us-east5")
@@ -5862,7 +5899,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Clear inputs
         self.glossary_key_entry.clear()
-        self.glossary_model_combo.setCurrentText("")
+        self._set_combo_text_silently(self.glossary_model_combo, "")
         self.glossary_google_creds_entry.clear()
         self.glossary_azure_endpoint_entry.clear()
         self.glossary_google_region_entry.setText("us-east5")
@@ -7129,7 +7166,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self.translator_gui, 'model_combo'):
             model = self.translator_gui.model_combo.currentText()
             if model:
-                self.model_combo.setCurrentText(model)
+                self._set_combo_text_silently(self.model_combo, model)
 
     def _add_key(self):
         """Add a new API key with optional Google credentials and individual endpoint"""
@@ -7176,7 +7213,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Clear inputs
         self.api_key_entry.clear()
-        self.model_combo.setCurrentText("")
+        self._set_combo_text_silently(self.model_combo, "")
         self.cooldown_spinbox.setValue(60)
         self.google_creds_entry.clear()
         self.azure_endpoint_entry.clear()
@@ -8561,7 +8598,7 @@ class MultiAPIKeyDialog(QDialog):
         })
         self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
         key_entry.clear()
-        model_combo.setCurrentText("")
+        self._set_combo_text_silently(model_combo, "")
         self._dedicated_widget(pool_name, 'google_creds_entry').clear()
         self._dedicated_widget(pool_name, 'azure_endpoint_entry').clear()
         self._dedicated_widget(pool_name, 'google_region_entry').setText("us-east5")
