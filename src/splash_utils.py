@@ -547,8 +547,12 @@ class SplashManager(QObject):
             "✅ EPUB converter loaded": 75,
             "Loading QA scanner...": 78,
             "✅ QA scanner loaded": 82,
+            "Loading manga tools...": 83,
+            "Manga tools loaded": 84,
             "Finalizing module initialization...": 85,
             "✅ All modules loaded successfully": 88,
+            "All startup modules loaded successfully": 88,
+            "All core modules loaded successfully": 88,
             
             "Creating main window...": 92,
             "Ready!": 100
@@ -689,6 +693,16 @@ class SplashManager(QObject):
                 "required": ("scan_html_folder",),
                 "result": lambda mod: mod.scan_html_folder,
             },
+            {
+                "key": "manga",
+                "module": "manga_integration",
+                "display": "manga tools",
+                "loading": "Loading manga tools...",
+                "loaded": "Manga tools loaded",
+                "required": ("MangaTranslationTab",),
+                "optional": True,
+                "result": lambda mod: mod.MangaTranslationTab,
+            },
         ]
 
         def _load_spec(spec):
@@ -715,7 +729,10 @@ class SplashManager(QObject):
                     results[key] = value
                     self.update_status(loaded_message)
                 except Exception as e:
-                    print(f"Warning: Could not import {spec['module']}: {e}")
+                    if spec.get("optional"):
+                        print(f"Optional startup module unavailable ({spec['module']}): {e}")
+                    else:
+                        print(f"Warning: Could not import {spec['module']}: {e}")
                 if self.app:
                     self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
             return results
@@ -746,7 +763,10 @@ class SplashManager(QObject):
                         results[key] = value
                         self.update_status(loaded_message)
                     except Exception as e:
-                        print(f"Warning: Could not import {spec['module']}: {e}")
+                        if spec.get("optional"):
+                            print(f"Optional startup module unavailable ({spec['module']}): {e}")
+                        else:
+                            print(f"Warning: Could not import {spec['module']}: {e}")
                 if self.app:
                     self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
                 if future_to_spec:

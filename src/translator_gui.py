@@ -627,13 +627,30 @@ try:
 except Exception:
     pass
     
-# Manga translation support (optional)
-try:
-    from manga_integration import MangaTranslationTab
-    MANGA_SUPPORT = True
-except ImportError:
-    MANGA_SUPPORT = False
-    print("Manga translation modules not found.")
+# Manga translation support is loaded during startup module loading so the
+# expensive import happens under the splash screen instead of before it appears.
+MangaTranslationTab = None
+MANGA_SUPPORT = False
+
+
+def _apply_manga_support(tab_class):
+    global MangaTranslationTab, MANGA_SUPPORT
+    MangaTranslationTab = tab_class
+    MANGA_SUPPORT = tab_class is not None
+
+
+def _load_manga_support_sync():
+    try:
+        from manga_integration import MangaTranslationTab as _MangaTranslationTab
+    except ImportError:
+        print("Manga translation modules not found.")
+        _apply_manga_support(None)
+    except Exception as e:
+        print(f"Manga translation modules failed to load: {e}")
+        _apply_manga_support(None)
+    else:
+        _apply_manga_support(_MangaTranslationTab)
+    return MangaTranslationTab
 
 # Async processing support (lazy loaded)
 ASYNC_SUPPORT = False
@@ -26881,20 +26898,25 @@ if __name__ == "__main__":
             glossary_main, glossary_stop_flag, glossary_stop_check = loading_results.get('glossary', (None, None, None))
             fallback_compile_epub = loading_results.get('epub')
             scan_html_folder = loading_results.get('scan')
+            manga_tab_class = loading_results.get('manga')
+            _apply_manga_support(manga_tab_class)
             
-            # Count modules
-            modules_loaded = 0
-            if translation_main: modules_loaded += 1
-            if glossary_main: modules_loaded += 1
-            if fallback_compile_epub: modules_loaded += 1
-            if scan_html_folder: modules_loaded += 1
+            # Count core modules separately so standard/lite builds without manga
+            # support do not report a degraded startup.
+            core_modules_loaded = 0
+            if translation_main: core_modules_loaded += 1
+            if glossary_main: core_modules_loaded += 1
+            if fallback_compile_epub: core_modules_loaded += 1
+            if scan_html_folder: core_modules_loaded += 1
             
             # Final status with pause for visibility
             splash_callback("Finalizing module initialization...")
-            if modules_loaded == 4:
-                splash_callback("✅ All modules loaded successfully")
+            if core_modules_loaded == 4 and manga_tab_class:
+                splash_callback("All startup modules loaded successfully")
+            elif core_modules_loaded == 4:
+                splash_callback("All core modules loaded successfully")
             else:
-                splash_callback(f"⚠️ {modules_loaded}/4 modules loaded")
+                splash_callback(f"{core_modules_loaded}/4 core modules loaded")
             
             # Store loaded modules globally for GUI access
             import translator_gui
@@ -26906,6 +26928,13 @@ if __name__ == "__main__":
             translator_gui.glossary_stop_check = glossary_stop_check
             translator_gui.fallback_compile_epub = fallback_compile_epub
             translator_gui.scan_html_folder = scan_html_folder
+            try:
+                translator_gui._apply_manga_support(manga_tab_class)
+            except Exception:
+                translator_gui.MangaTranslationTab = manga_tab_class
+                translator_gui.MANGA_SUPPORT = manga_tab_class is not None
+        else:
+            _load_manga_support_sync()
         
         if splash_manager:
             splash_manager.update_status("Creating main window...")
