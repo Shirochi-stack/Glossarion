@@ -29,6 +29,8 @@ except Exception:
 _configured = False
 _stylesheet_patch_installed = False
 _stylesheet_scale_factor = 1.0
+_qt_message_filter_installed = False
+_previous_qt_message_handler = None
 
 # Default scale factor when config.json has no value
 DEFAULT_SCALE_FACTOR = 1.0
@@ -616,6 +618,47 @@ def _append_qtwebengine_chromium_flag(flag):
             return
         parts.append(flag)
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(parts)
+    except Exception:
+        pass
+
+
+def _is_unsupported_scale_factor_message(message: object) -> bool:
+    text = str(message or "").strip()
+    return (
+        text.startswith("Unsupported scale factor (")
+        and ") detected on Display" in text
+    )
+
+
+def install_qt_message_filter():
+    """Silence only Qt's noisy WebEngine unsupported-scale warning."""
+    global _qt_message_filter_installed, _previous_qt_message_handler
+    if _qt_message_filter_installed:
+        return
+    if os.environ.get(
+            "GLOSSARION_SHOW_UNSUPPORTED_SCALE_WARNINGS", "").strip():
+        return
+    try:
+        from PySide6.QtCore import qInstallMessageHandler
+
+        def _handler(mode, context, message):
+            if _is_unsupported_scale_factor_message(message):
+                return
+            previous = _previous_qt_message_handler
+            if callable(previous):
+                try:
+                    previous(mode, context, message)
+                    return
+                except Exception:
+                    pass
+            try:
+                sys.stderr.write(str(message) + "\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+        _previous_qt_message_handler = qInstallMessageHandler(_handler)
+        _qt_message_filter_installed = True
     except Exception:
         pass
 

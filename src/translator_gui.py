@@ -411,6 +411,10 @@ try:
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
     from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
+    try:
+        dpi_setup.install_qt_message_filter()
+    except Exception:
+        pass
 except ImportError as e:
     print(f"\n{'='*60}")
     print("ERROR: PySide6 is not installed or could not be imported.")

@@ -32,6 +32,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
+try:
+    import dpi_setup
+    dpi_setup.install_qt_message_filter()
+except Exception:
+    pass
+
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -6673,6 +6679,7 @@ class EpubLibraryDialog(QDialog):
         self._ip_grid_container.empty_clicked.connect(self._on_empty_area_clicked)
         self._ip_grid_layout = QGridLayout(self._ip_grid_container)
         self._ip_grid_layout.setContentsMargins(1, 1, 1, 1)
+        self._ip_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._ip_scroll.setWidget(self._ip_grid_container)
         ip_layout.addWidget(self._ip_scroll, 1)
         # QScrollArea eats wheel events for its own scrolling, so the
@@ -6747,6 +6754,7 @@ class EpubLibraryDialog(QDialog):
         self._comp_grid_container.empty_clicked.connect(self._on_empty_area_clicked)
         self._comp_grid_layout = QGridLayout(self._comp_grid_container)
         self._comp_grid_layout.setContentsMargins(1, 1, 1, 1)
+        self._comp_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._comp_scroll.setWidget(self._comp_grid_container)
         comp_layout.addWidget(self._comp_scroll, 1)
         # Same Ctrl+Wheel interception as the In Progress scroll area.
@@ -9176,9 +9184,12 @@ class EpubLibraryDialog(QDialog):
         if loading_visible:
             self._pump_loading_events()
 
-        for c in range(grid_layout.columnCount()):
+        # Keep the grid packed from the top-left. A stretch spacer column
+        # here can leave cached cards stranded at the far edge after a
+        # viewport-width or scrollbar recalculation.
+        for c in range(max(grid_layout.columnCount(), cols + 2, 64)):
             grid_layout.setColumnStretch(c, 0)
-        grid_layout.setColumnStretch(cols, 1)
+        grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         # Pack cards to the top of the viewport: give the row below the
         # last populated row all of the vertical stretch. Without this,
