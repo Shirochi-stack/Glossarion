@@ -576,15 +576,15 @@ class SplashManager(QObject):
             
         self._status_text = message
 
-        if "Loading manga tools" in message:
-            self._manual_progress_auto_cap = 92
-        elif "QA scanner loaded" in message:
+        if "Loading QA scanner" in message:
             no_manga_startup = getattr(self, '_startup_manga_available', None) is False
+            self._manual_progress_auto_cap = 62 if no_manga_startup else 38
+            self._manual_progress_auto_boost = 1.0
+        elif "QA scanner loaded" in message:
             self._manual_progress_auto_cap = 92
-            self._manual_progress_auto_boost = 12.0 if no_manga_startup else 1.35
+            self._manual_progress_auto_boost = 2.0
         elif (
-            "Manga tools loaded" in message
-            or "Finalizing module initialization" in message
+            "Finalizing module initialization" in message
             or "Creating main window" in message
             or message == "Ready!"
         ):
@@ -601,8 +601,8 @@ class SplashManager(QObject):
             "Validating": 12,  # Partial match for "Validating X Python scripts..."
             "✅ All scripts validated": 25,
             
-            # Startup module loading is weighted around the expensive imports:
-            # TransateKRtoEN/unified API setup, then manga/vision/OCR tooling.
+            # Startup module loading is weighted around the core imports:
+            # TransateKRtoEN/unified API setup, glossary, EPUB, and QA scanning.
             "⚙️ Initializing startup modules...": 25,
             "Loading startup modules...": 25,
             "Loading translation modules...": 25,
@@ -619,10 +619,6 @@ class SplashManager(QObject):
             "Loading QA scanner...": 25,
             "🔍 QA scanner loaded": 38,
             "✅ QA scanner loaded": 38,
-            "🖼️ Loading manga tools...": 25,
-            "Loading manga tools...": 25,
-            "✅ Manga tools loaded": 88,
-            "Manga tools loaded": 88,
             "Finalizing module initialization...": 91,
             "✅ All modules loaded successfully": 92,
             "All startup modules loaded successfully": 92,
@@ -741,22 +737,6 @@ class SplashManager(QObject):
             import metadata_batch_translator  # noqa: F401
         except Exception:
             pass
-        if getattr(self, '_startup_manga_available', None) is False:
-            return
-        try:
-            from bubble_detector import BubbleDetector as _BD
-            try:
-                import manga_translator as _mt
-                _mt.BubbleDetector = _BD
-            except Exception:
-                pass
-        except ImportError:
-            try:
-                import manga_translator  # noqa: F401
-            except ImportError:
-                pass
-        except Exception as e:
-            print(f"Warning: background ML module load failed: {e}")
 
     def _is_startup_module_available(self, module_name):
         try:
@@ -837,17 +817,7 @@ class SplashManager(QObject):
                 "result": lambda mod: mod.scan_html_folder,
             },
         ]
-        if manga_available:
-            specs.append({
-                "key": "manga",
-                "module": "manga_integration",
-                "display": "manga tools",
-                "loading": "🖼️ Loading manga tools...",
-                "loaded": "✅ Manga tools loaded",
-                "required": ("MangaTranslationTab",),
-                "optional": True,
-                "result": lambda mod: mod.MangaTranslationTab,
-            })
+        results["manga_available"] = manga_available
 
         def _load_spec(spec):
             module = importlib.import_module(spec["module"])

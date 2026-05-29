@@ -655,29 +655,94 @@ try:
 except Exception:
     pass
     
-# Manga translation support is loaded during startup module loading so the
-# expensive import happens under the splash screen instead of before it appears.
+# Manga translation support is imported after the main window is constructed so
+# startup can show the toolbar immediately and keep the heavy imports in the
+# background.
 MangaTranslationTab = None
 MANGA_SUPPORT = False
+MANGA_IMPORT_FUTURE = None
+MANGA_IMPORT_LOADING = False
+MANGA_IMPORT_ERROR = None
+MANGA_IMPORT_EXECUTOR = None
 
 
 def _apply_manga_support(tab_class):
-    global MangaTranslationTab, MANGA_SUPPORT
+    global MangaTranslationTab, MANGA_SUPPORT, MANGA_IMPORT_LOADING
     MangaTranslationTab = tab_class
     MANGA_SUPPORT = tab_class is not None
+    MANGA_IMPORT_LOADING = False
 
 
-def _load_manga_support_sync():
+def _set_manga_import_future(future):
+    global MANGA_IMPORT_FUTURE, MANGA_IMPORT_LOADING, MANGA_IMPORT_ERROR
+    MANGA_IMPORT_FUTURE = future
+    MANGA_IMPORT_ERROR = None
+    MANGA_IMPORT_LOADING = future is not None and not future.done()
+
+
+def _mark_manga_import_pending():
+    global MANGA_IMPORT_LOADING, MANGA_IMPORT_ERROR
+    MANGA_IMPORT_LOADING = True
+    MANGA_IMPORT_ERROR = None
+
+
+def _start_manga_import_background():
+    global MANGA_IMPORT_EXECUTOR
+    if MANGA_IMPORT_FUTURE is not None:
+        return MANGA_IMPORT_FUTURE
+    _mark_manga_import_pending()
+
+    def _load_manga():
+        import importlib
+        module = importlib.import_module("manga_integration")
+        if not hasattr(module, "MangaTranslationTab"):
+            raise ImportError("manga_integration missing MangaTranslationTab")
+        return "manga", module.MangaTranslationTab, "✅ Manga tools loaded"
+
+    MANGA_IMPORT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="manga-import",
+    )
+    future = MANGA_IMPORT_EXECUTOR.submit(_load_manga)
+    _set_manga_import_future(future)
+
+    def _shutdown_manga_import_executor(_future):
+        global MANGA_IMPORT_EXECUTOR
+        try:
+            if MANGA_IMPORT_EXECUTOR is not None:
+                MANGA_IMPORT_EXECUTOR.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            pass
+        MANGA_IMPORT_EXECUTOR = None
+
+    future.add_done_callback(_shutdown_manga_import_executor)
+    return future
+
+
+def _consume_manga_import_future(future=None):
+    global MANGA_IMPORT_FUTURE, MANGA_IMPORT_LOADING, MANGA_IMPORT_ERROR
+    future = future or MANGA_IMPORT_FUTURE
+    if future is None:
+        return MangaTranslationTab
+    if not future.done():
+        MANGA_IMPORT_LOADING = True
+        return None
     try:
-        from manga_integration import MangaTranslationTab as _MangaTranslationTab
+        result = future.result()
+        tab_class = result[1] if isinstance(result, tuple) and len(result) >= 2 else result
+        _apply_manga_support(tab_class)
+        MANGA_IMPORT_ERROR = None
     except ImportError:
         print("Manga translation modules not found.")
         _apply_manga_support(None)
+        MANGA_IMPORT_ERROR = "Manga translation modules not found."
     except Exception as e:
         print(f"Manga translation modules failed to load: {e}")
         _apply_manga_support(None)
-    else:
-        _apply_manga_support(_MangaTranslationTab)
+        MANGA_IMPORT_ERROR = str(e)
+    finally:
+        MANGA_IMPORT_FUTURE = None
+        MANGA_IMPORT_LOADING = False
     return MangaTranslationTab
 
 # Async processing support (lazy loaded)
@@ -3407,6 +3472,14 @@ Text to analyze:
         
     def open_manga_translator(self):
         """Open manga translator in a new window"""
+        try:
+            if MANGA_IMPORT_FUTURE is not None:
+                _consume_manga_import_future()
+        except Exception:
+            pass
+        if MANGA_IMPORT_LOADING:
+            QMessageBox.information(self, "Manga Translator", "Manga imports are still loading.")
+            return
         if not MANGA_SUPPORT:
             QMessageBox.warning(self, "Not Available", "Manga translation modules not found.")
             return
@@ -4172,6 +4245,7 @@ Recent translations to summarize:
         bottom_toolbar = self._make_bottom_toolbar()
         self.bottom_toolbar = bottom_toolbar
         self.frame.addWidget(bottom_toolbar, 12, 0, 1, 5)  # Span all 5 columns at row 12
+        self._refresh_manga_import_button_state()
 
         # Apply initial dynamic sizing for prompt/log split
         try:
@@ -12721,6 +12795,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.set_startup_prewarm_button_loading('epub_library', loading)
         except Exception:
             pass
+
+    def _refresh_manga_import_button_state(self):
+        """Keep the Manga Translator toolbar button synced with background imports."""
+        try:
+            button = getattr(self, 'manga_translator_btn', None)
+            if button is None:
+                return
+
+            if MANGA_IMPORT_FUTURE is not None:
+                _consume_manga_import_future()
+
+            if MANGA_IMPORT_LOADING:
+                self.set_startup_prewarm_button_loading('manga_imports', True, "⌛ Loading Imports")
+                try:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(250, self._refresh_manga_import_button_state)
+                except Exception:
+                    pass
+                return
+
+            self.set_startup_prewarm_button_loading('manga_imports', False)
+            if MANGA_SUPPORT:
+                button.setEnabled(True)
+                button.setToolTip("Open the manga panel translator.")
+            else:
+                button.setEnabled(False)
+                button.setToolTip(MANGA_IMPORT_ERROR or "Manga translation modules not found.")
+        except Exception:
+            pass
       
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
@@ -13163,8 +13266,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             ("Progress Manager", self.open_progress_manager, "progress"),
         ])
 
-        # Place Manga Translator immediately to the right of Progress Manager
-        if MANGA_SUPPORT:
+        # Place Manga Translator immediately to the right of Progress Manager.
+        # If imports are still running, the button stays visible but disabled.
+        if MANGA_SUPPORT or MANGA_IMPORT_LOADING or MANGA_IMPORT_FUTURE is not None:
             toolbar_items.append(("🖼️ Manga Translator", self.open_manga_translator, "primary"))
 
         toolbar_items.extend([
@@ -13210,6 +13314,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.async_translator_btn = btn
                 self._register_startup_prewarm_button(
                     'async_translator', btn, loading_text="Loading..."
+                )
+            elif "Manga Translator" in lbl:
+                self.manga_translator_btn = btn
+                self._register_startup_prewarm_button(
+                    'manga_imports', btn, loading_text="⌛ Loading Imports"
                 )
 
             btn.setMinimumHeight(toolbar_button_height)
@@ -13272,6 +13381,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 f"background-color: {color}; "
                 f"}}"
             )
+            try:
+                registry = getattr(self, '_startup_prewarm_button_registry', {})
+                for entry in registry.values():
+                    if entry.get('button') is btn:
+                        entry['normal_style'] = btn.styleSheet()
+                        if not entry.get('is_loading', False):
+                            entry.pop('active_style', None)
+            except Exception:
+                pass
 
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
@@ -27294,8 +27412,12 @@ if __name__ == "__main__":
             glossary_main, glossary_stop_flag, glossary_stop_check = loading_results.get('glossary', (None, None, None))
             fallback_compile_epub = loading_results.get('epub')
             scan_html_folder = loading_results.get('scan')
+            manga_available = bool(loading_results.get('manga_available'))
             manga_tab_class = loading_results.get('manga')
-            _apply_manga_support(manga_tab_class)
+            if manga_available:
+                _mark_manga_import_pending()
+            else:
+                _apply_manga_support(manga_tab_class)
             
             # Count core modules separately so standard/lite builds without manga
             # support do not report a degraded startup.
@@ -27325,12 +27447,23 @@ if __name__ == "__main__":
             translator_gui.fallback_compile_epub = fallback_compile_epub
             translator_gui.scan_html_folder = scan_html_folder
             try:
-                translator_gui._apply_manga_support(manga_tab_class)
+                if manga_available:
+                    translator_gui._mark_manga_import_pending()
+                else:
+                    translator_gui._apply_manga_support(manga_tab_class)
             except Exception:
                 translator_gui.MangaTranslationTab = manga_tab_class
                 translator_gui.MANGA_SUPPORT = manga_tab_class is not None
         else:
-            _load_manga_support_sync()
+            try:
+                import importlib.util
+                manga_available = importlib.util.find_spec("manga_integration") is not None
+            except Exception:
+                manga_available = False
+            if manga_available:
+                _mark_manga_import_pending()
+            else:
+                _apply_manga_support(None)
         
         if splash_manager:
             splash_manager.update_status("🪟 Creating main window...")
@@ -27358,6 +27491,31 @@ if __name__ == "__main__":
         
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
+
+        should_start_manga_imports = bool(globals().get('manga_available', False))
+        if should_start_manga_imports:
+            try:
+                main_window._refresh_manga_import_button_state()
+            except Exception:
+                pass
+
+        def _kickoff_manga_import_after_show():
+            if not should_start_manga_imports:
+                return
+            try:
+                manga_future = _start_manga_import_background()
+                try:
+                    translator_gui._set_manga_import_future(manga_future)
+                except Exception:
+                    pass
+                main_window._refresh_manga_import_button_state()
+            except Exception as e:
+                print(f"Manga translation modules failed to start loading: {e}")
+                _apply_manga_support(None)
+                try:
+                    main_window._refresh_manga_import_button_state()
+                except Exception:
+                    pass
         
         # Mark modules as already loaded to skip lazy loading
         main_window._modules_loaded = True
@@ -27377,10 +27535,16 @@ if __name__ == "__main__":
             main_window.showNormal()
             main_window.raise_()
             main_window.activateWindow()
+            QTimer.singleShot(0, _kickoff_manga_import_after_show)
             # Re-assert focus shortly after show to avoid race with splash/OS focus
             QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
         except Exception:
             main_window.show()
+            try:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, _kickoff_manga_import_after_show)
+            except Exception:
+                _kickoff_manga_import_after_show()
 
         try:
             if getattr(main_window, '_pending_glossary_mode_welcome', False):

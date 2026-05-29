@@ -4232,19 +4232,20 @@ class MangaSettingsDialog(QDialog):
         self.max_workers_spinbox.setRange(1, 999)
         self.max_workers_spinbox.setValue(self.settings['advanced']['max_workers'])
         self.max_workers_spinbox.setToolTip(f"Maximum worker threads. Detected CPU cores: {manga_cpu_cores}.")
-        workers_layout.addWidget(self.max_workers_spinbox)
+        self.max_workers_spinbox.setMinimumWidth(92)
+        self.max_workers_spinbox.setFixedHeight(26)
+        self.max_workers_spinbox.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        try:
+            self.max_workers_spinbox.lineEdit().setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        except Exception:
+            pass
+        workers_layout.addWidget(self.max_workers_spinbox, 0, Qt.AlignmentFlag.AlignVCenter)
         
         self.workers_desc_label = QLabel(f"(threads for parallel processing; CPU cores: {manga_cpu_cores})")
-        workers_layout.addWidget(self.workers_desc_label)
+        workers_layout.addWidget(self.workers_desc_label, 0, Qt.AlignmentFlag.AlignVCenter)
         workers_layout.addStretch()
 
         self._max_workers_cpu_cores = manga_cpu_cores
-        self._max_workers_default_palette = QPalette(self.max_workers_spinbox.palette())
-        self._max_workers_warning_palette = QPalette(self._max_workers_default_palette)
-        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Base, QColor("#3a171b"))
-        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Text, QColor("#ffb3b3"))
-        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Highlight, QColor("#7a2832"))
-        self._max_workers_warning_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
         self.max_workers_spinbox.valueChanged.connect(self._update_max_workers_warning_style)
         
         # Initialize workers state
@@ -4654,13 +4655,14 @@ class MangaSettingsDialog(QDialog):
             enabled = bool(self.parallel_processing_checkbox.isChecked())
             if hasattr(self, 'max_workers_spinbox'):
                 self.max_workers_spinbox.setEnabled(enabled)
-                self._update_max_workers_warning_style()
             if hasattr(self, 'workers_label'):
                 self.workers_label.setEnabled(enabled)
                 self.workers_label.setStyleSheet("color: white;" if enabled else "color: gray;")
             if hasattr(self, 'workers_desc_label'):
                 self.workers_desc_label.setEnabled(enabled)
                 self.workers_desc_label.setStyleSheet("color: white;" if enabled else "color: gray;")
+            if hasattr(self, 'max_workers_spinbox'):
+                self._update_max_workers_warning_style()
 
     def _update_max_workers_warning_style(self, *_args):
         """Warn when manga max workers exceed detected CPU cores."""
@@ -4671,12 +4673,35 @@ class MangaSettingsDialog(QDialog):
             enabled = bool(getattr(self, 'parallel_processing_checkbox', None) and self.parallel_processing_checkbox.isChecked())
             cores = max(1, int(getattr(self, '_max_workers_cpu_cores', os.cpu_count() or 1) or 1))
             too_many = enabled and int(spinbox.value()) > cores
-            spinbox.setStyleSheet("")
+            color_hex = "#ff4d4d" if too_many else ("#ffffff" if enabled else "#666666")
+            disabled_color = QColor("#666666")
+            color = QColor(color_hex)
+            for widget in (spinbox, spinbox.lineEdit()):
+                palette = widget.palette()
+                for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                    palette.setColor(group, QPalette.ColorRole.Text, color)
+                    palette.setColor(group, QPalette.ColorRole.WindowText, color)
+                    palette.setColor(group, QPalette.ColorRole.ButtonText, color)
+                    palette.setColor(group, QPalette.ColorRole.HighlightedText, color)
+                for group in (QPalette.ColorGroup.Disabled,):
+                    palette.setColor(group, QPalette.ColorRole.Text, disabled_color)
+                    palette.setColor(group, QPalette.ColorRole.WindowText, disabled_color)
+                    palette.setColor(group, QPalette.ColorRole.ButtonText, disabled_color)
+                    palette.setColor(group, QPalette.ColorRole.HighlightedText, disabled_color)
+                widget.setPalette(palette)
+            spinbox.setStyleSheet(
+                f"QSpinBox {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                "QSpinBox:disabled { color: #666666; selection-color: #666666; }"
+            )
+            spinbox.lineEdit().setStyleSheet(
+                f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                "QLineEdit:disabled { color: #666666; selection-color: #666666; }"
+            )
+            if hasattr(self, 'workers_label'):
+                self.workers_label.setStyleSheet(f"color: {color_hex};")
             if too_many:
-                spinbox.setPalette(getattr(self, '_max_workers_warning_palette', spinbox.palette()))
                 spinbox.setToolTip(f"Maximum worker threads exceed detected CPU cores ({cores}).")
             else:
-                spinbox.setPalette(getattr(self, '_max_workers_default_palette', spinbox.palette()))
                 spinbox.setToolTip(f"Maximum worker threads. Detected CPU cores: {cores}.")
         except Exception:
             pass
