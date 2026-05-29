@@ -3681,6 +3681,12 @@ def _create_response_handling_section(self, parent):
 
 
     # Parallel Extraction
+    try:
+        parallel_cpu_cores = multiprocessing.cpu_count()
+    except Exception:
+        parallel_cpu_cores = os.cpu_count() or 1
+    parallel_cpu_cores = max(1, int(parallel_cpu_cores or 1))
+
     parallel_title = QLabel("Parallel Extraction")
     parallel_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(parallel_title)
@@ -3708,13 +3714,39 @@ def _create_response_handling_section(self, parent):
     extraction_h.addWidget(self.workers_label)
     self.extraction_workers_entry = QLineEdit()
     self.extraction_workers_entry.setFixedWidth(50)
+    self.extraction_workers_entry.setToolTip(f"Worker threads. Detected CPU cores: {parallel_cpu_cores}.")
     try:
         self.extraction_workers_entry.setText(str(self.extraction_workers_var))
     except Exception:
         pass
+    def _update_extraction_workers_warning_style():
+        try:
+            raw_workers = self.extraction_workers_entry.text()
+            workers = int(str(raw_workers).strip())
+            enabled = bool(getattr(self, 'enable_parallel_extraction_var', False))
+            too_many = enabled and workers > parallel_cpu_cores
+        except (TypeError, ValueError):
+            enabled = bool(getattr(self, 'enable_parallel_extraction_var', False))
+            too_many = enabled
+        if too_many:
+            self.extraction_workers_entry.setStyleSheet(
+                "QLineEdit { background-color: #3a171b; color: #ffb3b3; "
+                "border: 1px solid #dc3545; border-radius: 3px; padding: 4px; } "
+                "QLineEdit:focus { border: 2px solid #ff4d5e; }"
+            )
+            self.extraction_workers_entry.setToolTip(
+                f"Worker threads exceed detected CPU cores ({parallel_cpu_cores})."
+            )
+        else:
+            self.extraction_workers_entry.setStyleSheet("")
+            self.extraction_workers_entry.setToolTip(
+                f"Worker threads. Detected CPU cores: {parallel_cpu_cores}."
+            )
+    self._update_extraction_workers_warning_style = _update_extraction_workers_warning_style
     def _on_workers_changed(text):
         try:
             self.extraction_workers_var = text
+            self._update_extraction_workers_warning_style()
             if bool(getattr(self, 'enable_parallel_extraction_var', False)):
                 os.environ["EXTRACTION_WORKERS"] = str(text)
                 try:
@@ -3724,14 +3756,18 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.extraction_workers_entry.textChanged.connect(_on_workers_changed)
+    self._update_extraction_workers_warning_style()
     extraction_h.addWidget(self.extraction_workers_entry)
-    self.threads_label = QLabel("threads")
+    self.threads_label = QLabel(f"threads (CPU cores: {parallel_cpu_cores})")
     extraction_h.addWidget(self.threads_label)
     extraction_h.addStretch()
     section_v.addWidget(extraction_row)
     
     # Store reference to description label for enable/disable
-    self.parallel_desc_label = QLabel("Speed up EPUB extraction, reader loading, and reader search using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)")
+    self.parallel_desc_label = QLabel(
+        "Speed up EPUB extraction, reader loading, reader search, and glossary editor output-file updates using multiple threads.\n"
+        f"Recommended: 4-8 workers; detected CPU cores: {parallel_cpu_cores} (set to 1 to disable)"
+    )
     self.parallel_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.parallel_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.parallel_desc_label)
@@ -5131,6 +5167,10 @@ def toggle_extraction_workers(self):
         # Workers entry
         if hasattr(self, 'extraction_workers_entry'):
             self.extraction_workers_entry.setEnabled(enabled)
+            try:
+                self._update_extraction_workers_warning_style()
+            except Exception:
+                pass
             
         # Workers and threads labels
         if hasattr(self, 'workers_label'):

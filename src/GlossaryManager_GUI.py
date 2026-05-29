@@ -5699,14 +5699,14 @@ Do not stop after the glossary."""
         editor_layout = QVBoxLayout(parent)
         editor_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Toggle: update HTML files when translated names change
+        # Toggle: update output files when translated names change
         html_toggle_widget = QWidget()
         html_toggle_layout = QHBoxLayout(html_toggle_widget)
         html_toggle_layout.setContentsMargins(0, 0, 0, 4)
-        self.update_html_on_save_checkbox = self._create_styled_checkbox("Update all HTML files on save")
+        self.update_html_on_save_checkbox = self._create_styled_checkbox("Update output files on save")
         self.update_html_on_save_checkbox.setChecked(self.config.get('update_html_on_save', True))
         self.update_html_on_save_checkbox.setToolTip(
-            "When enabled, saving will also replace updated translated names across all .html files."
+            "When enabled, saving will also replace updated translated names in direct files in the book output folder."
         )
         def _persist_update_html(state):
             self.config['update_html_on_save'] = bool(state)
@@ -7445,14 +7445,14 @@ Do not stop after the glossary."""
                         changes.append((old, new))
             return changes
 
-        def update_html_files(changes):
-            """Replace old translated names with new ones across .html files."""
+        def _update_html_files_legacy(changes):
+            """Legacy sequential output-file updater."""
             if not changes:
                 return 0, 0
             
             glossary_path = self.editor_file_entry.text()
             if not glossary_path or not os.path.exists(glossary_path):
-                self.append_log("⚠️ Cannot update HTML files: no glossary file loaded.")
+                self.append_log("⚠️ Cannot update output files: no glossary file loaded.")
                 return 0, 0
             
             glossary_dir = os.path.dirname(glossary_path)
@@ -7495,10 +7495,10 @@ Do not stop after the glossary."""
                 book_output_dir = glossary_dir
 
             if not os.path.isdir(book_output_dir):
-                self.append_log(f"⚠️ Cannot update HTML files: directory not found: {book_output_dir}")
+                self.append_log(f"⚠️ Cannot update output files: directory not found: {book_output_dir}")
                 return 0, 0
 
-            self.append_log(f"📁 Scanning for HTML files in: {book_output_dir}")
+            self.append_log(f"📁 Scanning output files in: {book_output_dir}")
 
             files_updated = 0
             total_replacements = 0
@@ -7620,6 +7620,213 @@ Do not stop after the glossary."""
                 except Exception as e:
                     self.append_log(f"⚠️ Failed to update {path}: {e}")
             return files_updated, total_replacements
+
+        def update_html_files(changes):
+            """Replace old translated names with new ones across output files."""
+            if not changes:
+                return 0, 0
+
+            effective_changes = [(old, new) for old, new in changes if old and new and old != new]
+            if not effective_changes:
+                return 0, 0
+
+            glossary_path = self.editor_file_entry.text()
+            if not glossary_path or not os.path.exists(glossary_path):
+                self.append_log("Cannot update output files: no glossary file loaded.")
+                return 0, 0
+
+            glossary_dir = os.path.dirname(glossary_path)
+            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]
+            parent_of_glossary_dir = os.path.dirname(glossary_dir)
+            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
+            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
+
+            book_output_dir = None
+            if is_shared_glossary_folder:
+                book_name = None
+                for suffix in ('_glossary', '_Glossary'):
+                    if glossary_fname.endswith(suffix):
+                        book_name = glossary_fname[:-len(suffix)]
+                        break
+                if not book_name:
+                    book_name = glossary_fname
+                if book_name:
+                    candidate = os.path.join(parent_of_glossary_dir, book_name)
+                    if os.path.isdir(candidate):
+                        book_output_dir = candidate
+                if not book_output_dir:
+                    book_output_dir = parent_of_glossary_dir
+            elif is_book_glossary_subfolder:
+                book_name = os.path.basename(glossary_dir)
+                grandparent = os.path.dirname(parent_of_glossary_dir)
+                candidate = os.path.join(grandparent, book_name)
+                book_output_dir = candidate if os.path.isdir(candidate) else grandparent
+            else:
+                book_output_dir = glossary_dir
+
+            if not os.path.isdir(book_output_dir):
+                self.append_log(f"Cannot update output files: directory not found: {book_output_dir}")
+                return 0, 0
+
+            self.append_log(f"Scanning output files in: {book_output_dir}")
+
+            excluded_extensions = {'.csv', '.json'}
+            excluded_names = {'metadata.json', 'metadata.opf', 'metadata.xml', 'content.opf', 'toc.ncx'}
+            candidate_paths = []
+            for name in sorted(os.listdir(book_output_dir)):
+                path = os.path.join(book_output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                lower_name = name.lower()
+                if any(lower_name.endswith(ext) for ext in excluded_extensions):
+                    continue
+                if lower_name in excluded_names:
+                    continue
+                candidate_paths.append(path)
+
+            if not candidate_paths:
+                return 0, 0
+
+            def _configured_update_workers():
+                enabled = bool(
+                    getattr(
+                        self,
+                        'enable_parallel_extraction_var',
+                        self.config.get('enable_parallel_extraction', False),
+                    )
+                )
+                if not enabled:
+                    return 1
+                raw_workers = getattr(
+                    self,
+                    'extraction_workers_var',
+                    self.config.get('extraction_workers', os.environ.get('EXTRACTION_WORKERS', 1)),
+                )
+                try:
+                    workers = int(raw_workers)
+                except (TypeError, ValueError):
+                    workers = 1
+                return max(1, workers)
+
+            def _update_one_file(path):
+                logs = []
+                try:
+                    with open(path, 'rb') as f:
+                        raw_bytes = f.read()
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('utf-8', errors='replace')
+
+                    new_content = content
+                    per_pair_counts = []
+                    for old, new in effective_changes:
+                        before_count = new_content.count(old)
+                        if before_count == 0:
+                            continue
+                        new_content = new_content.replace(old, new)
+                        per_pair_counts.append((old, new, before_count))
+
+                    if new_content == content:
+                        return {"path": path, "files_updated": 0, "replacements": 0, "logs": logs}
+
+                    try:
+                        stat_before = os.stat(path)
+                        mtime_before = stat_before.st_mtime
+                        size_before = stat_before.st_size
+                    except Exception:
+                        mtime_before, size_before = None, None
+
+                    new_bytes = new_content.encode('utf-8')
+                    with open(path, 'wb') as f:
+                        f.write(new_bytes)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except Exception:
+                            pass
+
+                    try:
+                        with open(path, 'rb') as f:
+                            verify_bytes = f.read()
+                        stat_after = os.stat(path)
+                        mtime_after = stat_after.st_mtime
+                        size_after = stat_after.st_size
+                    except Exception as ve:
+                        logs.append(f"Could not verify write of {path}: {ve}")
+                        verify_bytes = None
+                        mtime_after, size_after = None, None
+
+                    replaced_here = sum(c for _o, _n, c in per_pair_counts)
+                    write_landed = verify_bytes == new_bytes
+                    if write_landed:
+                        logs.append(
+                            f"Updated file: {path} ({replaced_here} replacements, "
+                            f"{size_before} -> {size_after} bytes)"
+                        )
+                        return {"path": path, "files_updated": 1, "replacements": replaced_here, "logs": logs}
+
+                    resolved = os.path.realpath(path)
+                    logs.append(
+                        f"Write did NOT persist for {path}"
+                        + (f" (realpath: {resolved})" if resolved != path else "")
+                    )
+                    logs.append(
+                        f"   expected {len(new_bytes)} bytes, found {size_after} bytes"
+                        + (f" (mtime {mtime_before} -> {mtime_after})" if mtime_before is not None else "")
+                    )
+                    if verify_bytes is not None:
+                        try:
+                            verify_text = verify_bytes.decode('utf-8', errors='replace')
+                            for old, new, _cnt in per_pair_counts:
+                                still = verify_text.count(old)
+                                if still:
+                                    logs.append(f"   - '{old}' still present {still} time(s) (expected 0)")
+                        except Exception:
+                            pass
+                    logs.append(
+                        "   Likely causes: file locked by another app, OneDrive/antivirus revert, "
+                        "or read-only attribute. Try closing viewers and retry."
+                    )
+                    return {"path": path, "files_updated": 0, "replacements": replaced_here, "logs": logs}
+                except Exception as e:
+                    return {
+                        "path": path,
+                        "files_updated": 0,
+                        "replacements": 0,
+                        "logs": [f"Failed to update {path}: {e}"],
+                    }
+
+            workers = _configured_update_workers()
+            if workers > 1 and len(candidate_paths) > 1:
+                self.append_log(f"Updating {len(candidate_paths)} output files with {workers} worker threads")
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                results = []
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="GlossaryFileUpdate") as executor:
+                    future_to_path = {executor.submit(_update_one_file, path): path for path in candidate_paths}
+                    for future in as_completed(future_to_path):
+                        try:
+                            results.append(future.result())
+                        except Exception as e:
+                            path = future_to_path.get(future, "<unknown>")
+                            results.append({
+                                "path": path,
+                                "files_updated": 0,
+                                "replacements": 0,
+                                "logs": [f"Failed to update {path}: {e}"],
+                            })
+                results.sort(key=lambda item: item.get("path", ""))
+            else:
+                results = [_update_one_file(path) for path in candidate_paths]
+
+            files_updated = 0
+            total_replacements = 0
+            for result in results:
+                files_updated += int(result.get("files_updated", 0) or 0)
+                total_replacements += int(result.get("replacements", 0) or 0)
+                for line in result.get("logs", []):
+                    self.append_log(line)
+            return files_updated, total_replacements
         
         def save_edited_glossary():
            changes = collect_translated_changes()
@@ -7627,8 +7834,8 @@ Do not stop after the glossary."""
                example_lines = "<br>".join(f"{old or '&lt;empty&gt;'} -> {new or '&lt;empty&gt;'}" for old, new in changes[:5])
                msg = QMessageBox(self.dialog)
                msg.setIcon(QMessageBox.Warning)
-               msg.setWindowTitle("Update HTML files")
-               msg.setText(f"{len(changes)} entries have had their translated name field updated.\nNow all HTML files will be updated to reflect the change.")
+               msg.setWindowTitle("Update output files")
+               msg.setText(f"{len(changes)} entries have had their translated name field updated.\nNow matching output files will be updated to reflect the change.")
                msg.setInformativeText(example_lines)
                msg.setTextFormat(Qt.RichText)
                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -8313,7 +8520,7 @@ Do not stop after the glossary."""
                     prompt = QMessageBox(self.dialog)
                     prompt.setIcon(QMessageBox.Question)
                     prompt.setWindowTitle("No glossary match")
-                    prompt.setText("No entry found in the glossary. Update HTML/TXT files directly?")
+                    prompt.setText("No entry found in the glossary. Update output files directly?")
                     prompt.setInformativeText(f"{old} -> {new}")
                     prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                     prompt.setDefaultButton(QMessageBox.Yes)
