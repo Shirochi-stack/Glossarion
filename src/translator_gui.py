@@ -27604,7 +27604,7 @@ if __name__ == "__main__":
         main_window._modules_loading = False
 
         if splash_manager:
-            splash_manager.update_status("Ready!")
+            splash_manager.show_ready_frame()
         
         # Show and paint the window while the splash is still on top. Closing
         # the splash first exposes a brief unpainted white Qt window on startup.
@@ -27617,7 +27617,6 @@ if __name__ == "__main__":
             main_window.activateWindow()
             main_window.repaint()
             qapp.processEvents(QEventLoop.ExcludeUserInputEvents)
-            QTimer.singleShot(0, _kickoff_manga_import_after_show)
             # Re-assert focus shortly after show to avoid race with splash/OS focus
             QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
         except Exception:
@@ -27627,15 +27626,19 @@ if __name__ == "__main__":
                 qapp.processEvents()
             except Exception:
                 pass
-            try:
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, _kickoff_manga_import_after_show)
-            except Exception:
-                _kickoff_manga_import_after_show()
 
         if splash_manager:
             splash_manager.close_splash()
         _pyi_splash_close()
+
+        if should_start_manga_imports:
+            try:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, _kickoff_manga_import_after_show)
+            except Exception:
+                # Last-resort fallback only; normal Qt startup must not block
+                # on manga imports before the main window is visible.
+                _kickoff_manga_import_after_show()
 
         try:
             if getattr(main_window, '_pending_glossary_mode_welcome', False):

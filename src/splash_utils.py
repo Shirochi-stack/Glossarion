@@ -665,7 +665,7 @@ class SplashManager(QObject):
         try:
             # Check for exact matches first
             if message in progress_map:
-                self.set_progress(progress_map[message])
+                self.set_progress(progress_map[message], immediate=(message == "Ready!"))
             else:
                 # Check for partial matches
                 for key, value in progress_map.items():
@@ -688,14 +688,14 @@ class SplashManager(QObject):
             # Widget deleted or not available
             pass
     
-    def set_progress(self, value):
+    def set_progress(self, value, immediate=False):
         """Move progress toward a new target (0-100), never backwards."""
         if self._closed:
             return
         
         value = max(0, min(100, value))
         current_target = max(getattr(self, '_progress_target', self.progress_value), self.progress_value)
-        if value <= current_target and value <= self.progress_value:
+        if value <= current_target and value <= self.progress_value and not immediate:
             return
         self._progress_target = max(current_target, value)
 
@@ -705,13 +705,26 @@ class SplashManager(QObject):
         except Exception:
             timer_active = False
 
-        if timer_active and self.splash_window:
+        if timer_active and self.splash_window and not immediate:
             return
 
-        # Validation mode stops the timer; keep that path immediate.
-        self.progress_value = self._progress_target
+        # Validation mode stops the timer; "Ready!" also needs one immediate
+        # paint so users see 100% before the main window takes over.
+        self.progress_value = value if immediate else self._progress_target
         try:
             self._progress_update_signal.emit(int(self.progress_value))
+        except Exception:
+            pass
+
+    def show_ready_frame(self, minimum_ms=45):
+        """Paint the final Ready/100% state briefly before showing the main UI."""
+        try:
+            self.update_status("Ready!")
+            deadline = time.time() + max(0.0, float(minimum_ms) / 1000.0)
+            while time.time() < deadline:
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                time.sleep(0.005)
         except Exception:
             pass
     
@@ -1091,7 +1104,6 @@ class SplashManager(QObject):
                     if self.app:
                         self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
                     
-                    time.sleep(0.1)
                 except RuntimeError:
                     # Widget already deleted by Qt, that's okay
                     pass
