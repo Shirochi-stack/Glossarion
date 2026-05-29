@@ -1648,6 +1648,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Auto-scroll control: delay forcing scroll on new runs
         self._autoscroll_delay_until = 0.0  # epoch seconds
         self._user_scrolled_up = False  # Track if user manually scrolled up
+        self._log_auto_scroll_disabled = False  # Explicit right-click toggle
         
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
@@ -21029,6 +21030,31 @@ Important rules:
             self._update_log_scroll_button()
         except Exception:
             pass
+
+    def _should_log_autoscroll(self):
+        try:
+            if getattr(self, '_log_auto_scroll_disabled', False):
+                return False
+            import time as _time
+            if _time.time() < getattr(self, '_autoscroll_delay_until', 0):
+                return False
+            return not getattr(self, '_user_scrolled_up', False)
+        except Exception:
+            return True
+
+    def _set_log_auto_scroll_disabled(self, disabled):
+        try:
+            self._log_auto_scroll_disabled = bool(disabled)
+            if self._log_auto_scroll_disabled:
+                self._user_scrolled_up = True
+            else:
+                self._user_scrolled_up = False
+                if hasattr(self, 'log_text') and self.log_text:
+                    sb = self.log_text.verticalScrollBar()
+                    sb.setValue(sb.maximum())
+            self._update_log_scroll_button()
+        except Exception:
+            pass
     
     def _start_autoscroll_delay(self, ms=0):
         try:
@@ -21140,7 +21166,7 @@ Important rules:
         try:
             if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
                 return
-            visible = bool(getattr(self, '_user_scrolled_up', False))
+            visible = bool(getattr(self, '_user_scrolled_up', False) or getattr(self, '_log_auto_scroll_disabled', False))
             self.log_scroll_btn.setVisible(visible)
             if visible:
                 self._position_log_scroll_button()
@@ -21150,10 +21176,7 @@ Important rules:
     def _scroll_log_to_bottom(self):
         try:
             if hasattr(self, 'log_text'):
-                sb = self.log_text.verticalScrollBar()
-                sb.setValue(sb.maximum())
-                self._user_scrolled_up = False
-                self._update_log_scroll_button()
+                self._set_log_auto_scroll_disabled(False)
         except Exception:
             pass
 
@@ -21656,12 +21679,11 @@ Important rules:
                 import time as _time
                 from PySide6.QtCore import QTimer
                 # Only auto-scroll if delay passed AND user hasn't scrolled up
-                if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
-                    not getattr(self, '_user_scrolled_up', False)):
+                if self._should_log_autoscroll():
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
                     # Use single delayed timer instead of 8 timers to prevent handle exhaustion
-                    QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
+                    QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if self._should_log_autoscroll() else None)
             except Exception:
                 pass
         except Exception as e:
@@ -21748,13 +21770,12 @@ Important rules:
                    import time as _time
                    from PySide6.QtCore import QTimer
                    # Only auto-scroll if delay passed AND user hasn't scrolled up
-                   if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
-                       not getattr(self, '_user_scrolled_up', False)):
+                   if self._should_log_autoscroll():
                        scrollbar = self.log_text.verticalScrollBar()
                        if at_bottom or True:
                            scrollbar.setValue(scrollbar.maximum())
                            # Use single delayed timer instead of 8 timers to prevent handle exhaustion
-                           QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
+                           QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if self._should_log_autoscroll() else None)
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()
@@ -21930,6 +21951,14 @@ Important rules:
        
        select_all_action = context_menu.addAction("Select All")
        select_all_action.triggered.connect(self.select_all_log)
+
+       context_menu.addSeparator()
+
+       auto_scroll_disabled = bool(getattr(self, '_log_auto_scroll_disabled', False))
+       auto_scroll_action = context_menu.addAction("Enable Auto Scroll" if auto_scroll_disabled else "Disable Auto Scroll")
+       auto_scroll_action.triggered.connect(
+           lambda _checked=False, disabled=auto_scroll_disabled: self._set_log_auto_scroll_disabled(not disabled)
+       )
        
        # Show the context menu at the cursor position
        context_menu.exec(self.log_text.mapToGlobal(pos))

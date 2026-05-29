@@ -854,6 +854,7 @@ class MangaTranslationTab(QObject):
         self._autoscroll_delay_until = 0.0  # epoch seconds
         self._user_scrolled_up = False  # Track if user manually scrolled up
         self._log_autoscroll_pending = False
+        self._log_auto_scroll_disabled = False
         
         # Flags for stdio redirection to avoid duplicate GUI logs
         self._stdout_redirect_on = False
@@ -6708,6 +6709,8 @@ class MangaTranslationTab(QObject):
             }
         """)
         log_frame_layout.addWidget(self.log_text)
+        self.log_text.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.log_text.customContextMenuRequested.connect(self._show_log_context_menu)
         
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
@@ -13530,6 +13533,48 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
 
+    def _set_log_auto_scroll_disabled(self, disabled):
+        try:
+            self._log_auto_scroll_disabled = bool(disabled)
+            if self._log_auto_scroll_disabled:
+                self._user_scrolled_up = True
+            else:
+                self._user_scrolled_up = False
+                if hasattr(self, 'log_text') and self.log_text:
+                    sb = self.log_text.verticalScrollBar()
+                    sb.setValue(sb.maximum())
+            self._update_log_scroll_button()
+        except Exception:
+            pass
+
+    def _show_log_context_menu(self, pos):
+        try:
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self.log_text)
+            cursor = self.log_text.textCursor()
+            has_selection = bool(cursor and cursor.hasSelection())
+
+            copy_action = menu.addAction("Copy")
+            copy_action.setEnabled(has_selection)
+            copy_action.triggered.connect(lambda: self.log_text.copy())
+
+            menu.addSeparator()
+
+            select_all_action = menu.addAction("Select All")
+            select_all_action.triggered.connect(self.log_text.selectAll)
+
+            menu.addSeparator()
+
+            auto_scroll_disabled = bool(getattr(self, '_log_auto_scroll_disabled', False))
+            auto_scroll_action = menu.addAction("Enable Auto Scroll" if auto_scroll_disabled else "Disable Auto Scroll")
+            auto_scroll_action.triggered.connect(
+                lambda _checked=False, disabled=auto_scroll_disabled: self._set_log_auto_scroll_disabled(not disabled)
+            )
+
+            menu.exec(self.log_text.mapToGlobal(pos))
+        except Exception:
+            pass
+
     def _position_log_scroll_button(self):
         try:
             if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
@@ -13547,7 +13592,7 @@ class MangaTranslationTab(QObject):
         try:
             if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
                 return
-            visible = bool(getattr(self, '_user_scrolled_up', False))
+            visible = bool(getattr(self, '_user_scrolled_up', False) or getattr(self, '_log_auto_scroll_disabled', False))
             self.log_scroll_btn.setVisible(visible)
             if visible:
                 self._position_log_scroll_button()
@@ -13557,10 +13602,7 @@ class MangaTranslationTab(QObject):
     def _scroll_log_to_bottom(self):
         try:
             if hasattr(self, 'log_text'):
-                sb = self.log_text.verticalScrollBar()
-                sb.setValue(sb.maximum())
-                self._user_scrolled_up = False
-                self._update_log_scroll_button()
+                self._set_log_auto_scroll_disabled(False)
         except Exception:
             pass
 
@@ -13576,6 +13618,8 @@ class MangaTranslationTab(QObject):
     def _should_autoscroll(self) -> bool:
         """Return True if we should auto-scroll to bottom based on current scrollbar position and flags."""
         try:
+            if getattr(self, '_log_auto_scroll_disabled', False):
+                return False
             if not hasattr(self, 'log_text') or not self.log_text:
                 return True
             sb = self.log_text.verticalScrollBar()
@@ -14783,9 +14827,7 @@ class MangaTranslationTab(QObject):
                     try:
                         if hasattr(self, 'log_text') and self.log_text:
                             # Only auto-scroll LOG if user hasn't manually scrolled up (respects delay)
-                            import time as _time
-                            if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
-                                not getattr(self, '_user_scrolled_up', False)):
+                            if self._should_autoscroll():
                                 self.log_text.moveCursor(QTextCursor.End)
                                 self.log_text.ensureCursorVisible()
                             # Always scroll the entire GUI scroll area to bottom (no delay check)
