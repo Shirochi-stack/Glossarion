@@ -1,6 +1,19 @@
 #translator_gui.py
 if __name__ == '__main__':
     import multiprocessing
+    import sys as _early_sys
+
+    def _close_pyi_splash_for_child_process() -> None:
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except Exception:
+            pass
+
+    _early_args = " ".join(_early_sys.argv[1:])
+    if "--multiprocessing-" in _early_args or "multiprocessing." in _early_args:
+        _close_pyi_splash_for_child_process()
+
     try:
         multiprocessing.freeze_support()
     except OSError:
@@ -9,8 +22,8 @@ if __name__ == '__main__':
         # that is already closed (parent exited, path has special chars,
         # or antivirus interfered with the spawn).  The child has no parent
         # to talk to, so exit silently instead of showing an error dialog.
-        import sys
-        sys.exit(0)
+        _close_pyi_splash_for_child_process()
+        _early_sys.exit(0)
 
     # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
     # run itself via ``sys.executable script.py`` once bundled because
@@ -18,6 +31,7 @@ if __name__ == '__main__':
     # before importing the full GUI so the child process returns JSON and exits.
     import sys as _authnd_sys
     if "--authnd-mint-token" in _authnd_sys.argv:
+        _close_pyi_splash_for_child_process()
         _idx = _authnd_sys.argv.index("--authnd-mint-token")
         _page_url = _authnd_sys.argv[_idx + 1] if len(_authnd_sys.argv) > _idx + 1 else ""
         _remaining = _authnd_sys.argv[_idx + 2:]
@@ -41,7 +55,35 @@ import sys
 import os
 import tempfile
 from decimal import Decimal, InvalidOperation
-from app_version import APP_DISPLAY_NAME, APP_READY_MESSAGE, APP_STARTUP_MESSAGE, APP_USER_MODEL_ID, APP_VERSION
+from app_version import (
+    APP_DISPLAY_NAME,
+    APP_READY_MESSAGE,
+    APP_STARTUP_MESSAGE,
+    APP_USER_MODEL_ID,
+    APP_VERSION,
+    get_runtime_app_display_name,
+)
+
+
+def _pyi_splash_update(message: str) -> None:
+    """Update PyInstaller's native one-file splash when available."""
+    try:
+        import pyi_splash
+        pyi_splash.update_text(str(message or ""))
+    except Exception:
+        pass
+
+
+def _pyi_splash_close() -> None:
+    """Close PyInstaller's native splash if this build enabled it."""
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
+_pyi_splash_update("Starting Glossarion...")
 
 
 def _authnd_auto_token_limits():
@@ -415,11 +457,13 @@ if sys.platform == 'darwin':
 
 # PySide6 imports (replacing Tkinter)
 # DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
+_pyi_splash_update("Configuring display...")
 try:
     import dpi_setup
     dpi_setup.configure()
 except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
+_pyi_splash_update("Loading UI framework...")
 try:
     # Importing splash_utils first warms QtCore/QtGui/QtWidgets in parallel.
     from splash_utils import SplashManager
@@ -441,8 +485,10 @@ except ImportError as e:
     print(f"\nPlease install PySide6 using:")
     print("  pip install PySide6")
     print(f"{'='*60}\n")
+    _pyi_splash_close()
     sys.exit(1)
 
+_pyi_splash_update("Loading application modules...")
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
 from api_key_encryption import encrypt_config, decrypt_config
@@ -1611,7 +1657,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
         self.__version__ = APP_VERSION
-        self.setWindowTitle(APP_DISPLAY_NAME)
+        self.setWindowTitle(get_runtime_app_display_name())
         
         # Track fullscreen state
         self.is_fullscreen = False
@@ -27378,16 +27424,20 @@ if __name__ == "__main__":
     except Exception:
         pass
     
+    _pyi_splash_update(APP_STARTUP_MESSAGE)
     print(f"🚀 {APP_STARTUP_MESSAGE}")
     
     # Initialize splash screen
     splash_manager = None
     try:
+        _pyi_splash_update("Starting application splash...")
         from splash_utils import SplashManager
         splash_manager = SplashManager()
         splash_started = splash_manager.start_splash()
         
         if splash_started:
+            _pyi_splash_update("Showing application splash...")
+            _pyi_splash_close()
             splash_manager.update_status("Loading theme framework...")
             time.sleep(0.1)
     except Exception as e:
@@ -27430,6 +27480,7 @@ if __name__ == "__main__":
             
             # Create a custom callback function for splash updates
             def splash_callback(message):
+                _pyi_splash_update(message)
                 if splash_manager and splash_manager.splash_window:
                     splash_manager.update_status(message)
                     splash_manager.splash_window.update()
@@ -27553,29 +27604,38 @@ if __name__ == "__main__":
         main_window._modules_loading = False
 
         if splash_manager:
-            # Extra pause to show "Ready!" before closing
             splash_manager.update_status("Ready!")
-            time.sleep(0.1)
-            splash_manager.close_splash()
         
-        # Show the window (ensure not minimized)
+        # Show and paint the window while the splash is still on top. Closing
+        # the splash first exposes a brief unpainted white Qt window on startup.
         try:
-            from PySide6.QtCore import Qt, QTimer
+            from PySide6.QtCore import Qt, QTimer, QEventLoop
             # Clear any minimized state potentially inherited
             main_window.setWindowState(main_window.windowState() & ~Qt.WindowMinimized)
             main_window.showNormal()
             main_window.raise_()
             main_window.activateWindow()
+            main_window.repaint()
+            qapp.processEvents(QEventLoop.ExcludeUserInputEvents)
             QTimer.singleShot(0, _kickoff_manga_import_after_show)
             # Re-assert focus shortly after show to avoid race with splash/OS focus
             QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
         except Exception:
             main_window.show()
             try:
+                main_window.repaint()
+                qapp.processEvents()
+            except Exception:
+                pass
+            try:
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(0, _kickoff_manga_import_after_show)
             except Exception:
                 _kickoff_manga_import_after_show()
+
+        if splash_manager:
+            splash_manager.close_splash()
+        _pyi_splash_close()
 
         try:
             if getattr(main_window, '_pending_glossary_mode_welcome', False):
@@ -27675,6 +27735,7 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")
+        _pyi_splash_close()
         if splash_manager:
             try:
                 splash_manager.close_splash()
@@ -27691,6 +27752,7 @@ if __name__ == "__main__":
             sys.exit(1)
     
     finally:
+        _pyi_splash_close()
         if splash_manager and not getattr(splash_manager, '_already_closed', False):
             try:
                 print("[MAIN] Closing splash screen in finally block...")

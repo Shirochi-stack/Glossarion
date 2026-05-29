@@ -10,7 +10,7 @@ import os
 SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 if SPEC_DIR not in sys.path:
     sys.path.insert(0, SPEC_DIR)
-from app_version import get_spec_app_name
+from app_version import create_pyinstaller_bootloader_splash, get_spec_app_name
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -1024,16 +1024,32 @@ pyz = PYZ(
 )
 
 # ============================================================================
+# BOOTLOADER SPLASH
+# ============================================================================
+
+bootloader_splash = create_pyinstaller_bootloader_splash(
+    a,
+    one_file=ONE_FILE,
+    spec_dir=SPEC_DIR,
+)
+
+# ============================================================================
 # EXECUTABLE CONFIGURATION (Linux single file)
 # ============================================================================
 
-exe = EXE(
+exe_inputs = [
     pyz,
     a.scripts,
     a.binaries,
     a.zipfiles,
     a.datas,
-    [],
+]
+if bootloader_splash is not None:
+    exe_inputs.extend([bootloader_splash, bootloader_splash.binaries])
+exe_inputs.append([])
+
+exe = EXE(
+    *exe_inputs,
     name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,

@@ -5,7 +5,45 @@
 
 APP_VERSION = "9.0.7"
 VERSION_TAG = f"v{APP_VERSION}"
-APP_DISPLAY_NAME = f"Glossarion {VERSION_TAG}"
+
+
+def get_runtime_package_label(executable_name=None):
+    """Return the package/build label visible to users for this runtime."""
+    import os
+    import sys
+
+    if executable_name is None:
+        if not getattr(sys, "frozen", False):
+            return ""
+        executable_name = os.path.basename(sys.executable)
+
+    exe_name = os.path.splitext(os.path.basename(str(executable_name)))[0].lower()
+    normalized = exe_name.replace("-", "_").replace(" ", "_")
+
+    if "omegalite" in normalized:
+        return "OmegaLite"
+    if "superlite" in normalized:
+        return "SuperLite"
+    if "turbolite" in normalized:
+        return "TurboLite"
+    if "nocuda" in normalized or "no_cuda" in normalized or normalized.startswith("n_"):
+        return "NoCuda"
+    if "heavy" in normalized or normalized.startswith("h_"):
+        return "Heavy"
+    if "lite" in normalized or normalized.startswith("l_"):
+        return "Lite"
+    return ""
+
+
+def get_runtime_app_display_name(executable_name=None):
+    """Return the app title, including the package label for bundled builds."""
+    package_label = get_runtime_package_label(executable_name)
+    if package_label:
+        return f"Glossarion {package_label} {VERSION_TAG}"
+    return f"Glossarion {VERSION_TAG}"
+
+
+APP_DISPLAY_NAME = get_runtime_app_display_name()
 APP_STARTUP_MESSAGE = f"Starting {APP_DISPLAY_NAME}..."
 APP_READY_MESSAGE = f"{APP_DISPLAY_NAME} - Ready to use!"
 APP_USER_MODEL_ID = f"Glossarion.Translator.{APP_VERSION}"
@@ -29,3 +67,71 @@ def get_spec_app_name(spec_path):
     import os
 
     return SPEC_APP_NAMES.get(os.path.basename(str(spec_path)), APP_DISPLAY_NAME)
+
+
+def _patch_pyinstaller_splash_template(window_title="Glossarion"):
+    """Hide PyInstaller's temporary Tk root until the real splash is ready."""
+    from PyInstaller.building import splash_templates
+
+    title = str(window_title).replace("}", "\\}")
+
+    if "_glossarion_hidden_tk_root" not in splash_templates.image_script:
+        splash_templates.image_script = f"""
+# Glossarion patch: PyInstaller's splash uses Tk, which can briefly show
+# a blank default root window titled "tk" while the splash image is prepared.
+package require Tk
+wm withdraw .
+wm title . {{{title}}}
+set _glossarion_hidden_tk_root 1
+""" + splash_templates.image_script
+
+    if "package require Tk" in splash_templates.splash_canvas_setup:
+        splash_templates.splash_canvas_setup = splash_templates.splash_canvas_setup.replace(
+            "package require Tk\n\n",
+            "",
+            1,
+        )
+
+    if "_glossarion_show_splash_root" not in splash_templates.raise_window:
+        splash_templates.raise_window = """
+# Glossarion patch: only show the Tk window after the image canvas and
+# window flags are fully configured.
+set _glossarion_show_splash_root 1
+wm deiconify .
+update idletasks
+""" + splash_templates.raise_window
+
+
+def create_pyinstaller_bootloader_splash(analysis, one_file=True, spec_dir=None):
+    """Create the native PyInstaller splash for supported one-file builds."""
+    import os
+    import sys
+
+    if not one_file:
+        return None
+    if sys.platform == "darwin":
+        print("  PyInstaller splash skipped: not supported on macOS")
+        return None
+
+    try:
+        from PyInstaller.building.splash import Splash
+        _patch_pyinstaller_splash_template(get_runtime_app_display_name())
+
+        return Splash(
+            os.path.join(spec_dir or os.getcwd(), "Halgakos_NoChibi.png"),
+            binaries=analysis.binaries,
+            datas=analysis.datas,
+            text_pos=(28, 452),
+            text_size=13,
+            text_font="Segoe UI",
+            text_color="#f4f7ff",
+            text_default="Starting Glossarion...",
+            minify_script=True,
+            always_on_top=True,
+            max_img_size=(760, 480),
+        )
+    except SystemExit as splash_error:
+        print(f"  WARNING: PyInstaller splash disabled: {splash_error}")
+    except Exception as splash_error:
+        print(f"  WARNING: Could not configure PyInstaller splash: {splash_error}")
+    return None
