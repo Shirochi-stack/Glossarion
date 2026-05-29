@@ -26,6 +26,7 @@ jobs:
     env:
       PYSIDE_VERSION: ${{ inputs.pyside_version }}
       PYSIDE_ANDROID_ARCH: aarch64
+      PYSIDE_ANDROID_PYTHON_TAG: cp311
       PYSIDE_BUILD_MODE: ${{ inputs.build_mode }}
       ANDROID_NDK_VERSION: 26.1.10909125
       ANDROID_PLATFORM: android-34
@@ -55,6 +56,7 @@ jobs:
             libssl-dev \
             libltdl-dev \
             cmake \
+            curl \
             zip \
             unzip \
             openjdk-17-jdk
@@ -98,62 +100,29 @@ jobs:
           rm -rf "$WHEEL_DIR"
           mkdir -p "$WHEEL_DIR"
 
-          python - <<'PY'
-          import html
-          import os
-          import re
-          import sys
-          import urllib.parse
-          import urllib.request
-          from pathlib import Path
+          PYSIDE_WHEEL_NAME="pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
+          SHIBOKEN_WHEEL_NAME="shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
+          PYSIDE_WHEEL="$WHEEL_DIR/$PYSIDE_WHEEL_NAME"
+          SHIBOKEN_WHEEL="$WHEEL_DIR/$SHIBOKEN_WHEEL_NAME"
+          PYSIDE_URL="https://download.qt.io/official_releases/QtForPython/pyside6/$PYSIDE_WHEEL_NAME"
+          SHIBOKEN_URL="https://download.qt.io/official_releases/QtForPython/shiboken6/$SHIBOKEN_WHEEL_NAME"
 
-          base_url = "https://download.qt.io/official_releases/QtForPython"
-          version = os.environ["PYSIDE_VERSION"]
-          arch = os.environ["PYSIDE_ANDROID_ARCH"]
-          wheel_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "src/android/pyside_launcher/deployment/android-wheels"
+          echo "Downloading PySide Android wheel: $PYSIDE_URL"
+          curl --fail --location --retry 5 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 30 --max-time 900 \
+            --output "$PYSIDE_WHEEL" \
+            "$PYSIDE_URL"
 
-          def find_android_wheel(package_dir: str, prefix: str) -> tuple[str, str]:
-              index_url = f"{base_url}/{package_dir}/"
-              print(f"Reading {index_url}", flush=True)
-              with urllib.request.urlopen(index_url, timeout=60) as response:
-                  index_html = response.read().decode("utf-8", errors="replace")
-              links = re.findall(r'href="([^"]+\.whl)"', index_html, flags=re.IGNORECASE)
-              candidates = []
-              for link in links:
-                  name = html.unescape(urllib.parse.unquote(link.rsplit("/", 1)[-1]))
-                  lower = name.lower()
-                  if (
-                      lower.startswith(prefix)
-                      and f"-{version.lower()}-" in lower
-                      and lower.endswith(f"android_{arch.lower()}.whl")
-                  ):
-                      candidates.append((name, urllib.parse.urljoin(index_url, link)))
-              if not candidates:
-                  raise SystemExit(
-                      f"No {package_dir} Android wheel found for version={version} arch={arch}"
-                  )
-              candidates.sort()
-              return candidates[-1]
-
-          wheels = [
-              find_android_wheel("pyside6", "pyside6-"),
-              find_android_wheel("shiboken6", "shiboken6-"),
-          ]
-
-          for name, url in wheels:
-              destination = wheel_dir / name
-              print(f"Downloading {url}", flush=True)
-              urllib.request.urlretrieve(url, destination)
-              print(f"Saved {destination}", flush=True)
-          PY
+          echo "Downloading Shiboken Android wheel: $SHIBOKEN_URL"
+          curl --fail --location --retry 5 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 30 --max-time 900 \
+            --output "$SHIBOKEN_WHEEL" \
+            "$SHIBOKEN_URL"
 
           echo "Downloaded Android wheels:"
           find "$WHEEL_DIR" -type f -name '*.whl' -print | sort
 
-          PYSIDE_WHEEL="$(find "$WHEEL_DIR" -type f -iname 'pyside6-*.whl' | sort | head -1)"
-          SHIBOKEN_WHEEL="$(find "$WHEEL_DIR" -type f -iname 'shiboken6-*.whl' | sort | head -1)"
-
-          if [ -z "$PYSIDE_WHEEL" ] || [ -z "$SHIBOKEN_WHEEL" ]; then
+          if [ ! -s "$PYSIDE_WHEEL" ] || [ ! -s "$SHIBOKEN_WHEEL" ]; then
             echo "Could not find downloaded PySide6/Shiboken6 Android wheels in $WHEEL_DIR"
             exit 1
           fi

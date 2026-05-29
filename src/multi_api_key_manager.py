@@ -1524,6 +1524,22 @@ class MultiAPIKeyDialog(QDialog):
     def __init__(self, parent, translator_gui, preview_pool: Optional[str] = None):
         # PySide6 dialogs need QWidget parents or None
         style_parent = parent if HAS_GUI and isinstance(parent, QWidget) else None
+
+        # IMPORTANT (spinbox rendering): Qt style sheets cascade into child windows.
+        # The "Other Settings" dialog styles ``QSpinBox`` (other_settings.py) but
+        # never defines the ::up-button/::down-button sub-controls, so any preview
+        # window opened as its child inherits that rule and the native Windows style
+        # collapses the rotation spin buttons (the "fucked up"/garbled spinbox).
+        # The Refinement view looked correct only because it is parented to a dialog
+        # with no such rule. To make every pool match it, re-root preview windows to
+        # the main window, whose stylesheet has no QSpinBox rule -> native spinbox.
+        _preview = (str(preview_pool or '').strip() or None)
+        if _preview and HAS_GUI and isinstance(translator_gui, QWidget):
+            try:
+                style_parent = translator_gui.window()
+            except Exception:
+                pass
+
         super().__init__(style_parent)
 
         self.translator_gui = translator_gui
@@ -1711,68 +1727,21 @@ class MultiAPIKeyDialog(QDialog):
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
         spinbox.wheelEvent = lambda event: None
 
-    @staticmethod
-    def _functional_spinbox_stylesheet() -> str:
-        """A self-contained QSpinBox stylesheet that keeps the up/down buttons usable.
-
-        When this dialog is opened as a child of a window that styles ``QSpinBox``
-        (e.g. the Other Settings dialog, other_settings.py) Qt cascades that rule
-        into our spinbox. If the ancestor styles the QSpinBox *box* but never
-        defines the ``::up-button``/``::down-button`` sub-controls, the native
-        Windows style collapses those buttons into a tiny, near-unclickable strip
-        (the "fucked up spinbox"). An empty ``setStyleSheet("")`` cannot undo an
-        inherited rule, so we instead define the full control here. Declaring the
-        rules on the widget itself overrides the inherited cascade and, crucially,
-        gives the spin buttons an explicit clickable geometry. This is why the
-        Refinement pool worked: it is parented to a dialog that has no QSpinBox
-        rule, so its spinbox was never put into stylesheet mode.
-        """
-        return (
-            "QSpinBox {"
-            " background-color: #2d2d2d; color: #ffffff;"
-            " border: 1px solid #4a5568; border-radius: 3px;"
-            " padding: 1px 2px; }"
-            "QSpinBox:disabled {"
-            " background-color: #242424; color: #777777;"
-            " border: 1px solid #3a4555; }"
-            "QSpinBox::up-button {"
-            " subcontrol-origin: border; subcontrol-position: top right;"
-            " width: 18px; border-left: 1px solid #4a5568;"
-            " border-top-right-radius: 3px; background-color: #3d3d3d; }"
-            "QSpinBox::down-button {"
-            " subcontrol-origin: border; subcontrol-position: bottom right;"
-            " width: 18px; border-left: 1px solid #4a5568;"
-            " border-bottom-right-radius: 3px; background-color: #3d3d3d; }"
-            "QSpinBox::up-button:hover, QSpinBox::down-button:hover {"
-            " background-color: #4d4d4d; }"
-            "QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {"
-            " background-color: #5a9fd4; }"
-            "QSpinBox::up-arrow {"
-            " width: 0; height: 0;"
-            " border-left: 4px solid transparent; border-right: 4px solid transparent;"
-            " border-bottom: 5px solid #cfd8e3; }"
-            "QSpinBox::down-arrow {"
-            " width: 0; height: 0;"
-            " border-left: 4px solid transparent; border-right: 4px solid transparent;"
-            " border-top: 5px solid #cfd8e3; }"
-            "QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off {"
-            " border-bottom-color: #555555; }"
-            "QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off {"
-            " border-top-color: #555555; }"
-        )
-
     def _normalize_rotation_spinbox_appearance(self):
-        """Keep the rotation-frequency spinbox fully functional in every pool view.
+        """Keep rotation frequency on the native spinbox appearance.
 
-        Note: we deliberately set an explicit stylesheet (not ``""``) so an
-        inherited ``QSpinBox`` rule from a parent dialog cannot collapse the spin
-        buttons. See _functional_spinbox_stylesheet for the full rationale.
+        The spinbox must stay NATIVE (no custom QSS) so it matches the Refinement
+        view. The real cause of the broken spinbox was an inherited ``QSpinBox``
+        rule cascading from a styled parent dialog; that is handled at construction
+        time by re-rooting preview-pool windows to the unstyled main window (see
+        __init__), so here we simply clear any local stylesheet and let the native
+        style draw the control.
         """
         spinbox = getattr(self, 'frequency_spinbox', None)
         if spinbox is None:
             return
         try:
-            spinbox.setStyleSheet(self._functional_spinbox_stylesheet())
+            spinbox.setStyleSheet("")
             spinbox.setMinimumHeight(0)
             spinbox.setMaximumHeight(16777215)
             spinbox.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
