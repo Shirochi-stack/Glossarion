@@ -3,17 +3,6 @@ if __name__ == '__main__':
     import multiprocessing
     import sys as _early_sys
 
-    def _close_pyi_splash_for_child_process() -> None:
-        try:
-            import pyi_splash
-            pyi_splash.close()
-        except Exception:
-            pass
-
-    _early_args = " ".join(_early_sys.argv[1:])
-    if "--multiprocessing-" in _early_args or "multiprocessing." in _early_args:
-        _close_pyi_splash_for_child_process()
-
     try:
         multiprocessing.freeze_support()
     except OSError:
@@ -22,7 +11,6 @@ if __name__ == '__main__':
         # that is already closed (parent exited, path has special chars,
         # or antivirus interfered with the spawn).  The child has no parent
         # to talk to, so exit silently instead of showing an error dialog.
-        _close_pyi_splash_for_child_process()
         _early_sys.exit(0)
 
     # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
@@ -31,7 +19,6 @@ if __name__ == '__main__':
     # before importing the full GUI so the child process returns JSON and exits.
     import sys as _authnd_sys
     if "--authnd-mint-token" in _authnd_sys.argv:
-        _close_pyi_splash_for_child_process()
         _idx = _authnd_sys.argv.index("--authnd-mint-token")
         _page_url = _authnd_sys.argv[_idx + 1] if len(_authnd_sys.argv) > _idx + 1 else ""
         _remaining = _authnd_sys.argv[_idx + 2:]
@@ -63,27 +50,6 @@ from app_version import (
     APP_VERSION,
     get_runtime_app_display_name,
 )
-
-
-def _pyi_splash_update(message: str) -> None:
-    """Update PyInstaller's native one-file splash when available."""
-    try:
-        import pyi_splash
-        pyi_splash.update_text(str(message or ""))
-    except Exception:
-        pass
-
-
-def _pyi_splash_close() -> None:
-    """Close PyInstaller's native splash if this build enabled it."""
-    try:
-        import pyi_splash
-        pyi_splash.close()
-    except Exception:
-        pass
-
-
-_pyi_splash_update("Starting Glossarion...")
 
 
 def _authnd_auto_token_limits():
@@ -457,13 +423,11 @@ if sys.platform == 'darwin':
 
 # PySide6 imports (replacing Tkinter)
 # DPI scaling must be disabled BEFORE importing PySide6 so Qt reads the env vars
-_pyi_splash_update("Configuring display...")
 try:
     import dpi_setup
     dpi_setup.configure()
 except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
-_pyi_splash_update("Loading UI framework...")
 try:
     # Importing splash_utils first warms QtCore/QtGui/QtWidgets in parallel.
     from splash_utils import SplashManager
@@ -485,10 +449,8 @@ except ImportError as e:
     print(f"\nPlease install PySide6 using:")
     print("  pip install PySide6")
     print(f"{'='*60}\n")
-    _pyi_splash_close()
     sys.exit(1)
 
-_pyi_splash_update("Loading application modules...")
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
 from api_key_encryption import encrypt_config, decrypt_config
@@ -27424,20 +27386,16 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    _pyi_splash_update(APP_STARTUP_MESSAGE)
     print(f"🚀 {APP_STARTUP_MESSAGE}")
     
     # Initialize splash screen
     splash_manager = None
     try:
-        _pyi_splash_update("Starting application splash...")
         from splash_utils import SplashManager
         splash_manager = SplashManager()
         splash_started = splash_manager.start_splash()
         
         if splash_started:
-            _pyi_splash_update("Showing application splash...")
-            _pyi_splash_close()
             splash_manager.update_status("Loading theme framework...")
             time.sleep(0.1)
     except Exception as e:
@@ -27480,7 +27438,6 @@ if __name__ == "__main__":
             
             # Create a custom callback function for splash updates
             def splash_callback(message):
-                _pyi_splash_update(message)
                 if splash_manager and splash_manager.splash_window:
                     splash_manager.update_status(message)
                     splash_manager.splash_window.update()
@@ -27629,7 +27586,6 @@ if __name__ == "__main__":
 
         if splash_manager:
             splash_manager.close_splash()
-        _pyi_splash_close()
 
         if should_start_manga_imports:
             try:
@@ -27738,7 +27694,6 @@ if __name__ == "__main__":
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")
-        _pyi_splash_close()
         if splash_manager:
             try:
                 splash_manager.close_splash()
@@ -27755,7 +27710,6 @@ if __name__ == "__main__":
             sys.exit(1)
     
     finally:
-        _pyi_splash_close()
         if splash_manager and not getattr(splash_manager, '_already_closed', False):
             try:
                 print("[MAIN] Closing splash screen in finally block...")

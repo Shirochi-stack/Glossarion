@@ -11,7 +11,7 @@ import os
 SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 if SPEC_DIR not in sys.path:
     sys.path.insert(0, SPEC_DIR)
-from app_version import APP_VERSION, create_pyinstaller_bootloader_splash, get_spec_app_name
+from app_version import APP_VERSION, get_spec_app_name
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -1121,16 +1121,6 @@ pyz = PYZ(
     a.pure,
     a.zipped_data,
     cipher=block_cipher
-)
-
-# ============================================================================
-# BOOTLOADER SPLASH
-# ============================================================================
-
-bootloader_splash = create_pyinstaller_bootloader_splash(
-    a,
-    one_file=ONE_FILE,
-    spec_dir=SPEC_DIR,
 )
 
 # ============================================================================
