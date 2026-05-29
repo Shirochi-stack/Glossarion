@@ -208,6 +208,19 @@ def get_current_thread_actual_request_key_identifier():
     """Return the concrete key/pool identifier selected for the API request on this thread."""
     return getattr(_ACTUAL_REQUEST_MODEL_TLS, "key_identifier", None)
 
+def set_current_thread_actual_request_model(model=None, key_identifier=None):
+    """Seed the current thread with model/key metadata captured by a child API thread."""
+    model_name = str(model or "").strip()
+    key_id = str(key_identifier or "").strip()
+    if model_name:
+        _ACTUAL_REQUEST_MODEL_TLS.model = model_name
+    elif hasattr(_ACTUAL_REQUEST_MODEL_TLS, "model"):
+        delattr(_ACTUAL_REQUEST_MODEL_TLS, "model")
+    if key_id:
+        _ACTUAL_REQUEST_MODEL_TLS.key_identifier = key_id
+    elif hasattr(_ACTUAL_REQUEST_MODEL_TLS, "key_identifier"):
+        delattr(_ACTUAL_REQUEST_MODEL_TLS, "key_identifier")
+
 class _RunIdFilter(logging.Filter):
     """Allow transport logs only for the currently-active run id (when configured)."""
     def filter(self, record: logging.LogRecord) -> bool:

@@ -408,6 +408,28 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     result_queue = queue.Queue()
 
+    def _capture_actual_request_metadata():
+        actual_model = None
+        actual_key = None
+        try:
+            if hasattr(client, 'get_last_actual_request_model'):
+                actual_model = client.get_last_actual_request_model()
+        except Exception:
+            actual_model = None
+        try:
+            if hasattr(client, 'get_last_actual_request_key_identifier'):
+                actual_key = client.get_last_actual_request_key_identifier()
+        except Exception:
+            actual_key = None
+        return actual_model, actual_key
+
+    def _install_actual_request_metadata(actual_model, actual_key):
+        try:
+            from unified_api_client import set_current_thread_actual_request_model
+            set_current_thread_actual_request_model(actual_model, actual_key)
+        except Exception:
+            pass
+
     # Honor runtime toggle: if RETRY_TIMEOUT is off, disable chunk timeout entirely.
     env_retry = os.getenv("RETRY_TIMEOUT")
     if env_retry is not None:
@@ -497,9 +519,16 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # if raw_obj:
                         #     print("🧠 Captured thought signature for glossary extraction")
                 
-                # Include raw_obj in the result tuple
-                result_queue.put((result, elapsed, raw_obj))
+                actual_model, actual_key = _capture_actual_request_metadata()
+                # Include raw_obj plus concrete model/key metadata in the result tuple.
+                result_queue.put((result, elapsed, raw_obj, actual_model, actual_key))
             except Exception as e:
+                actual_model, actual_key = _capture_actual_request_metadata()
+                try:
+                    e._glossarion_actual_model = actual_model
+                    e._glossarion_actual_key = actual_key
+                except Exception:
+                    pass
                 result_queue.put(e)
         # Apply submission delay shared across glossary batch threads to space out API launches.
         # Priority: per-key api_call_delay from glossary keys > global SEND_INTERVAL_SECONDS
@@ -591,15 +620,24 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Check for results with shorter timeout
                     result = result_queue.get(timeout=check_interval)
                     if isinstance(result, Exception):
+                        _install_actual_request_metadata(
+                            getattr(result, '_glossarion_actual_model', None),
+                            getattr(result, '_glossarion_actual_key', None),
+                        )
                         raise result
                     if isinstance(result, tuple):
-                        # Check if we have the new format with response object
-                        if len(result) == 3:
+                        # Check if we have the new format with response object and model/key metadata.
+                        if len(result) >= 5:
+                            api_result, api_time, raw_obj, actual_model, actual_key = result[:5]
+                            _install_actual_request_metadata(actual_model, actual_key)
+                        elif len(result) == 3:
                             api_result, api_time, raw_obj = result
+                            _install_actual_request_metadata(*_capture_actual_request_metadata())
                         else:
                             # Old format without response object
                             api_result, api_time = result
                             raw_obj = None
+                            _install_actual_request_metadata(*_capture_actual_request_metadata())
                         
                         if chunk_timeout and api_time > chunk_timeout:
                             if hasattr(client, '_in_cleanup'):
@@ -5072,6 +5110,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             total_chunks=total_chunks,
             before_send_callback=before_send_callback,
         )
+        request_model_name = _current_glossary_model_name({}, prefer_thread=True)
+        request_key_identifier, request_key_pool = _current_glossary_key_context({}, prefer_thread=True)
 
         # Handle the response - it might be a tuple or a string
         if raw is None:
@@ -5081,6 +5121,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                 'data': [],
                 'resp': "",
                 'chap': chap,
+                'model_name': request_model_name,
+                'key_identifier': request_key_identifier,
+                'key_pool': request_key_pool,
                 'error': "API returned None"
             }
 
@@ -5136,6 +5179,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'chap': chap,  # Include the chapter text in the result
             'raw_obj': raw_obj,  # Include raw object for history (from send_with_interrupt)
             'finish_reason': finish_reason,  # Track truncation ('length'/'MAX_TOKENS' = truncated)
+            'model_name': request_model_name,
+            'key_identifier': request_key_identifier,
+            'key_pool': request_key_pool,
             'error': None
         }
             
@@ -5155,6 +5201,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'data': [],
             'resp': "",
             'chap': chap,  # Include chapter even on error
+            'model_name': _current_glossary_model_name({}, prefer_thread=True),
+            'key_identifier': _current_glossary_key_context({}, prefer_thread=True)[0],
             'error': str(e),
             'graceful_stop_skip': _is_graceful_stop_skip_error(e),
         }
@@ -5167,6 +5215,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'data': [],
             'resp': "",
             'chap': chap,  # Include chapter even on error
+            'model_name': _current_glossary_model_name({}, prefer_thread=True),
+            'key_identifier': _current_glossary_key_context({}, prefer_thread=True)[0],
             'error': str(e)
         }
 def process_single_chapter_with_split(idx: int,
@@ -5230,6 +5280,9 @@ def process_single_chapter_with_split(idx: int,
     aggregated_data = []
     last_resp = ""
     last_raw_obj = None
+    last_model_name = ""
+    last_key_identifier = ""
+    last_key_pool = ""
     any_chunk_truncated = False
     for chunk_html, chunk_idx, total_chunks in chunks:
         if stop_check_fn():
@@ -5276,6 +5329,12 @@ def process_single_chapter_with_split(idx: int,
         last_resp = result.get("resp", last_resp)
         if result.get("raw_obj"):
             last_raw_obj = result.get("raw_obj")
+        if result.get("model_name"):
+            last_model_name = result.get("model_name")
+        if result.get("key_identifier"):
+            last_key_identifier = result.get("key_identifier")
+        if result.get("key_pool"):
+            last_key_pool = result.get("key_pool")
         # Track truncation: if any chunk was truncated, the whole chapter is truncated
         chunk_finish = result.get("finish_reason", "stop")
         if chunk_finish in ("length", "MAX_TOKENS", "max_tokens"):
@@ -5288,6 +5347,9 @@ def process_single_chapter_with_split(idx: int,
         'chap': chap,
         'raw_obj': last_raw_obj,
         'finish_reason': 'length' if any_chunk_truncated else 'stop',
+        'model_name': last_model_name,
+        'key_identifier': last_key_identifier,
+        'key_pool': last_key_pool,
         'error': None
     }
 
@@ -5395,13 +5457,15 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             merged_chapters=chapter_nums,
             before_send_callback=before_send_callback,
         )
+        request_model_name = _current_glossary_model_name({}, prefer_thread=True)
+        request_key_identifier, request_key_pool = _current_glossary_key_context({}, prefer_thread=True)
         
         # Extract response text
         resp = ""
         if raw is None:
             print(f"⚠️ API returned None for merged group")
             return {
-                'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': 'API returned None'}
+                'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'model_name': request_model_name, 'key_identifier': request_key_identifier, 'key_pool': request_key_pool, 'error': 'API returned None'}
                            for idx, chap in merge_group],
                 'merged_indices': [idx for idx, _ in merge_group[1:]]
             }
@@ -5459,6 +5523,9 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                     'chap': chap,
                     'raw_obj': raw_obj,
                     'finish_reason': finish_reason,
+                    'model_name': request_model_name,
+                    'key_identifier': request_key_identifier,
+                    'key_pool': request_key_pool,
                     'error': None
                 })
             else:
@@ -5469,6 +5536,9 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
                     'resp': '',
                     'chap': chap,
                     'raw_obj': None,
+                    'model_name': request_model_name,
+                    'key_identifier': request_key_identifier,
+                    'key_pool': request_key_pool,
                     'error': None,
                     'merged_into': parent_idx
                 })
@@ -6657,11 +6727,58 @@ def main(log_callback=None, stop_callback=None):
                 def _handle_future_result(future, unit):
                     nonlocal batch_entry_count, stopped_early
                     unit_indices = [u_idx for u_idx, _ in unit]
+                    model_updates = {}
+                    key_updates = {}
+
+                    def _collect_request_metadata(result, target_indices=None):
+                        if not isinstance(result, dict):
+                            return
+                        model_name = str(result.get('model_name') or '').strip()
+                        key_identifier = str(result.get('key_identifier') or '').strip()
+                        if not (model_name or key_identifier):
+                            return
+                        targets = target_indices
+                        if targets is None:
+                            try:
+                                targets = [int(result.get('idx'))]
+                            except (TypeError, ValueError):
+                                targets = []
+                        for target_idx in targets or []:
+                            try:
+                                target_idx = int(target_idx)
+                            except (TypeError, ValueError):
+                                continue
+                            if model_name:
+                                model_updates[target_idx] = model_name
+                            if key_identifier:
+                                key_updates[target_idx] = key_identifier
+
+                    def _save_progress_for_unit():
+                        save_progress(
+                            completed,
+                            glossary,
+                            merged_indices,
+                            failed=failed,
+                            in_progress=in_progress,
+                            context=progress_context,
+                            model_update_indices=sorted(set(model_updates) | set(key_updates)),
+                            model_updates=model_updates,
+                            key_updates=key_updates,
+                        )
+
                     try:
                         if is_merged_mode:
                             # Handle merged group result
                             group_result = future.result(timeout=0.5)
                             results = group_result.get('results', [])
+                            group_model = next((str(r.get('model_name') or '').strip() for r in results if isinstance(r, dict) and str(r.get('model_name') or '').strip()), '')
+                            group_key = next((str(r.get('key_identifier') or '').strip() for r in results if isinstance(r, dict) and str(r.get('key_identifier') or '').strip()), '')
+                            if group_model or group_key:
+                                for u_idx in unit_indices:
+                                    if group_model:
+                                        model_updates[int(u_idx)] = group_model
+                                    if group_key:
+                                        key_updates[int(u_idx)] = group_key
                             new_merged_indices = group_result.get('merged_indices', [])
                             
                             # Add new merged indices to tracking
@@ -6686,7 +6803,7 @@ def main(log_callback=None, stop_callback=None):
                                     print(f"[Chapter {display_idx}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
                                     _clear_glossary_in_progress(unit_indices)
-                                    save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                                    _save_progress_for_unit()
                                     return
                                 
                                 # Process entries
@@ -6756,6 +6873,7 @@ def main(log_callback=None, stop_callback=None):
                             idx, chap = unit[0]
                             display_idx = _glossary_chapter_actual_num(idx, context=progress_context)
                             result = future.result(timeout=0.5)
+                            _collect_request_metadata(result)
                             
                             # Process this chapter's results immediately
                             data = result.get('data', [])
@@ -6771,7 +6889,7 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"[Chapter {display_idx}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                                 _clear_glossary_in_progress(unit_indices)
-                                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                                _save_progress_for_unit()
                                 return
                             
                             # Process entries as each chapter completes
@@ -6825,7 +6943,7 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
                         _clear_glossary_in_progress(unit_indices)
-                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                        _save_progress_for_unit()
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, args.output)
                         save_glossary_csv(glossary, args.output)
@@ -6857,7 +6975,7 @@ def main(log_callback=None, stop_callback=None):
                             if idx not in completed and idx not in failed:
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                         _clear_glossary_in_progress(unit_indices)
-                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                        _save_progress_for_unit()
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -7270,6 +7388,23 @@ def main(log_callback=None, stop_callback=None):
             # Build merged chapter nums for watchdog progress bar
             merged_chapter_nums = [_glossary_chapter_actual_num(g_idx, context=progress_context) for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
             current_progress_indices = [g_idx for g_idx, _ in merge_groups[idx]] if idx in merge_groups else [idx]
+            current_model_updates = {}
+            current_key_updates = {}
+
+            def _remember_current_request_metadata():
+                model_name = _current_glossary_model_name({}, prefer_thread=True)
+                key_identifier, _key_pool = _current_glossary_key_context({}, prefer_thread=True)
+                if not (model_name or key_identifier):
+                    return
+                for progress_idx in current_progress_indices:
+                    try:
+                        progress_idx = int(progress_idx)
+                    except (TypeError, ValueError):
+                        continue
+                    if model_name:
+                        current_model_updates[progress_idx] = model_name
+                    if key_identifier:
+                        current_key_updates[progress_idx] = key_identifier
 
             def _mark_current_glossary_progress_on_send():
                 _mark_glossary_in_progress(current_progress_indices)
@@ -7474,6 +7609,7 @@ def main(log_callback=None, stop_callback=None):
                                 merged_chapters=merged_chapter_nums,
                                 before_send_callback=_mark_current_glossary_progress_on_send,
                             )
+                            _remember_current_request_metadata()
                             if _glossary_issue_from_finish_reason(chunk_finish_reason, None) == "TRUNCATED":
                                 chapter_had_truncated_chunk = True
                         except UnifiedClientError as e:
@@ -7646,6 +7782,7 @@ def main(log_callback=None, stop_callback=None):
                             merged_chapters=merged_chapter_nums,
                             before_send_callback=_mark_current_glossary_progress_on_send,
                         )
+                        _remember_current_request_metadata()
                                 
                     except UnifiedClientError as e:
                         if "stopped by user" in str(e).lower():
@@ -7851,7 +7988,17 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⚠️ Failed to save history for chapter {_chap_num}: {e}")
 
                 _clear_glossary_in_progress(current_progress_indices)
-                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                save_progress(
+                    completed,
+                    glossary,
+                    merged_indices,
+                    failed=failed,
+                    in_progress=in_progress,
+                    context=progress_context,
+                    model_update_indices=sorted(set(current_model_updates) | set(current_key_updates)),
+                    model_updates=current_model_updates,
+                    key_updates=current_key_updates,
+                )
                 save_glossary_json(glossary, args.output)
                 save_glossary_csv(glossary, args.output)
                 
@@ -7887,7 +8034,17 @@ def main(log_callback=None, stop_callback=None):
                 print(f"Full traceback: {traceback.format_exc()}")
                 _mark_glossary_failed(failed, idx, "API_ERROR")
                 _clear_glossary_in_progress(locals().get('current_progress_indices', [idx]))
-                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+                save_progress(
+                    completed,
+                    glossary,
+                    merged_indices,
+                    failed=failed,
+                    in_progress=in_progress,
+                    context=progress_context,
+                    model_update_indices=sorted(set(locals().get('current_model_updates', {})) | set(locals().get('current_key_updates', {}))),
+                    model_updates=locals().get('current_model_updates', {}),
+                    key_updates=locals().get('current_key_updates', {}),
+                )
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {locals().get('_chap_num', idx + 1)}")
@@ -7993,7 +8150,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None, model_updates=None, key_updates=None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
@@ -8207,6 +8364,28 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 model_update_set.add(int(_idx))
             except (TypeError, ValueError):
                 pass
+        model_update_map = {}
+        if isinstance(model_updates, dict):
+            for _idx, _model in model_updates.items():
+                try:
+                    _idx = int(_idx)
+                except (TypeError, ValueError):
+                    continue
+                _model = str(_model or "").strip()
+                if _model:
+                    model_update_map[_idx] = _model
+                    model_update_set.add(_idx)
+        key_update_map = {}
+        if isinstance(key_updates, dict):
+            for _idx, _key in key_updates.items():
+                try:
+                    _idx = int(_idx)
+                except (TypeError, ValueError):
+                    continue
+                _key = str(_key or "").strip()
+                if _key:
+                    key_update_map[_idx] = _key
+                    model_update_set.add(_idx)
 
         chapters = {}
         for idx in sorted(completed_set | failed_set | merged_set | in_progress_set):
@@ -8239,10 +8418,13 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "status": status,
                 "last_updated": time.time(),
             }
-            model_name = _current_glossary_model_name(existing_info, prefer_thread=idx in model_update_set)
+            model_name = model_update_map.get(idx) or _current_glossary_model_name(existing_info, prefer_thread=idx in model_update_set)
             if model_name:
                 chapter_info["model_name"] = model_name
             key_identifier, key_pool = _current_glossary_key_context(existing_info, prefer_thread=idx in model_update_set)
+            if key_update_map.get(idx):
+                key_identifier = key_update_map[idx]
+                key_pool = _glossary_key_pool_from_identifier(key_identifier) or key_pool
             if key_identifier:
                 chapter_info["key_identifier"] = key_identifier
             if key_pool:
@@ -8326,8 +8508,11 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     existing_info["key_pool"] = key_pool
                 chapters[_glossary_chapter_key(idx)] = existing_info
 
-        progress_model_name = _current_glossary_model_name(existing_progress, prefer_thread=bool(model_update_set))
+        progress_model_name = next((value for value in model_update_map.values() if value), "") or _current_glossary_model_name(existing_progress, prefer_thread=bool(model_update_set))
         progress_key_identifier, progress_key_pool = _current_glossary_key_context(existing_progress, prefer_thread=bool(model_update_set))
+        progress_key_identifier = next((value for value in key_update_map.values() if value), "") or progress_key_identifier
+        if progress_key_identifier:
+            progress_key_pool = _glossary_key_pool_from_identifier(progress_key_identifier) or progress_key_pool
         progress_data = {
             "book_title_present": bool(context.book_title_present) if isinstance(context, GlossaryProgressContext) else bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title

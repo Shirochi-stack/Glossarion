@@ -14717,6 +14717,60 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_call_state = {"tls": None}
     deferred_batch_logs = pop_deferred_batch_logs()
 
+    def _capture_actual_request_metadata():
+        actual_model = None
+        actual_key = None
+        try:
+            if hasattr(client, 'get_last_actual_request_model'):
+                actual_model = client.get_last_actual_request_model()
+        except Exception:
+            actual_model = None
+        try:
+            if hasattr(client, 'get_last_actual_request_key_identifier'):
+                actual_key = client.get_last_actual_request_key_identifier()
+        except Exception:
+            actual_key = None
+        return actual_model, actual_key
+
+    def _install_actual_request_metadata(actual_model, actual_key):
+        try:
+            from unified_api_client import set_current_thread_actual_request_model
+            set_current_thread_actual_request_model(actual_model, actual_key)
+        except Exception:
+            pass
+
+    def _coerce_api_result_for_caller(api_result, raw_obj):
+        if api_result is None:
+            recovered_finish = 'error'
+            try:
+                if hasattr(client, 'get_last_response_object'):
+                    resp_obj = client.get_last_response_object()
+                    if resp_obj and hasattr(resp_obj, 'finish_reason') and resp_obj.finish_reason:
+                        recovered_finish = resp_obj.finish_reason
+                if recovered_finish == 'error' and raw_obj and hasattr(raw_obj, 'finish_reason') and raw_obj.finish_reason:
+                    recovered_finish = raw_obj.finish_reason
+            except Exception:
+                pass
+            print(f"⚠️ API returned None — treating as empty response (finish_reason={recovered_finish!r})")
+            try:
+                if hasattr(client, '_save_failed_request'):
+                    client._save_failed_request(
+                        messages,
+                        f"API returned None (finish_reason={recovered_finish!r})",
+                        context or 'translation',
+                        None,
+                    )
+            except Exception:
+                pass
+            return api_result, True, ("", recovered_finish, None)
+        if isinstance(api_result, tuple):
+            return api_result, True, (*api_result, raw_obj)
+        try:
+            api_result._raw_obj = raw_obj
+        except AttributeError:
+            pass
+        return api_result, False, None
+
     # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
     retry_env = os.getenv("RETRY_TIMEOUT")
     # Default: wrapper chunk timeout is OFF unless RETRY_TIMEOUT is explicitly truthy
@@ -14864,12 +14918,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # print("🧠 Captured thought signature for history in send_with_interrupt")
             
             elapsed = time.time() - start_time
-            # Include raw_obj in the result tuple
-            result_queue.put((result, elapsed, raw_obj))
+            actual_model, actual_key = _capture_actual_request_metadata()
+            # Include raw_obj plus concrete model/key metadata in the result tuple.
+            result_queue.put((result, elapsed, raw_obj, actual_model, actual_key))
         except Exception as e:
             # If already cancelled, suppress late exceptions from the abandoned call.
             if cancel_event.is_set():
                 return
+            actual_model, actual_key = _capture_actual_request_metadata()
+            try:
+                e._glossarion_actual_model = actual_model
+                e._glossarion_actual_key = actual_key
+            except Exception:
+                pass
             result_queue.put(e)
         finally:
             if tls_for_local_cancel is not None:
@@ -14923,6 +14984,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         try:
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
+                _install_actual_request_metadata(
+                    getattr(result, '_glossarion_actual_model', None),
+                    getattr(result, '_glossarion_actual_key', None),
+                )
                 # For expected errors like rate limits, preserve the error type without extra traceback
                 if hasattr(result, 'error_type') and result.error_type == "rate_limit":
                     raise result
@@ -14932,9 +14997,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 else:
                     raise result
             if isinstance(result, tuple):
-                # Unpack the tuple (now includes raw_obj)
-                if len(result) == 3:
+                # Unpack the tuple (now includes raw_obj and optional model/key metadata)
+                if len(result) >= 5:
+                    api_result, api_time, raw_obj, actual_model, actual_key = result[:5]
+                    _install_actual_request_metadata(actual_model, actual_key)
+                elif len(result) == 3:
                     api_result, api_time, raw_obj = result
+                    _install_actual_request_metadata(*_capture_actual_request_metadata())
                     # None from client.send() is an empty response — could be prohibited
                     # content, a safety block, or a real truncation.  Recover finish_reason
                     # from the already-captured raw_obj / last UnifiedResponse so the normal
@@ -14976,6 +15045,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 else:
                     # Backward compatibility for old format
                     api_result, api_time = result
+                    raw_obj = None
+                    _install_actual_request_metadata(*_capture_actual_request_metadata())
+
+                api_result, should_return, return_value = _coerce_api_result_for_caller(api_result, raw_obj)
+                if should_return:
+                    return return_value
                     
                 if chunk_timeout is not None and api_time > chunk_timeout:
                     # Set cleanup flag when chunk timeout occurs
