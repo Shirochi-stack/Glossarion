@@ -22,7 +22,7 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter, QDialogButtonBox, QInputDialog
+        QCompleter, QDialogButtonBox, QInputDialog, QAbstractSpinBox
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -54,6 +54,7 @@ except ImportError:
     QGridLayout = object
     QGroupBox = object
     QDoubleSpinBox = object
+    QAbstractSpinBox = object
     QAbstractItemView = object
     QHeaderView = object
     QMenu = object
@@ -1710,52 +1711,24 @@ class MultiAPIKeyDialog(QDialog):
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
         spinbox.wheelEvent = lambda event: None
 
-    def _style_key_manager_spinbox(self, spinbox, min_width=76, max_width=96):
-        """Apply the same dark key-manager styling to every spinbox."""
+    def _normalize_rotation_spinbox_appearance(self):
+        """Keep rotation frequency on the native spinbox appearance."""
+        spinbox = getattr(self, 'frequency_spinbox', None)
+        if spinbox is None:
+            return
         try:
-            spinbox.setMinimumWidth(min_width)
-            if max_width:
-                spinbox.setMaximumWidth(max_width)
-            spinbox.setFixedHeight(26)
+            spinbox.setStyleSheet("")
+            spinbox.setMinimumHeight(0)
+            spinbox.setMaximumHeight(16777215)
+            spinbox.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
             spinbox.setAlignment(Qt.AlignCenter)
-            spinbox.setStyleSheet("""
-                QSpinBox, QDoubleSpinBox {
-                    background-color: #2d2d2d;
-                    color: #e0e0e0;
-                    border: 1px solid #4a5568;
-                    border-radius: 3px;
-                    padding: 2px 20px 2px 6px;
-                    selection-background-color: #4a7ba7;
-                }
-                QSpinBox:hover, QDoubleSpinBox:hover,
-                QSpinBox:focus, QDoubleSpinBox:focus {
-                    border-color: #5a9fd4;
-                }
-                QSpinBox::up-button, QDoubleSpinBox::up-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: top right;
-                    width: 18px;
-                    background-color: #252525;
-                    border-left: 1px solid #4a5568;
-                    border-bottom: 1px solid #4a5568;
-                    border-top-right-radius: 3px;
-                }
-                QSpinBox::down-button, QDoubleSpinBox::down-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: bottom right;
-                    width: 18px;
-                    background-color: #252525;
-                    border-left: 1px solid #4a5568;
-                    border-bottom-right-radius: 3px;
-                }
-                QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
-                QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-                    background-color: #3a3a3a;
-                }
-            """)
+            spinbox.setMinimumWidth(76)
+            spinbox.setMaximumWidth(96)
+            spinbox.style().unpolish(spinbox)
+            spinbox.style().polish(spinbox)
+            spinbox.update()
         except Exception:
             pass
-        return spinbox
 
     def _disable_combobox_mousewheel(self, combobox):
         """Disable mousewheel scrolling on a combobox (PySide6)"""
@@ -1972,6 +1945,7 @@ class MultiAPIKeyDialog(QDialog):
 
     def _sync_rotation_controls_from_config(self):
         cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._normalize_rotation_spinbox_appearance()
         self._set_checkbox_from_config(
             getattr(self, 'force_rotation_checkbox', None),
             cfg.get('force_key_rotation', True),
@@ -2458,7 +2432,7 @@ class MultiAPIKeyDialog(QDialog):
         self.frequency_spinbox = QSpinBox()
         self.frequency_spinbox.setRange(1, 100)
         self.frequency_spinbox.setValue(self.rotation_frequency_var)
-        self._style_key_manager_spinbox(self.frequency_spinbox, min_width=76, max_width=96)
+        self._normalize_rotation_spinbox_appearance()
         self.frequency_spinbox.valueChanged.connect(self._on_rotation_settings_changed)
         self._disable_spinbox_mousewheel(self.frequency_spinbox)
         frequency_layout.addWidget(self.frequency_spinbox)
@@ -4398,7 +4372,7 @@ class MultiAPIKeyDialog(QDialog):
         self.cooldown_spinbox = QSpinBox()
         self.cooldown_spinbox.setRange(10, 3600)
         self.cooldown_spinbox.setValue(60)
-        self._style_key_manager_spinbox(self.cooldown_spinbox, min_width=90, max_width=110)
+        self.cooldown_spinbox.setMaximumWidth(100)
         self._disable_spinbox_mousewheel(self.cooldown_spinbox)  # Disable mousewheel
         cooldown_layout.addWidget(self.cooldown_spinbox)
 

@@ -85,6 +85,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel virtualenv
           python -m pip install "PySide6==$PYSIDE_VERSION"
+          python -m pip install "qtpip==0.1.4"
           command -v pyside6-android-deploy
           command -v qtpip
 

@@ -15474,6 +15474,30 @@ class EpubReaderDialog(QDialog):
         self._font_combo.blockSignals(False)
         self._start_loading()
 
+    def _reader_combo_arrow_stylesheet(self) -> str:
+        icon_path = _find_halgakos_icon()
+        if icon_path:
+            icon_url = icon_path.replace("\\", "/")
+            arrow = f'image: url("{icon_url}"); width: 12px; height: 12px;'
+        else:
+            arrow = "width: 0px; height: 0px;"
+        return f"""
+            QComboBox::drop-down {{
+                border: none;
+                background: transparent;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+            }}
+            QComboBox::down-arrow {{
+                {arrow}
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+                left: 1px;
+            }}
+        """
+
     def _setup_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -15563,23 +15587,32 @@ class EpubReaderDialog(QDialog):
         self._spacing_combo = QComboBox()
         self._spacing_combo.setEditable(True)
         self._spacing_combo.addItems(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8", "3.0"])
-        self._spacing_combo.setFixedWidth(58)
+        self._spacing_combo.setFixedWidth(72)
         self._spacing_combo.setCursor(Qt.PointingHandCursor)
+        reader_combo_arrow = self._reader_combo_arrow_stylesheet()
         self._spacing_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 18px 3px 6px;
             }
             QComboBox:hover { border-color: #6c63ff; }
-            QComboBox::drop-down { border: none; width: 18px; }
-            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
+        """ + reader_combo_arrow + """
+            QComboBox QLineEdit {
+                background: transparent; color: #e0e0e0; border: none;
+                padding: 0px; margin: 0px; font-size: 8.5pt;
+            }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
             }
         """)
+        spacing_edit = self._spacing_combo.lineEdit()
+        if spacing_edit:
+            spacing_edit.setAlignment(Qt.AlignCenter)
+            spacing_edit.setTextMargins(0, 0, 0, 0)
         self._spacing_combo.activated.connect(lambda idx: self._on_spacing_changed(self._spacing_combo.itemText(idx)))
-        self._spacing_combo.lineEdit().editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
+        if spacing_edit:
+            spacing_edit.editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
         self._spacing_combo.setFocusPolicy(Qt.StrongFocus)
         self._spacing_combo.installEventFilter(self)
         toolbar.addWidget(self._spacing_combo)
@@ -15595,7 +15628,7 @@ class EpubReaderDialog(QDialog):
         self._font_combo = QComboBox()
         self._font_combo.setEditable(True)
         self._font_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._font_combo.setFixedWidth(130)
+        self._font_combo.setFixedWidth(158)
         self._font_combo.setCursor(Qt.PointingHandCursor)
         self._font_combo.setToolTip("Text font family")
         # First item: use the EPUB's own embedded CSS (fonts, layout, etc.)
@@ -15627,13 +15660,10 @@ class EpubReaderDialog(QDialog):
         self._font_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px 3px 8px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 20px 3px 8px;
             }
             QComboBox:hover { border-color: #6c63ff; }
-            QComboBox::drop-down {
-                border: none; background: transparent;
-                subcontrol-position: right center;
-            }
+        """ + reader_combo_arrow + """
             QComboBox QLineEdit {
                 background: transparent; color: #e0e0e0; border: none;
                 padding: 0px; margin: 0px; font-size: 8.5pt;
