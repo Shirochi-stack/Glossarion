@@ -1381,6 +1381,11 @@ def open_other_settings(self, *args, show=True):
         QLineEdit:focus, QTextEdit:focus, QSpinBox:focus {
             border-color: #5a9fd4;
         }
+        QLineEdit:disabled, QTextEdit:disabled, QSpinBox:disabled {
+            background-color: #242424;
+            color: #777777;
+            border: 1px solid #3a4555;
+        }
         QPushButton {
             background-color: #3d3d3d;
             color: white;
@@ -3876,7 +3881,8 @@ def _create_response_handling_section(self, parent):
     compression_w = QWidget()
     compression_h = QHBoxLayout(compression_w)
     compression_h.setContentsMargins(20, 5, 0, 0)
-    compression_h.addWidget(QLabel("CJK→English compression:"))
+    compression_label = QLabel("CJK→English compression:")
+    compression_h.addWidget(compression_label)
     compression_edit = QLineEdit()
     compression_edit.setFixedWidth(60)
     try:
@@ -3922,7 +3928,11 @@ def _create_response_handling_section(self, parent):
         try:
             self.config['auto_compression_factor'] = bool(checked)
             # Enable/disable manual editing
-            compression_edit.setEnabled(not checked)
+            manual_enabled = not checked
+            compression_edit.setEnabled(manual_enabled)
+            label_color = "#ffffff" if manual_enabled else "#777777"
+            compression_label.setStyleSheet(f"color: {label_color};")
+            compression_hint_label.setStyleSheet(f"color: {label_color};")
             # Update factor when enabling auto
             if checked:
                 _update_compression_factor()
@@ -3939,7 +3949,8 @@ def _create_response_handling_section(self, parent):
     
     compression_edit.textChanged.connect(_on_compression_changed)
     compression_h.addWidget(compression_edit)
-    compression_h.addWidget(QLabel("(Decrease this for less chunking)"))
+    compression_hint_label = QLabel("(Decrease this for less chunking)")
+    compression_h.addWidget(compression_hint_label)
     compression_h.addStretch()
     section_v.addWidget(compression_w)
     
