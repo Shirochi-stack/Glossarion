@@ -40,6 +40,7 @@ if __name__ == '__main__':
 import sys
 import os
 import tempfile
+from decimal import Decimal, InvalidOperation
 from app_version import APP_DISPLAY_NAME, APP_READY_MESSAGE, APP_STARTUP_MESSAGE, APP_USER_MODEL_ID, APP_VERSION
 
 
@@ -48,6 +49,24 @@ def _authnd_auto_token_limits():
     token_limit = min(4, max(1, cores // 2))
     subprocess_limit = min(8, max(token_limit, cores))
     return token_limit, subprocess_limit, cores
+
+
+def _format_plain_decimal_setting(value, default="0.0001"):
+    """Return a validated decimal string without scientific notation."""
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        raw = str(default)
+    try:
+        number = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        number = Decimal(str(default))
+    if not number.is_finite():
+        number = Decimal(str(default))
+
+    text = format(number, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
@@ -1758,7 +1777,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.skip_metadata_thinking_var = self.config.get('skip_metadata_thinking', True)
         self.skip_toc_thinking_var = self.config.get('skip_toc_thinking', False)
         self.lightweight_thinking_level_var = self.config.get('lightweight_thinking_level', 1)
-        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.0001))
+        self.thread_delay_var = _format_plain_decimal_setting(self.config.get('thread_submission_delay', '0.0001'))
         _raw_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "off")
         if _raw_artifacts == "0": _raw_artifacts = "off"
         elif _raw_artifacts == "1": _raw_artifacts = "medium"
@@ -25565,7 +25584,7 @@ Important rules:
                 
                 # Numeric settings
                 ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
-                ('thread_submission_delay', ['thread_delay_entry'], 0.0001, lambda v: safe_float(v, 0.0001)),
+                ('thread_submission_delay', ['thread_delay_entry'], '0.0001', _format_plain_decimal_setting),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
 
