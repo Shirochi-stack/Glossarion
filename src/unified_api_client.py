@@ -4937,12 +4937,6 @@ class UnifiedClient:
         if not hasattr(self, 'conversation_message_count'):
             self.conversation_message_count = 0
         
-        # Log if logger is available
-        if hasattr(self, 'logger'):
-            self.logger.info("Statistics and pattern tracking reset")
-        else:
-            print("Statistics and pattern tracking reset")
-    
     def _rotate_to_next_available_key(self, skip_current: bool = False) -> bool:
         """
         Rotate to the next available key that's not rate limited

@@ -48,6 +48,33 @@ def _get_app_dir() -> str:
         return os.path.dirname(os.path.abspath(__file__))
     return os.getcwd()
 
+
+def _manga_cmd_debug_logging_enabled() -> bool:
+    return (
+        os.environ.get('DEBUG_MODE', '0') == '1'
+        or os.environ.get('SHOW_DEBUG_BUTTONS', '0') == '1'
+        or os.environ.get('MANGA_DEBUG_MODE', '0') == '1'
+        or os.environ.get('DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE', '0') == '1'
+    )
+
+
+def _manga_cmd_debug_print(*args, **kwargs):
+    try:
+        first_arg = str(args[0]) if args else ''
+        important = any(term in first_arg.lower() for term in ('error', 'failed', 'failure', 'exception', 'warning', 'critical'))
+        debug_prefixes = (
+            '[FILE_SELECTION]',
+            '[FILE_PERSIST]',
+            '[SYNC_SELECTION]',
+            '[STATE DEBUG]',
+            '[STATE]',
+        )
+        if first_arg.startswith(debug_prefixes) and not important and not _manga_cmd_debug_logging_enabled():
+            return
+    except Exception:
+        pass
+    print(*args, **kwargs)
+
 # Natural/numerical sort helper function
 def _natural_sort_key(text):
     """Generate a key for natural/numerical sorting.
@@ -394,6 +421,7 @@ class ImageStateManager:
     
     def _load_state(self):
         """Load state from JSON file if it exists (synchronous on startup)"""
+        print = _manga_cmd_debug_print
         if os.path.exists(self.state_file_path):
             try:
                 with open(self.state_file_path, 'r', encoding='utf-8') as f:
@@ -485,6 +513,7 @@ class ImageStateManager:
     
     def update_state(self, image_path: str, updates: Dict[str, Any], save: bool = True):
         """Update specific fields in image state"""
+        print = _manga_cmd_debug_print
         image_path = self._normalize_path(image_path)
         if image_path not in self._states:
             self._states[image_path] = {}
@@ -513,6 +542,7 @@ class ImageStateManager:
     
     def clear_all_states(self, save: bool = True):
         """Clear all saved states for all images"""
+        print = _manga_cmd_debug_print
         self._states.clear()
         if getattr(self, '_mp_enabled', False) and self._mp_task_q:
             try:
@@ -525,6 +555,7 @@ class ImageStateManager:
     
     def flush(self):
         """Force immediate save if dirty - saves synchronously to guarantee persistence"""
+        print = _manga_cmd_debug_print
         print(f"[STATE DEBUG] flush() called, dirty={self._dirty}, images={len(self._states)}")
         
         # Debug: Show ALL images with recognized_texts
@@ -12956,6 +12987,7 @@ class MangaTranslationTab(QObject):
     
     def _persist_selected_files(self):
         """Save the current selected_files list to config for persistence across restarts."""
+        print = _manga_cmd_debug_print
         try:
             if not hasattr(self, 'main_gui') or not self.main_gui:
                 return
@@ -12982,6 +13014,7 @@ class MangaTranslationTab(QObject):
     
     def _load_persisted_files(self):
         """Load the persisted selected_files list from config on startup."""
+        print = _manga_cmd_debug_print
         try:
             if not hasattr(self, 'main_gui') or not self.main_gui:
                 return
@@ -13038,6 +13071,7 @@ class MangaTranslationTab(QObject):
         Called when user clicks on the image viewer to ensure the file list selection
         matches the displayed image, which triggers proper state restoration.
         """
+        print = _manga_cmd_debug_print
         try:
             # Get the currently displayed image path from the preview
             current_image = getattr(self.image_preview_widget, 'current_image_path', None)
@@ -13073,6 +13107,7 @@ class MangaTranslationTab(QObject):
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
+        print = _manga_cmd_debug_print
         try:
             print(f"[FILE_SELECTION] _on_file_selection_changed triggered")
             
@@ -13749,7 +13784,6 @@ class MangaTranslationTab(QObject):
             return not any(term in lower for term in important_terms)
 
         noisy_exact_prefixes = (
-            'Statistics and pattern tracking reset',
             'Initialized OCR Manager for ',
             'Model preloading already in progress',
             'TOGGLE FUNCTION CALLED!',

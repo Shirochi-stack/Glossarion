@@ -29,7 +29,13 @@ def _manga_debug_print(*args, **kwargs):
     try:
         first_arg = str(args[0]) if args else ''
         important = any(term in first_arg.lower() for term in ('error', 'failed', 'failure', 'exception', 'warning'))
-        if first_arg.startswith('[SRC]') and not important and not _manga_debug_logging_enabled():
+        debug_prefixes = (
+            '[SRC]',
+            '[STATE_ISOLATION]',
+            '[LOADED]',
+            '[NAV]',
+        )
+        if first_arg.startswith(debug_prefixes) and not important and not _manga_debug_logging_enabled():
             return
     except Exception:
         pass
@@ -2526,6 +2532,7 @@ class MangaImagePreviewWidget(QWidget):
             preserve_rectangles: If True, don't clear rectangles when loading (for workflow continuity)
             preserve_text_overlays: If True, keep text overlays visible (for cleaned images)
         """
+        print = _manga_debug_print
         # MEMORY OPTIMIZATION: Explicitly clear previous image before loading new one
         try:
             if hasattr(self.viewer, '_pixmap_item') and self.viewer._pixmap_item:
@@ -3258,6 +3265,7 @@ class MangaImagePreviewWidget(QWidget):
         This ensures arrow key navigation in the preview properly selects the
         corresponding item in the file list, which triggers state restoration.
         """
+        print = _manga_debug_print
         try:
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 mi = self.manga_integration
@@ -3328,6 +3336,7 @@ class MangaImagePreviewWidget(QWidget):
     @Slot(str)
     def _on_image_loaded_success(self, image_path: str):
         """Handle successful image load"""
+        print = _manga_debug_print
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal

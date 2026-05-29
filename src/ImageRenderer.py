@@ -40,6 +40,7 @@ def _manga_debug_print(*args, **kwargs):
         important = any(term in first_arg.lower() for term in ('error', 'failed', 'failure', 'exception', 'warning'))
         debug_prefixes = (
             '[STATE]',
+            '[STATE DEBUG]',
             '[STATE_ISOLATION]',
             '[STATE_CLEAN]',
             '[RECT_0_DEBUG]',
@@ -1060,6 +1061,7 @@ def _clear_cross_image_state(self):
     """Clear recognition and translation data to prevent state leaking between images.
     This is the main fix for cross-contamination of OCR/translation states.
     """
+    print = _manga_debug_print
     try:
         # Clear recognition data to prevent "Edit OCR" tooltips from previous images
         if hasattr(self, '_recognition_data'):
@@ -1140,6 +1142,7 @@ def _persist_current_image_state(self):
     IMPORTANT: Merge into existing state to avoid wiping recognized/translated texts.
     Also cleans up old overlays to prevent RAM accumulation.
     """
+    print = _manga_debug_print
     try:
         if not hasattr(self, '_current_image_path') or not self._current_image_path:
             return
@@ -1253,6 +1256,7 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
     STATE ISOLATION: This function properly scopes data to image_path and tags the restored
     state with _current_state_image_path to prevent cross-contamination.
     """
+    print = _manga_debug_print
     try:
         if not hasattr(self, 'image_state_manager'):
             return (0, 0)
@@ -1321,6 +1325,7 @@ def _validate_and_clean_stale_state(self, image_path: str):
     - viewer_rectangles (manually adjusted boxes)
     - overlay_rects
     """
+    print = _manga_debug_print
     try:
         if not hasattr(self, 'image_state_manager') or not self.image_state_manager:
             return
@@ -7566,6 +7571,7 @@ def _remove_rectangle_pulse_effect(self, rect_item, region_index):
 
 def _restore_exclusion_status_from_state(self, image_path: str):
     """Restore exclusion status for rectangles from saved state - DISABLED"""
+    print = _manga_debug_print
     try:
         print(f"[EXCLUDE_RESTORE] === EXCLUSION RESTORATION DISABLED - ALWAYS START WITH NO EXCLUSIONS ===")
         print(f"[EXCLUDE_RESTORE] Exclusion toggle state no longer persists across sessions")
@@ -7631,6 +7637,7 @@ def _get_custom_iterations_for_regions(self, regions: list) -> dict:
 
 def _restore_inpainting_iterations_from_state(self, image_path: str):
     """Restore custom inpainting iterations for rectangles from saved state"""
+    print = _manga_debug_print
     try:
         print(f"[ITERATIONS_RESTORE] === ITERATION RESTORATION CALLED FOR IMAGE: {image_path} ===")
         
@@ -12331,6 +12338,7 @@ def _get_ocr_config(self) -> dict:
 
 def _process_recognize_results(self, results: dict):
     """Process recognition results on main thread (image-aware)."""
+    print = _manga_debug_print
     # ===== CANCELLATION CHECK: Discard results if stop was clicked =====
     if _is_translation_cancelled(self):
         print(f"[RECOG_RESULTS] Discarding results - stop was clicked")
