@@ -3469,7 +3469,7 @@ class UnifiedClient:
         self._thread_last_payload_paths = {}  # {thread_id: filepath}
         
         # Track per-thread chapter/chunk context for richer payload metadata
-        # Structure: {thread_id: {'chapter': str, 'chunk': int, 'total_chunks': int}}
+        # Structure: {thread_id: {'chapter': str, 'chunk': int, 'total_chunks': int, 'merged_chapters': list}}
         self._thread_chapter_info = {}
         
         # Timeout configuration
@@ -5738,21 +5738,47 @@ class UnifiedClient:
             'chunk': None,
             'total_chunks': None
         }
-        
-        # Prefer explicit per-thread context set by callers (does NOT affect prompts)
+
+        def _apply_context(ctx) -> bool:
+            if not isinstance(ctx, dict):
+                return False
+            applied = False
+            if ctx.get('chapter') is not None:
+                info['chapter'] = str(ctx['chapter'])
+                applied = True
+            if ctx.get('chunk') is not None:
+                info['chunk'] = str(ctx['chunk'])
+                applied = True
+            if ctx.get('total_chunks') is not None:
+                info['total_chunks'] = str(ctx['total_chunks'])
+                applied = True
+            if ctx.get('merged_chapters'):
+                try:
+                    info['merged_chapters'] = list(ctx.get('merged_chapters') or [])
+                except Exception:
+                    info['merged_chapters'] = ctx.get('merged_chapters')
+                applied = True
+            return applied
+
+        # Prefer explicit per-thread context set by callers (does NOT affect prompts).
+        # The active set_chapter_context implementation stores this on TLS for logging;
+        # older payload code stored it in _thread_chapter_info. Read both so saved
+        # payload metadata follows the actual request thread.
+        try:
+            tls = self._get_thread_local_client()
+            _apply_context(getattr(tls, 'chapter_context', None))
+            if info['chapter'] is not None and info['chunk'] is not None and info['total_chunks'] is not None:
+                return info
+        except Exception:
+            pass
+
         try:
             thread_id = threading.current_thread().ident
             ctx = getattr(self, '_thread_chapter_info', {}).get(thread_id)
-            if isinstance(ctx, dict):
-                if ctx.get('chapter') is not None:
-                    info['chapter'] = str(ctx['chapter'])
-                if ctx.get('chunk') is not None:
-                    info['chunk'] = str(ctx['chunk'])
-                if ctx.get('total_chunks') is not None:
-                    info['total_chunks'] = str(ctx['total_chunks'])
-                # If caller provided full context, we can skip regex/progress parsing
-                if info['chapter'] is not None and info['chunk'] is not None and info['total_chunks'] is not None:
-                    return info
+            _apply_context(ctx)
+            # If caller provided full context, we can skip regex/progress parsing
+            if info['chapter'] is not None and info['chunk'] is not None and info['total_chunks'] is not None:
+                return info
         except Exception:
             pass
         
@@ -17030,15 +17056,37 @@ class UnifiedClient:
         return "request"
 
     def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None, merged_chapters=None):
-        """Store chapter/chunk context on thread-local state for logging."""
+        """Store chapter/chunk context on thread-local state for logging and payload metadata."""
         try:
             tls = self._get_thread_local_client()
-            tls.chapter_context = {
+            context = {
                 "chapter": chapter,
                 "chunk": chunk,
                 "total_chunks": total_chunks,
                 "merged_chapters": merged_chapters,
             }
+            tls.chapter_context = context
+
+            try:
+                thread_id = threading.current_thread().ident
+                if not hasattr(self, '_thread_chapter_info'):
+                    self._thread_chapter_info = {}
+                info = {}
+                if chapter is not None:
+                    info["chapter"] = str(chapter)
+                if chunk is not None:
+                    info["chunk"] = int(float(chunk)) if isinstance(chunk, (float, str)) else int(chunk)
+                if total_chunks is not None:
+                    info["total_chunks"] = int(float(total_chunks)) if isinstance(total_chunks, (float, str)) else int(total_chunks)
+                if merged_chapters:
+                    try:
+                        info["merged_chapters"] = list(merged_chapters)
+                    except Exception:
+                        info["merged_chapters"] = merged_chapters
+                self._thread_chapter_info[thread_id] = info
+            except Exception:
+                pass
+
             # Also set a friendly label for paths that only read current_request_label
             if merged_chapters and len(merged_chapters) > 0:
                 try:
