@@ -2471,7 +2471,10 @@ def _refine_csv_lines_if_enabled(csv_lines, output_dir):
 
         mtoks = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096")))
         temp = float(os.getenv("GLOSSARY_TEMPERATURE", os.getenv("TEMPERATURE", "0.3")))
-        compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
+        compression_factor = float(os.getenv(
+            "GLOSSARY_REFINEMENT_COMPRESSION_FACTOR",
+            os.getenv("COMPRESSION_FACTOR", "1.0"),
+        ))
         available_tokens = int(mtoks / max(compression_factor, 0.1)) if compression_factor > 0 else int(mtoks * 0.8)
         available_tokens = max(512, available_tokens)
 

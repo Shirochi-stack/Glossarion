@@ -17952,6 +17952,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
            
             # Glossary-specific overrides
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
+            'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR': str(self.compression_factor_var),
             'GLOSSARY_MAX_OUTPUT_TOKENS': str(current_max_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
             'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', self.trans_temp.text())),
        }
@@ -19275,7 +19276,7 @@ Important rules:
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
-                    'COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
+                    'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
                     'GLOSSARY_SKIP_GENDER_TRACKING': '1' if getattr(self, 'glossary_skip_gender_tracking_var', False) else '0',
@@ -19300,6 +19301,7 @@ Important rules:
                     'GLOSSARY_REQUEST_MERGING_ENABLED': glossary_request_merging_enabled,
                     'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
                     'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
+                    'GLOSSARY_REFINEMENT_COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 1.0))),
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                     'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     # Optional assistant prefill prompt

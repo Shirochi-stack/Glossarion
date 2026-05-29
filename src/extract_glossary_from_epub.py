@@ -6132,6 +6132,13 @@ def main(log_callback=None, stop_callback=None):
     # Initialize chapter splitter with compression factor
     chapter_splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
 
+    refinement_compression_factor = float(os.getenv(
+        "GLOSSARY_REFINEMENT_COMPRESSION_FACTOR",
+        os.getenv("COMPRESSION_FACTOR", str(compression_factor)),
+    ))
+    refinement_available_tokens = _compute_safe_input_tokens(effective_output_tokens, refinement_compression_factor)
+    refinement_splitter = ChapterSplitter(model_name=model, compression_factor=refinement_compression_factor)
+
     # Get temperature from environment or config
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
 
@@ -8116,6 +8123,10 @@ def main(log_callback=None, stop_callback=None):
         save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
 
     if _glossary_refinement_enabled() and not check_stop():
+        print(
+            f"📊 Glossary refinement chunk budget: {refinement_available_tokens:,} tokens "
+            f"(output limit {effective_output_tokens:,}, margin 500, compression {refinement_compression_factor})"
+        )
         before_refinement_count = len(glossary)
         glossary = refine_glossary_entries(
             glossary,
@@ -8123,8 +8134,8 @@ def main(log_callback=None, stop_callback=None):
             temp=temp,
             mtoks=mtoks,
             check_stop=check_stop,
-            chapter_splitter=chapter_splitter,
-            available_tokens=available_tokens,
+            chapter_splitter=refinement_splitter,
+            available_tokens=refinement_available_tokens,
             chunk_timeout=chunk_timeout,
             parse_response_fn=parse_api_response,
             dedupe_fn=skip_duplicate_entries,

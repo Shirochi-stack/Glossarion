@@ -116,6 +116,41 @@ def _strip_inactive_description(entries: List[Dict]) -> List[Dict]:
     return cleaned
 
 
+def _refinement_budget_label(available_tokens: int, mtoks: int) -> str:
+    try:
+        budget = int(available_tokens)
+    except Exception:
+        budget = available_tokens
+    try:
+        output_limit = int(mtoks)
+    except Exception:
+        output_limit = None
+    try:
+        raw_factor = os.getenv(
+            "GLOSSARY_REFINEMENT_COMPRESSION_FACTOR",
+            os.getenv("COMPRESSION_FACTOR", os.getenv("GLOSSARY_COMPRESSION_FACTOR", "")),
+        )
+        compression_factor = float(raw_factor)
+    except Exception:
+        raw_factor = ""
+        compression_factor = None
+
+    parts = []
+    if output_limit:
+        parts.append(f"output limit {output_limit:,}")
+    if compression_factor and compression_factor > 0:
+        margin = None
+        try:
+            if int(max(1000, int((output_limit - 500) / compression_factor))) == int(budget):
+                margin = 500
+        except Exception:
+            margin = None
+        if margin is not None:
+            parts.append(f"margin {margin:,}")
+        parts.append(f"compression {raw_factor or compression_factor}")
+    return f"budget {int(budget):,}" + (f" ({', '.join(parts)})" if parts else "")
+
+
 def _entry_columns(entries: List[Dict]) -> List[str]:
     columns = ["type", "raw_name", "translated_name"]
     custom_fields = _active_custom_fields()
@@ -564,20 +599,22 @@ def refine_glossary_entries(
             return chapter_splitter.count_tokens(text)
         except Exception:
             return len(text) // 3
+    budget_label = _refinement_budget_label(available_tokens, mtoks)
 
     all_selected_entries = [
         dict(e) for e in glossary
         if str(e.get("type", "")).strip().lower() in selected_lc
     ]
 
-    # Older runs wrote a synthetic all:: row ("selected glossary entries").
-    # Runtime progress is easier to reason about when every row is a real type.
     broad_type_key = f"all::{','.join(selected_types)}"
     for old_key, old_info in list(progress.items()):
         old_entry_type = ""
         if isinstance(old_info, dict):
             old_entry_type = str(old_info.get("entry_type") or "").strip().lower()
-        if str(old_key).startswith("all::") or old_entry_type == "selected glossary entries":
+        if (
+            (str(old_key).startswith("all::") and str(old_key) != broad_type_key)
+            or (old_entry_type in ("selected glossary entries", "all selected entry types") and str(old_key) != broad_type_key)
+        ):
             remove_refinement_progress(progress_file, old_key, atomic_replace_fn=atomic_replace_fn)
             progress.pop(old_key, None)
 
@@ -655,6 +692,21 @@ def refine_glossary_entries(
     all_selected_entries = [
         e for entry_type in selected_types for e in entries_by_type.get(entry_type, [])
     ]
+    broad_input_hash = _entry_hash("all selected entry types", all_selected_entries, hash_mode)
+    if send_all_types:
+        broad_placeholder = {
+            "entry_type": "all selected entry types",
+            "status": "not_refined",
+            "input_hash": broad_input_hash,
+            "chunking_mode": canonical_mode,
+            "payload_delimiter": payload_delimiter_name,
+            "entry_count_before": len(all_selected_entries),
+            "output_file": os.path.basename(output_path or ""),
+        }
+        update_refinement_progress(progress_file, broad_type_key, broad_placeholder, atomic_replace_fn=atomic_replace_fn)
+        existing_broad = dict(progress.get(broad_type_key, {})) if isinstance(progress.get(broad_type_key), dict) else {}
+        existing_broad.update(broad_placeholder)
+        progress[broad_type_key] = existing_broad
     if send_all_types:
         groups = [("selected glossary entries", all_selected_entries, broad_type_key, selected_lc)]
     else:
@@ -689,7 +741,7 @@ def refine_glossary_entries(
             combined_payload = _entry_payload(entries, payload_columns, payload_delimiter)
             token_count = _count_payload_tokens(combined_payload)
             if token_count <= available_tokens:
-                log(f"Glossary refinement keeping all selected entry types as one fitted chunk ({token_count:,} tokens, budget {available_tokens:,}).")
+                log(f"Glossary refinement keeping all selected entry types as one fitted chunk ({token_count:,} tokens, {budget_label}).")
                 planned_chunks.append((combined_payload, entry_type, True))
             else:
                 split_chunks = [
@@ -704,7 +756,7 @@ def refine_glossary_entries(
                 ]
                 if not split_chunks:
                     split_chunks = [combined_payload]
-                log(f"🪓 Glossary refinement split all selected entry types into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
+                log(f"🪓 Glossary refinement split all selected entry types into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, {budget_label}).")
                 planned_chunks.extend((chunk_text, entry_type, False) for chunk_text in split_chunks)
         else:
             for selected_type in group_selected_types:
@@ -717,7 +769,7 @@ def refine_glossary_entries(
                 type_payload = _entry_payload(type_entries, payload_columns, payload_delimiter)
                 token_count = _count_payload_tokens(type_payload)
                 if token_count <= available_tokens:
-                    log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, budget {available_tokens:,}).")
+                    log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, {budget_label}).")
                     planned_chunks.append((type_payload, selected_type, True))
                     continue
 
@@ -733,7 +785,7 @@ def refine_glossary_entries(
                 ]
                 if not split_chunks:
                     split_chunks = [type_payload]
-                log(f"🪓 Glossary refinement split oversized {selected_type} entries into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
+                log(f"🪓 Glossary refinement split oversized {selected_type} entries into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, {budget_label}).")
                 planned_chunks.extend((chunk_text, selected_type, False) for chunk_text in split_chunks)
 
         if not planned_chunks:
@@ -756,6 +808,19 @@ def refine_glossary_entries(
                 per_type_total_chunks[chunk_entry_type] = per_type_total_chunks.get(chunk_entry_type, 0) + 1
         if total_chunks > 1:
             log(f"🧮 Glossary refinement will process {total_chunks} total chunk(s) across selected entry types.")
+
+        if send_all_types:
+            update_refinement_progress(progress_file, broad_type_key, {
+                "entry_type": "all selected entry types",
+                "status": "in_progress",
+                "input_hash": broad_input_hash,
+                "chunking_mode": canonical_mode,
+                "payload_delimiter": payload_delimiter_name,
+                "entry_count_before": len(entries),
+                "completed_chunks": 0,
+                "total_chunks": total_chunks,
+                "output_file": os.path.basename(output_path or ""),
+            }, atomic_replace_fn=atomic_replace_fn)
 
         for selected_type in group_selected_types:
             type_entries = entries_by_type.get(selected_type) or []
@@ -871,6 +936,20 @@ def refine_glossary_entries(
             else:
                 log(f"Refinement failed for chunk {chunk_idx}: {error}")
             if send_all_types:
+                broad_failed_update = {
+                    "entry_type": "all selected entry types",
+                    "status": "failed",
+                    "error": error,
+                    "completed_chunks": max(completed_by_type.values(), default=0),
+                    "total_chunks": len(chunks),
+                }
+                broad_failed_update.update(_result_model_update(result))
+                update_refinement_progress(
+                    progress_file,
+                    broad_type_key,
+                    broad_failed_update,
+                    atomic_replace_fn=atomic_replace_fn,
+                )
                 failed_update = {
                     "status": "failed",
                     "error": error,
@@ -920,6 +999,20 @@ def refine_glossary_entries(
 
         def _mark_type_chunk_success(result):
             if send_all_types:
+                broad_completed_chunks = max(completed_by_type.values(), default=0) + 1
+                broad_update = {
+                    "entry_type": "all selected entry types",
+                    "status": "in_progress",
+                    "completed_chunks": broad_completed_chunks,
+                    "total_chunks": len(chunks),
+                }
+                broad_update.update(_result_model_update(result))
+                update_refinement_progress(
+                    progress_file,
+                    broad_type_key,
+                    broad_update,
+                    atomic_replace_fn=atomic_replace_fn,
+                )
                 for selected_type in group_selected_types:
                     completed_by_type[selected_type] = completed_by_type.get(selected_type, 0) + 1
                     chunk_update = {
@@ -953,6 +1046,18 @@ def refine_glossary_entries(
             )
 
         def _mark_all_pending_stopped():
+            if send_all_types:
+                update_refinement_progress(
+                    progress_file,
+                    broad_type_key,
+                    {
+                        "entry_type": "all selected entry types",
+                        "status": "in_progress",
+                        "completed_chunks": max(completed_by_type.values(), default=0),
+                        "total_chunks": len(chunks),
+                    },
+                    atomic_replace_fn=atomic_replace_fn,
+                )
             for selected_type in group_selected_types:
                 update_refinement_progress(
                     progress_file,
@@ -967,6 +1072,19 @@ def refine_glossary_entries(
                 )
 
         def _mark_remaining_pending_failed(error, skip_entry_type=None):
+            if send_all_types:
+                update_refinement_progress(
+                    progress_file,
+                    broad_type_key,
+                    {
+                        "entry_type": "all selected entry types",
+                        "status": "failed",
+                        "error": error,
+                        "completed_chunks": max(completed_by_type.values(), default=0),
+                        "total_chunks": len(chunks),
+                    },
+                    atomic_replace_fn=atomic_replace_fn,
+                )
             for selected_type in group_selected_types:
                 if skip_entry_type and selected_type == skip_entry_type:
                     continue
@@ -1083,6 +1201,27 @@ def refine_glossary_entries(
             request_update = dict(last_request_context or _actual_request_key_context(client))
             if model_name:
                 request_update["model_name"] = model_name
+            if send_all_types:
+                broad_completed_update = {
+                    "entry_type": "all selected entry types",
+                    "status": "completed",
+                    "input_hash": broad_input_hash,
+                    "output_hash": _entry_hash("all selected entry types", refined_entries, hash_mode),
+                    "entry_count_before": len(entries),
+                    "entry_count_after": len(refined_entries),
+                    "completed_chunks": total_chunks,
+                    "total_chunks": total_chunks,
+                    "chunking_mode": canonical_mode,
+                    "payload_delimiter": payload_delimiter_name,
+                    "output_file": os.path.basename(output_path or ""),
+                }
+                broad_completed_update.update(request_update)
+                update_refinement_progress(
+                    progress_file,
+                    broad_type_key,
+                    broad_completed_update,
+                    atomic_replace_fn=atomic_replace_fn,
+                )
             for selected_type in group_selected_types:
                 original_type_entries = entries_by_type.get(selected_type) or []
                 refined_type_entries = result_mapping.get(selected_type, [])
