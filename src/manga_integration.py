@@ -10757,11 +10757,6 @@ class MangaTranslationTab(QObject):
 
     def _toggle_inpaint_visibility(self):
         """Enable/disable inpainting options based on skip toggle (no animations to prevent dialog issues)"""
-        print("\n" + "="*80)
-        print("TOGGLE FUNCTION CALLED!")
-        print(f"Checkbox state: {self.skip_inpainting_checkbox.isChecked() if hasattr(self, 'skip_inpainting_checkbox') else 'NO CHECKBOX'}")
-        print(f"Initializing: {getattr(self, '_initializing', 'NO FLAG')}")
-        print("="*80 + "\n")
         try:
             if not getattr(self, '_initializing', False):
                 _, inpainter_in_use = self._get_inpainter_pool_usage()
@@ -13786,9 +13781,6 @@ class MangaTranslationTab(QObject):
         noisy_exact_prefixes = (
             'Initialized OCR Manager for ',
             'Model preloading already in progress',
-            'TOGGLE FUNCTION CALLED!',
-            'Checkbox state:',
-            'Initializing:',
         )
         if text.startswith(noisy_exact_prefixes):
             return True
