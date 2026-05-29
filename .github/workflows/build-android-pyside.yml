@@ -1,0 +1,200 @@
+name: Build Android PySide APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      pyside_version:
+        description: "Host PySide6 version and Android wheel version to use"
+        required: true
+        default: "6.11.1"
+      build_mode:
+        description: "debug creates APK, release creates AAB"
+        required: true
+        default: "debug"
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build-android-pyside:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      PYSIDE_VERSION: ${{ inputs.pyside_version }}
+      PYSIDE_ANDROID_ARCH: aarch64
+      PYSIDE_BUILD_MODE: ${{ inputs.build_mode }}
+      ANDROID_NDK_VERSION: 26.1.10909125
+      ANDROID_PLATFORM: android-34
+      ANDROID_BUILD_TOOLS: 35.0.0
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libffi-dev \
+            libssl-dev \
+            libltdl-dev \
+            cmake \
+            zip \
+            unzip \
+            openjdk-17-jdk
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;$ANDROID_PLATFORM" \
+            "build-tools;$ANDROID_BUILD_TOOLS" \
+            "ndk;$ANDROID_NDK_VERSION"
+
+      - name: Restore PySide Android build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.buildozer
+            ~/.pyside6-android-deploy
+            src/.buildozer
+            src/android/pyside_launcher/deployment
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', '.github/workflows/build-android-pyside.yml') }}
+
+      - name: Install PySide deploy tooling
+        run: |
+          python -m pip install --upgrade pip setuptools wheel virtualenv
+          python -m pip install "PySide6==$PYSIDE_VERSION"
+          command -v pyside6-android-deploy
+          command -v qtpip
+
+      - name: Download PySide Android wheels
+        run: |
+          mkdir -p src/android/pyside_launcher/deployment/android-wheels
+          cd src/android/pyside_launcher/deployment/android-wheels
+          qtpip download "PySide6==$PYSIDE_VERSION" --android --arch "$PYSIDE_ANDROID_ARCH"
+          echo "Downloaded Android wheels:"
+          find . -maxdepth 1 -name '*.whl' -print
+
+      - name: Generate Android stubs
+        run: |
+          python src/android/generate_stubs.py
+
+      - name: Patch PySide deploy spec for workflow mode
+        working-directory: src/android/pyside_launcher
+        run: |
+          python - <<'PY'
+          from configparser import ConfigParser
+          from pathlib import Path
+          import os
+
+          spec = Path("pysidedeploy.spec")
+          config = ConfigParser(comment_prefixes="/", strict=False, allow_no_value=True)
+          config.read(spec)
+          config["buildozer"]["mode"] = os.environ["PYSIDE_BUILD_MODE"]
+          config["buildozer"]["arch"] = os.environ["PYSIDE_ANDROID_ARCH"]
+          with spec.open("w", encoding="utf-8") as handle:
+              config.write(handle, space_around_delimiters=True)
+          PY
+          echo "--- pysidedeploy.spec ---"
+          cat pysidedeploy.spec
+
+      - name: Build PySide Android package
+        working-directory: src/android/pyside_launcher
+        run: |
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+
+          PYSIDE_WHEEL="$(find deployment/android-wheels -maxdepth 1 -iname 'PySide6-*.whl' | head -1)"
+          SHIBOKEN_WHEEL="$(find deployment/android-wheels -maxdepth 1 -iname 'shiboken6-*.whl' | head -1)"
+
+          if [ -z "$PYSIDE_WHEEL" ] || [ -z "$SHIBOKEN_WHEEL" ]; then
+            echo "Could not find downloaded PySide6/Shiboken6 Android wheels"
+            exit 1
+          fi
+
+          PYSIDE_WHEEL="$(realpath "$PYSIDE_WHEEL")"
+          SHIBOKEN_WHEEL="$(realpath "$SHIBOKEN_WHEEL")"
+
+          echo "Using PySide wheel: $PYSIDE_WHEEL"
+          echo "Using Shiboken wheel: $SHIBOKEN_WHEEL"
+
+          set -o pipefail
+          pyside6-android-deploy \
+            --config-file pysidedeploy.spec \
+            --wheel-pyside "$PYSIDE_WHEEL" \
+            --wheel-shiboken "$SHIBOKEN_WHEEL" \
+            --sdk-path "$ANDROID_HOME" \
+            --ndk-path "$ANDROID_NDK_HOME" \
+            --force \
+            --keep-deployment-files \
+            --verbose \
+            2>&1 | tee android-pyside-build.log
+
+      - name: Find Android package
+        id: find_package
+        if: always()
+        run: |
+          echo "=== Android packages under src ==="
+          find src -type f \( -name '*.apk' -o -name '*.aab' \) -print || true
+
+          PACKAGE_PATH="$(find src -type f \( -name '*.apk' -o -name '*.aab' \) | head -1)"
+          if [ -n "$PACKAGE_PATH" ]; then
+            echo "package_found=true" >> "$GITHUB_OUTPUT"
+            echo "package_path=$PACKAGE_PATH" >> "$GITHUB_OUTPUT"
+            mkdir -p src/android/pyside_launcher/bin
+            cp "$PACKAGE_PATH" src/android/pyside_launcher/bin/
+          else
+            echo "package_found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload PySide Android package
+        if: steps.find_package.outputs.package_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Glossarion-Android-PySide-${{ inputs.build_mode }}
+          path: src/android/pyside_launcher/bin/*
+          if-no-files-found: error
+
+      - name: Upload PySide Android build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-pyside-build-logs
+          path: |
+            src/android/pyside_launcher/android-pyside-build.log
+            src/android/pyside_launcher/.buildozer/**/*.log
+            src/.buildozer/**/*.log
+          if-no-files-found: warn
+
+      - name: Save PySide Android build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.buildozer
+            ~/.pyside6-android-deploy
+            src/.buildozer
+            src/android/pyside_launcher/deployment
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', '.github/workflows/build-android-pyside.yml') }}

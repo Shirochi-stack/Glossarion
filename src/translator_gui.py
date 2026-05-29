@@ -777,6 +777,14 @@ if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
 else:
     _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+_ENV_APP_DIR = os.environ.get("GLOSSARION_APP_DIR")
+if _ENV_APP_DIR:
+    try:
+        os.makedirs(_ENV_APP_DIR, exist_ok=True)
+        _APP_DIR = os.path.abspath(_ENV_APP_DIR)
+    except OSError:
+        pass
+
 # On macOS .app bundles, App Translocation makes the bundle directory
 # read-only.  Detect this and redirect config/data to a writable location.
 if sys.platform == 'darwin' and getattr(sys, 'frozen', False):

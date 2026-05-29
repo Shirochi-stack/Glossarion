@@ -41,6 +41,11 @@ src/**
 # Allow android subfolder (Kivy/KivyMD Android entry point)
 !src/android/
 !src/android/**
+!src/android/launch_pyside_gui.bat
+!src/android/pyside_launcher/
+!src/android/pyside_launcher/*.py
+!src/android/pyside_launcher/*.spec
+!src/android/pyside_launcher/*.md
 
 # Never commit secrets and configs anywhere
 **/config.json
