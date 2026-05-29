@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QSizePolicy, QApplication,
                                 QGraphicsOpacityEffect)
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QIcon, QPixmap, QImage, QPainter, QColor
+from PySide6.QtGui import QFont, QIcon, QPixmap, QImage, QPainter, QColor, QPalette
 from typing import Dict, Any, Optional, Callable
 import logging
 import time
@@ -4218,6 +4218,7 @@ class MangaSettingsDialog(QDialog):
         perf_layout.addWidget(self.parallel_processing_checkbox)
         
         # Max workers
+        manga_cpu_cores = max(1, int(os.cpu_count() or 1))
         workers_frame = QWidget()
         workers_layout = QHBoxLayout(workers_frame)
         workers_layout.setContentsMargins(0, 0, 0, 0)
@@ -4230,11 +4231,21 @@ class MangaSettingsDialog(QDialog):
         self.max_workers_spinbox = QSpinBox()
         self.max_workers_spinbox.setRange(1, 999)
         self.max_workers_spinbox.setValue(self.settings['advanced']['max_workers'])
+        self.max_workers_spinbox.setToolTip(f"Maximum worker threads. Detected CPU cores: {manga_cpu_cores}.")
         workers_layout.addWidget(self.max_workers_spinbox)
         
-        self.workers_desc_label = QLabel("(threads for parallel processing)")
+        self.workers_desc_label = QLabel(f"(threads for parallel processing; CPU cores: {manga_cpu_cores})")
         workers_layout.addWidget(self.workers_desc_label)
         workers_layout.addStretch()
+
+        self._max_workers_cpu_cores = manga_cpu_cores
+        self._max_workers_default_palette = QPalette(self.max_workers_spinbox.palette())
+        self._max_workers_warning_palette = QPalette(self._max_workers_default_palette)
+        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Base, QColor("#3a171b"))
+        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Text, QColor("#ffb3b3"))
+        self._max_workers_warning_palette.setColor(QPalette.ColorRole.Highlight, QColor("#7a2832"))
+        self._max_workers_warning_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        self.max_workers_spinbox.valueChanged.connect(self._update_max_workers_warning_style)
         
         # Initialize workers state
         self._toggle_workers()
@@ -4643,12 +4654,32 @@ class MangaSettingsDialog(QDialog):
             enabled = bool(self.parallel_processing_checkbox.isChecked())
             if hasattr(self, 'max_workers_spinbox'):
                 self.max_workers_spinbox.setEnabled(enabled)
+                self._update_max_workers_warning_style()
             if hasattr(self, 'workers_label'):
                 self.workers_label.setEnabled(enabled)
                 self.workers_label.setStyleSheet("color: white;" if enabled else "color: gray;")
             if hasattr(self, 'workers_desc_label'):
                 self.workers_desc_label.setEnabled(enabled)
                 self.workers_desc_label.setStyleSheet("color: white;" if enabled else "color: gray;")
+
+    def _update_max_workers_warning_style(self, *_args):
+        """Warn when manga max workers exceed detected CPU cores."""
+        try:
+            spinbox = getattr(self, 'max_workers_spinbox', None)
+            if spinbox is None:
+                return
+            enabled = bool(getattr(self, 'parallel_processing_checkbox', None) and self.parallel_processing_checkbox.isChecked())
+            cores = max(1, int(getattr(self, '_max_workers_cpu_cores', os.cpu_count() or 1) or 1))
+            too_many = enabled and int(spinbox.value()) > cores
+            spinbox.setStyleSheet("")
+            if too_many:
+                spinbox.setPalette(getattr(self, '_max_workers_warning_palette', spinbox.palette()))
+                spinbox.setToolTip(f"Maximum worker threads exceed detected CPU cores ({cores}).")
+            else:
+                spinbox.setPalette(getattr(self, '_max_workers_default_palette', spinbox.palette()))
+                spinbox.setToolTip(f"Maximum worker threads. Detected CPU cores: {cores}.")
+        except Exception:
+            pass
     
     def _toggle_panel_controls(self):
         """Enable/disable panel control fields based on parallel panel toggle."""
