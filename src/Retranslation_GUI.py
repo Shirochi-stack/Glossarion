@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
 import zipfile
@@ -179,6 +179,41 @@ class RetranslationMixin:
             if re.search(r'\d', stem):
                 return False
         return True
+
+    def _apply_compact_inline_list_style(self, listbox, font=None, extra_row_px=0):
+        """Use dense row spacing for inline status/list views."""
+        try:
+            if font is not None:
+                listbox.setFont(font)
+            listbox.setProperty("_compact_inline_extra_row_px", max(0, int(extra_row_px or 0)))
+            listbox.setSpacing(0)
+            listbox.setUniformItemSizes(True)
+            listbox.setStyleSheet("""
+                QListWidget {
+                    outline: 0;
+                }
+                QListWidget::item {
+                    margin: 0px;
+                    padding: 0px 2px;
+                }
+            """)
+        except Exception:
+            pass
+
+    def _set_compact_inline_item_size(self, listbox, item):
+        try:
+            extra_row_px = int(listbox.property("_compact_inline_extra_row_px") or 0)
+            height = max(18, listbox.fontMetrics().lineSpacing() + 2) + extra_row_px
+            item.setSizeHint(QSize(0, height))
+        except Exception:
+            pass
+        return item
+
+    def _add_compact_inline_list_item(self, listbox, item_or_text):
+        item = item_or_text if isinstance(item_or_text, QListWidgetItem) else QListWidgetItem(str(item_or_text))
+        self._set_compact_inline_item_size(listbox, item)
+        listbox.addItem(item)
+        return item
     
     def _ui_yield(self, ms=5):
         """Let the Qt event loop process pending events briefly."""
@@ -2465,10 +2500,7 @@ class RetranslationMixin:
             
             # Chapter list
             gp_listbox = QListWidget()
-            gp_listbox.setFont(QFont('Courier', 10))
-            gp_listbox.setSpacing(0)
-            gp_listbox.setUniformItemSizes(True)
-            gp_listbox.setStyleSheet("QListWidget::item { padding: 1px 2px; margin: 0px; }")
+            self._apply_compact_inline_list_style(gp_listbox, QFont('Courier', 10))
             gp_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
             gp_listbox.setSelectionMode(QListWidget.ExtendedSelection)
             
@@ -2497,7 +2529,7 @@ class RetranslationMixin:
                 item.setForeground(QColor(color))
                 item.setData(Qt.UserRole, status)
                 item.setData(Qt.UserRole + 1, ci)  # Store chapter index for deletion
-                gp_listbox.addItem(item)
+                self._add_compact_inline_list_item(gp_listbox, item)
 
             def _refresh_refinement_rows(_d, keep_updates_disabled=False):
                 selected_ref_keys = {
@@ -2519,7 +2551,7 @@ class RetranslationMixin:
                         item.setData(Qt.UserRole, ref_status)
                         item.setData(Qt.UserRole + 1, None)
                         item.setData(Qt.UserRole + 3, ref_key)
-                        gp_listbox.addItem(item)
+                        self._add_compact_inline_list_item(gp_listbox, item)
                         if ref_key in selected_ref_keys:
                             item.setSelected(True)
                 finally:
@@ -2549,7 +2581,7 @@ class RetranslationMixin:
                         item.setForeground(QColor(_gp_color_for(status)))
                         item.setData(Qt.UserRole, status)
                         item.setData(Qt.UserRole + 1, ci)
-                        gp_listbox.addItem(item)
+                        self._add_compact_inline_list_item(gp_listbox, item)
                         if panel_state.get('select_all_visible'):
                             item.setSelected(not item.isHidden())
                     state['ci'] = end_ci
@@ -2936,7 +2968,7 @@ class RetranslationMixin:
                     item.setForeground(QColor(color))
                     item.setData(Qt.UserRole, status)
                     item.setData(Qt.UserRole + 1, ci)
-                    gp_listbox.addItem(item)
+                    self._add_compact_inline_list_item(gp_listbox, item)
             
                 _populate_gp_listbox(_d)
 
@@ -3134,6 +3166,8 @@ class RetranslationMixin:
                     if expected_refinement:
                         ref_list = QListWidget(panel)
                         ref_list.setSelectionMode(QAbstractItemView.NoSelection)
+                        ref_list.setSpacing(0)
+                        ref_list.setUniformItemSizes(True)
                         ref_list.setStyleSheet("""
                             QListWidget {
                                 background-color: #1f1f1f;
@@ -3142,14 +3176,17 @@ class RetranslationMixin:
                                 border-radius: 4px;
                                 padding: 4px;
                             }
-                            QListWidget::item { padding: 3px 6px; }
+                            QListWidget::item {
+                                margin: 0px;
+                                padding: 0px 4px;
+                            }
                         """)
                         ref_list.setMaximumHeight(160)
                         for _ref_key, ref_info in sorted(expected_refinement.items()):
                             entry_type = str(ref_info.get('entry_type') or _ref_key.replace('type::', '')).strip() or 'entry type'
                             item = QListWidgetItem(f"Refinement | \u2728 Not Refined    | {entry_type}")
                             item.setForeground(QColor('#5a9fd4'))
-                            ref_list.addItem(item)
+                            self._add_compact_inline_list_item(ref_list, item)
                         p_layout.addWidget(ref_list)
                     
                     p_layout.addStretch()
@@ -3593,10 +3630,7 @@ class RetranslationMixin:
         listbox = QListWidget()
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
         listbox_font = QFont('Courier', 10)  # Fixed-width font for better alignment
-        listbox.setFont(listbox_font)
-        listbox.setSpacing(0)
-        listbox.setUniformItemSizes(True)
-        listbox.setStyleSheet("QListWidget::item { padding: 1px 2px; margin: 0px; }")
+        self._apply_compact_inline_list_style(listbox, listbox_font, extra_row_px=2)
         # Use 36% of screen width
         min_width, _ = self._get_dialog_size(0.36, 0)
         listbox.setMinimumWidth(min_width)
@@ -3769,7 +3803,7 @@ class RetranslationMixin:
             item.setData(Qt.UserRole + 2, status)
             
             # Add item to listbox first
-            listbox.addItem(item)
+            self._add_compact_inline_list_item(listbox, item)
             
             # Then hide skipped special files if toggle is off (must be done after adding to listbox)
             _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
@@ -6553,6 +6587,7 @@ class RetranslationMixin:
                 display_status = self._progress_display_status(info, data)
                 item.setText(build_display(info, max_original_len, max_output_len))
                 apply_item_visuals(item, display_status)
+                self._set_compact_inline_item_size(listbox, item)
                 is_special = info.get('is_special', False)
                 _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
                 is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
@@ -6576,7 +6611,7 @@ class RetranslationMixin:
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setData(Qt.UserRole + 2, display_status)
                 item.setHidden(is_skipped_special and not show_special_files)
-                listbox.addItem(item)
+                self._add_compact_inline_list_item(listbox, item)
 
         listbox.blockSignals(False)
         listbox.setUpdatesEnabled(True)
@@ -6878,7 +6913,7 @@ class RetranslationMixin:
                 else:
                     display = f"📄 {info['file']}"
                 
-                listbox.addItem(display)
+                self._add_compact_inline_list_item(listbox, display)
             
             # Restore selections
             try:
@@ -7342,6 +7377,7 @@ class RetranslationMixin:
         # Listbox (QListWidget has built-in scrolling)
         listbox = QListWidget()
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        self._apply_compact_inline_list_style(listbox)
         # Use 16% of screen width (half of original ~31% for 1920px screen)
         min_width, _ = self._get_dialog_size(0.16, 0)
         listbox.setMinimumWidth(min_width)
@@ -7377,7 +7413,7 @@ class RetranslationMixin:
             if found_translations:
                 for output_dir, html_file in found_translations:
                     display = f"📄 {img_name} → {html_file} | ✅ Translated"
-                    listbox.addItem(display)
+                    self._add_compact_inline_list_item(listbox, display)
                     
                     file_info.append({
                         'type': 'translated',
@@ -7388,7 +7424,7 @@ class RetranslationMixin:
                     })
             else:
                 display = f"🖼️ {img_name} | ❌ No translation found"
-                listbox.addItem(display)
+                self._add_compact_inline_list_item(listbox, display)
         
         # Selection count
         selection_count_label = QLabel("Selected: 0")
@@ -7481,6 +7517,7 @@ class RetranslationMixin:
         # Listbox (QListWidget has built-in scrolling)
         listbox = QListWidget()
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        self._apply_compact_inline_list_style(listbox)
         # Use 16% of screen width (half of original ~31% for 1920px screen)
         min_width, _ = self._get_dialog_size(0.16, 0)
         listbox.setMinimumWidth(min_width)
@@ -7500,7 +7537,7 @@ class RetranslationMixin:
                 else:
                     display = f"📄 {file} | ✅ Completed"
                 
-                listbox.addItem(display)
+                self._add_compact_inline_list_item(listbox, display)
                 file_info.append({
                     'type': 'translated',
                     'file': file,
@@ -7513,7 +7550,7 @@ class RetranslationMixin:
             for file in sorted(os.listdir(images_dir)):
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
                     display = f"🖼️ Cover | {file} | ⏭️ Skipped"
-                    listbox.addItem(display)
+                    self._add_compact_inline_list_item(listbox, display)
                     file_info.append({
                         'type': 'cover',
                         'file': file,
@@ -7783,6 +7820,7 @@ class RetranslationMixin:
         # Create listbox (QListWidget has built-in scrolling)
         listbox = QListWidget()
         listbox.setSelectionMode(QListWidget.ExtendedSelection)
+        self._apply_compact_inline_list_style(listbox)
         # Use 16% of screen width (half of original ~31% for 1920px screen)
         min_width, _ = self._get_dialog_size(0.16, 0)
         listbox.setMinimumWidth(min_width)
@@ -7806,7 +7844,7 @@ class RetranslationMixin:
             else:
                 display = f"📄 {display_name} | ✅ Completed"
             
-            listbox.addItem(display)
+            self._add_compact_inline_list_item(listbox, display)
             
             # Find the hash key for this file if progress tracking exists
             hash_key = None
@@ -7834,7 +7872,7 @@ class RetranslationMixin:
         # Add cover images
         for img_file in sorted(image_files):
             display = f"🖼️ Cover | {img_file} | ⏭️ Skipped (cover)"
-            listbox.addItem(display)
+            self._add_compact_inline_list_item(listbox, display)
             file_info.append({
                 'type': 'cover',
                 'file': img_file,
