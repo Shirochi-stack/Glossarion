@@ -3724,6 +3724,21 @@ def _create_response_handling_section(self, parent):
         self.extraction_workers_entry.setText(str(self.extraction_workers_var))
     except Exception:
         pass
+    extraction_workers_normal_style = (
+        "QLineEdit { background-color: #2d2d2d; color: white; "
+        "border: 1px solid #4a5568; border-radius: 3px; padding: 4px; } "
+        "QLineEdit:focus { border-color: #5a9fd4; } "
+        "QLineEdit:disabled { background-color: #242424; color: #777777; "
+        "border: 1px solid #3a4555; }"
+    )
+    extraction_workers_warning_style = (
+        "QLineEdit { background-color: #3a171b; color: #ffb3b3; "
+        "border: 1px solid #dc3545; border-radius: 3px; padding: 4px; } "
+        "QLineEdit:focus { border: 2px solid #ff4d5e; } "
+        "QLineEdit:disabled { background-color: #242424; color: #777777; "
+        "border: 1px solid #3a4555; }"
+    )
+
     def _update_extraction_workers_warning_style():
         try:
             raw_workers = self.extraction_workers_entry.text()
@@ -3734,16 +3749,12 @@ def _create_response_handling_section(self, parent):
             enabled = bool(getattr(self, 'enable_parallel_extraction_var', False))
             too_many = enabled
         if too_many:
-            self.extraction_workers_entry.setStyleSheet(
-                "QLineEdit { background-color: #3a171b; color: #ffb3b3; "
-                "border: 1px solid #dc3545; border-radius: 3px; padding: 4px; } "
-                "QLineEdit:focus { border: 2px solid #ff4d5e; }"
-            )
+            self.extraction_workers_entry.setStyleSheet(extraction_workers_warning_style)
             self.extraction_workers_entry.setToolTip(
                 f"Worker threads exceed detected CPU cores ({parallel_cpu_cores})."
             )
         else:
-            self.extraction_workers_entry.setStyleSheet("")
+            self.extraction_workers_entry.setStyleSheet(extraction_workers_normal_style)
             self.extraction_workers_entry.setToolTip(
                 f"Worker threads. Detected CPU cores: {parallel_cpu_cores}."
             )
