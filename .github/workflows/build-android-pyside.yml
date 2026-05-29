@@ -85,6 +85,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel virtualenv
           python -m pip install "PySide6==$PYSIDE_VERSION"
+          ANDROID_REQUIREMENTS="$(python -c 'from pathlib import Path; import PySide6; print(Path(PySide6.__file__).resolve().parent / "scripts" / "requirements-android.txt")')"
+          echo "Installing PySide Android deploy requirements from: $ANDROID_REQUIREMENTS"
+          python -m pip install -r "$ANDROID_REQUIREMENTS"
           command -v pyside6-android-deploy
 
       - name: Download PySide Android wheels
