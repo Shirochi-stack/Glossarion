@@ -85,17 +85,78 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel virtualenv
           python -m pip install "PySide6==$PYSIDE_VERSION"
-          python -m pip install "qtpip==0.1.4"
           command -v pyside6-android-deploy
-          command -v qtpip
 
       - name: Download PySide Android wheels
+        id: android_wheels
         run: |
-          mkdir -p src/android/pyside_launcher/deployment/android-wheels
-          cd src/android/pyside_launcher/deployment/android-wheels
-          qtpip download "PySide6==$PYSIDE_VERSION" --android --arch "$PYSIDE_ANDROID_ARCH"
+          set -euo pipefail
+          WHEEL_DIR="$GITHUB_WORKSPACE/src/android/pyside_launcher/deployment/android-wheels"
+          rm -rf "$WHEEL_DIR"
+          mkdir -p "$WHEEL_DIR"
+
+          python - <<'PY'
+          import html
+          import os
+          import re
+          import sys
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          base_url = "https://download.qt.io/official_releases/QtForPython"
+          version = os.environ["PYSIDE_VERSION"]
+          arch = os.environ["PYSIDE_ANDROID_ARCH"]
+          wheel_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "src/android/pyside_launcher/deployment/android-wheels"
+
+          def find_android_wheel(package_dir: str, prefix: str) -> tuple[str, str]:
+              index_url = f"{base_url}/{package_dir}/"
+              print(f"Reading {index_url}", flush=True)
+              with urllib.request.urlopen(index_url, timeout=60) as response:
+                  index_html = response.read().decode("utf-8", errors="replace")
+              links = re.findall(r'href="([^"]+\.whl)"', index_html, flags=re.IGNORECASE)
+              candidates = []
+              for link in links:
+                  name = html.unescape(urllib.parse.unquote(link.rsplit("/", 1)[-1]))
+                  lower = name.lower()
+                  if (
+                      lower.startswith(prefix)
+                      and f"-{version.lower()}-" in lower
+                      and lower.endswith(f"android_{arch.lower()}.whl")
+                  ):
+                      candidates.append((name, urllib.parse.urljoin(index_url, link)))
+              if not candidates:
+                  raise SystemExit(
+                      f"No {package_dir} Android wheel found for version={version} arch={arch}"
+                  )
+              candidates.sort()
+              return candidates[-1]
+
+          wheels = [
+              find_android_wheel("pyside6", "pyside6-"),
+              find_android_wheel("shiboken6", "shiboken6-"),
+          ]
+
+          for name, url in wheels:
+              destination = wheel_dir / name
+              print(f"Downloading {url}", flush=True)
+              urllib.request.urlretrieve(url, destination)
+              print(f"Saved {destination}", flush=True)
+          PY
+
           echo "Downloaded Android wheels:"
-          find . -maxdepth 1 -name '*.whl' -print
+          find "$WHEEL_DIR" -type f -name '*.whl' -print | sort
+
+          PYSIDE_WHEEL="$(find "$WHEEL_DIR" -type f -iname 'pyside6-*.whl' | sort | head -1)"
+          SHIBOKEN_WHEEL="$(find "$WHEEL_DIR" -type f -iname 'shiboken6-*.whl' | sort | head -1)"
+
+          if [ -z "$PYSIDE_WHEEL" ] || [ -z "$SHIBOKEN_WHEEL" ]; then
+            echo "Could not find downloaded PySide6/Shiboken6 Android wheels in $WHEEL_DIR"
+            exit 1
+          fi
+
+          echo "pyside_wheel=$PYSIDE_WHEEL" >> "$GITHUB_OUTPUT"
+          echo "shiboken_wheel=$SHIBOKEN_WHEEL" >> "$GITHUB_OUTPUT"
 
       - name: Generate Android stubs
         run: |
@@ -126,11 +187,12 @@ jobs:
           export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
 
-          PYSIDE_WHEEL="$(find deployment/android-wheels -maxdepth 1 -iname 'PySide6-*.whl' | head -1)"
-          SHIBOKEN_WHEEL="$(find deployment/android-wheels -maxdepth 1 -iname 'shiboken6-*.whl' | head -1)"
+          PYSIDE_WHEEL="${{ steps.android_wheels.outputs.pyside_wheel }}"
+          SHIBOKEN_WHEEL="${{ steps.android_wheels.outputs.shiboken_wheel }}"
 
-          if [ -z "$PYSIDE_WHEEL" ] || [ -z "$SHIBOKEN_WHEEL" ]; then
+          if [ ! -f "$PYSIDE_WHEEL" ] || [ ! -f "$SHIBOKEN_WHEEL" ]; then
             echo "Could not find downloaded PySide6/Shiboken6 Android wheels"
+            find deployment/android-wheels -type f -name '*.whl' -print || true
             exit 1
           fi
 
