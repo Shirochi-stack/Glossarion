@@ -546,8 +546,9 @@ def refine_glossary_entries(
     if not str(system_prompt or "").strip() or _is_legacy_default_refinement_prompt(system_prompt):
         system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
     user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
-    send_all_types = True
-    canonical_mode = "separate"
+    raw_chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
+    send_all_types = raw_chunking_mode in ("all", "all_types", "all_in_one", "all_entries", "combined")
+    canonical_mode = "all" if send_all_types else "separate"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
     payload_delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
     payload_delimiter_name = "unit_separator" if payload_delimiter == "\x1F" else "comma"
@@ -618,7 +619,7 @@ def refine_glossary_entries(
                 "status": "completed",
                 "input_hash": type_hash,
                 "output_hash": type_hash,
-                "chunking_mode": "separate",
+                "chunking_mode": canonical_mode,
                 "payload_delimiter": payload_delimiter_name,
                 "entry_count_before": 0,
                 "entry_count_after": 0,
@@ -634,7 +635,7 @@ def refine_glossary_entries(
             "entry_type": entry_type,
             "status": "not_refined",
             "input_hash": type_hash,
-            "chunking_mode": "separate",
+            "chunking_mode": canonical_mode,
             "payload_delimiter": payload_delimiter_name,
             "entry_count_before": len(entries),
             "output_file": os.path.basename(output_path or ""),
@@ -654,7 +655,13 @@ def refine_glossary_entries(
     all_selected_entries = [
         e for entry_type in selected_types for e in entries_by_type.get(entry_type, [])
     ]
-    groups = [("selected glossary entries", all_selected_entries, broad_type_key, selected_lc)]
+    if send_all_types:
+        groups = [("selected glossary entries", all_selected_entries, broad_type_key, selected_lc)]
+    else:
+        groups = [
+            (entry_type, entries_by_type.get(entry_type, []), type_keys[entry_type], {entry_type.lower()})
+            for entry_type in selected_types
+        ]
 
     def _original_mapping_for_group(entry_type, entries):
         if send_all_types:
@@ -676,34 +683,58 @@ def refine_glossary_entries(
 
         payload_columns = _entry_columns(entries)
         planned_chunks = []
-        for selected_type in selected_types:
-            type_entries = [
-                e for e in entries
-                if str(e.get("type", "")).strip().lower() == selected_type.lower()
-            ]
-            if not type_entries:
-                continue
-            type_payload = _entry_payload(type_entries, payload_columns, payload_delimiter)
-            token_count = _count_payload_tokens(type_payload)
-            if token_count <= available_tokens:
-                log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, budget {available_tokens:,}).")
-                planned_chunks.append((type_payload, selected_type, True))
-                continue
+        group_selected_types = selected_types if send_all_types else [entry_type]
 
-            split_chunks = [
-                chunk_text
-                for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
-                    type_payload,
-                    available_tokens,
-                    filename=f"glossary_refinement_{selected_type}.txt",
-                )
-                for chunk_text in [str(chunk_html or "").strip()]
-                if chunk_text
-            ]
-            if not split_chunks:
-                split_chunks = [type_payload]
-            log(f"🪓 Glossary refinement split oversized {selected_type} entries into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
-            planned_chunks.extend((chunk_text, selected_type, False) for chunk_text in split_chunks)
+        if send_all_types:
+            combined_payload = _entry_payload(entries, payload_columns, payload_delimiter)
+            token_count = _count_payload_tokens(combined_payload)
+            if token_count <= available_tokens:
+                log(f"Glossary refinement keeping all selected entry types as one fitted chunk ({token_count:,} tokens, budget {available_tokens:,}).")
+                planned_chunks.append((combined_payload, entry_type, True))
+            else:
+                split_chunks = [
+                    chunk_text
+                    for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
+                        combined_payload,
+                        available_tokens,
+                        filename="glossary_refinement_selected_types.txt",
+                    )
+                    for chunk_text in [str(chunk_html or "").strip()]
+                    if chunk_text
+                ]
+                if not split_chunks:
+                    split_chunks = [combined_payload]
+                log(f"🪓 Glossary refinement split all selected entry types into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
+                planned_chunks.extend((chunk_text, entry_type, False) for chunk_text in split_chunks)
+        else:
+            for selected_type in group_selected_types:
+                type_entries = [
+                    e for e in entries
+                    if str(e.get("type", "")).strip().lower() == selected_type.lower()
+                ]
+                if not type_entries:
+                    continue
+                type_payload = _entry_payload(type_entries, payload_columns, payload_delimiter)
+                token_count = _count_payload_tokens(type_payload)
+                if token_count <= available_tokens:
+                    log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, budget {available_tokens:,}).")
+                    planned_chunks.append((type_payload, selected_type, True))
+                    continue
+
+                split_chunks = [
+                    chunk_text
+                    for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
+                        type_payload,
+                        available_tokens,
+                        filename=f"glossary_refinement_{selected_type}.txt",
+                    )
+                    for chunk_text in [str(chunk_html or "").strip()]
+                    if chunk_text
+                ]
+                if not split_chunks:
+                    split_chunks = [type_payload]
+                log(f"🪓 Glossary refinement split oversized {selected_type} entries into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
+                planned_chunks.extend((chunk_text, selected_type, False) for chunk_text in split_chunks)
 
         if not planned_chunks:
             payload = _entry_payload(entries, payload_columns, payload_delimiter)
@@ -713,13 +744,20 @@ def refine_glossary_entries(
             (chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk)
             for chunk_idx, (chunk_text, chunk_entry_type, whole_type_chunk) in enumerate(planned_chunks, 1)
         ]
-        per_type_total_chunks = {}
-        for _chunk_text, _chunk_idx, _total_chunks, chunk_entry_type, _whole_type_chunk in chunks:
-            per_type_total_chunks[chunk_entry_type] = per_type_total_chunks.get(chunk_entry_type, 0) + 1
+        if send_all_types:
+            per_type_total_chunks = {
+                selected_type: total_chunks
+                for selected_type in group_selected_types
+                if entries_by_type.get(selected_type)
+            }
+        else:
+            per_type_total_chunks = {}
+            for _chunk_text, _chunk_idx, _total_chunks, chunk_entry_type, _whole_type_chunk in chunks:
+                per_type_total_chunks[chunk_entry_type] = per_type_total_chunks.get(chunk_entry_type, 0) + 1
         if total_chunks > 1:
             log(f"🧮 Glossary refinement will process {total_chunks} total chunk(s) across selected entry types.")
 
-        for selected_type in selected_types:
+        for selected_type in group_selected_types:
             type_entries = entries_by_type.get(selected_type) or []
             if not type_entries:
                 continue
@@ -727,7 +765,7 @@ def refine_glossary_entries(
                 "entry_type": selected_type,
                 "status": "in_progress",
                 "input_hash": type_hashes.get(selected_type) or _entry_hash(selected_type, type_entries, hash_mode),
-                "chunking_mode": "separate",
+                "chunking_mode": canonical_mode,
                 "payload_delimiter": payload_delimiter_name,
                 "entry_count_before": len(type_entries),
                 "completed_chunks": 0,
@@ -740,7 +778,9 @@ def refine_glossary_entries(
             if check_stop():
                 return {"status": "stopped", "chunk_idx": chunk_idx, "total_chunks": total_chunks, "entry_type": chunk_entry_type}
 
-            if whole_type_chunk:
+            if send_all_types:
+                log(f"✨ Refining selected glossary entries ({chunk_idx}/{total_chunks})...")
+            elif whole_type_chunk:
                 log(f"✨ Refining {chunk_entry_type} entries ({chunk_idx}/{total_chunks})...")
             else:
                 log(f"✨ Refining glossary chunks ({chunk_idx}/{total_chunks})...")
@@ -830,6 +870,26 @@ def refine_glossary_entries(
                 log(f"Refinement chunk {chunk_idx} was truncated; keeping original selected entries.")
             else:
                 log(f"Refinement failed for chunk {chunk_idx}: {error}")
+            if send_all_types:
+                failed_update = {
+                    "status": "failed",
+                    "error": error,
+                }
+                failed_update.update(_result_model_update(result))
+                for selected_type in group_selected_types:
+                    typed_failed_update = dict(failed_update)
+                    typed_failed_update.update({
+                        "entry_type": selected_type,
+                        "completed_chunks": completed_by_type.get(selected_type, 0),
+                        "total_chunks": per_type_total_chunks.get(selected_type, result.get("total_chunks")),
+                    })
+                    update_refinement_progress(
+                        progress_file,
+                        type_keys[selected_type],
+                        typed_failed_update,
+                        atomic_replace_fn=atomic_replace_fn,
+                    )
+                return
             failed_update = {
                 "entry_type": result_entry_type,
                 "status": "failed",
@@ -856,9 +916,26 @@ def refine_glossary_entries(
             if result.get("request_context"):
                 last_request_context = dict(result.get("request_context") or {})
 
-        completed_by_type = {selected_type: 0 for selected_type in selected_types}
+        completed_by_type = {selected_type: 0 for selected_type in group_selected_types}
 
         def _mark_type_chunk_success(result):
+            if send_all_types:
+                for selected_type in group_selected_types:
+                    completed_by_type[selected_type] = completed_by_type.get(selected_type, 0) + 1
+                    chunk_update = {
+                        "entry_type": selected_type,
+                        "status": "in_progress",
+                        "completed_chunks": completed_by_type[selected_type],
+                        "total_chunks": per_type_total_chunks.get(selected_type, result.get("total_chunks")),
+                    }
+                    chunk_update.update(_result_model_update(result))
+                    update_refinement_progress(
+                        progress_file,
+                        type_keys[selected_type],
+                        chunk_update,
+                        atomic_replace_fn=atomic_replace_fn,
+                    )
+                return
             result_entry_type = result.get("entry_type") or entry_type
             completed_by_type[result_entry_type] = completed_by_type.get(result_entry_type, 0) + 1
             chunk_update = {
@@ -876,7 +953,7 @@ def refine_glossary_entries(
             )
 
         def _mark_all_pending_stopped():
-            for selected_type in selected_types:
+            for selected_type in group_selected_types:
                 update_refinement_progress(
                     progress_file,
                     type_keys[selected_type],
@@ -890,7 +967,7 @@ def refine_glossary_entries(
                 )
 
         def _mark_remaining_pending_failed(error, skip_entry_type=None):
-            for selected_type in selected_types:
+            for selected_type in group_selected_types:
                 if skip_entry_type and selected_type == skip_entry_type:
                     continue
                 update_refinement_progress(
@@ -953,10 +1030,11 @@ def refine_glossary_entries(
 
             if failed_result:
                 _record_failed_chunk(failed_result)
-                _mark_remaining_pending_failed(
-                    "refinement_aborted_after_chunk_failure",
-                    failed_result.get("entry_type"),
-                )
+                if not send_all_types:
+                    _mark_remaining_pending_failed(
+                        "refinement_aborted_after_chunk_failure",
+                        failed_result.get("entry_type"),
+                    )
                 refined_entries = []
             else:
                 for chunk_idx in sorted(chunk_results):
@@ -972,10 +1050,11 @@ def refine_glossary_entries(
                     return "stopped", entry_type, {}
                 if status != "ok":
                     _record_failed_chunk(result)
-                    _mark_remaining_pending_failed(
-                        "refinement_aborted_after_chunk_failure",
-                        result.get("entry_type"),
-                    )
+                    if not send_all_types:
+                        _mark_remaining_pending_failed(
+                            "refinement_aborted_after_chunk_failure",
+                            result.get("entry_type"),
+                        )
                     refined_entries = []
                     break
 
@@ -989,7 +1068,7 @@ def refine_glossary_entries(
                 refined_entries = dedupe_fn(refined_entries)
             if send_all_types:
                 result_mapping = {}
-                for selected_type in selected_types:
+                for selected_type in group_selected_types:
                     typed_refined = [
                         e for e in refined_entries
                         if str(e.get("type", "")).strip().lower() == selected_type.lower()
@@ -1004,7 +1083,7 @@ def refine_glossary_entries(
             request_update = dict(last_request_context or _actual_request_key_context(client))
             if model_name:
                 request_update["model_name"] = model_name
-            for selected_type in selected_types:
+            for selected_type in group_selected_types:
                 original_type_entries = entries_by_type.get(selected_type) or []
                 refined_type_entries = result_mapping.get(selected_type, [])
                 completed_update = {
@@ -1016,7 +1095,7 @@ def refine_glossary_entries(
                     "entry_count_after": len(refined_type_entries),
                     "completed_chunks": per_type_total_chunks.get(selected_type, 0),
                     "total_chunks": per_type_total_chunks.get(selected_type, 0),
-                    "chunking_mode": "separate",
+                    "chunking_mode": canonical_mode,
                     "payload_delimiter": payload_delimiter_name,
                     "output_file": os.path.basename(output_path or ""),
                 }
