@@ -581,7 +581,7 @@ class SplashManager(QObject):
             self._manual_progress_auto_cap = 62 if no_manga_startup else 38
             self._manual_progress_auto_boost = 1.0
         elif "QA scanner loaded" in message:
-            self._manual_progress_auto_cap = 92
+            self._manual_progress_auto_cap = 95
             self._manual_progress_auto_boost = 2.0
         elif (
             "Finalizing module initialization" in message
