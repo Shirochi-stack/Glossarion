@@ -199,6 +199,45 @@ def _entry_payload(entries: List[Dict], columns: Optional[List[str]] = None, del
     return "\n".join(lines)
 
 
+def _payload_type_counts(payload_text: str, columns: List[str], delimiter: str = ",") -> Dict[str, int]:
+    type_idx = 0
+    try:
+        lowered = [str(col).strip().lower() for col in columns or []]
+        if "type" in lowered:
+            type_idx = lowered.index("type")
+    except Exception:
+        type_idx = 0
+
+    counts: Dict[str, int] = {}
+    if not str(payload_text or "").strip():
+        return counts
+    try:
+        if delimiter == "\x1F":
+            rows = [
+                line.split(delimiter)
+                for line in str(payload_text).splitlines()
+                if str(line or "").strip()
+            ]
+        else:
+            rows = csv.reader(io.StringIO(str(payload_text or "")))
+        for row in rows:
+            if not row or len(row) <= type_idx:
+                continue
+            entry_type = str(row[type_idx] or "").strip()
+            if not entry_type:
+                continue
+            counts[entry_type] = counts.get(entry_type, 0) + 1
+    except Exception:
+        return counts
+    return counts
+
+
+def _format_type_counts(counts: Dict[str, int]) -> str:
+    if not counts:
+        return "no recognizable entry rows"
+    return ", ".join(f"{entry_type} x{count:,}" for entry_type, count in counts.items())
+
+
 def _entry_hash(entry_type: str, entries: List[Dict], chunking_mode: str) -> str:
     payload = {
         "entry_type": entry_type,
@@ -796,6 +835,17 @@ def refine_glossary_entries(
             (chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk)
             for chunk_idx, (chunk_text, chunk_entry_type, whole_type_chunk) in enumerate(planned_chunks, 1)
         ]
+        if send_all_types:
+            for chunk_text, chunk_idx, _total_chunks, _chunk_entry_type, _whole_type_chunk in chunks:
+                chunk_counts = _payload_type_counts(chunk_text, payload_columns, payload_delimiter)
+                try:
+                    chunk_tokens = _count_payload_tokens(chunk_text)
+                except Exception:
+                    chunk_tokens = len(str(chunk_text or "")) // 3
+                log(
+                    f"🧩 Glossary refinement chunk {chunk_idx}/{total_chunks} includes "
+                    f"{_format_type_counts(chunk_counts)} ({chunk_tokens:,} tokens)."
+                )
         if send_all_types:
             per_type_total_chunks = {
                 selected_type: total_chunks
