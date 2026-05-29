@@ -16,6 +16,26 @@ from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCurs
 import numpy as np
 
 
+def _manga_debug_logging_enabled() -> bool:
+    return (
+        os.environ.get('DEBUG_MODE', '0') == '1'
+        or os.environ.get('SHOW_DEBUG_BUTTONS', '0') == '1'
+        or os.environ.get('MANGA_DEBUG_MODE', '0') == '1'
+        or os.environ.get('DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE', '0') == '1'
+    )
+
+
+def _manga_debug_print(*args, **kwargs):
+    try:
+        first_arg = str(args[0]) if args else ''
+        important = any(term in first_arg.lower() for term in ('error', 'failed', 'failure', 'exception', 'warning'))
+        if first_arg.startswith('[SRC]') and not important and not _manga_debug_logging_enabled():
+            return
+    except Exception:
+        pass
+    print(*args, **kwargs)
+
+
 class MoveableRectItem(QGraphicsRectItem):
     """Simple moveable and resizable rectangle for text box selection"""
     
@@ -4006,6 +4026,7 @@ class MangaImagePreviewWidget(QWidget):
         Returns:
             Path based on current display mode: translated output, cleaned, or original
         """
+        print = _manga_debug_print
         try:
             # Get current display mode (translated, cleaned, or original)
             mode = getattr(self, 'source_display_mode', 'translated')

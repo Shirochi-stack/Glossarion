@@ -25,6 +25,34 @@ from manga_settings_dialog import MangaSettingsDialog
 _REGION_METADATA_KEYS = ('bubble_type', 'region_type', 'bubble_bounds')
 
 
+def _manga_debug_logging_enabled() -> bool:
+    return (
+        os.environ.get('DEBUG_MODE', '0') == '1'
+        or os.environ.get('SHOW_DEBUG_BUTTONS', '0') == '1'
+        or os.environ.get('MANGA_DEBUG_MODE', '0') == '1'
+        or os.environ.get('DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE', '0') == '1'
+    )
+
+
+def _manga_debug_print(*args, **kwargs):
+    try:
+        first_arg = str(args[0]) if args else ''
+        important = any(term in first_arg.lower() for term in ('error', 'failed', 'failure', 'exception', 'warning'))
+        debug_prefixes = (
+            '[STATE]',
+            '[STATE_ISOLATION]',
+            '[STATE_CLEAN]',
+            '[RECT_0_DEBUG]',
+            '[EXCLUDE_RESTORE]',
+            '[ITERATIONS_RESTORE]',
+        )
+        if first_arg.startswith(debug_prefixes) and not important and not _manga_debug_logging_enabled():
+            return
+    except Exception:
+        pass
+    print(*args, **kwargs)
+
+
 def _normalize_region_kind(value) -> str:
     try:
         return str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
@@ -1366,6 +1394,7 @@ def _validate_and_clean_stale_state(self, image_path: str):
 
 def _restore_image_state(self, image_path: str):
     """Restore persisted state for an image (rectangles, overlays, paths)"""
+    print = _manga_debug_print
     try:
         if not hasattr(self, 'image_state_manager'):
             return
@@ -1672,7 +1701,7 @@ def _restore_image_state(self, image_path: str):
                     viewer._scene.update()
                     viewer.viewport().update()
                     
-                    print(f"[STATE] Comprehensive refresh completed for {os.path.basename(image_path)}")
+                    _manga_debug_print(f"[STATE] Comprehensive refresh completed for {os.path.basename(image_path)}")
                 except Exception as e:
                     print(f"[STATE] Comprehensive refresh failed: {e}")
             
@@ -1695,6 +1724,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
     
     STATE ISOLATION: Validates that we're restoring the correct image's state.
     """
+    print = _manga_debug_print
     try:
         if not hasattr(self, 'image_state_manager'):
             return
@@ -2082,7 +2112,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     viewer.viewport().update()
                     viewer.repaint()
                     
-                    print(f"[STATE] Comprehensive overlay refresh completed for {os.path.basename(image_path)}")
+                    _manga_debug_print(f"[STATE] Comprehensive overlay refresh completed for {os.path.basename(image_path)}")
                 except Exception as e:
                     print(f"[STATE] Comprehensive overlay refresh failed: {e}")
             
@@ -12189,6 +12219,23 @@ def _get_ocr_config(self) -> dict:
     # Normalize aliases
     if provider in ['azure_document_intelligence', 'azure-document-intel', 'azure_doc_intel']:
         provider = 'azure-document-intelligence'
+    debug_enabled = (
+        os.getenv('DEBUG_MODE', '0') == '1'
+        or os.getenv('SHOW_DEBUG_BUTTONS', '0') == '1'
+        or os.getenv('MANGA_DEBUG_MODE', '0') == '1'
+        or os.getenv('DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE', '0') == '1'
+    )
+    import builtins as _builtins
+
+    def print(*args, **kwargs):
+        try:
+            first_arg = str(args[0]) if args else ''
+            if first_arg.startswith('[DEBUG]') and not debug_enabled:
+                return
+        except Exception:
+            pass
+        return _builtins.print(*args, **kwargs)
+
     print(f"[DEBUG] Building OCR config for provider: {provider}")
     config = {'provider': provider}
     try:

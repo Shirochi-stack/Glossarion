@@ -3512,13 +3512,32 @@ class UnifiedClient:
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
-        print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
-        print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
+        debug_enabled = (
+            os.getenv('DEBUG_MODE', '0') == '1'
+            or os.getenv('SHOW_DEBUG_BUTTONS', '0') == '1'
+            or os.getenv('MANGA_DEBUG_MODE', '0') == '1'
+            or os.getenv('DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE', '0') == '1'
+        )
+        _client_print = _gui_print
+
+        def print(*args, **kwargs):
+            try:
+                first_arg = str(args[0]) if args else ''
+                if first_arg.startswith('[DEBUG]') and not debug_enabled:
+                    return
+            except Exception:
+                pass
+            return _client_print(*args, **kwargs)
+
+        if debug_enabled:
+            print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
+            print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
         
         if use_multi_keys_env:
             # Initialize from environment OR from in-memory config (avoids Windows env var length limit)
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
-            print(f"[DEBUG] Loading multi-keys config...")
+            if debug_enabled:
+                print(f"[DEBUG] Loading multi-keys config...")
             force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
             rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
             
@@ -3547,7 +3566,8 @@ class UnifiedClient:
                     if multi_keys:
                         with self.__class__._in_memory_multi_keys_lock:
                             self.__class__._in_memory_multi_keys = multi_keys
-                        print(f"[DEBUG] Loaded {len(multi_keys)} multi-key entry(s) from config.json fallback")
+                        if debug_enabled:
+                            print(f"[DEBUG] Loaded {len(multi_keys)} multi-key entry(s) from config.json fallback")
                 except Exception:
                     multi_keys = []
 

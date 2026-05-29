@@ -6746,6 +6746,8 @@ class MangaTranslationTab(QObject):
                         'debug': 'lightblue'
                     }
                     for message, level in MangaTranslationTab._persistent_log:
+                        if self._should_suppress_debug_log(message, level):
+                            continue
                         color = color_map.get(level, 'white')
                         self.log_text.setTextColor(QColor(color))
                         self.log_text.append(message)
@@ -13666,9 +13668,107 @@ class MangaTranslationTab(QObject):
             QTimer.singleShot(50, scroll_once)
         except Exception:
             self._log_autoscroll_pending = False
+
+    def _debug_logging_enabled(self) -> bool:
+        try:
+            config = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+            manga_settings = config.get('manga_settings', {}) if isinstance(config.get('manga_settings', {}), dict) else {}
+            manga_advanced = manga_settings.get('advanced', {}) if isinstance(manga_settings.get('advanced', {}), dict) else {}
+            return bool(
+                config.get('show_debug_buttons', False)
+                or manga_advanced.get('debug_mode', False)
+                or os.environ.get('DEBUG_MODE') == '1'
+                or os.environ.get('SHOW_DEBUG_BUTTONS') == '1'
+                or os.environ.get('MANGA_DEBUG_MODE') == '1'
+            )
+        except Exception:
+            return os.environ.get('DEBUG_MODE') == '1'
+
+    def _should_suppress_debug_log(self, message: str, level: str = "info") -> bool:
+        if self._debug_logging_enabled():
+            return False
+
+        text = str(message or '').strip()
+        if not text:
+            return False
+
+        if str(level or '').lower() == 'debug':
+            return True
+
+        lower = text.lower()
+        if lower.startswith('debug:') or lower.startswith('[debug]'):
+            return True
+
+        noisy_prefixes = (
+            '[STATE DEBUG]',
+            '[STATE_ISOLATION]',
+            '[FILE_PERSIST]',
+            '[FILE_SELECTION]',
+            '[SYNC_SELECTION]',
+            '[SRC]',
+            '[LOADED]',
+            '[STATE_CLEAN]',
+            '[STATE]',
+            '[RECT_0_DEBUG]',
+            '[EXCLUDE_RESTORE]',
+            '[ITERATIONS_RESTORE]',
+            '[PRELOAD_DETECTOR]',
+            '[PRELOAD_INPAINTER]',
+            '[PRELOAD_CHECK]',
+            '[MANGA_CLOSE]',
+            '[OCR_PROMPT_LOAD]',
+            '[OCR_PROMPT_SAVE]',
+            '[BUTTON_STATE]',
+            '[POOL_TRACKER]',
+            '[PREVIEW_UPDATE]',
+            '[LOAD_IMAGE]',
+            '[DISPLAY_MODE]',
+            '[QUEUE]',
+            '[BATCH_SYNC]',
+            '[FILE_REORDER]',
+            '[FILE_LIST]',
+            '[CLEANED]',
+            '[TRANSLATE_THIS_TEXT]',
+            '[TRANSLATE_RESULT]',
+            '[START_TRANSLATION]',
+            '[START_HEAVY]',
+            '[INIT_PRELOAD]',
+            '[TOGGLE_PRELOAD]',
+            '[INPAINT_LOAD]',
+        )
+        if text.startswith(noisy_prefixes):
+            important_terms = (
+                'error',
+                'failed',
+                'failure',
+                'exception',
+                'traceback',
+                'critical',
+                'warning',
+            )
+            return not any(term in lower for term in important_terms)
+
+        noisy_exact_prefixes = (
+            'Statistics and pattern tracking reset',
+            'Initialized OCR Manager for ',
+            'Model preloading already in progress',
+            'TOGGLE FUNCTION CALLED!',
+            'Checkbox state:',
+            'Initializing:',
+        )
+        if text.startswith(noisy_exact_prefixes):
+            return True
+
+        if text and set(text) == {'='}:
+            return True
+
+        return False
     
     def _log(self, message: str, level: str = "info"):
         """Log message to GUI text widget or console with enhanced stop suppression"""
+        if self._should_suppress_debug_log(message, level):
+            return
+
         # Enhanced stop suppression - allow only essential stop confirmation messages
         if self._is_stop_requested() or self.is_globally_cancelled():
             # Only allow very specific stop confirmation messages - nothing else
