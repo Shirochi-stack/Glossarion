@@ -372,6 +372,17 @@ jobs:
           runtime_version = os.environ["PYSIDE_ANDROID_PYTHON_VERSION"]
           expected = f"libpython{'.'.join(runtime_version.split('.')[:2])}.so"
 
+          def archive_member_names(tar):
+              names = set()
+              for member in tar.getmembers():
+                  name = member.name.replace("\\", "/")
+                  while "/./" in name:
+                      name = name.replace("/./", "/")
+                  if name.startswith("./"):
+                      name = name[2:]
+                  names.add(name)
+              return names
+
           with zipfile.ZipFile(package_path) as archive:
               package_names = set(archive.namelist())
               libs = sorted(
@@ -381,6 +392,10 @@ jobs:
                   and Path(name).suffix == ".so"
               )
               private_tar = archive.read("assets/private.tar")
+              pybundle_paths = sorted(
+                  name for name in package_names if Path(name).name == "libpybundle.so"
+              )
+              pybundle_tar = archive.read(pybundle_paths[0]) if pybundle_paths else None
 
           print("Packaged Python runtime libraries:")
           for lib in libs:
@@ -418,7 +433,7 @@ jobs:
               "android/_backend/ebooklib_stub.pyc",
           }
           with tarfile.open(fileobj=io.BytesIO(private_tar), mode="r:*") as tar:
-              private_names = {member.name for member in tar.getmembers()}
+              private_names = archive_member_names(tar)
 
           missing_entrypoints = sorted(required_entrypoints - private_names)
           if missing_entrypoints:
@@ -430,6 +445,15 @@ jobs:
               sys.exit(1)
 
           print("Validated packaged Python entrypoint bytecode.")
+
+          dependency_names = set(private_names)
+          if pybundle_tar is not None:
+              with tarfile.open(fileobj=io.BytesIO(pybundle_tar), mode="r:*") as tar:
+                  pybundle_names = archive_member_names(tar)
+              dependency_names.update(pybundle_names)
+              print(f"Validated packaged Python bundle archive: {pybundle_paths[0]}")
+          else:
+              print("No libpybundle.so archive found; checking private.tar for bundled dependencies.")
 
           required_package_markers = {
               "bs4/__init__",
@@ -448,7 +472,7 @@ jobs:
                   or name == f"{marker}.pyc"
                   or name.endswith(f"/{marker}.py")
                   or name.endswith(f"/{marker}.pyc")
-                  for name in private_names
+                  for name in dependency_names
               )
           )
           if missing_packages:
