@@ -15,6 +15,14 @@ on:
         options:
           - debug
           - release
+      pyside_android_wheel_url:
+        description: "Optional custom PySide6 Android wheel URL. Required if testing QtWebEngine, because the official Android wheel may not contain WebEngine libs."
+        required: false
+        default: ""
+      shiboken_android_wheel_url:
+        description: "Optional custom Shiboken6 Android wheel URL matching the custom PySide6 Android wheel."
+        required: false
+        default: ""
 
 jobs:
   build-android-pyside:
@@ -27,6 +35,8 @@ jobs:
       PYSIDE_VERSION: ${{ inputs.pyside_version }}
       PYSIDE_ANDROID_ARCH: aarch64
       PYSIDE_ANDROID_PYTHON_TAG: cp311
+      PYSIDE_ANDROID_WHEEL_URL: ${{ inputs.pyside_android_wheel_url }}
+      SHIBOKEN_ANDROID_WHEEL_URL: ${{ inputs.shiboken_android_wheel_url }}
       PYSIDE_BUILD_MODE: ${{ inputs.build_mode }}
       ANDROID_NDK_VERSION: 26.1.10909125
       ANDROID_PLATFORM: android-34
@@ -81,7 +91,7 @@ jobs:
             ~/.pyside6-android-deploy
             src/.buildozer
             src/android/pyside_launcher/deployment
-          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', '.github/workflows/build-android-pyside.yml') }}
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
 
       - name: Install PySide deploy tooling
         run: |
@@ -100,12 +110,27 @@ jobs:
           rm -rf "$WHEEL_DIR"
           mkdir -p "$WHEEL_DIR"
 
-          PYSIDE_WHEEL_NAME="pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
-          SHIBOKEN_WHEEL_NAME="shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
+          OFFICIAL_PYSIDE_WHEEL_NAME="pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
+          OFFICIAL_SHIBOKEN_WHEEL_NAME="shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-${PYSIDE_ANDROID_PYTHON_TAG}-${PYSIDE_ANDROID_PYTHON_TAG}-android_${PYSIDE_ANDROID_ARCH}.whl"
+
+          if [ -n "${PYSIDE_ANDROID_WHEEL_URL:-}" ]; then
+            PYSIDE_URL="$PYSIDE_ANDROID_WHEEL_URL"
+            PYSIDE_WHEEL_NAME="$(python -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlparse(sys.argv[1]).path.rsplit("/", 1)[-1]))' "$PYSIDE_URL")"
+          else
+            PYSIDE_WHEEL_NAME="$OFFICIAL_PYSIDE_WHEEL_NAME"
+            PYSIDE_URL="https://download.qt.io/official_releases/QtForPython/pyside6/$PYSIDE_WHEEL_NAME"
+          fi
+
+          if [ -n "${SHIBOKEN_ANDROID_WHEEL_URL:-}" ]; then
+            SHIBOKEN_URL="$SHIBOKEN_ANDROID_WHEEL_URL"
+            SHIBOKEN_WHEEL_NAME="$(python -c 'import sys, urllib.parse; print(urllib.parse.unquote(urllib.parse.urlparse(sys.argv[1]).path.rsplit("/", 1)[-1]))' "$SHIBOKEN_URL")"
+          else
+            SHIBOKEN_WHEEL_NAME="$OFFICIAL_SHIBOKEN_WHEEL_NAME"
+            SHIBOKEN_URL="https://download.qt.io/official_releases/QtForPython/shiboken6/$SHIBOKEN_WHEEL_NAME"
+          fi
+
           PYSIDE_WHEEL="$WHEEL_DIR/$PYSIDE_WHEEL_NAME"
           SHIBOKEN_WHEEL="$WHEEL_DIR/$SHIBOKEN_WHEEL_NAME"
-          PYSIDE_URL="https://download.qt.io/official_releases/QtForPython/pyside6/$PYSIDE_WHEEL_NAME"
-          SHIBOKEN_URL="https://download.qt.io/official_releases/QtForPython/shiboken6/$SHIBOKEN_WHEEL_NAME"
 
           echo "Downloading PySide Android wheel: $PYSIDE_URL"
           curl --fail --location --retry 5 --retry-delay 10 --retry-all-errors \
@@ -129,6 +154,50 @@ jobs:
 
           echo "pyside_wheel=$PYSIDE_WHEEL" >> "$GITHUB_OUTPUT"
           echo "shiboken_wheel=$SHIBOKEN_WHEEL" >> "$GITHUB_OUTPUT"
+
+      - name: Validate QtWebEngine support in Android wheel
+        env:
+          PYSIDE_WHEEL: ${{ steps.android_wheels.outputs.pyside_wheel }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import zipfile
+
+          arch = os.environ["PYSIDE_ANDROID_ARCH"]
+          abi_by_arch = {
+              "aarch64": "arm64-v8a",
+              "x86_64": "x86_64",
+          }
+          abi = abi_by_arch.get(arch)
+          if not abi:
+              print(f"::error::Unsupported PySide Android arch for WebEngine validation: {arch}")
+              sys.exit(1)
+
+          wheel = os.environ["PYSIDE_WHEEL"]
+          required = [
+              f"PySide6/Qt/lib/libQt6WebEngineCore_{abi}.so",
+              f"PySide6/Qt/lib/libQt6WebEngineWidgets_{abi}.so",
+          ]
+
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+
+          missing = [name for name in required if name not in names]
+          if missing:
+              print("::error::QtWebEngine is required by Glossarion's Android PySide build, "
+                    "but the selected PySide6 Android wheel does not contain the required "
+                    "QtWebEngine libraries.")
+              print("Missing libraries:")
+              for name in missing:
+                  print(f"  - {name}")
+              print("Provide a custom WebEngine-capable PySide6 Android wheel with the "
+                    "pyside_android_wheel_url workflow input, plus the matching Shiboken wheel "
+                    "if needed.")
+              sys.exit(1)
+
+          print("QtWebEngine libraries found in selected PySide Android wheel.")
+          PY
 
       - name: Generate Android stubs
         run: |
@@ -232,4 +301,4 @@ jobs:
             ~/.pyside6-android-deploy
             src/.buildozer
             src/android/pyside_launcher/deployment
-          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', '.github/workflows/build-android-pyside.yml') }}
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}

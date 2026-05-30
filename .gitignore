@@ -30,6 +30,7 @@ tools/**
 src/**
 # Allow only top-level files directly under src (no subfolders)
 !src/*.py
+!src/*.pyproject
 !src/*.spec
 !src/*.bat
 !src/*.vbs

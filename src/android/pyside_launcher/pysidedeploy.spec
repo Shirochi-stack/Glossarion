@@ -2,12 +2,13 @@
 
 # Experimental PySide6 Android build for the desktop Glossarion GUI.
 # Run pyside6-android-deploy from this directory so input_file resolves to
-# this launcher while project_dir still packages the full src tree.
+# this launcher while project_file pins the same Python surface used by
+# translator_NoCuda.spec, plus the Android launcher/stub files.
 title = Glossarion
 project_dir = ../..
 input_file = main.py
 exec_directory =
-project_file =
+project_file = glossarion_android.pyproject
 icon = ../../Halgakos.png
 
 [python]
@@ -20,7 +21,7 @@ android_packages = buildozer==1.5.0,cython==0.29.33,virtualenv
 
 qml_files =
 excluded_qml_plugins =
-modules = Core,Gui,Widgets,Network,Multimedia
+modules = Core,Gui,Widgets,Network,Multimedia,WebChannel,WebEngineCore,WebEngineWidgets
 plugins =
 
 [android]
