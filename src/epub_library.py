@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import hashlib
+import importlib
 import logging
 import shutil
 import subprocess
@@ -38,13 +39,35 @@ try:
 except Exception:
     pass
 
-# Use QWebEngineView for full CSS support (images, block layout, etc.)
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
-    _HAS_WEBENGINE = True
-except ImportError:
-    _HAS_WEBENGINE = False
+# Use QWebEngineView on desktop for full CSS support. Keep the import dynamic:
+# pyside6-android-deploy scans static PySide imports and the official Android
+# wheel does not ship QtWebEngine. Android uses QtWebView below instead.
+QWebEngineView = None
+QWebView = None
+QtWebView = None
+_HAS_WEBENGINE = False
+_HAS_WEBVIEW = False
+_IS_ANDROID_PYSIDE = (
+    sys.platform == "android"
+    or os.environ.get("GLOSSARION_ANDROID_PYSIDE") == "1"
+    or any(os.environ.get(name) for name in ("ANDROID_ARGUMENT", "ANDROID_ROOT"))
+)
+
+if not _IS_ANDROID_PYSIDE:
+    try:
+        _webengine_widgets = importlib.import_module("PySide6.QtWebEngineWidgets")
+        QWebEngineView = _webengine_widgets.QWebEngineView
+        _HAS_WEBENGINE = True
+    except ImportError:
+        _HAS_WEBENGINE = False
+
+if not _HAS_WEBENGINE:
+    try:
+        from PySide6.QtWebView import QWebView, QtWebView
+        QtWebView.initialize()
+        _HAS_WEBVIEW = True
+    except ImportError:
+        _HAS_WEBVIEW = False
 
 logger = logging.getLogger(__name__)
 
@@ -14305,6 +14328,46 @@ if _HAS_WEBENGINE:
             return super().eventFilter(obj, event)
 
 
+if _HAS_WEBVIEW:
+    class _AndroidWebViewWidget(QWidget):
+        """Embed QtWebView's native Android web view in the reader layout."""
+
+        loadingFinished = Signal(bool)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            self._view = QWebView()
+            self._container = QWidget.createWindowContainer(self._view, self)
+            layout.addWidget(self._container)
+            try:
+                self._view.loadingChanged.connect(self._on_loading_changed)
+            except Exception:
+                pass
+
+        def setUrl(self, url):
+            self._view.setUrl(url)
+
+        def stop(self):
+            try:
+                self._view.stop()
+            except Exception:
+                pass
+
+        def selectedText(self):
+            return ""
+
+        def _on_loading_changed(self, info):
+            status = getattr(info, "status", lambda: None)()
+            name = str(getattr(status, "name", status))
+            if "Succeeded" in name:
+                self.loadingFinished.emit(True)
+            elif "Failed" in name:
+                self.loadingFinished.emit(False)
+
+
 class _EpubCacheLoaderThread(QThread):
     """Read the pickled EPUB cache off the UI thread.
 
@@ -15360,6 +15423,8 @@ class EpubReaderDialog(QDialog):
         self._font_family = self._config.get('epub_reader_font_family', 'Embedded CSS')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
+        if _HAS_WEBVIEW and not _HAS_WEBENGINE and self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            self._layout_mode = LAYOUT_SCROLL
         # Optional — caller can request opening at a specific chapter index.
         # The index is clamped to the available chapter range once the EPUB
         # has finished loading (see _on_epub_loaded_from_cache). When the
@@ -15827,6 +15892,8 @@ class EpubReaderDialog(QDialog):
                 t = self._get_theme()
                 w.page().setBackgroundColor(QColor(t['bg']))
                 w.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
+            elif _HAS_WEBVIEW:
+                w = _AndroidWebViewWidget()
             else:
                 w = QTextBrowser()
                 w.setOpenExternalLinks(False)
@@ -15844,6 +15911,8 @@ class EpubReaderDialog(QDialog):
         self._reader = _make_reader_widget()
         if _HAS_WEBENGINE:
             self._reader.loadFinished.connect(self._on_reader_load_finished)
+        elif _HAS_WEBVIEW:
+            self._reader.loadingFinished.connect(self._on_reader_load_finished)
         self._reader_stack.addWidget(self._reader)
 
         # Page 1: double-page layout (two browsers side by side)
@@ -15860,6 +15929,9 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             self._reader_left.loadFinished.connect(self._on_reader_load_finished)
             self._reader_right.loadFinished.connect(self._on_reader_load_finished)
+        elif _HAS_WEBVIEW:
+            self._reader_left.loadingFinished.connect(self._on_reader_load_finished)
+            self._reader_right.loadingFinished.connect(self._on_reader_load_finished)
         double_layout.addWidget(self._reader_left)
         double_layout.addWidget(self._reader_right)
         self._reader_stack.addWidget(double_widget)
@@ -17941,6 +18013,13 @@ class EpubReaderDialog(QDialog):
         old_page = self._current_page
         old_count = self._chapter_page_cache.get(self._current_row, 0)
         new_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
+        if _HAS_WEBVIEW and not _HAS_WEBENGINE and new_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            new_mode = LAYOUT_SCROLL
+            scroll_index = modes.index(LAYOUT_SCROLL)
+            if self._layout_combo.currentIndex() != scroll_index:
+                self._layout_combo.blockSignals(True)
+                self._layout_combo.setCurrentIndex(scroll_index)
+                self._layout_combo.blockSignals(False)
         self._layout_mode = new_mode
         if old_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and new_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             self._current_page = self._clamp_page_for_layout(old_page, old_count)
@@ -17964,7 +18043,7 @@ class EpubReaderDialog(QDialog):
             QWebEngineView.setHtml() has a ~2MB limit — base64 images
             easily exceed this.  Write to a temp file and load via URL.
             """
-            if _HAS_WEBENGINE:
+            if _HAS_WEBENGINE or _HAS_WEBVIEW:
                 tmp_dir = _epub_cache_dir()
                 tmp_path = os.path.join(tmp_dir, f"_reader_{id(browser)}.html")
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -18400,6 +18479,9 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return
         if not self._chapters:
+            return
+        if not _HAS_WEBENGINE:
+            self._render_current()
             return
         # Save scroll proportion before clearing cache
         old_count = self._chapter_page_cache.get(self._current_row, 0)

@@ -155,17 +155,14 @@ jobs:
           echo "pyside_wheel=$PYSIDE_WHEEL" >> "$GITHUB_OUTPUT"
           echo "shiboken_wheel=$SHIBOKEN_WHEEL" >> "$GITHUB_OUTPUT"
 
-      - name: Validate QtWebEngine support in Android wheel
+      - name: Validate Android web backend in PySide wheel
         env:
           PYSIDE_WHEEL: ${{ steps.android_wheels.outputs.pyside_wheel }}
         run: |
           mkdir -p src/android/pyside_launcher
           python - <<'PY'
           import os
-          import re
           import sys
-          import urllib.error
-          import urllib.request
           import zipfile
           from pathlib import Path
 
@@ -192,27 +189,15 @@ jobs:
           }
           abi = abi_by_arch.get(arch)
           if not abi:
-              log(f"::error::Unsupported PySide Android arch for WebEngine validation: {arch}")
+              log(f"::error::Unsupported PySide Android arch for WebView validation: {arch}")
               write_log()
               sys.exit(1)
 
-          qt_repo_abi_by_arch = {
-              "aarch64": "arm64_v8a",
-              "x86_64": "x86_64",
-          }
-          qt_repo_abi = qt_repo_abi_by_arch[arch]
-          version = os.environ["PYSIDE_VERSION"]
-          compact_version = version.replace(".", "")
-          qt_repo_component = f"qt6_{compact_version}"
-          qt_android_metadata_url = (
-              "https://download.qt.io/online/qtsdkrepository/all_os/android/"
-              f"{qt_repo_component}/{qt_repo_component}_{qt_repo_abi}/Updates.xml"
-          )
-
           wheel = os.environ["PYSIDE_WHEEL"]
           required = [
-              f"PySide6/Qt/lib/libQt6WebEngineCore_{abi}.so",
-              f"PySide6/Qt/lib/libQt6WebEngineWidgets_{abi}.so",
+              "PySide6/QtWebView.abi3.so",
+              f"PySide6/Qt/lib/libQt6WebView_{abi}.so",
+              f"PySide6/Qt/lib/libQt6WebChannel_{abi}.so",
           ]
 
           log(f"Checking selected PySide Android wheel: {wheel}")
@@ -222,50 +207,22 @@ jobs:
 
           missing = [name for name in required if name not in names]
           if missing:
-              log("Missing QtWebEngine libraries in selected PySide wheel:")
+              log("Missing Android web backend files in selected PySide wheel:")
               for name in missing:
                   log(f"  - {name}")
-
               log("")
-              log(f"Checking official Qt Android package metadata: {qt_android_metadata_url}")
-              try:
-                  with urllib.request.urlopen(qt_android_metadata_url, timeout=60) as response:
-                      metadata = response.read().decode("utf-8", errors="replace")
-              except urllib.error.HTTPError as exc:
-                  log(f"Official Qt Android metadata lookup failed with HTTP {exc.code}.")
-                  metadata = ""
-              except Exception as exc:
-                  log(f"Official Qt Android metadata lookup failed: {exc}")
-                  metadata = ""
-
-              if metadata:
-                  web_package_names = sorted(set(re.findall(r"<Name>([^<]*web[^<]*)</Name>",
-                                                           metadata,
-                                                           flags=re.IGNORECASE)))
-                  webengine_package_names = [
-                      name for name in web_package_names
-                      if "webengine" in name.lower()
-                  ]
-                  if web_package_names:
-                      log("Official Qt Android web-related packages found:")
-                      for name in web_package_names:
-                          log(f"  - {name}")
-                  else:
-                      log("No official Qt Android web-related packages were found.")
-
-                  if not webengine_package_names:
-                      log("")
-                      log("Official Qt Android metadata does not publish a qtwebengine Android "
-                          f"package for Qt/PySide {version} and ABI {qt_repo_abi}.")
-
-              log("")
-              log("::error::Glossarion requires QtWebEngine for this Android PySide build, "
-                  "but the selected official PySide Android wheel and the official Qt Android "
-                  "repository do not provide QtWebEngine for this target.")
+              log("::error::Glossarion's Android PySide build requires the QtWebView "
+                  "backend files that ship with the official PySide Android wheel.")
               write_log()
               sys.exit(1)
 
-          log("QtWebEngine libraries found in selected PySide Android wheel.")
+          webengine_libs = sorted(name for name in names if "QtWebEngine" in name)
+          if webengine_libs:
+              log("QtWebEngine files are present in the selected wheel.")
+          else:
+              log("QtWebEngine files are not present in the selected Android wheel; "
+                  "using the QtWebView Android backend.")
+          log("QtWebView Android backend files found in selected PySide Android wheel.")
           write_log()
           PY
 

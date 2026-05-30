@@ -21,7 +21,7 @@ android_packages = buildozer==1.5.0,cython==0.29.33,virtualenv
 
 qml_files =
 excluded_qml_plugins =
-modules = Core,Gui,Widgets,Network,Multimedia,WebChannel,WebEngineCore,WebEngineWidgets
+modules = Core,Gui,Widgets,Network,Multimedia,WebChannel,WebView
 plugins =
 
 [android]

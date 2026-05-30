@@ -865,9 +865,12 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
     )
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
+    import importlib
     from PySide6.QtCore import QEventLoop, QTimer, QUrl
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     from PySide6.QtWidgets import QApplication
+    qtwebengine = importlib.import_module("PySide6.QtWebEngineCore")
+    QWebEnginePage = qtwebengine.QWebEnginePage
+    QWebEngineProfile = qtwebengine.QWebEngineProfile
 
     app = QApplication.instance()
     created_app = False
