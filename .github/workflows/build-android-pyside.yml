@@ -106,7 +106,7 @@ jobs:
         id: android_wheels
         run: |
           set -euo pipefail
-          WHEEL_DIR="$GITHUB_WORKSPACE/src/android/pyside_launcher/deployment/android-wheels"
+          WHEEL_DIR="$RUNNER_TEMP/pyside-android-wheels"
           rm -rf "$WHEEL_DIR"
           mkdir -p "$WHEEL_DIR"
 
@@ -260,7 +260,7 @@ jobs:
 
           if [ ! -f "$PYSIDE_WHEEL" ] || [ ! -f "$SHIBOKEN_WHEEL" ]; then
             echo "Could not find downloaded PySide6/Shiboken6 Android wheels"
-            find deployment/android-wheels -type f -name '*.whl' -print || true
+            find "$(dirname "$PYSIDE_WHEEL")" -type f -name '*.whl' -print || true
             exit 1
           fi
 
