@@ -15,6 +15,14 @@ on:
         options:
           - debug
           - release
+      pyside_android_arch:
+        description: "Android wheel architecture. Use x86_64 for the local Android emulator."
+        required: true
+        default: "aarch64"
+        type: choice
+        options:
+          - aarch64
+          - x86_64
       pyside_android_wheel_url:
         description: "Optional private PySide6 Android wheel URL override. The workflow checks official Qt/PySide artifacts automatically."
         required: false
@@ -33,7 +41,7 @@ jobs:
 
     env:
       PYSIDE_VERSION: ${{ inputs.pyside_version }}
-      PYSIDE_ANDROID_ARCH: aarch64
+      PYSIDE_ANDROID_ARCH: ${{ inputs.pyside_android_arch }}
       PYSIDE_ANDROID_PYTHON_TAG: cp311
       PYSIDE_ANDROID_WHEEL_URL: ${{ inputs.pyside_android_wheel_url }}
       SHIBOKEN_ANDROID_WHEEL_URL: ${{ inputs.shiboken_android_wheel_url }}
@@ -103,7 +111,7 @@ jobs:
             ~/.pyside6-android-deploy
             src/.buildozer
             src/deployment
-          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ inputs.pyside_android_arch }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
 
       - name: Install PySide deploy tooling
         run: |
@@ -490,7 +498,7 @@ jobs:
         if: steps.find_package.outputs.package_found == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Glossarion-Android-PySide-${{ inputs.build_mode }}
+          name: Glossarion-Android-PySide-${{ inputs.build_mode }}-${{ inputs.pyside_android_arch }}
           path: src/android/pyside_launcher/bin/*
           if-no-files-found: error
 
@@ -516,4 +524,4 @@ jobs:
             ~/.pyside6-android-deploy
             src/.buildozer
             src/deployment
-          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
+          key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ inputs.pyside_android_arch }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
