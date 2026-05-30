@@ -90,7 +90,7 @@ jobs:
             ~/.buildozer
             ~/.pyside6-android-deploy
             src/.buildozer
-            src/android/pyside_launcher/deployment
+            src/deployment
           key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}
 
       - name: Install PySide deploy tooling
@@ -250,7 +250,7 @@ jobs:
           cat pysidedeploy.spec
 
       - name: Build PySide Android package
-        working-directory: src/android/pyside_launcher
+        working-directory: src
         run: |
           export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
@@ -272,7 +272,7 @@ jobs:
 
           set -o pipefail
           pyside6-android-deploy \
-            --config-file pysidedeploy.spec \
+            --config-file android/pyside_launcher/pysidedeploy.spec \
             --wheel-pyside "$PYSIDE_WHEEL" \
             --wheel-shiboken "$SHIBOKEN_WHEEL" \
             --sdk-path "$ANDROID_HOME" \
@@ -280,7 +280,7 @@ jobs:
             --force \
             --keep-deployment-files \
             --verbose \
-            2>&1 | tee android-pyside-build.log
+            2>&1 | tee android/pyside_launcher/android-pyside-build.log
 
       - name: Find Android package
         id: find_package
@@ -316,6 +316,7 @@ jobs:
             src/android/pyside_launcher/android-pyside-build.log
             src/android/pyside_launcher/.buildozer/**/*.log
             src/.buildozer/**/*.log
+            src/deployment/**/*.log
           if-no-files-found: warn
 
       - name: Save PySide Android build cache
@@ -327,5 +328,5 @@ jobs:
             ~/.buildozer
             ~/.pyside6-android-deploy
             src/.buildozer
-            src/android/pyside_launcher/deployment
+            src/deployment
           key: pyside-android-v1-${{ runner.os }}-${{ inputs.pyside_version }}-${{ hashFiles('src/android/pyside_launcher/pysidedeploy.spec', 'src/glossarion_android.pyproject', '.github/workflows/build-android-pyside.yml') }}

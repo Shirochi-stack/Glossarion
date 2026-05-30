@@ -1,5 +1,6 @@
 {
   "files": [
+    "main.py",
     "android/pyside_launcher/main.py",
     "translator_gui.py",
     "splash_utils.py",

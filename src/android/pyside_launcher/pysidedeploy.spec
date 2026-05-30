@@ -1,15 +1,14 @@
 [app]
 
 # Experimental PySide6 Android build for the desktop Glossarion GUI.
-# Run pyside6-android-deploy from this directory so input_file resolves to
-# this launcher while project_file pins the same Python surface used by
-# translator_NoCuda.spec, plus the Android launcher/stub files.
+# Run pyside6-android-deploy from ../../ so PySide's Buildozer wrapper
+# creates buildozer.spec in the same directory it checks.
 title = Glossarion
 project_dir = ../..
 input_file = main.py
 exec_directory =
 project_file = glossarion_android.pyproject
-icon = ../../Halgakos.png
+icon = Halgakos.png
 
 [python]
 
