@@ -16,11 +16,11 @@ on:
           - debug
           - release
       pyside_android_wheel_url:
-        description: "Optional custom PySide6 Android wheel URL. Required if testing QtWebEngine, because the official Android wheel may not contain WebEngine libs."
+        description: "Optional private PySide6 Android wheel URL override. The workflow checks official Qt/PySide artifacts automatically."
         required: false
         default: ""
       shiboken_android_wheel_url:
-        description: "Optional custom Shiboken6 Android wheel URL matching the custom PySide6 Android wheel."
+        description: "Optional private Shiboken6 Android wheel URL override matching the PySide6 wheel."
         required: false
         default: ""
 
@@ -159,10 +159,31 @@ jobs:
         env:
           PYSIDE_WHEEL: ${{ steps.android_wheels.outputs.pyside_wheel }}
         run: |
+          mkdir -p src/android/pyside_launcher
           python - <<'PY'
           import os
+          import re
           import sys
+          import urllib.error
+          import urllib.request
           import zipfile
+          from pathlib import Path
+
+
+          log_lines = []
+
+
+          def log(message=""):
+              print(message)
+              log_lines.append(message)
+
+
+          def write_log():
+              Path("src/android/pyside_launcher/android-pyside-build.log").write_text(
+                  "\n".join(log_lines) + "\n",
+                  encoding="utf-8",
+              )
+
 
           arch = os.environ["PYSIDE_ANDROID_ARCH"]
           abi_by_arch = {
@@ -171,8 +192,22 @@ jobs:
           }
           abi = abi_by_arch.get(arch)
           if not abi:
-              print(f"::error::Unsupported PySide Android arch for WebEngine validation: {arch}")
+              log(f"::error::Unsupported PySide Android arch for WebEngine validation: {arch}")
+              write_log()
               sys.exit(1)
+
+          qt_repo_abi_by_arch = {
+              "aarch64": "arm64_v8a",
+              "x86_64": "x86_64",
+          }
+          qt_repo_abi = qt_repo_abi_by_arch[arch]
+          version = os.environ["PYSIDE_VERSION"]
+          compact_version = version.replace(".", "")
+          qt_repo_component = f"qt6_{compact_version}"
+          qt_android_metadata_url = (
+              "https://download.qt.io/online/qtsdkrepository/all_os/android/"
+              f"{qt_repo_component}/{qt_repo_component}_{qt_repo_abi}/Updates.xml"
+          )
 
           wheel = os.environ["PYSIDE_WHEEL"]
           required = [
@@ -180,23 +215,58 @@ jobs:
               f"PySide6/Qt/lib/libQt6WebEngineWidgets_{abi}.so",
           ]
 
+          log(f"Checking selected PySide Android wheel: {wheel}")
+
           with zipfile.ZipFile(wheel) as archive:
               names = set(archive.namelist())
 
           missing = [name for name in required if name not in names]
           if missing:
-              print("::error::QtWebEngine is required by Glossarion's Android PySide build, "
-                    "but the selected PySide6 Android wheel does not contain the required "
-                    "QtWebEngine libraries.")
-              print("Missing libraries:")
+              log("Missing QtWebEngine libraries in selected PySide wheel:")
               for name in missing:
-                  print(f"  - {name}")
-              print("Provide a custom WebEngine-capable PySide6 Android wheel with the "
-                    "pyside_android_wheel_url workflow input, plus the matching Shiboken wheel "
-                    "if needed.")
+                  log(f"  - {name}")
+
+              log("")
+              log(f"Checking official Qt Android package metadata: {qt_android_metadata_url}")
+              try:
+                  with urllib.request.urlopen(qt_android_metadata_url, timeout=60) as response:
+                      metadata = response.read().decode("utf-8", errors="replace")
+              except urllib.error.HTTPError as exc:
+                  log(f"Official Qt Android metadata lookup failed with HTTP {exc.code}.")
+                  metadata = ""
+              except Exception as exc:
+                  log(f"Official Qt Android metadata lookup failed: {exc}")
+                  metadata = ""
+
+              if metadata:
+                  web_package_names = sorted(set(re.findall(r"<Name>([^<]*web[^<]*)</Name>",
+                                                           metadata,
+                                                           flags=re.IGNORECASE)))
+                  webengine_package_names = [
+                      name for name in web_package_names
+                      if "webengine" in name.lower()
+                  ]
+                  if web_package_names:
+                      log("Official Qt Android web-related packages found:")
+                      for name in web_package_names:
+                          log(f"  - {name}")
+                  else:
+                      log("No official Qt Android web-related packages were found.")
+
+                  if not webengine_package_names:
+                      log("")
+                      log("Official Qt Android metadata does not publish a qtwebengine Android "
+                          f"package for Qt/PySide {version} and ABI {qt_repo_abi}.")
+
+              log("")
+              log("::error::Glossarion requires QtWebEngine for this Android PySide build, "
+                  "but the selected official PySide Android wheel and the official Qt Android "
+                  "repository do not provide QtWebEngine for this target.")
+              write_log()
               sys.exit(1)
 
-          print("QtWebEngine libraries found in selected PySide Android wheel.")
+          log("QtWebEngine libraries found in selected PySide Android wheel.")
+          write_log()
           PY
 
       - name: Generate Android stubs
