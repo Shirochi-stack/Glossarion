@@ -1527,14 +1527,13 @@ class MultiAPIKeyDialog(QDialog):
 
         # IMPORTANT (spinbox rendering): Qt style sheets cascade into child windows.
         # The "Other Settings" dialog styles ``QSpinBox`` (other_settings.py) but
-        # never defines the ::up-button/::down-button sub-controls, so any preview
-        # window opened as its child inherits that rule and the native Windows style
-        # collapses the rotation spin buttons (the "fucked up"/garbled spinbox).
+        # never defines the ::up-button/::down-button sub-controls, so any dialog
+        # opened as its child inherits that rule and the native Windows style
+        # collapses the rotation spin buttons (the broken/garbled spinbox).
         # The Refinement view looked correct only because it is parented to a dialog
-        # with no such rule. To make every pool match it, re-root preview windows to
-        # the main window, whose stylesheet has no QSpinBox rule -> native spinbox.
-        _preview = (str(preview_pool or '').strip() or None)
-        if _preview and HAS_GUI and isinstance(translator_gui, QWidget):
+        # with no such rule. Re-root ALL instances to the main window, whose
+        # stylesheet has no QSpinBox rule -> native spinbox.
+        if HAS_GUI and isinstance(translator_gui, QWidget):
             try:
                 style_parent = translator_gui.window()
             except Exception:
