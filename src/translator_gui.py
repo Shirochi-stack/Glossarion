@@ -76,6 +76,9 @@ def _format_plain_decimal_setting(value, default="0.0001"):
         text = text.rstrip("0").rstrip(".")
     return text or "0"
 
+
+MULTIPASS_REFINEMENT_MODES = ("full", "failed", "partial", "partial.b", "partial.b2")
+
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 try:
@@ -1908,7 +1911,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
         self.multipass_mode_var = self.config.get('multipass_mode', False)
         self.multipass_refinement_mode_var = str(self.config.get('multipass_refinement_mode', 'full') or 'full').strip().lower()
-        if self.multipass_refinement_mode_var not in ('full', 'failed', 'partial'):
+        if self.multipass_refinement_mode_var not in MULTIPASS_REFINEMENT_MODES:
             self.multipass_refinement_mode_var = 'full'
 
         # Initialize fuzzy threshold variable
@@ -3708,10 +3711,41 @@ Text to analyze:
             "Convert any foreign onomatopoeia to romaji. "
             "Return only the refined HTML.\n\n"
             "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML.\n"
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
+            "If placeholder HTML tags are present, retain every placeholder opening/closing tag and its attributes exactly.\n"
             "{QA_Issues}"
         )
         self.default_refinement_partial_user_prompt = ""
+        self.default_refinement_partial_b_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "The QA issue(s) below identify leftover source-language text in these HTML fragments. "
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
+            "Each request is wrapped in a placeholder HTML tag; retain every placeholder opening/closing tag "
+            "and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
+            "Example placeholder to preserve exactly: "
+            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
+            "{QA_Issues}"
+        )
+        self.default_refinement_partial_b_user_prompt = ""
+        self.default_refinement_partial_b2_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only valid JSON using the same structure as the input.\n\n"
+            "The JSON requests identify leftover source-language text in HTML fragments. Translate that leftover text "
+            "into {target_lang} while preserving the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
+            "and html field. Each html value is wrapped in a placeholder HTML tag; retain every placeholder opening/closing "
+            "tag and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
+            "Example html value to preserve exactly around the refined content: "
+            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
+            "{QA_Issues}"
+        )
+        self.default_refinement_partial_b2_user_prompt = ""
         
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
@@ -3851,6 +3885,22 @@ Recent translations to summarize:
         self.refinement_partial_user_prompt = self.config.get(
             'refinement_partial_user_prompt',
             getattr(self, 'default_refinement_partial_user_prompt', '')
+        )
+        if 'refinement_partial_b_system_prompt' in self.config:
+            self.refinement_partial_b_system_prompt = str(self.config.get('refinement_partial_b_system_prompt', '') or '')
+        else:
+            self.refinement_partial_b_system_prompt = getattr(self, 'default_refinement_partial_b_system_prompt', '')
+        self.refinement_partial_b_user_prompt = self.config.get(
+            'refinement_partial_b_user_prompt',
+            getattr(self, 'default_refinement_partial_b_user_prompt', '')
+        )
+        if 'refinement_partial_b2_system_prompt' in self.config:
+            self.refinement_partial_b2_system_prompt = str(self.config.get('refinement_partial_b2_system_prompt', '') or '')
+        else:
+            self.refinement_partial_b2_system_prompt = getattr(self, 'default_refinement_partial_b2_system_prompt', '')
+        self.refinement_partial_b2_user_prompt = self.config.get(
+            'refinement_partial_b2_user_prompt',
+            getattr(self, 'default_refinement_partial_b2_user_prompt', '')
         )
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
@@ -4633,6 +4683,10 @@ Recent translations to summarize:
             ('refinement_failed_user_prompt', 'default_refinement_failed_user_prompt'),
             ('refinement_partial_system_prompt', 'default_refinement_partial_system_prompt'),
             ('refinement_partial_user_prompt', 'default_refinement_partial_user_prompt'),
+            ('refinement_partial_b_system_prompt', 'default_refinement_partial_b_system_prompt'),
+            ('refinement_partial_b_user_prompt', 'default_refinement_partial_b_user_prompt'),
+            ('refinement_partial_b2_system_prompt', 'default_refinement_partial_b2_system_prompt'),
+            ('refinement_partial_b2_user_prompt', 'default_refinement_partial_b2_user_prompt'),
         ]
         is_custom = any(
             str(getattr(self, attr, '') or '').strip() != str(getattr(self, default_attr, '') or '').strip()
@@ -4671,7 +4725,7 @@ Recent translations to summarize:
         if not mode:
             mode = self.config.get('multipass_refinement_mode', 'full')
         mode = str(mode or 'full').strip().lower()
-        return mode if mode in ('failed', 'partial') else 'full'
+        return mode if mode in MULTIPASS_REFINEMENT_MODES else 'full'
 
     def _sync_multipass_refinement_mode_from_combo(self, _idx=None):
         mode = self._get_multipass_refinement_mode()
@@ -4875,7 +4929,7 @@ Recent translations to summarize:
             "Edit prompts sent only to refinement requests. "
             "Use {target_lang} for the selected target language. "
             "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
-            "In All, Failed, and Partial prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
+            "In All, Failed, Partial, Partial.b, and Partial.b2 prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
@@ -4941,12 +4995,12 @@ Recent translations to summarize:
                 value = getattr(self, default_attr, '')
             return str(value or '')
 
-        def _add_prompt_tab(mode_key, label, system_attr, user_attr, system_config_key, user_config_key, default_system_attr, default_user_attr):
+        def _add_prompt_tab(mode_key, label, system_attr, user_attr, system_config_key, user_config_key, default_system_attr, default_user_attr, *, system_allow_default=True):
             tab = QWidget()
             tab_layout = QVBoxLayout(tab)
             tab_layout.addWidget(QLabel("System Prompt:"))
             system_editor = QTextEdit()
-            system_editor.setPlainText(_prompt_value(system_attr, system_config_key, default_system_attr))
+            system_editor.setPlainText(_prompt_value(system_attr, system_config_key, default_system_attr, allow_default=system_allow_default))
             tab_layout.addWidget(system_editor)
 
             tab_layout.addWidget(QLabel("User Prompt (optional):"))
@@ -4977,6 +5031,20 @@ Recent translations to summarize:
             "refinement_partial_system_prompt", "refinement_partial_user_prompt",
             "refinement_partial_system_prompt", "refinement_partial_user_prompt",
             "default_refinement_partial_system_prompt", "default_refinement_partial_user_prompt",
+        )
+        _add_prompt_tab(
+            "partial.b", "Partial.b",
+            "refinement_partial_b_system_prompt", "refinement_partial_b_user_prompt",
+            "refinement_partial_b_system_prompt", "refinement_partial_b_user_prompt",
+            "default_refinement_partial_b_system_prompt", "default_refinement_partial_b_user_prompt",
+            system_allow_default=False,
+        )
+        _add_prompt_tab(
+            "partial.b2", "Partial.b2",
+            "refinement_partial_b2_system_prompt", "refinement_partial_b2_user_prompt",
+            "refinement_partial_b2_system_prompt", "refinement_partial_b2_user_prompt",
+            "default_refinement_partial_b2_system_prompt", "default_refinement_partial_b2_user_prompt",
+            system_allow_default=False,
         )
 
         key_preview_tab = QWidget()
@@ -5017,6 +5085,8 @@ Recent translations to summarize:
             all_system, all_user = editors["all"]
             failed_system, failed_user = editors["failed"]
             partial_system, partial_user = editors["partial"]
+            partial_b_system, partial_b_user = editors["partial.b"]
+            partial_b2_system, partial_b2_user = editors["partial.b2"]
 
             self.refinement_system_prompt = all_system.toPlainText().strip() or getattr(self, 'default_refinement_system_prompt', '')
             self.refinement_user_prompt = all_user.toPlainText().strip()
@@ -5024,6 +5094,10 @@ Recent translations to summarize:
             self.refinement_failed_user_prompt = failed_user.toPlainText().strip()
             self.refinement_partial_system_prompt = partial_system.toPlainText().strip() or getattr(self, 'default_refinement_partial_system_prompt', self.refinement_system_prompt)
             self.refinement_partial_user_prompt = partial_user.toPlainText().strip()
+            self.refinement_partial_b_system_prompt = partial_b_system.toPlainText().strip()
+            self.refinement_partial_b_user_prompt = partial_b_user.toPlainText().strip()
+            self.refinement_partial_b2_system_prompt = partial_b2_system.toPlainText().strip()
+            self.refinement_partial_b2_user_prompt = partial_b2_user.toPlainText().strip()
 
             self.config['refinement_system_prompt'] = self.refinement_system_prompt
             self.config['refinement_user_prompt'] = self.refinement_user_prompt
@@ -5031,6 +5105,10 @@ Recent translations to summarize:
             self.config['refinement_failed_user_prompt'] = self.refinement_failed_user_prompt
             self.config['refinement_partial_system_prompt'] = self.refinement_partial_system_prompt
             self.config['refinement_partial_user_prompt'] = self.refinement_partial_user_prompt
+            self.config['refinement_partial_b_system_prompt'] = self.refinement_partial_b_system_prompt
+            self.config['refinement_partial_b_user_prompt'] = self.refinement_partial_b_user_prompt
+            self.config['refinement_partial_b2_system_prompt'] = self.refinement_partial_b2_system_prompt
+            self.config['refinement_partial_b2_user_prompt'] = self.refinement_partial_b2_user_prompt
             self._update_refinement_prompt_button_style()
             self.save_config(show_message=False)
             self.append_log("✅ Refinement prompts updated")
@@ -5064,6 +5142,12 @@ Recent translations to summarize:
                 elif mode_key == "partial":
                     system_editor.setPlainText(getattr(self, 'default_refinement_partial_system_prompt', ''))
                     user_editor.setPlainText(getattr(self, 'default_refinement_partial_user_prompt', ''))
+                elif mode_key == "partial.b":
+                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_b_system_prompt', ''))
+                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_b_user_prompt', ''))
+                elif mode_key == "partial.b2":
+                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_system_prompt', ''))
+                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_user_prompt', ''))
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(save_prompt)
@@ -9103,7 +9187,9 @@ Recent translations to summarize:
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
             "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
             "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
-            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends the affected HTML tag entries for refinement."
+            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends affected HTML tag entries one request at a time.<br>"
+            "<b>Partial.b</b>: batches all affected entries for each chapter into one placeholder-tagged HTML request.<br>"
+            "<b>Partial.b2</b>: batches all affected entries for each chapter into one JSON request with per-entry QA issue prompts and placeholder-tagged HTML."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
@@ -9127,10 +9213,18 @@ Recent translations to summarize:
         self.multipass_refinement_mode_combo.addItem("Full", "full")
         self.multipass_refinement_mode_combo.addItem("Failed", "failed")
         self.multipass_refinement_mode_combo.addItem("Partial", "partial")
-        _multipass_mode_index = {"full": 0, "failed": 1, "partial": 2}.get(self.multipass_refinement_mode_var, 0)
+        self.multipass_refinement_mode_combo.addItem("Partial.b", "partial.b")
+        self.multipass_refinement_mode_combo.addItem("Partial.b2", "partial.b2")
+        _multipass_mode_index = {
+            "full": 0,
+            "failed": 1,
+            "partial": 2,
+            "partial.b": 3,
+            "partial.b2": 4,
+        }.get(self.multipass_refinement_mode_var, 0)
         self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
         self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
-        self.multipass_refinement_mode_combo.setFixedWidth(67)
+        self.multipass_refinement_mode_combo.setFixedWidth(92)
         multipass_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
         multipass_disabled_icon_path = _get_disabled_halgakos_icon_path(multipass_icon_path)
         self.multipass_refinement_mode_combo.setStyleSheet(f"""
@@ -10690,7 +10784,7 @@ Recent translations to summarize:
         self._translation_run_skipped_qa_failures = []
         self._translation_run_followup_translation_after_refinement = False
 
-        if not multipass_enabled or multipass_refinement_mode not in ("failed", "partial"):
+        if not multipass_enabled or multipass_refinement_mode not in ("failed", "partial", "partial.b", "partial.b2"):
             return []
         if self._get_output_mode() in ("refinement", "audio", "image", "video"):
             return []
@@ -17594,6 +17688,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         authnd_token_limit, authnd_subprocess_limit, authnd_auto_flag = _authnd_effective_token_limits()
 
+        def _explicit_blank_prompt_value(attr_name, config_key, default_attr):
+            if hasattr(self, attr_name):
+                value = getattr(self, attr_name)
+                return str(value if value is not None else '')
+            if config_key in self.config:
+                value = self.config.get(config_key)
+                return str(value if value is not None else '')
+            return str(getattr(self, default_attr, '') or '')
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -17718,6 +17821,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REFINEMENT_FAILED_USER_PROMPT': getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', ''))),
             'REFINEMENT_PARTIAL_SYSTEM_PROMPT': getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', ''),
             'REFINEMENT_PARTIAL_USER_PROMPT': getattr(self, 'refinement_partial_user_prompt', self.config.get('refinement_partial_user_prompt', getattr(self, 'default_refinement_partial_user_prompt', ''))),
+            'REFINEMENT_PARTIAL_B_SYSTEM_PROMPT': _explicit_blank_prompt_value('refinement_partial_b_system_prompt', 'refinement_partial_b_system_prompt', 'default_refinement_partial_b_system_prompt'),
+            'REFINEMENT_PARTIAL_B_USER_PROMPT': _explicit_blank_prompt_value('refinement_partial_b_user_prompt', 'refinement_partial_b_user_prompt', 'default_refinement_partial_b_user_prompt'),
+            'REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT': _explicit_blank_prompt_value('refinement_partial_b2_system_prompt', 'refinement_partial_b2_system_prompt', 'default_refinement_partial_b2_system_prompt'),
+            'REFINEMENT_PARTIAL_B2_USER_PROMPT': _explicit_blank_prompt_value('refinement_partial_b2_user_prompt', 'refinement_partial_b2_user_prompt', 'default_refinement_partial_b2_user_prompt'),
             'ENABLE_IMAGE_TRANSLATION': "1" if (self.enable_image_translation_var and output_mode not in ('refinement', 'audio')) else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -25858,6 +25965,10 @@ Important rules:
                 ('refinement_failed_user_prompt', ['refinement_failed_user_prompt'], getattr(self, 'default_refinement_failed_user_prompt', ''), str),
                 ('refinement_partial_system_prompt', ['refinement_partial_system_prompt'], getattr(self, 'default_refinement_partial_system_prompt', ''), str),
                 ('refinement_partial_user_prompt', ['refinement_partial_user_prompt'], getattr(self, 'default_refinement_partial_user_prompt', ''), str),
+                ('refinement_partial_b_system_prompt', ['refinement_partial_b_system_prompt'], getattr(self, 'default_refinement_partial_b_system_prompt', ''), str),
+                ('refinement_partial_b_user_prompt', ['refinement_partial_b_user_prompt'], getattr(self, 'default_refinement_partial_b_user_prompt', ''), str),
+                ('refinement_partial_b2_system_prompt', ['refinement_partial_b2_system_prompt'], getattr(self, 'default_refinement_partial_b2_system_prompt', ''), str),
+                ('refinement_partial_b2_user_prompt', ['refinement_partial_b2_user_prompt'], getattr(self, 'default_refinement_partial_b2_user_prompt', ''), str),
                 ('inpainter_keys', ['inpainter_keys_var'], [], list),
                 ('rolling_summary_keys', ['rolling_summary_keys_var'], [], list),
                 ('truncation_retry_keys', ['truncation_retry_keys_var'], [], list),
@@ -25905,7 +26016,7 @@ Important rules:
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
                 ('multipass_mode', ['multipass_checkbox', 'multipass_mode_var'], False, bool),
-                ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('failed', 'partial') else 'full'),
+                ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: str(v).strip().lower() if str(v).strip().lower() in MULTIPASS_REFINEMENT_MODES else 'full'),
                 ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
@@ -26941,6 +27052,15 @@ Important rules:
                 if isinstance(value, str):
                     return value.strip().lower() in ('1', 'true', 'yes', 'on')
                 return bool(value)
+
+            def _explicit_blank_prompt_value(attr_name, config_key, default_attr):
+                if hasattr(self, attr_name):
+                    value = getattr(self, attr_name)
+                    return str(value if value is not None else '')
+                if config_key in self.config:
+                    value = self.config.get(config_key)
+                    return str(value if value is not None else '')
+                return str(getattr(self, default_attr, '') or '')
             
             extra_env_mappings = [
                 # Rolling summary
@@ -27073,6 +27193,10 @@ Important rules:
                 ('REFINEMENT_FAILED_USER_PROMPT', getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', '')))),
                 ('REFINEMENT_PARTIAL_SYSTEM_PROMPT', getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', '')),
                 ('REFINEMENT_PARTIAL_USER_PROMPT', getattr(self, 'refinement_partial_user_prompt', self.config.get('refinement_partial_user_prompt', getattr(self, 'default_refinement_partial_user_prompt', '')))),
+                ('REFINEMENT_PARTIAL_B_SYSTEM_PROMPT', _explicit_blank_prompt_value('refinement_partial_b_system_prompt', 'refinement_partial_b_system_prompt', 'default_refinement_partial_b_system_prompt')),
+                ('REFINEMENT_PARTIAL_B_USER_PROMPT', _explicit_blank_prompt_value('refinement_partial_b_user_prompt', 'refinement_partial_b_user_prompt', 'default_refinement_partial_b_user_prompt')),
+                ('REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT', _explicit_blank_prompt_value('refinement_partial_b2_system_prompt', 'refinement_partial_b2_system_prompt', 'default_refinement_partial_b2_system_prompt')),
+                ('REFINEMENT_PARTIAL_B2_USER_PROMPT', _explicit_blank_prompt_value('refinement_partial_b2_user_prompt', 'refinement_partial_b2_user_prompt', 'default_refinement_partial_b2_user_prompt')),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),

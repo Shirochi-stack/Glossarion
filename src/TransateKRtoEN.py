@@ -55,6 +55,8 @@ from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
+MULTIPASS_REFINEMENT_MODES = ("full", "failed", "partial", "partial.b", "partial.b2")
+
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
 
@@ -631,7 +633,7 @@ class TranslationConfig:
             self.OUTPUT_MODE = "text"
         self.MULTIPASS_MODE = os.getenv("MULTIPASS_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
         self.MULTIPASS_REFINEMENT_MODE = os.getenv("MULTIPASS_REFINEMENT_MODE", "full").strip().lower()
-        if self.MULTIPASS_REFINEMENT_MODE not in ("full", "failed", "partial"):
+        if self.MULTIPASS_REFINEMENT_MODE not in MULTIPASS_REFINEMENT_MODES:
             self.MULTIPASS_REFINEMENT_MODE = "full"
         self.SCAN_PHASE_MODE = os.getenv("SCAN_PHASE_MODE", "quick-scan").strip().lower()
         if self.SCAN_PHASE_MODE not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
@@ -680,7 +682,36 @@ class TranslationConfig:
             "Convert any foreign onomatopoeia to romaji. "
             "Return only the refined HTML.\n\n"
             "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML.\n"
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
+            "If placeholder HTML tags are present, retain every placeholder opening/closing tag and its attributes exactly.\n"
+            "{QA_Issues}"
+        )
+        default_refinement_partial_b_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only the refined HTML.\n\n"
+            "The QA issue(s) below identify leftover source-language text in these HTML fragments. "
+            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
+            "Each request is wrapped in a placeholder HTML tag; retain every placeholder opening/closing tag "
+            "and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
+            "Example placeholder to preserve exactly: "
+            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
+            "{QA_Issues}"
+        )
+        default_refinement_partial_b2_system_prompt = (
+            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
+            "Return only valid JSON using the same structure as the input.\n\n"
+            "The JSON requests identify leftover source-language text in HTML fragments. Translate that leftover text "
+            "into {target_lang} while preserving the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
+            "and html field. Each html value is wrapped in a placeholder HTML tag; retain every placeholder opening/closing "
+            "tag and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
+            "Example html value to preserve exactly around the refined content: "
+            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
             "{QA_Issues}"
         )
         if not self.REFINEMENT_SYSTEM_PROMPT:
@@ -689,6 +720,10 @@ class TranslationConfig:
         _failed_user = _prompt_env_raw("REFINEMENT_FAILED_USER_PROMPT")
         _partial_system = _prompt_env_raw("REFINEMENT_PARTIAL_SYSTEM_PROMPT")
         _partial_user = _prompt_env_raw("REFINEMENT_PARTIAL_USER_PROMPT")
+        _partial_b_system = _prompt_env_raw("REFINEMENT_PARTIAL_B_SYSTEM_PROMPT")
+        _partial_b_user = _prompt_env_raw("REFINEMENT_PARTIAL_B_USER_PROMPT")
+        _partial_b2_system = _prompt_env_raw("REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT")
+        _partial_b2_user = _prompt_env_raw("REFINEMENT_PARTIAL_B2_USER_PROMPT")
         failed_system_prompt = (
             default_refinement_failed_system_prompt
             if _failed_system is None
@@ -703,10 +738,26 @@ class TranslationConfig:
             else str(_partial_system).strip()
         )
         partial_user_prompt = str(_partial_user).strip() if _partial_user is not None else ""
+        partial_b_system_prompt = (
+            default_refinement_partial_b_system_prompt
+            if _partial_b_system is None
+            else str(_partial_b_system).strip()
+        )
+        partial_b_user_prompt = str(_partial_b_user).strip() if _partial_b_user is not None else ""
+        partial_b2_system_prompt = (
+            default_refinement_partial_b2_system_prompt
+            if _partial_b2_system is None
+            else str(_partial_b2_system).strip()
+        )
+        partial_b2_user_prompt = str(_partial_b2_user).strip() if _partial_b2_user is not None else ""
         self.REFINEMENT_FAILED_SYSTEM_PROMPT = failed_system_prompt
         self.REFINEMENT_FAILED_USER_PROMPT = failed_user_prompt
         self.REFINEMENT_PARTIAL_SYSTEM_PROMPT = partial_system_prompt
         self.REFINEMENT_PARTIAL_USER_PROMPT = partial_user_prompt
+        self.REFINEMENT_PARTIAL_B_SYSTEM_PROMPT = partial_b_system_prompt
+        self.REFINEMENT_PARTIAL_B_USER_PROMPT = partial_b_user_prompt
+        self.REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT = partial_b2_system_prompt
+        self.REFINEMENT_PARTIAL_B2_USER_PROMPT = partial_b2_user_prompt
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
@@ -13400,6 +13451,8 @@ _PARTIAL_REFINEMENT_SKIP_TAGS = {
     "html", "head", "body", "script", "style", "meta", "link", "title", "svg",
     "math", "noscript", "template",
 }
+_PARTIAL_REFINEMENT_PLACEHOLDER_TAG = "glossarion-partial"
+_PARTIAL_REFINEMENT_PLACEHOLDER_ID_ATTR = "data-glossarion-id"
 
 try:
     from html_tag_entities import VALID_ENTITY_TAGS as _PARTIAL_VALID_HTML_TAGS
@@ -13694,7 +13747,7 @@ def _collect_partial_refinement_tag_groups(html_content, qa_settings):
 
 def _strip_refinement_code_fence(text):
     cleaned = str(text or "").strip()
-    cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.IGNORECASE | re.MULTILINE)
+    cleaned = re.sub(r"^```(?:[A-Za-z0-9_-]+)?\s*\n?", "", cleaned, count=1, flags=re.IGNORECASE | re.MULTILINE)
     cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
     return cleaned.strip()
 
@@ -13778,6 +13831,108 @@ def _partial_refinement_target_count(targets):
         else:
             total += len(target.get("tags", []))
     return total
+
+
+def _partial_refinement_request_id(target_index):
+    return f"partial-{int(target_index):04d}"
+
+
+def _partial_refinement_qa_prompt_text(qa_entry) -> str:
+    qa_issues_text = _qa_issues_for_refinement_prompt(qa_entry)
+    return f"QA issue(s) to address: {qa_issues_text}" if qa_issues_text else ""
+
+
+def _wrap_partial_refinement_placeholder(fragment_html, request_id):
+    escaped_id = html.escape(str(request_id), quote=True)
+    return (
+        f"<{_PARTIAL_REFINEMENT_PLACEHOLDER_TAG} "
+        f"{_PARTIAL_REFINEMENT_PLACEHOLDER_ID_ATTR}=\"{escaped_id}\">"
+        f"{fragment_html}"
+        f"</{_PARTIAL_REFINEMENT_PLACEHOLDER_TAG}>"
+    )
+
+
+def _partial_refinement_placeholder_response_map(refined_content, expected_request_ids):
+    expected_ids = [str(request_id) for request_id in expected_request_ids]
+    cleaned = _strip_refinement_code_fence(refined_content)
+    soup = BeautifulSoup(cleaned, "html.parser")
+    found = {}
+    duplicates = set()
+
+    for placeholder in soup.find_all(_PARTIAL_REFINEMENT_PLACEHOLDER_TAG):
+        request_id = str(placeholder.get(_PARTIAL_REFINEMENT_PLACEHOLDER_ID_ATTR, "") or "").strip()
+        if not request_id:
+            continue
+        if request_id in found:
+            duplicates.add(request_id)
+            continue
+        found[request_id] = _partial_refinement_tag_inner_html(placeholder)
+
+    missing = [request_id for request_id in expected_ids if request_id not in found]
+    if missing:
+        raise RuntimeError(
+            "Partial batch refinement response missing placeholder HTML tag(s): "
+            + ", ".join(missing)
+        )
+    if duplicates:
+        raise RuntimeError(
+            "Partial batch refinement response duplicated placeholder HTML tag(s): "
+            + ", ".join(sorted(duplicates))
+        )
+    return {request_id: found[request_id] for request_id in expected_ids}
+
+
+def _partial_refinement_json_response_map(refined_content, expected_requests):
+    expected_by_id = {str(request["request_id"]): request for request in expected_requests}
+    expected_ids = list(expected_by_id.keys())
+    cleaned = _strip_refinement_code_fence(refined_content)
+    try:
+        parsed = json.loads(cleaned)
+    except Exception as exc:
+        raise RuntimeError(f"Partial.b2 refinement response was not valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Partial.b2 refinement response must be a JSON object")
+    requests = parsed.get("requests")
+    if not isinstance(requests, list):
+        raise RuntimeError("Partial.b2 refinement response missing JSON requests array")
+
+    found = {}
+    duplicates = set()
+    for item in requests:
+        if not isinstance(item, dict):
+            raise RuntimeError("Partial.b2 refinement response contains a non-object request")
+        request_id = str(item.get("id", "") or "").strip()
+        if not request_id:
+            raise RuntimeError("Partial.b2 refinement response contains a request without an id")
+        if request_id in found:
+            duplicates.add(request_id)
+            continue
+        if "qa_issue_prompt" not in item:
+            raise RuntimeError(f"Partial.b2 refinement response request {request_id} is missing qa_issue_prompt")
+        if "html" not in item:
+            raise RuntimeError(f"Partial.b2 refinement response request {request_id} is missing html")
+        found[request_id] = str(item.get("html") if item.get("html") is not None else "")
+
+    missing = [request_id for request_id in expected_ids if request_id not in found]
+    if missing:
+        raise RuntimeError(
+            "Partial.b2 refinement response missing JSON request(s): "
+            + ", ".join(missing)
+        )
+    if duplicates:
+        raise RuntimeError(
+            "Partial.b2 refinement response duplicated JSON request id(s): "
+            + ", ".join(sorted(duplicates))
+        )
+
+    refined_by_id = {}
+    for request_id in expected_ids:
+        refined_by_id[request_id] = _partial_refinement_placeholder_response_map(
+            found[request_id],
+            [request_id],
+        )[request_id]
+    return refined_by_id
 
 
 def _apply_partial_refinement_response(document, target, refined_fragment):
@@ -13908,6 +14063,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     if use_batch and len(chapters) > 1:
         print(f"⚡ Batch mode enabled for {mode}: {batch_size} parallel workers")
     refined_output_paths = set()
+    partial_refinement_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "partial") or "partial").strip().lower()
+    if partial_refinement_mode not in ("partial", "partial.b", "partial.b2"):
+        partial_refinement_mode = "partial"
 
     def _force_stop_requested():
         return (
@@ -13986,7 +14144,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return None
 
     def _refinement_prompt_templates(prompt_mode):
-        if prompt_mode == "partial":
+        if prompt_mode == "partial.b":
+            system_prompt = getattr(config, "REFINEMENT_PARTIAL_B_SYSTEM_PROMPT", "").strip()
+            user_prompt = getattr(config, "REFINEMENT_PARTIAL_B_USER_PROMPT", "").strip()
+        elif prompt_mode == "partial.b2":
+            system_prompt = getattr(config, "REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT", "").strip()
+            user_prompt = getattr(config, "REFINEMENT_PARTIAL_B2_USER_PROMPT", "").strip()
+        elif prompt_mode == "partial":
             system_prompt = getattr(config, "REFINEMENT_PARTIAL_SYSTEM_PROMPT", "").strip()
             user_prompt = getattr(config, "REFINEMENT_PARTIAL_USER_PROMPT", "").strip()
         elif prompt_mode == "failed":
@@ -13997,8 +14161,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             user_prompt = getattr(config, "REFINEMENT_USER_PROMPT", "").strip()
         return system_prompt, user_prompt
 
-    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None):
-        prompt_mode = "partial" if partial else ("failed" if multipass_failed_mode else "full")
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None, partial_mode="partial"):
+        prompt_mode = partial_mode if partial else ("failed" if multipass_failed_mode else "full")
         system_template, user_template = _refinement_prompt_templates(prompt_mode)
         qa_issues_text = _qa_issues_for_refinement_prompt(qa_entry)
         refine_system = _format_refinement_prompt(
@@ -14256,6 +14420,100 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         )
                         partial_requests.append((target_index, target, messages))
 
+                    partial_request_count = len(partial_requests)
+                    if partial_refinement_mode in ("partial.b", "partial.b2"):
+                        batch_requests = []
+                        for target_index, target, _messages in partial_requests:
+                            fragment_html = _partial_refinement_target_fragment(target, partial_document)
+                            fragment_qa_entry = _partial_refinement_qa_entry_for_fragment(
+                                pre_existing_qa_source_entry or pre_existing_entry,
+                                fragment_html,
+                                qa_settings,
+                            )
+                            batch_requests.append({
+                                "index": target_index,
+                                "target": target,
+                                "fragment_html": fragment_html,
+                                "qa_entry": fragment_qa_entry,
+                                "qa_issue_prompt": _partial_refinement_qa_prompt_text(fragment_qa_entry),
+                                "request_id": _partial_refinement_request_id(target_index),
+                            })
+
+                        if partial_refinement_mode == "partial.b2":
+                            batch_payload = json.dumps(
+                                {
+                                    "requests": [
+                                        {
+                                            "id": request["request_id"],
+                                            "qa_issue_prompt": request["qa_issue_prompt"],
+                                            "html": _wrap_partial_refinement_placeholder(
+                                                request["fragment_html"],
+                                                request["request_id"],
+                                            ),
+                                        }
+                                        for request in batch_requests
+                                    ]
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                            batch_kind = "json"
+                        else:
+                            batch_payload = "\n".join(
+                                _wrap_partial_refinement_placeholder(
+                                    request["fragment_html"],
+                                    request["request_id"],
+                                )
+                                for request in batch_requests
+                            )
+                            batch_kind = "batch"
+
+                        messages = _build_refinement_messages(
+                            batch_payload,
+                            partial=True,
+                            partial_kind=batch_kind,
+                            qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
+                            partial_mode=partial_refinement_mode,
+                        )
+                        refined_batch, finish_reason, _raw_obj = send_with_interrupt(
+                            messages,
+                            client,
+                            config.TEMP,
+                            config.MAX_OUTPUT_TOKENS,
+                            check_stop,
+                            chunk_timeout=None,
+                            context="refinement",
+                            chapter_context={"chapter": actual_num, "chunk": 1, "total_chunks": 1},
+                            bypass_graceful_stop=True,
+                            before_send_callback=_mark_refinement_progress_on_send,
+                        )
+                        if (
+                            not refined_batch
+                            or not str(refined_batch).strip()
+                            or finish_reason in ("content_filter", "prohibited_content", "error")
+                        ):
+                            raise RuntimeError(
+                                f"Partial batch refinement returned no usable content for Chapter {actual_num} "
+                                f"(finish_reason={finish_reason})"
+                            )
+                        if partial_refinement_mode == "partial.b2":
+                            refined_by_id = _partial_refinement_json_response_map(refined_batch, batch_requests)
+                        else:
+                            refined_by_id = _partial_refinement_placeholder_response_map(
+                                refined_batch,
+                                [request["request_id"] for request in batch_requests],
+                            )
+                        for request in batch_requests:
+                            if _force_stop_requested():
+                                return "skipped", f"â¹ï¸ Refinement stopped before applying Chapter {actual_num} partial batch"
+                            _apply_partial_refinement_response(
+                                partial_document,
+                                request["target"],
+                                refined_by_id[request["request_id"]],
+                            )
+                        partial_requests = []
+                        partial_request_count = 1
+
                     def _send_partial_refinement_fragment(target_index, target, messages):
                         refined_fragment, finish_reason, _raw_obj = send_with_interrupt(
                             messages,
@@ -14409,7 +14667,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 if multipass_partial_mode:
                     return "processed", (
                         f"Partial refined Chapter {actual_num}: {output_file} "
-                        f"({len(partial_targets)} request(s), {total_targets} target(s))"
+                        f"({partial_request_count} request(s), {total_targets} target(s))"
                     )
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
@@ -18817,12 +19075,12 @@ def main(log_callback=None, stop_callback=None):
     
     if config.OUTPUT_MODE in ("refinement", "audio"):
         direct_multipass_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
-        if direct_multipass_mode not in ("full", "failed", "partial"):
+        if direct_multipass_mode not in MULTIPASS_REFINEMENT_MODES:
             direct_multipass_mode = "full"
         direct_multipass_enabled = (
             config.OUTPUT_MODE == "refinement"
             and bool(getattr(config, "MULTIPASS_MODE", False))
-            and direct_multipass_mode in ("failed", "partial")
+            and direct_multipass_mode in ("failed", "partial", "partial.b", "partial.b2")
         )
         post_mode_chapters = []
         for _idx, _chapter in enumerate(chapters):
@@ -18854,7 +19112,7 @@ def main(log_callback=None, stop_callback=None):
             progress_manager,
             check_stop,
             multipass_failed_mode=direct_multipass_enabled,
-            multipass_partial_mode=direct_multipass_enabled and direct_multipass_mode == "partial",
+            multipass_partial_mode=direct_multipass_enabled and direct_multipass_mode in ("partial", "partial.b", "partial.b2"),
         )
         return
 
@@ -22536,17 +22794,17 @@ def main(log_callback=None, stop_callback=None):
         print("✨ MULTIPASS REFINEMENT")
         print("=" * 50)
         multipass_refinement_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
-        if multipass_refinement_mode not in ("full", "failed", "partial"):
+        if multipass_refinement_mode not in MULTIPASS_REFINEMENT_MODES:
             multipass_refinement_mode = "full"
         print(f"Running a refinement pass over translated HTML output (mode: {multipass_refinement_mode}).")
-        if multipass_refinement_mode in ("failed", "partial"):
+        if multipass_refinement_mode in ("failed", "partial", "partial.b", "partial.b2"):
             qa_scan_mode = str(getattr(config, "SCAN_PHASE_MODE", "quick-scan") or "quick-scan").strip().lower()
             if qa_scan_mode not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
                 qa_scan_mode = "quick-scan"
             qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
             if not isinstance(qa_settings, dict):
                 qa_settings = _load_qa_scanner_settings_from_env()
-            mode_label = "Partial" if multipass_refinement_mode == "partial" else "Failed"
+            mode_label = "Partial" if multipass_refinement_mode.startswith("partial") else "Failed"
             print(f"{mode_label} multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
             try:
                 try:
@@ -22592,8 +22850,8 @@ def main(log_callback=None, stop_callback=None):
                 out,
                 progress_manager,
                 check_stop,
-                multipass_failed_mode=multipass_refinement_mode in ("failed", "partial"),
-                multipass_partial_mode=multipass_refinement_mode == "partial",
+                multipass_failed_mode=multipass_refinement_mode in ("failed", "partial", "partial.b", "partial.b2"),
+                multipass_partial_mode=multipass_refinement_mode in ("partial", "partial.b", "partial.b2"),
             )
         finally:
             config.OUTPUT_MODE = original_output_mode
