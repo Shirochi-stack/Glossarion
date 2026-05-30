@@ -18812,6 +18812,21 @@ def main(log_callback=None, stop_callback=None):
             return True
         return start <= actual_num <= end
 
+    def _range_display_value(chapter, actual_num, chapter_idx=None):
+        """Return the value users typed ranges against for summaries/errors."""
+        if use_spine_order:
+            spine_pos_1based = _spine_pos_by_idx.get(chapter_idx) if chapter_idx is not None else None
+            return spine_pos_1based
+        return actual_num
+
+    range_matched_chapters = []
+    range_already_translated_chapters = []
+    range_special_skipped_chapters = []
+    if hasattr(config, '_range_skipped_chapters'):
+        config._range_skipped_chapters = []
+    if hasattr(config, '_skipped_special_files'):
+        config._skipped_special_files = []
+
     # When USE_SPINE_ORDER is active, build a mapping from each extracted
     # chapter's list index to its raw OPF spine position. This matches the
     # Progress Manager display.
@@ -18943,7 +18958,10 @@ def main(log_callback=None, stop_callback=None):
         
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
+        range_display_value = _range_display_value(c, actual_num, idx)
         c['_range_allowed_for_translation'] = _range_allows_chapter(c, actual_num, idx)
+        if start is not None and c['_range_allowed_for_translation']:
+            range_matched_chapters.append(range_display_value if range_display_value is not None else actual_num)
         
         # Skip configured special files if translation is disabled.
         # Display/progress chapter 0 is cosmetic and must not imply special-file skipping.
@@ -18954,6 +18972,8 @@ def main(log_callback=None, stop_callback=None):
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
             if _is_configured_special_file(name):
                 if not (_translate_all_numbered and _has_number_in_filename(name)):
+                    if start is not None and c.get('_range_allowed_for_translation', True):
+                        range_special_skipped_chapters.append(range_display_value if range_display_value is not None else actual_num)
                     # Track skipped special files
                     if not hasattr(config, '_skipped_special_files'):
                         config._skipped_special_files = []
@@ -18967,7 +18987,7 @@ def main(log_callback=None, stop_callback=None):
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
                     config._range_skipped_chapters = []
-                config._range_skipped_chapters.append(c['actual_chapter_num'])
+                config._range_skipped_chapters.append(range_display_value if range_display_value is not None else c['actual_chapter_num'])
                 continue
                 
         # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
@@ -18977,6 +18997,8 @@ def main(log_callback=None, stop_callback=None):
         )
         
         if not needs_translation:
+            if start is not None and c.get('_range_allowed_for_translation', True):
+                range_already_translated_chapters.append(range_display_value if range_display_value is not None else actual_num)
             chunks_per_chapter[idx] = 0
             continue
         
@@ -19618,25 +19640,40 @@ def main(log_callback=None, stop_callback=None):
         if start is not None and end is not None:
             # Check if chapters in the range exist but are already completed
             if chapters:
-                available_chapters = [c.get('actual_chapter_num', c['num']) for c in chapters]
-                chapters_in_range = [num for num in available_chapters if start <= num <= end]
+                available_chapters = []
+                for _idx, _chapter in enumerate(chapters):
+                    _actual = _chapter.get('actual_chapter_num', _chapter.get('num'))
+                    _range_value = _range_display_value(_chapter, _actual, _idx)
+                    if _range_value is not None:
+                        available_chapters.append(_range_value)
+
+                chapters_in_range = range_matched_chapters
+                range_label = "spine positions" if use_spine_order else "chapters"
                 
                 if chapters_in_range:
-                    # Chapters in range exist but are already completed
-                    print(f"\n✅ All chapters in range {start}-{end} are already translated - nothing to do!")
+                    if range_already_translated_chapters:
+                        # Chapters in range exist but are already completed
+                        print(f"\n✅ All translatable {range_label} in range {start}-{end} are already translated - nothing to do!")
+                        if range_special_skipped_chapters:
+                            print(f"📊 Skipped {len(range_special_skipped_chapters)} special file(s) inside the range because TRANSLATE_SPECIAL_FILES is disabled.")
+                    elif range_special_skipped_chapters:
+                        print(f"\n⚠️ WARNING: All {range_label} in range {start}-{end} are configured special files and TRANSLATE_SPECIAL_FILES is disabled.")
+                        print(f"💡 Enable 'Translate Special Files' in settings if you want to translate these files.")
+                    else:
+                        print(f"\n✅ No {range_label} in range {start}-{end} need translation - nothing to do!")
                 else:
                     # No chapters exist in the specified range
-                    min_chapter = min(available_chapters)
-                    max_chapter = max(available_chapters)
+                    min_chapter = min(available_chapters) if available_chapters else "unknown"
+                    max_chapter = max(available_chapters) if available_chapters else "unknown"
                     
-                    print(f"\n❌ ERROR: Chapter range {start}-{end} doesn't match any chapters!")
-                    print(f"📚 Available chapters in this EPUB: {min_chapter}-{max_chapter} ({len(chapters)} total)")
-                    print(f"💡 Please adjust your chapter range in the settings to match the available chapters.")
+                    print(f"\n❌ ERROR: Chapter range {start}-{end} doesn't match any {range_label}!")
+                    print(f"📚 Available {range_label} in this EPUB: {min_chapter}-{max_chapter} ({len(chapters)} total)")
+                    print(f"💡 Please adjust your chapter range in the settings to match the available {range_label}.")
                     
                     if hasattr(config, '_range_skipped_chapters') and config._range_skipped_chapters:
                         print(f"\n📊 All {len(config._range_skipped_chapters)} chapters were outside the specified range.")
                     
-                    raise ValueError(f"Chapter range {start}-{end} doesn't match any available chapters ({min_chapter}-{max_chapter})")
+                    raise ValueError(f"Chapter range {start}-{end} doesn't match any available {range_label} ({min_chapter}-{max_chapter})")
             else:
                 print(f"\n❌ ERROR: No chapters found in EPUB to translate!")
                 raise ValueError("No chapters found in EPUB")
