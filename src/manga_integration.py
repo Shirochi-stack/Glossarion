@@ -3840,7 +3840,7 @@ class MangaTranslationTab(QObject):
                 border-color: #3a3a3a;
             }
             /* Disabled fields styling */
-            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
+            QLineEdit:disabled, QComboBox:disabled {
                 background-color: #1a1a1a;
                 color: #666666;
                 border: 1px solid #3a3a3a;
@@ -7651,6 +7651,13 @@ class MangaTranslationTab(QObject):
                     self.manga_image_request_quality_spinbox.setRange(1, 95)
                     self.manga_image_request_quality_spinbox.setValue(int(comp.get('jpeg_quality', 85)))
                 self.manga_image_request_quality_spinbox.setEnabled(enabled)
+                from PySide6.QtWidgets import QGraphicsOpacityEffect
+                if not enabled:
+                    eff = QGraphicsOpacityEffect(self.manga_image_request_quality_spinbox)
+                    eff.setOpacity(0.35)
+                    self.manga_image_request_quality_spinbox.setGraphicsEffect(eff)
+                else:
+                    self.manga_image_request_quality_spinbox.setGraphicsEffect(None)
                 self.manga_image_request_quality_spinbox.blockSignals(False)
             if hasattr(self, 'manga_image_request_quality_label'):
                 self.manga_image_request_quality_label.setEnabled(enabled)
