@@ -15,6 +15,7 @@ import os
 import runpy
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 
@@ -56,6 +57,44 @@ def _is_writable_dir(path: Path) -> bool:
         return False
 
 
+def _safe_home_dir() -> Path | None:
+    try:
+        return Path.home()
+    except Exception:
+        return None
+
+
+def _startup_log_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for name in ("GLOSSARION_APP_DIR", "ANDROID_PRIVATE", "ANDROID_ARGUMENT"):
+        raw = os.environ.get(name)
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    candidates.append(Path(tempfile.gettempdir()))
+    return candidates
+
+
+def _write_startup_crash(exc: BaseException) -> None:
+    message = (
+        "Glossarion PySide Android startup failed\n\n"
+        + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    )
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    for base in _startup_log_candidates():
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "glossarion_pyside_startup_crash.log").write_text(
+                message,
+                encoding="utf-8",
+            )
+            return
+        except Exception:
+            pass
+
+
 def _find_entrypoint(source_path: Path) -> Path:
     # python-for-android packages sources as top-level .pyc files.
     for candidate in (source_path, source_path.with_suffix(".pyc")):
@@ -80,9 +119,11 @@ def _configure_app_data_dir() -> None:
     candidates = [
         os.environ.get("ANDROID_PRIVATE"),
         os.environ.get("ANDROID_ARGUMENT"),
-        str(Path.home() / ".glossarion"),
         str(Path(tempfile.gettempdir()) / "glossarion"),
     ]
+    home_dir = _safe_home_dir()
+    if home_dir is not None:
+        candidates.insert(2, str(home_dir / ".glossarion"))
 
     for raw in candidates:
         if not raw:
@@ -97,9 +138,13 @@ def _configure_app_data_dir() -> None:
 
 def _load_backend_stub(stub_name: str):
     """Load a stub from android/_backend without letting src/ shadow it."""
-    stub_path = BACKEND_DIR / f"{stub_name}.py"
-    if not stub_path.is_file():
-        raise ImportError(f"Missing Android stub: {stub_path}")
+    stub_path = None
+    for candidate in (BACKEND_DIR / f"{stub_name}.py", BACKEND_DIR / f"{stub_name}.pyc"):
+        if candidate.is_file():
+            stub_path = candidate
+            break
+    if stub_path is None:
+        raise ImportError(f"Missing Android stub: {BACKEND_DIR / (stub_name + '.py')}")
 
     cached = sys.modules.get(stub_name)
     if cached is not None:
@@ -128,6 +173,7 @@ def _register_android_stubs() -> None:
         "rapidfuzz.fuzz": ("rapidfuzz_stub", False),
         "rapidfuzz.process": ("rapidfuzz_stub", False),
         "langdetect": ("langdetect_stub", False),
+        "langdetect.lang_detect_exception": ("langdetect_stub", False),
         # The desktop implementations pull in native stacks that are not part
         # of the first PySide Android experiment.
         "image_translator": ("image_translator", True),
@@ -155,6 +201,14 @@ def _register_android_stubs() -> None:
 def _prepare_runtime() -> None:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     os.environ.setdefault("GLOSSARION_ANDROID_PYSIDE", "1")
+    os.environ.setdefault("GLOSSARION_SERIAL_QT_IMPORTS", "1")
+    os.environ.setdefault("GLOSSARION_SERIAL_SPLASH_IMPORTS", "1")
+
+    try:
+        import faulthandler
+        faulthandler.enable()
+    except Exception:
+        pass
 
     # Keep src/ ahead of _backend/ so translator_gui.py can import its real
     # PySide mixins. Individual heavy modules are stubbed explicitly above.
@@ -164,6 +218,13 @@ def _prepare_runtime() -> None:
 
     _configure_app_data_dir()
     _register_android_stubs()
+
+    try:
+        from PySide6.QtWebView import QtWebView
+        QtWebView.initialize()
+        os.environ["GLOSSARION_QTWEBVIEW_INITIALIZED"] = "1"
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -175,4 +236,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:
+        _write_startup_crash(exc)
+        raise

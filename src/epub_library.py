@@ -64,7 +64,9 @@ if not _IS_ANDROID_PYSIDE:
 if not _HAS_WEBENGINE:
     try:
         from PySide6.QtWebView import QWebView, QtWebView
-        QtWebView.initialize()
+        if os.environ.get("GLOSSARION_QTWEBVIEW_INITIALIZED") != "1":
+            QtWebView.initialize()
+            os.environ["GLOSSARION_QTWEBVIEW_INITIALIZED"] = "1"
         _HAS_WEBVIEW = True
     except ImportError:
         _HAS_WEBVIEW = False

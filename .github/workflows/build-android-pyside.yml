@@ -39,6 +39,7 @@ jobs:
       SHIBOKEN_ANDROID_WHEEL_URL: ${{ inputs.shiboken_android_wheel_url }}
       PYSIDE_BUILD_MODE: ${{ inputs.build_mode }}
       PYSIDE_ANDROID_PYTHON_VERSION: "3.11.5"
+      PYSIDE_ANDROID_EXTRA_REQUIREMENTS: "beautifulsoup4,soupsieve,requests,certifi,charset-normalizer,idna,urllib3,chardet,html2text,tqdm,six,filetype,typing_extensions,packaging"
       ANDROID_NDK_VERSION: 26.1.10909125
       ANDROID_PLATFORM: android-34
       ANDROID_BUILD_TOOLS: 35.0.0
@@ -123,6 +124,13 @@ jobs:
 
 
           runtime_version = os.environ["PYSIDE_ANDROID_PYTHON_VERSION"]
+          extra_requirements = os.environ["PYSIDE_ANDROID_EXTRA_REQUIREMENTS"].strip()
+          requirements = (
+              f"python3=={runtime_version},hostpython3=={runtime_version},"
+              "shiboken6,PySide6"
+          )
+          if extra_requirements:
+              requirements = f"{requirements},{extra_requirements}"
           buildozer_py = (
               Path(PySide6.__file__).resolve().parent
               / "scripts"
@@ -135,8 +143,7 @@ jobs:
           old = 'self.set_value("app", "requirements", "python3,shiboken6,PySide6")'
           new = (
               'self.set_value("app", "requirements", '
-              f'"python3=={runtime_version},hostpython3=={runtime_version},'
-              'shiboken6,PySide6")'
+              f'"{requirements}")'
           )
           if old not in text:
               raise SystemExit(
@@ -144,7 +151,7 @@ jobs:
               )
           buildozer_py.write_text(text.replace(old, new), encoding="utf-8")
           print(f"Patched {buildozer_py}")
-          print(f"Buildozer Python requirements now pin python3/hostpython3 to {runtime_version}")
+          print(f"Buildozer requirements now set to: {requirements}")
           PY
 
       - name: Download PySide Android wheels
@@ -406,6 +413,9 @@ jobs:
               "main.pyc",
               "android/pyside_launcher/main.pyc",
               "translator_gui.pyc",
+              "android/_backend/langdetect_stub.pyc",
+              "android/_backend/tiktoken_stub.pyc",
+              "android/_backend/ebooklib_stub.pyc",
           }
           with tarfile.open(fileobj=io.BytesIO(private_tar), mode="r:*") as tar:
               private_names = {member.name for member in tar.getmembers()}
@@ -420,6 +430,36 @@ jobs:
               sys.exit(1)
 
           print("Validated packaged Python entrypoint bytecode.")
+
+          required_package_markers = {
+              "bs4/__init__",
+              "soupsieve/__init__",
+              "requests/__init__",
+              "urllib3/__init__",
+              "certifi/__init__",
+              "charset_normalizer/__init__",
+              "tqdm/__init__",
+          }
+          missing_packages = sorted(
+              marker
+              for marker in required_package_markers
+              if not any(
+                  name == f"{marker}.py"
+                  or name == f"{marker}.pyc"
+                  or name.endswith(f"/{marker}.py")
+                  or name.endswith(f"/{marker}.pyc")
+                  for name in private_names
+              )
+          )
+          if missing_packages:
+              print(
+                  "::error::Packaged app is missing required pure-Python dependencies: "
+                  + ", ".join(missing_packages),
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print("Validated packaged pure-Python startup dependencies.")
           PY
 
       - name: Upload PySide Android package

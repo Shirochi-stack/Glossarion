@@ -8,8 +8,11 @@ does not collide with the existing Kivy Android entrypoint.
 
 from __future__ import annotations
 
+import os
 import runpy
 import sys
+import tempfile
+import traceback
 from pathlib import Path
 
 
@@ -26,7 +29,39 @@ def _find_entrypoint(source_path: Path) -> Path:
     )
 
 
+def _write_startup_crash(exc: BaseException) -> None:
+    message = (
+        "Glossarion PySide Android root launcher failed\n\n"
+        + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    )
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    for raw in (
+        os.environ.get("ANDROID_PRIVATE"),
+        os.environ.get("ANDROID_ARGUMENT"),
+        tempfile.gettempdir(),
+    ):
+        if not raw:
+            continue
+        try:
+            base = Path(raw).expanduser()
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "glossarion_pyside_startup_crash.log").write_text(
+                message,
+                encoding="utf-8",
+            )
+            return
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
-    launcher = _find_entrypoint(LAUNCHER)
-    sys.argv = [str(launcher), *sys.argv[1:]]
-    runpy.run_path(str(launcher), run_name="__main__")
+    try:
+        launcher = _find_entrypoint(LAUNCHER)
+        sys.argv = [str(launcher), *sys.argv[1:]]
+        runpy.run_path(str(launcher), run_name="__main__")
+    except BaseException as exc:
+        _write_startup_crash(exc)
+        raise
