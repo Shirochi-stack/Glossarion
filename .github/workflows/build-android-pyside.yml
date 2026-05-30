@@ -38,6 +38,7 @@ jobs:
       PYSIDE_ANDROID_WHEEL_URL: ${{ inputs.pyside_android_wheel_url }}
       SHIBOKEN_ANDROID_WHEEL_URL: ${{ inputs.shiboken_android_wheel_url }}
       PYSIDE_BUILD_MODE: ${{ inputs.build_mode }}
+      PYSIDE_ANDROID_PYTHON_VERSION: "3.11.5"
       ANDROID_NDK_VERSION: 26.1.10909125
       ANDROID_PLATFORM: android-34
       ANDROID_BUILD_TOOLS: 35.0.0
@@ -111,6 +112,40 @@ jobs:
           echo "Installing PySide Android deploy requirements from: $ANDROID_REQUIREMENTS"
           python -m pip install -r "$ANDROID_REQUIREMENTS"
           command -v pyside6-android-deploy
+
+      - name: Pin PySide Android Python runtime
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import PySide6
+
+
+          runtime_version = os.environ["PYSIDE_ANDROID_PYTHON_VERSION"]
+          buildozer_py = (
+              Path(PySide6.__file__).resolve().parent
+              / "scripts"
+              / "deploy_lib"
+              / "android"
+              / "buildozer.py"
+          )
+
+          text = buildozer_py.read_text(encoding="utf-8")
+          old = 'self.set_value("app", "requirements", "python3,shiboken6,PySide6")'
+          new = (
+              'self.set_value("app", "requirements", '
+              f'"python3=={runtime_version},hostpython3=={runtime_version},'
+              'shiboken6,PySide6")'
+          )
+          if old not in text:
+              raise SystemExit(
+                  f"Could not find PySide Buildozer requirements line in {buildozer_py}"
+              )
+          buildozer_py.write_text(text.replace(old, new), encoding="utf-8")
+          print(f"Patched {buildozer_py}")
+          print(f"Buildozer Python requirements now pin python3/hostpython3 to {runtime_version}")
+          PY
 
       - name: Download PySide Android wheels
         id: android_wheels
@@ -280,6 +315,9 @@ jobs:
           echo "Using PySide wheel: $PYSIDE_WHEEL"
           echo "Using Shiboken wheel: $SHIBOKEN_WHEEL"
 
+          rm -f buildozer.spec
+          trap 'echo "--- generated buildozer.spec ---"; test -f buildozer.spec && sed -n "1,220p" buildozer.spec || true' EXIT
+
           set -o pipefail
           pyside6-android-deploy \
             --config-file android/pyside_launcher/pysidedeploy.spec \
@@ -308,6 +346,81 @@ jobs:
           else
             echo "package_found=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Validate packaged Python runtime
+        if: steps.find_package.outputs.package_found == 'true'
+        env:
+          PACKAGE_PATH: ${{ steps.find_package.outputs.package_path }}
+        run: |
+          python - <<'PY'
+          import io
+          import os
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+
+          package_path = Path(os.environ["PACKAGE_PATH"])
+          runtime_version = os.environ["PYSIDE_ANDROID_PYTHON_VERSION"]
+          expected = f"libpython{'.'.join(runtime_version.split('.')[:2])}.so"
+
+          with zipfile.ZipFile(package_path) as archive:
+              package_names = set(archive.namelist())
+              libs = sorted(
+                  name
+                  for name in package_names
+                  if Path(name).name.startswith("libpython")
+                  and Path(name).suffix == ".so"
+              )
+              private_tar = archive.read("assets/private.tar")
+
+          print("Packaged Python runtime libraries:")
+          for lib in libs:
+              print(f"  - {lib}")
+
+          if not any(Path(lib).name == expected for lib in libs):
+              print(
+                  f"::error::Expected {expected} in {package_path}, but found: {libs}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          mismatches = [
+              lib
+              for lib in libs
+              if Path(lib).name.startswith("libpython")
+              and Path(lib).name not in {expected, "libpythonbin.so"}
+          ]
+          if mismatches:
+              print(
+                  "::error::Unexpected Python runtimes were packaged: "
+                  + ", ".join(mismatches),
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print(f"Validated packaged Python runtime: {expected}")
+
+          required_entrypoints = {
+              "main.pyc",
+              "android/pyside_launcher/main.pyc",
+              "translator_gui.pyc",
+          }
+          with tarfile.open(fileobj=io.BytesIO(private_tar), mode="r:*") as tar:
+              private_names = {member.name for member in tar.getmembers()}
+
+          missing_entrypoints = sorted(required_entrypoints - private_names)
+          if missing_entrypoints:
+              print(
+                  "::error::Packaged app is missing required Python entrypoint bytecode: "
+                  + ", ".join(missing_entrypoints),
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print("Validated packaged Python entrypoint bytecode.")
+          PY
 
       - name: Upload PySide Android package
         if: steps.find_package.outputs.package_found == 'true'

@@ -56,6 +56,16 @@ def _is_writable_dir(path: Path) -> bool:
         return False
 
 
+def _find_entrypoint(source_path: Path) -> Path:
+    # python-for-android packages sources as top-level .pyc files.
+    for candidate in (source_path, source_path.with_suffix(".pyc")):
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Cannot find desktop launcher as source or bytecode: {source_path}"
+    )
+
+
 def _configure_app_data_dir() -> None:
     """Point desktop GUI state at a writable Android data directory."""
     if not _is_android_runtime():
@@ -159,11 +169,9 @@ def _prepare_runtime() -> None:
 def main() -> None:
     _prepare_runtime()
 
-    if not TRANSLATOR_GUI.is_file():
-        raise FileNotFoundError(f"Cannot find desktop launcher: {TRANSLATOR_GUI}")
-
-    sys.argv = [str(TRANSLATOR_GUI), *sys.argv[1:]]
-    runpy.run_path(str(TRANSLATOR_GUI), run_name="__main__")
+    entrypoint = _find_entrypoint(TRANSLATOR_GUI)
+    sys.argv = [str(entrypoint), *sys.argv[1:]]
+    runpy.run_path(str(entrypoint), run_name="__main__")
 
 
 if __name__ == "__main__":
