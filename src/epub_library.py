@@ -12,7 +12,6 @@ import os
 import re
 import sys
 import hashlib
-import importlib
 import logging
 import shutil
 import subprocess
@@ -39,37 +38,13 @@ try:
 except Exception:
     pass
 
-# Use QWebEngineView on desktop for full CSS support. Keep the import dynamic:
-# pyside6-android-deploy scans static PySide imports and the official Android
-# wheel does not ship QtWebEngine. Android uses QtWebView below instead.
-QWebEngineView = None
-QWebView = None
-QtWebView = None
-_HAS_WEBENGINE = False
-_HAS_WEBVIEW = False
-_IS_ANDROID_PYSIDE = (
-    sys.platform == "android"
-    or os.environ.get("GLOSSARION_ANDROID_PYSIDE") == "1"
-    or any(os.environ.get(name) for name in ("ANDROID_ARGUMENT", "ANDROID_ROOT"))
-)
-
-if not _IS_ANDROID_PYSIDE:
-    try:
-        _webengine_widgets = importlib.import_module("PySide6.QtWebEngineWidgets")
-        QWebEngineView = _webengine_widgets.QWebEngineView
-        _HAS_WEBENGINE = True
-    except ImportError:
-        _HAS_WEBENGINE = False
-
-if not _HAS_WEBENGINE:
-    try:
-        from PySide6.QtWebView import QWebView, QtWebView
-        if os.environ.get("GLOSSARION_QTWEBVIEW_INITIALIZED") != "1":
-            QtWebView.initialize()
-            os.environ["GLOSSARION_QTWEBVIEW_INITIALIZED"] = "1"
-        _HAS_WEBVIEW = True
-    except ImportError:
-        _HAS_WEBVIEW = False
+# Use QWebEngineView for full CSS support (images, block layout, etc.)
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    _HAS_WEBENGINE = True
+except ImportError:
+    _HAS_WEBENGINE = False
 
 logger = logging.getLogger(__name__)
 
@@ -14330,46 +14305,6 @@ if _HAS_WEBENGINE:
             return super().eventFilter(obj, event)
 
 
-if _HAS_WEBVIEW:
-    class _AndroidWebViewWidget(QWidget):
-        """Embed QtWebView's native Android web view in the reader layout."""
-
-        loadingFinished = Signal(bool)
-
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(0)
-            self._view = QWebView()
-            self._container = QWidget.createWindowContainer(self._view, self)
-            layout.addWidget(self._container)
-            try:
-                self._view.loadingChanged.connect(self._on_loading_changed)
-            except Exception:
-                pass
-
-        def setUrl(self, url):
-            self._view.setUrl(url)
-
-        def stop(self):
-            try:
-                self._view.stop()
-            except Exception:
-                pass
-
-        def selectedText(self):
-            return ""
-
-        def _on_loading_changed(self, info):
-            status = getattr(info, "status", lambda: None)()
-            name = str(getattr(status, "name", status))
-            if "Succeeded" in name:
-                self.loadingFinished.emit(True)
-            elif "Failed" in name:
-                self.loadingFinished.emit(False)
-
-
 class _EpubCacheLoaderThread(QThread):
     """Read the pickled EPUB cache off the UI thread.
 
@@ -15425,8 +15360,6 @@ class EpubReaderDialog(QDialog):
         self._font_family = self._config.get('epub_reader_font_family', 'Embedded CSS')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
-        if _HAS_WEBVIEW and not _HAS_WEBENGINE and self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._layout_mode = LAYOUT_SCROLL
         # Optional — caller can request opening at a specific chapter index.
         # The index is clamped to the available chapter range once the EPUB
         # has finished loading (see _on_epub_loaded_from_cache). When the
@@ -15541,30 +15474,6 @@ class EpubReaderDialog(QDialog):
         self._font_combo.blockSignals(False)
         self._start_loading()
 
-    def _reader_combo_arrow_stylesheet(self) -> str:
-        icon_path = _find_halgakos_icon()
-        if icon_path:
-            icon_url = icon_path.replace("\\", "/")
-            arrow = f'image: url("{icon_url}"); width: 12px; height: 12px;'
-        else:
-            arrow = "width: 0px; height: 0px;"
-        return f"""
-            QComboBox::drop-down {{
-                border: none;
-                background: transparent;
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-            }}
-            QComboBox::down-arrow {{
-                {arrow}
-            }}
-            QComboBox::down-arrow:on {{
-                top: 1px;
-                left: 1px;
-            }}
-        """
-
     def _setup_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -15654,32 +15563,23 @@ class EpubReaderDialog(QDialog):
         self._spacing_combo = QComboBox()
         self._spacing_combo.setEditable(True)
         self._spacing_combo.addItems(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8", "3.0"])
-        self._spacing_combo.setFixedWidth(72)
+        self._spacing_combo.setFixedWidth(58)
         self._spacing_combo.setCursor(Qt.PointingHandCursor)
-        reader_combo_arrow = self._reader_combo_arrow_stylesheet()
         self._spacing_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 18px 3px 6px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px;
             }
             QComboBox:hover { border-color: #6c63ff; }
-        """ + reader_combo_arrow + """
-            QComboBox QLineEdit {
-                background: transparent; color: #e0e0e0; border: none;
-                padding: 0px; margin: 0px; font-size: 8.5pt;
-            }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
             }
         """)
-        spacing_edit = self._spacing_combo.lineEdit()
-        if spacing_edit:
-            spacing_edit.setAlignment(Qt.AlignCenter)
-            spacing_edit.setTextMargins(0, 0, 0, 0)
         self._spacing_combo.activated.connect(lambda idx: self._on_spacing_changed(self._spacing_combo.itemText(idx)))
-        if spacing_edit:
-            spacing_edit.editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
+        self._spacing_combo.lineEdit().editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
         self._spacing_combo.setFocusPolicy(Qt.StrongFocus)
         self._spacing_combo.installEventFilter(self)
         toolbar.addWidget(self._spacing_combo)
@@ -15695,7 +15595,7 @@ class EpubReaderDialog(QDialog):
         self._font_combo = QComboBox()
         self._font_combo.setEditable(True)
         self._font_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._font_combo.setFixedWidth(158)
+        self._font_combo.setFixedWidth(130)
         self._font_combo.setCursor(Qt.PointingHandCursor)
         self._font_combo.setToolTip("Text font family")
         # First item: use the EPUB's own embedded CSS (fonts, layout, etc.)
@@ -15727,10 +15627,13 @@ class EpubReaderDialog(QDialog):
         self._font_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 20px 3px 8px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px 3px 8px;
             }
             QComboBox:hover { border-color: #6c63ff; }
-        """ + reader_combo_arrow + """
+            QComboBox::drop-down {
+                border: none; background: transparent;
+                subcontrol-position: right center;
+            }
             QComboBox QLineEdit {
                 background: transparent; color: #e0e0e0; border: none;
                 padding: 0px; margin: 0px; font-size: 8.5pt;
@@ -15894,8 +15797,6 @@ class EpubReaderDialog(QDialog):
                 t = self._get_theme()
                 w.page().setBackgroundColor(QColor(t['bg']))
                 w.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
-            elif _HAS_WEBVIEW:
-                w = _AndroidWebViewWidget()
             else:
                 w = QTextBrowser()
                 w.setOpenExternalLinks(False)
@@ -15913,8 +15814,6 @@ class EpubReaderDialog(QDialog):
         self._reader = _make_reader_widget()
         if _HAS_WEBENGINE:
             self._reader.loadFinished.connect(self._on_reader_load_finished)
-        elif _HAS_WEBVIEW:
-            self._reader.loadingFinished.connect(self._on_reader_load_finished)
         self._reader_stack.addWidget(self._reader)
 
         # Page 1: double-page layout (two browsers side by side)
@@ -15931,9 +15830,6 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             self._reader_left.loadFinished.connect(self._on_reader_load_finished)
             self._reader_right.loadFinished.connect(self._on_reader_load_finished)
-        elif _HAS_WEBVIEW:
-            self._reader_left.loadingFinished.connect(self._on_reader_load_finished)
-            self._reader_right.loadingFinished.connect(self._on_reader_load_finished)
         double_layout.addWidget(self._reader_left)
         double_layout.addWidget(self._reader_right)
         self._reader_stack.addWidget(double_widget)
@@ -18015,13 +17911,6 @@ class EpubReaderDialog(QDialog):
         old_page = self._current_page
         old_count = self._chapter_page_cache.get(self._current_row, 0)
         new_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
-        if _HAS_WEBVIEW and not _HAS_WEBENGINE and new_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            new_mode = LAYOUT_SCROLL
-            scroll_index = modes.index(LAYOUT_SCROLL)
-            if self._layout_combo.currentIndex() != scroll_index:
-                self._layout_combo.blockSignals(True)
-                self._layout_combo.setCurrentIndex(scroll_index)
-                self._layout_combo.blockSignals(False)
         self._layout_mode = new_mode
         if old_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and new_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             self._current_page = self._clamp_page_for_layout(old_page, old_count)
@@ -18045,7 +17934,7 @@ class EpubReaderDialog(QDialog):
             QWebEngineView.setHtml() has a ~2MB limit — base64 images
             easily exceed this.  Write to a temp file and load via URL.
             """
-            if _HAS_WEBENGINE or _HAS_WEBVIEW:
+            if _HAS_WEBENGINE:
                 tmp_dir = _epub_cache_dir()
                 tmp_path = os.path.join(tmp_dir, f"_reader_{id(browser)}.html")
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -18481,9 +18370,6 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return
         if not self._chapters:
-            return
-        if not _HAS_WEBENGINE:
-            self._render_current()
             return
         # Save scroll proportion before clearing cache
         old_count = self._chapter_page_cache.get(self._current_row, 0)
