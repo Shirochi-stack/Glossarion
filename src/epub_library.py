@@ -15563,20 +15563,28 @@ class EpubReaderDialog(QDialog):
         self._spacing_combo = QComboBox()
         self._spacing_combo.setEditable(True)
         self._spacing_combo.addItems(["1.0", "1.2", "1.4", "1.6", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8", "3.0"])
-        self._spacing_combo.setFixedWidth(58)
+        self._spacing_combo.setFixedWidth(66)
         self._spacing_combo.setCursor(Qt.PointingHandCursor)
-        self._spacing_combo.setStyleSheet("""
-            QComboBox {
+        _spacing_icon_path = (_find_halgakos_icon() or "").replace("\\", "/")
+        self._spacing_combo.setStyleSheet(f"""
+            QComboBox {{
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px;
-            }
-            QComboBox:hover { border-color: #6c63ff; }
-            QComboBox::drop-down { border: none; width: 18px; }
-            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
-            QComboBox QAbstractItemView {
+                color: #e0e0e0; font-size: 8.5pt; padding: 2px 4px; padding-right: 18px;
+            }}
+            QComboBox:hover {{ border-color: #6c63ff; }}
+            QComboBox::drop-down {{
+                border: none; width: 18px;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{_spacing_icon_path}");
+                width: 12px; height: 12px;
+            }}
+            QComboBox QAbstractItemView {{
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
-            }
+            }}
         """)
         self._spacing_combo.activated.connect(lambda idx: self._on_spacing_changed(self._spacing_combo.itemText(idx)))
         self._spacing_combo.lineEdit().editingFinished.connect(lambda: self._on_spacing_changed(self._spacing_combo.currentText()))
@@ -15624,25 +15632,33 @@ class EpubReaderDialog(QDialog):
             for fam in families:
                 if fam not in _added:
                     self._font_combo.addItem(fam)
-        self._font_combo.setStyleSheet("""
-            QComboBox {
+        _font_icon_path = (_find_halgakos_icon() or "").replace("\\", "/")
+        self._font_combo.setStyleSheet(f"""
+            QComboBox {{
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px 3px 8px;
-            }
-            QComboBox:hover { border-color: #6c63ff; }
-            QComboBox::drop-down {
+                color: #e0e0e0; font-size: 8.5pt; padding: 2px 4px 2px 6px; padding-right: 20px;
+            }}
+            QComboBox:hover {{ border-color: #6c63ff; }}
+            QComboBox::drop-down {{
                 border: none; background: transparent;
-                subcontrol-position: right center;
-            }
-            QComboBox QLineEdit {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{_font_icon_path}");
+                width: 12px; height: 12px;
+            }}
+            QComboBox QLineEdit {{
                 background: transparent; color: #e0e0e0; border: none;
                 padding: 0px; margin: 0px; font-size: 8.5pt;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
-            }
+            }}
         """)
+        self._font_combo.setFixedWidth(140)
         self._font_combo.activated.connect(
             lambda idx: self._on_font_family_changed(self._font_combo.itemText(idx)))
         self._font_combo.lineEdit().editingFinished.connect(
