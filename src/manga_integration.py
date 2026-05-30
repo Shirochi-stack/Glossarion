@@ -9229,6 +9229,7 @@ class MangaTranslationTab(QObject):
                 return
 
             menu = QMenu(self.dialog if hasattr(self, 'dialog') else None)
+            menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
             is_skipped = self._is_manually_skipped_processing_file(filepath)
             action = menu.addAction("▶️ Process This Image" if is_skipped else "⏭️ Skip Processing")
             action.triggered.connect(lambda checked=False, path=filepath: self._toggle_skip_processing_for_path(path))
@@ -13590,6 +13591,7 @@ class MangaTranslationTab(QObject):
         try:
             from PySide6.QtWidgets import QMenu
             menu = QMenu(self.log_text)
+            menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
             cursor = self.log_text.textCursor()
             has_selection = bool(cursor and cursor.hasSelection())
 

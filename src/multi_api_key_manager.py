@@ -5167,6 +5167,7 @@ class MultiAPIKeyDialog(QDialog):
             return f"{base} ({selected_count} selected)" if selected_count > 1 else base
 
         menu = QMenu(self)
+        menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
 
         if total_keys > 1:
             reorder_menu = menu.addMenu("🔀 Reorder")

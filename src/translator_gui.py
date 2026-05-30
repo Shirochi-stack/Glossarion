@@ -21954,6 +21954,7 @@ Important rules:
     def _show_context_menu(self, pos):
        """Show context menu for log text"""
        context_menu = QMenu(self)
+       context_menu.setStyleSheet("QMenu::item { padding: 4px 16px; }")
        
        # Check if there's selected text
        cursor = self.log_text.textCursor()
