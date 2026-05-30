@@ -81,6 +81,16 @@ jobs:
             "platforms;$ANDROID_PLATFORM" \
             "build-tools;$ANDROID_BUILD_TOOLS" \
             "ndk;$ANDROID_NDK_VERSION"
+          mkdir -p "$ANDROID_HOME/tools/bin"
+          cat > "$ANDROID_HOME/tools/bin/sdkmanager" <<EOF
+          #!/usr/bin/env bash
+          exec "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "\$@"
+          EOF
+          cat > "$ANDROID_HOME/tools/bin/avdmanager" <<EOF
+          #!/usr/bin/env bash
+          exec "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "\$@"
+          EOF
+          chmod +x "$ANDROID_HOME/tools/bin/sdkmanager" "$ANDROID_HOME/tools/bin/avdmanager"
 
       - name: Restore PySide Android build cache
         uses: actions/cache/restore@v4
