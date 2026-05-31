@@ -5943,9 +5943,36 @@ Do not stop after the glossary."""
                 return
             mark_row_updated(item, new_val != baseline)
 
+        def _loaded_glossary_stats_text(entries):
+            stats = [f"Total entries: {len(entries)}"]
+            if self.current_glossary_format in ['list', 'token_csv'] and entries and isinstance(entries[0], dict) and 'type' in entries[0]:
+                characters = sum(1 for e in entries if isinstance(e, dict) and e.get('type') == 'character')
+                terms = sum(1 for e in entries if isinstance(e, dict) and e.get('type') == 'terms')
+                stats.append(f"Characters: {characters}, Terms: {terms}")
+            elif self.current_glossary_format == 'list':
+                chars = sum(1 for e in entries if isinstance(e, dict) and ('original_name' in e or 'name' in e))
+                locs = sum(1 for e in entries if isinstance(e, dict) and 'locations' in e and e['locations'])
+                stats.append(f"Characters: {chars}, Locations: {locs}")
+            return " | ".join(stats)
+
+        def _repair_loading_stats_label_if_tree_loaded():
+            if self.stats_label.text() != "Loading glossary..." or self.glossary_tree.topLevelItemCount() <= 0:
+                return
+            data = self.current_glossary_data
+            if isinstance(data, list):
+                self.stats_label.setText(_loaded_glossary_stats_text(data))
+            elif isinstance(data, dict):
+                entries = data.get('entries', {})
+                self.stats_label.setText(f"Total entries: {len(entries)}")
+            else:
+                self.stats_label.setText(f"Total entries: {self.glossary_tree.topLevelItemCount()}")
+
         def apply_loaded_glossary_result(payload):
             if payload.get('token') is not getattr(self, '_editor_load_token', None):
+                if getattr(self, '_editor_load_token', None) is None:
+                    _repair_loading_stats_label_if_tree_loaded()
                 return
+            self._editor_load_token = None
             if not payload.get('ok'):
                 error = payload.get('error', 'Unknown error')
                 print(f"load_glossary_for_editing failed: {error}")
@@ -6458,6 +6485,7 @@ Do not stop after the glossary."""
                    locs = sum(1 for e in entries if 'locations' in e and e['locations'])
                    stats.append(f"Characters: {chars}, Locations: {locs}")
                
+               self._editor_load_token = None
                self.stats_label.setText(" | ".join(stats))
                _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
                if getattr(self, '_last_loaded_glossary_log', '') != _log_msg:
@@ -6487,6 +6515,8 @@ Do not stop after the glossary."""
                
            except Exception as e:
                import traceback
+               self._editor_load_token = None
+               self.stats_label.setText("Failed to load glossary")
                print(f"⚠️ load_glossary_for_editing failed: {e}")
                traceback.print_exc()
                self.append_log(f"❌ Failed to load glossary: {e}")
@@ -8893,6 +8923,8 @@ Do not stop after the glossary."""
 
                 self._editor_last_mtime = current_mtime
 
+                saved_stats = self.stats_label.text()
+
                 # Snapshot current row data for change detection
                 old_rows = {}
                 try:
@@ -8935,12 +8967,16 @@ Do not stop after the glossary."""
                 try:
                     if hasattr(self, '_reload_icon'):
                         self._reload_icon.spin(600)
-                    saved_stats = self.stats_label.text()
                     self.stats_label.setText("Reloaded externally")
                     self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic; color: #fbbf24;")
                     def _restore_stats():
                         try:
-                            self.stats_label.setText(saved_stats)
+                            if self.stats_label.text() == "Reloaded externally":
+                                if saved_stats == "Loading glossary..." and self.glossary_tree.topLevelItemCount() > 0:
+                                    self.stats_label.setText("Loading glossary...")
+                                    _repair_loading_stats_label_if_tree_loaded()
+                                else:
+                                    self.stats_label.setText(saved_stats)
                             self.stats_label.setStyleSheet("font-size: 10pt; font-style: italic;")
                         except (RuntimeError, AttributeError):
                             pass
