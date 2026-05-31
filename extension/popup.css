@@ -36,9 +36,20 @@ h1 {
   line-height: 1.15;
 }
 
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 p {
   margin: 2px 0 0;
   color: #66717c;
+}
+
+.desktop-note {
+  font-size: 12px;
 }
 
 label {
@@ -159,6 +170,19 @@ button:disabled {
   opacity: 0.68;
 }
 
+.desktop-link {
+  display: inline-flex;
+  margin: 0;
+  color: #245b4f;
+  font-size: 12px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.desktop-link:hover {
+  text-decoration: underline;
+}
+
 .hidden {
   display: none;
 }
@@ -211,6 +235,10 @@ button:disabled {
   }
 
   #status {
+    color: #63b39f;
+  }
+
+  .desktop-link {
     color: #63b39f;
   }
 }

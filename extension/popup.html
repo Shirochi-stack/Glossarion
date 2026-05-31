@@ -11,8 +11,14 @@
       <header>
         <img src="icons/halgakos-48.png" alt="" width="48" height="48">
         <div>
-          <h1>Glossarion</h1>
-          <p>Page translator</p>
+          <div class="title-row">
+            <h1>Glossarion</h1>
+            <a class="desktop-link" href="https://github.com/Shirochi-stack/Glossarion" target="_blank" rel="noopener noreferrer">
+              Get the desktop app
+            </a>
+          </div>
+          <p>Browser page translator</p>
+          <p class="desktop-note">The fully configurable open-source app is available on GitHub.</p>
         </div>
       </header>
 
@@ -22,7 +28,7 @@
         <datalist id="models"></datalist>
       </label>
 
-      <label>
+      <label id="apiKeyLabel">
         API key
         <input id="apiKey" type="password" autocomplete="off" spellcheck="false">
       </label>

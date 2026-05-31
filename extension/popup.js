@@ -36,6 +36,7 @@ const fields = {
 };
 
 const statusEl = document.querySelector("#status");
+const apiKeyLabel = document.querySelector("#apiKeyLabel");
 const thinkingControls = document.querySelector("#thinkingControls");
 const authgptControls = document.querySelector("#authgptControls");
 const authgptStatus = document.querySelector("#authgptStatus");
@@ -95,7 +96,7 @@ function bindEvents() {
   translateButton.addEventListener("click", translateActiveTab);
   restoreButton.addEventListener("click", restoreActiveTab);
   fields.thinkingEnabled.addEventListener("change", updateThinkingVisibility);
-  fields.model.addEventListener("input", updateAuthgptVisibility);
+  fields.model.addEventListener("input", updateModelDependentVisibility);
   authgptLoginButton.addEventListener("click", loginAuthgpt);
   authgptLogoutButton.addEventListener("click", logoutAuthgpt);
 }
@@ -114,7 +115,7 @@ function applySettings(settings) {
   fields.customOpenAIBaseUrl.value = settings.customOpenAIBaseUrl;
   fields.customPrefixRoutes.value = settings.customPrefixRoutes;
   updateThinkingVisibility();
-  updateAuthgptVisibility();
+  updateModelDependentVisibility();
 }
 
 function readSettings() {
@@ -282,6 +283,15 @@ async function getActiveTab() {
 
 function updateThinkingVisibility() {
   thinkingControls.classList.toggle("hidden", !fields.thinkingEnabled.checked);
+}
+
+function updateModelDependentVisibility() {
+  updateApiKeyVisibility();
+  updateAuthgptVisibility();
+}
+
+function updateApiKeyVisibility() {
+  apiKeyLabel.classList.toggle("hidden", /auth/i.test(fields.model.value.trim()));
 }
 
 async function updateAuthgptVisibility() {
