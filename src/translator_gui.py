@@ -4360,6 +4360,25 @@ Recent translations to summarize:
                     self.append_log(f"📁 Restored last selection: {len(existing)} file(s)")
         except Exception:
             pass
+
+        def _prewarm_qa_settings_after_startup():
+            try:
+                self.set_startup_prewarm_button_loading('qa_settings', True, "Loading...")
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'prewarm_qa_scanner_gui'):
+                    self.prewarm_qa_scanner_gui()
+            finally:
+                try:
+                    self.set_startup_prewarm_button_loading('qa_settings', False)
+                except Exception:
+                    pass
+
+        try:
+            QTimer.singleShot(3500, _prewarm_qa_settings_after_startup)
+        except Exception:
+            pass
     
     def _add_combobox_arrow(self, combobox):
         """Add a unicode arrow overlay to a combobox"""
@@ -4530,6 +4549,10 @@ Recent translations to summarize:
         self.entry_epub.setText("No file selected")
         self.entry_epub.setMinimumWidth(400)
         self.entry_epub.setAcceptDrops(True)
+        try:
+            self.entry_epub.textChanged.connect(lambda _text: self._refresh_qa_settings_source_status())
+        except Exception:
+            pass
 
         # Override drag/drop events on the line edit
         def _epub_drag_enter(event):
@@ -14711,6 +14734,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     return
             else:
                 self.selected_files = [file_path]
+                self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
+                file_path = self.selected_files[0]
             
             # Auto-clear glossary if file doesn't match (works for both manual and auto-loaded)
             if self.manual_glossary_path:
@@ -14731,6 +14756,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.manual_glossary_manually_loaded = False
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
+        else:
+            self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
         
         # Record every selected raw input in the Library's raw-inputs
         # registry so the library dialog can find it later (even if the
@@ -22388,6 +22415,10 @@ Important rules:
             self.save_config(show_message=False)
         except Exception:
             pass
+        try:
+            self._refresh_qa_settings_source_status()
+        except Exception:
+            pass
         self.append_log("🗑️ Cleared file selection")
 
 
@@ -22395,6 +22426,7 @@ Important rules:
         """Common handler for file selection"""
         if not paths:
             return
+        paths = self._normalize_windows_input_filenames(paths)
         
         # Initialize conversion tracking if not exists
         if not hasattr(self, 'json_conversions'):
@@ -22757,6 +22789,10 @@ Important rules:
 
         # If the Glossary Settings dialog is initialized, automatically refresh the editor tab combobox 
         # so it switches to the glossary of the newly selected input file
+        try:
+            self._refresh_qa_settings_source_status()
+        except Exception:
+            pass
         try:
             if hasattr(self, '_refresh_glossary_editor'):
                 self._refresh_glossary_editor()
@@ -23220,6 +23256,74 @@ Important rules:
         except Exception:
             # Tooltip is non-critical — never let it crash the GUI.
             pass
+
+    def _windows_supported_input_path(self, path):
+        """Rename Windows-hostile input filenames before output-folder creation."""
+        try:
+            if not sys.platform.startswith('win'):
+                return path
+            if not path or path == "__generative_mode__" or not os.path.isfile(path):
+                return path
+            folder, filename = os.path.split(path)
+            stem, ext = os.path.splitext(filename)
+            safe_stem = stem.rstrip(" .")
+            if safe_stem == stem:
+                return path
+            if not safe_stem:
+                safe_stem = "input"
+
+            candidate = os.path.join(folder, safe_stem + ext)
+            if os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(os.path.abspath(path)):
+                return path
+
+            counter = 2
+            while os.path.exists(candidate):
+                candidate = os.path.join(folder, f"{safe_stem}_windows_safe_{counter}{ext}")
+                counter += 1
+
+            os.rename(path, candidate)
+            try:
+                self.append_log(
+                    "⚠️ Windows does not support this filename for generated output folders because it ends in dots/spaces."
+                )
+                self.append_log(
+                    f"📝 Renamed input file so extraction can continue: {filename} → {os.path.basename(candidate)}"
+                )
+            except Exception:
+                pass
+            return candidate
+        except Exception as e:
+            try:
+                self.append_log(f"⚠️ Could not rename Windows-hostile input filename: {e}")
+            except Exception:
+                pass
+            return path
+
+    def _normalize_windows_input_filenames(self, paths):
+        """Apply Windows filename normalization to a list of selected source paths."""
+        changed = False
+        normalized = []
+        for path in list(paths or []):
+            new_path = self._windows_supported_input_path(path)
+            if new_path != path:
+                changed = True
+            normalized.append(new_path)
+
+        if changed:
+            try:
+                if len(normalized) == 1 and hasattr(self, 'entry_epub'):
+                    self.entry_epub.setText(normalized[0])
+            except Exception:
+                pass
+            try:
+                self.config['last_input_files'] = normalized
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md'))]
+                if source_files:
+                    self.config['last_epub_path'] = source_files[0]
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        return normalized
 
     def _handle_library_files_reorganized(self, moves):
         """Library \u2192 Organize / Undo: rewrite stale input paths.

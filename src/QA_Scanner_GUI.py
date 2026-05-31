@@ -298,7 +298,16 @@ def normalize_name_for_comparison(name):
 
 class QAScannerMixin:
     """Mixin class containing QA Scanner methods for TranslatorGUI"""
-    
+
+    def _refresh_qa_settings_source_status(self):
+        """Refresh the live source-file row in the QA settings dialog, if open."""
+        try:
+            refresh = getattr(self, '_qa_settings_refresh_source_status', None)
+            if callable(refresh):
+                refresh()
+        except Exception:
+            pass
+
     def _create_styled_checkbox(self, text):
         """Create a checkbox with all checkmarks disabled"""
         from PySide6.QtWidgets import QCheckBox
@@ -2291,7 +2300,8 @@ class QAScannerMixin:
         try:
             existing = getattr(self, "_qa_settings_dialog", None)
             if existing is not None:
-                existing.setModal(bool(show))
+                existing.setModal(False)
+                existing.setWindowModality(Qt.NonModal)
                 if show:
                     existing.setAttribute(Qt.WA_DontShowOnScreen, False)
                     try:
@@ -2311,6 +2321,7 @@ class QAScannerMixin:
                             pass
                         existing.show()
                     try:
+                        self._refresh_qa_settings_source_status()
                         existing.raise_()
                         existing.activateWindow()
                     except Exception:
@@ -2394,7 +2405,8 @@ class QAScannerMixin:
             }
         """)
         dialog.setWindowTitle("QA Scanner Settings")
-        dialog.setModal(bool(show))
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
         # Use screen ratios: 40% width, 85% height (decreased from 100%)
         screen = QApplication.primaryScreen().geometry()
         settings_width = int(screen.width() * 0.52)
@@ -3011,43 +3023,69 @@ class QAScannerMixin:
         epub_layout = QHBoxLayout(epub_widget)
         epub_layout.setContentsMargins(0, 10, 0, 5)
 
-        # Get source files (EPUB, TXT, PDF, or MD) from actual current selection
-        current_epub_files = []
-        if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [
-                f for f in self.selected_files
-                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md'))
-            ]
-        
-        if len(current_epub_files) > 1:
-            # Multiple source files in current selection
-            primary_file = os.path.basename(_qa_vision_ocr_source_path(current_epub_files[0], self))
-            status_text = f"📖 {len(current_epub_files)} source files selected (Primary: {primary_file})"
-            status_color = 'green'
-        elif len(current_epub_files) == 1:
-            # Single source file in current selection
-            display_source_path = _qa_vision_ocr_source_path(current_epub_files[0], self)
-            file_name = os.path.basename(display_source_path)
-            lower_name = current_epub_files[0].lower()
-            if lower_name.endswith('.txt'):
-                file_type = "TXT"
-            elif lower_name.endswith('.pdf'):
-                file_type = "PDF"
-            elif lower_name.endswith('.md'):
-                file_type = "MD"
-            else:
-                file_type = "EPUB"
-            status_text = f"📖 Current {file_type}: {file_name}"
-            status_color = 'green'
-        else:
-            # No source files in current selection
-            status_text = "📖 No EPUB/TXT/PDF/MD in current selection"
-            status_color = 'orange'
-
-        status_label = QLabel(status_text)
+        status_label = QLabel()
         status_label.setFont(QFont('Arial', 10))
-        status_label.setStyleSheet(f"color: {status_color};")
         epub_layout.addWidget(status_label)
+
+        def _selected_source_files_for_qa():
+            source_exts = ('.epub', '.txt', '.pdf', '.md')
+            files = []
+            try:
+                files = [
+                    f for f in (getattr(self, 'selected_files', []) or [])
+                    if isinstance(f, str) and f.lower().endswith(source_exts)
+                ]
+            except Exception:
+                files = []
+            if not files:
+                try:
+                    files = [
+                        f for f in (getattr(self, 'selected_epub_files', []) or [])
+                        if isinstance(f, str) and f.lower().endswith(source_exts)
+                    ]
+                except Exception:
+                    files = []
+            if not files:
+                for attr in ('selected_epub_path',):
+                    try:
+                        p = getattr(self, attr, None)
+                    except Exception:
+                        p = None
+                    if isinstance(p, str) and p.lower().endswith(source_exts):
+                        files = [p]
+                        break
+            return files
+
+        def _source_file_type(path):
+            lower_name = str(path or '').lower()
+            if lower_name.endswith('.txt'):
+                return "TXT"
+            if lower_name.endswith('.pdf'):
+                return "PDF"
+            if lower_name.endswith('.md'):
+                return "MD"
+            return "EPUB"
+
+        def refresh_source_status():
+            current_source_files = _selected_source_files_for_qa()
+            if len(current_source_files) > 1:
+                primary_file = os.path.basename(_qa_vision_ocr_source_path(current_source_files[0], self))
+                status_label.setText(f"📖 {len(current_source_files)} source files selected (Primary: {primary_file})")
+                status_label.setStyleSheet("color: green;")
+            elif len(current_source_files) == 1:
+                source_path = current_source_files[0]
+                display_source_path = _qa_vision_ocr_source_path(source_path, self)
+                status_label.setText(f"📖 Current {_source_file_type(source_path)}: {os.path.basename(display_source_path)}")
+                status_label.setStyleSheet("color: green;")
+            else:
+                status_label.setText("📖 No EPUB/TXT/PDF/MD in current selection")
+                status_label.setStyleSheet("color: orange;")
+
+        refresh_source_status()
+        try:
+            self._qa_settings_refresh_source_status = refresh_source_status
+        except Exception:
+            pass
 
         def select_epub_for_qa():
             # Allow selecting EPUB, TXT, PDF, or MD files as source
@@ -3067,18 +3105,9 @@ class QAScannerMixin:
                 if hasattr(self, 'selected_epub_files'):
                     self.selected_epub_files = [epub_path]
                 
-                lower_name = epub_path.lower()
-                if lower_name.endswith('.txt'):
-                    file_type = "TXT"
-                elif lower_name.endswith('.pdf'):
-                    file_type = "PDF"
-                elif lower_name.endswith('.md'):
-                    file_type = "MD"
-                else:
-                    file_type = "EPUB"
+                file_type = _source_file_type(epub_path)
                 display_source_path = _qa_vision_ocr_source_path(epub_path, self)
-                status_label.setText(f"📖 Current {file_type}: {os.path.basename(display_source_path)}")
-                status_label.setStyleSheet("color: green;")
+                refresh_source_status()
                 self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
                 if display_source_path != epub_path:
                     self.append_log(f"   Vision QA source: {os.path.basename(display_source_path)}")
@@ -4875,6 +4904,12 @@ class QAScannerMixin:
             except Exception:
                 dialog.hide()
         dialog.closeEvent = handle_close_event
+        try:
+            dialog.destroyed.connect(
+                lambda *_: setattr(self, '_qa_settings_refresh_source_status', None)
+            )
+        except Exception:
+            pass
 
         if not show:
             _prewarm_dialog_offscreen(dialog)
