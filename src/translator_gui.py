@@ -402,7 +402,7 @@ def _log_mei_cleanup_on_exit():
         pass
 
 # Standard Library
-import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
+import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal, subprocess
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
@@ -697,8 +697,17 @@ def _mark_manga_import_pending():
     MANGA_IMPORT_ERROR = None
 
 
+def _mark_manga_import_available():
+    """Record that manga support exists without importing it during GUI startup."""
+    global MANGA_IMPORT_LOADING, MANGA_IMPORT_ERROR
+    MANGA_IMPORT_LOADING = False
+    MANGA_IMPORT_ERROR = None
+
+
 def _start_manga_import_background():
     global MANGA_IMPORT_EXECUTOR
+    if MANGA_SUPPORT and MangaTranslationTab is not None:
+        return MANGA_IMPORT_FUTURE
     if MANGA_IMPORT_FUTURE is not None:
         return MANGA_IMPORT_FUTURE
     _mark_manga_import_pending()
@@ -3498,7 +3507,20 @@ Text to analyze:
         except Exception:
             pass
         if MANGA_IMPORT_LOADING:
-            QMessageBox.information(self, "Manga Translator", "Manga imports are still loading.")
+            self._manga_open_when_import_ready = True
+            try:
+                self._refresh_manga_import_button_state()
+            except Exception:
+                pass
+            return
+        if not MANGA_SUPPORT and bool(globals().get('manga_available', False)):
+            try:
+                _start_manga_import_background()
+                self._manga_open_when_import_ready = True
+                self._refresh_manga_import_button_state()
+            except Exception as e:
+                print(f"Manga translation modules failed to start loading: {e}")
+                _apply_manga_support(None)
             return
         if not MANGA_SUPPORT:
             QMessageBox.warning(self, "Not Available", "Manga translation modules not found.")
@@ -10918,8 +10940,6 @@ Recent translations to summarize:
 
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
-        import subprocess
-        
         if not hasattr(self, 'selected_files') or not self.selected_files:
              # Try to use self.file_path if set (single file legacy/other mode)
              if hasattr(self, 'file_path') and self.file_path:
@@ -10978,8 +10998,6 @@ Recent translations to summarize:
 
     def _open_path_in_file_manager(self, path, show_error=True):
         """Open a folder/file in the OS file manager with Linux fallbacks."""
-        import subprocess
-
         if not path:
             return False
 
@@ -13015,7 +13033,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if MANGA_SUPPORT:
                 button.setEnabled(True)
                 button.setToolTip("Open the manga panel translator.")
+                if getattr(self, '_manga_open_when_import_ready', False):
+                    self._manga_open_when_import_ready = False
+                    try:
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(0, self.open_manga_translator)
+                    except Exception:
+                        self.open_manga_translator()
+            elif bool(globals().get('manga_available', False)):
+                button.setEnabled(True)
+                button.setToolTip("Load and open the manga panel translator.")
             else:
+                self._manga_open_when_import_ready = False
                 button.setEnabled(False)
                 button.setToolTip(MANGA_IMPORT_ERROR or "Manga translation modules not found.")
         except Exception:
@@ -13464,7 +13493,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         # Place Manga Translator immediately to the right of Progress Manager.
         # If imports are still running, the button stays visible but disabled.
-        if MANGA_SUPPORT or MANGA_IMPORT_LOADING or MANGA_IMPORT_FUTURE is not None:
+        if MANGA_SUPPORT or MANGA_IMPORT_LOADING or MANGA_IMPORT_FUTURE is not None or bool(globals().get('manga_available', False)):
             toolbar_items.append(("🖼️ Manga Translator", self.open_manga_translator, "primary"))
 
         toolbar_items.extend([
@@ -13929,6 +13958,30 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
  
     # ===== Progress Manager (Retranslation) fast opener =====
+    def _has_cached_progress_manager_dialog(self) -> bool:
+        """Return True if a Progress Manager dialog already exists, without refreshing it."""
+        try:
+            if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
+                p = self.entry_epub.text().strip()
+                if p:
+                    key = os.path.abspath(p)
+                    cache = getattr(self, '_retranslation_dialog_cache', None)
+                    if isinstance(cache, dict) and key in cache and cache[key].get('dialog'):
+                        return True
+
+            if getattr(self, '_multi_file_retranslation_dialog', None):
+                return True
+
+            if hasattr(self, '_image_retranslation_dialog_cache') and hasattr(self, 'selected_files') and self.selected_files:
+                first = self.selected_files[0]
+                folder_key = os.path.abspath(first if os.path.isdir(first) else os.path.dirname(first))
+                cache = getattr(self, '_image_retranslation_dialog_cache', None)
+                if isinstance(cache, dict) and folder_key in cache and cache.get(folder_key):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _show_cached_progress_manager_if_any(self) -> bool:
         """Bring any cached Progress Manager dialog to front instantly. Returns True if shown."""
         try:
@@ -14092,7 +14145,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         finally:
             # Poll until the actual dialog exists, then stop spinning
             def _finish_when_ready(attempts=0):
-                if self._show_cached_progress_manager_if_any():
+                if self._has_cached_progress_manager_dialog():
                     self._stop_pm_spin()
                 elif attempts >= 60:  # ~6s max
                     self._stop_pm_spin()
@@ -27753,7 +27806,7 @@ if __name__ == "__main__":
             manga_available = bool(loading_results.get('manga_available'))
             manga_tab_class = loading_results.get('manga')
             if manga_available:
-                _mark_manga_import_pending()
+                _mark_manga_import_available()
             else:
                 _apply_manga_support(manga_tab_class)
             
@@ -27786,7 +27839,7 @@ if __name__ == "__main__":
             translator_gui.scan_html_folder = scan_html_folder
             try:
                 if manga_available:
-                    translator_gui._mark_manga_import_pending()
+                    translator_gui._mark_manga_import_available()
                 else:
                     translator_gui._apply_manga_support(manga_tab_class)
             except Exception:
@@ -27799,7 +27852,7 @@ if __name__ == "__main__":
             except Exception:
                 manga_available = False
             if manga_available:
-                _mark_manga_import_pending()
+                _mark_manga_import_available()
             else:
                 _apply_manga_support(None)
         
@@ -27830,15 +27883,15 @@ if __name__ == "__main__":
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
 
-        should_start_manga_imports = bool(globals().get('manga_available', False))
-        if should_start_manga_imports:
+        should_show_manga_button = bool(globals().get('manga_available', False))
+        if should_show_manga_button:
             try:
                 main_window._refresh_manga_import_button_state()
             except Exception:
                 pass
 
         def _kickoff_manga_import_after_show():
-            if not should_start_manga_imports:
+            if not should_show_manga_button:
                 return
             try:
                 manga_future = _start_manga_import_background()
@@ -27885,15 +27938,6 @@ if __name__ == "__main__":
 
         if splash_manager:
             splash_manager.close_splash()
-
-        if should_start_manga_imports:
-            try:
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(500, _kickoff_manga_import_after_show)
-            except Exception:
-                # Last-resort fallback only; normal Qt startup must not block
-                # on manga imports before the main window is visible.
-                _kickoff_manga_import_after_show()
 
         try:
             if getattr(main_window, '_pending_glossary_mode_welcome', False):
