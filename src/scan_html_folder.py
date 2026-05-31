@@ -193,7 +193,8 @@ class DuplicateDetectionConfig:
                 'structural': 0.80,
                 'consecutive_chapters': 3,
                 'word_overlap': 0.65,
-                'minhash_threshold': 0.70
+                'minhash_threshold': 0.70,
+                'min_duplicate_word_count': 500
             },
             'quick-scan': {  # Optimized for speed
                 'similarity': 0.85,
@@ -207,7 +208,8 @@ class DuplicateDetectionConfig:
                 'skip_minhash': True,
                 'sample_size': 1000,  # Smaller sample
                 'disable_duplicate_check': False,
-                'check_all_pairs': False  # Never check all pairs
+                'check_all_pairs': False,  # Never check all pairs
+                'min_duplicate_word_count': 500
             },
             'custom': {
                 'similarity': 0.85,
@@ -218,7 +220,8 @@ class DuplicateDetectionConfig:
                 'minhash_threshold': 0.80,
                 'check_all_pairs': False,
                 'sample_size': 3000,
-                'min_text_length': 500
+                'min_text_length': 500,
+                'min_duplicate_word_count': 500
             },
             'ai-hunter': {
                 'similarity': 0.30, 
@@ -230,14 +233,15 @@ class DuplicateDetectionConfig:
                 'check_all_pairs': True,
                 # Guardrail: don't flag AI/structural duplicates if the raw text overlap is essentially zero
                 # (prevents false positives where structure/semantics match but actual text does not)
-                'min_text_similarity': 0.05
+                'min_text_similarity': 0.05,
+                'min_duplicate_word_count': 500
             }
         }
         
         # Override with custom settings if mode is 'custom'
         if mode == 'custom' and custom_settings:
             self.thresholds['custom'].update(custom_settings.get('thresholds', {}))
-            for key in ['consecutive_chapters', 'check_all_pairs', 'sample_size', 'min_text_length']:
+            for key in ['consecutive_chapters', 'check_all_pairs', 'sample_size', 'min_text_length', 'min_duplicate_word_count']:
                 if key in custom_settings:
                     self.thresholds['custom'][key] = custom_settings[key]
     
@@ -692,6 +696,101 @@ def _count_words(text: str) -> int:
         return 0
     tokens = _TOKEN_RE.findall(text)
     return len(tokens)
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _count_small_file_words(text: str) -> int:
+    """Approximate words for the small-file skip threshold, independent of count mode."""
+    if not isinstance(text, str) or not text:
+        return 0
+
+    if '&' in text:
+        text = _ENTITY_PATTERN.sub(' ', text)
+        text = html_lib.unescape(text)
+
+    # Estimate CJK content as words so source chapters without spaces are not
+    # accidentally treated as tiny files.
+    cjk_units = 0
+    chinese_segments = re.findall(r'[\u4e00-\u9fff]+', text)
+    for segment in chinese_segments:
+        cjk_units += max(1, int(len(segment) / 1.7))
+    cjk_units += len(re.findall(r'[\u3040-\u309f]+', text))
+    cjk_units += len(re.findall(r'[\u30a0-\u30ff]+', text))
+    cjk_units += len(re.findall(r'[\uac00-\ud7af]+', text))
+
+    non_cjk = re.sub(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+', ' ', text)
+    return cjk_units + _count_words(non_cjk)
+
+def _get_small_file_word_threshold(qa_settings=None, config=None, mode=None, default=500) -> int:
+    """Resolve the shared small-file threshold used by QA skip checks."""
+    sentinel = object()
+    value = sentinel
+
+    if isinstance(qa_settings, dict):
+        if 'min_duplicate_word_count' in qa_settings:
+            value = qa_settings.get('min_duplicate_word_count')
+        else:
+            custom = qa_settings.get('custom_mode_settings')
+            if isinstance(custom, dict) and 'min_duplicate_word_count' in custom:
+                value = custom.get('min_duplicate_word_count')
+
+    if value is sentinel and config is not None:
+        try:
+            mode_name = mode or getattr(config, 'mode', None)
+            value = config.thresholds.get(mode_name, {}).get('min_duplicate_word_count', sentinel)
+        except Exception:
+            value = sentinel
+
+    if value is sentinel:
+        env_value = os.getenv('QA_MIN_DUPLICATE_WORD_COUNT')
+        if env_value is not None:
+            value = env_value
+
+    if value is sentinel:
+        value = default
+
+    return max(0, _safe_int(value, default))
+
+def _source_word_count_value(source_info, default=0) -> int:
+    if isinstance(source_info, dict):
+        for key in ('word_count', 'small_file_word_count', 'threshold_word_count'):
+            if key in source_info:
+                return max(0, _safe_int(source_info.get(key), default))
+        return default
+    return max(0, _safe_int(source_info, default))
+
+def _source_small_file_word_count(source_info, default=0) -> int:
+    if isinstance(source_info, dict):
+        for key in ('small_file_word_count', 'threshold_word_count', 'word_count'):
+            if key in source_info:
+                return max(0, _safe_int(source_info.get(key), default))
+        return default
+    return max(0, _safe_int(source_info, default))
+
+def _sum_source_word_counts(source_counts) -> int:
+    return sum(_source_word_count_value(info) for info in (source_counts or {}).values())
+
+def _small_file_word_count_result(original_wc, translated_wc, original_file, threshold):
+    ratio = translated_wc / max(1, original_wc)
+    return {
+        'found_match': True,
+        'chapter_num': original_file,
+        'original_wc': original_wc,
+        'translated_wc': translated_wc,
+        'ratio': ratio,
+        'normalized_ratio': ratio,
+        'multiplier': 1.0,
+        'percentage': ratio * 100,
+        'is_reasonable': True,
+        'is_typical': True,
+        'original_file': original_file,
+        'warning': 'small_file_skipped',
+        'warning_desc': f'Source file below {threshold} words; word count check skipped'
+    }
 
 def _count_chars_exact(text: str) -> int:
     """
@@ -3039,9 +3138,9 @@ def detect_duplicates(results, log, should_stop, config):
     # Initialize comparisons_done at the function level
     comparisons_done = 0
     
-    # Get minimum word count threshold for duplicate detection (default 500)
-    # This prevents small files (sections, notices) from being flagged as duplicates
-    min_dup_words = config.thresholds.get(config.mode, {}).get('min_duplicate_word_count', 500)
+    # Get minimum word count threshold for small-file QA skips (default 500).
+    # This prevents section/notice files from being flagged as duplicates.
+    min_dup_words = _get_small_file_word_threshold(config=config)
     
     # Filter out files that are too small for duplicate detection
     # These are likely section headers, notices, or metadata files
@@ -3050,7 +3149,7 @@ def detect_duplicates(results, log, should_stop, config):
     
     for result in results:
         text = result.get('raw_text', '')
-        word_count = len(text.split())
+        word_count = _count_small_file_words(text)
         
         if word_count < min_dup_words:
             skipped_small_files.append(result['filename'])
@@ -3058,7 +3157,7 @@ def detect_duplicates(results, log, should_stop, config):
             results_for_dup_check.append(result)
     
     if skipped_small_files:
-        log(f"⏭️  Skipping {len(skipped_small_files)} files with <{min_dup_words} words (likely sections/notices)")
+        log(f"⏭️  Skipping {len(skipped_small_files)} files with <{min_dup_words} words for duplicate checks")
     
     # Use filtered results for duplicate detection
     total_files = len(results_for_dup_check)
@@ -4907,6 +5006,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         
                         script_hint = detect_dominant_script(text)
                         has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                        small_file_word_count = _count_small_file_words(text)
                         
                         # Use appropriate counting based on mode
                         # Word count mode needs special CJK handling
@@ -4931,6 +5031,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         # Store using spine index as the authoritative chapter number
                         word_counts[spine_index] = {
                             'word_count': word_count,
+                            'small_file_word_count': small_file_word_count,
                             'filename': basename,
                             'full_path': file_path,
                             'is_cjk': has_cjk,
@@ -4968,12 +5069,9 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         if len(text) < min_file_length:
                             continue
                         
-                        # Check if text contains CJK characters
-                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
-                                      '\u3040' <= char <= '\u309f' or  # Hiragana
-                                      '\u30a0' <= char <= '\u30ff' or  # Katakana
-                                      '\uac00' <= char <= '\ud7af'     # Korean
-                                      for char in text)
+                        script_hint = detect_dominant_script(text)
+                        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+                        small_file_word_count = _count_small_file_words(text)
                         
                         # Use word or character counting based on mode
                         if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
@@ -4995,6 +5093,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         
                         word_counts[idx] = {
                             'word_count': word_count,
+                            'small_file_word_count': small_file_word_count,
                             'has_headers': has_headers,
                             'custom_tags_count': custom_tags_count,
                             'custom_tag_names': custom_tag_names,
@@ -6485,7 +6584,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         
         # Direct filename match (case-insensitive)
         if search_name.lower() == epub_filename.lower():
-            original_wc = count_info['word_count']
+            original_wc = _source_word_count_value(count_info)
+            original_small_wc = _source_small_file_word_count(count_info, original_wc)
             is_cjk = count_info.get('is_cjk', True)
             
             # REQUEST MERGING: If this chapter has merged children, combine word counts
@@ -6500,11 +6600,15 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                     if child_spine_key in filename_to_spine_idx:
                         child_spine_idx = filename_to_spine_idx[child_spine_key]
                         if child_spine_idx in original_counts:
-                            original_wc += original_counts[child_spine_idx]['word_count']
+                            child_info = original_counts[child_spine_idx]
+                            original_wc += _source_word_count_value(child_info)
+                            original_small_wc += _source_small_file_word_count(child_info)
                             children_found += 1
                     # Also try direct spine index lookup as fallback
                     elif child_num in original_counts:
-                        original_wc += original_counts[child_num]['word_count']
+                        child_info = original_counts[child_num]
+                        original_wc += _source_word_count_value(child_info)
+                        original_small_wc += _source_small_file_word_count(child_info)
                         children_found += 1
                 if children_found > 0:
                     log(f"   🔗 Merged chapter {file_chapter_num}: combining word counts from {children_found} child chapters")
@@ -6512,6 +6616,15 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             
             # Count words in translated text
             translated_wc = _count_words_cached(translated_text)
+
+            small_file_threshold = _get_small_file_word_threshold(qa_settings)
+            if small_file_threshold and original_small_wc < small_file_threshold:
+                return _small_file_word_count_result(
+                    original_wc,
+                    translated_wc,
+                    count_info['filename'],
+                    small_file_threshold
+                )
             
             # If both sides are effectively empty, treat as reasonable and skip mismatch
             if original_wc < 5 and translated_wc < 2:
@@ -6723,8 +6836,10 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 break
     
     if chapter_num is not None and chapter_num in original_counts:
-        original_wc = original_counts[chapter_num]['word_count']
-        is_cjk = original_counts[chapter_num].get('is_cjk', True)  # Get CJK flag if available
+        count_info = original_counts[chapter_num]
+        original_wc = _source_word_count_value(count_info)
+        original_small_wc = _source_small_file_word_count(count_info, original_wc)
+        is_cjk = count_info.get('is_cjk', True)  # Get CJK flag if available
         
         # REQUEST MERGING: If this chapter has merged children, combine word counts
         # Need to map child chapter numbers to spine indices
@@ -6736,13 +6851,26 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
                 if child_spine_key in filename_to_spine_idx:
                     child_spine_idx = filename_to_spine_idx[child_spine_key]
                     if child_spine_idx in original_counts:
-                        original_wc += original_counts[child_spine_idx]['word_count']
+                        child_info = original_counts[child_spine_idx]
+                        original_wc += _source_word_count_value(child_info)
+                        original_small_wc += _source_small_file_word_count(child_info)
                 # Fallback: try direct spine index
                 elif child_num in original_counts:
-                    original_wc += original_counts[child_num]['word_count']
+                    child_info = original_counts[child_num]
+                    original_wc += _source_word_count_value(child_info)
+                    original_small_wc += _source_small_file_word_count(child_info)
         
         # Count words in translated text
-        translated_wc = len(translated_text.split())
+        translated_wc = _count_words_cached(translated_text)
+        
+        small_file_threshold = _get_small_file_word_threshold(qa_settings)
+        if small_file_threshold and original_small_wc < small_file_threshold:
+            return _small_file_word_count_result(
+                original_wc,
+                translated_wc,
+                count_info['filename'],
+                small_file_threshold
+            )
         
         # Calculate ratio (translated words / original words)
         ratio = translated_wc / max(1, original_wc)
@@ -6833,7 +6961,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             'percentage': percentage,  # e.g., 150 = 150% of original
             'is_reasonable': is_reasonable,
             'is_typical': is_typical,
-            'original_file': original_counts[chapter_num]['filename']
+            'original_file': count_info['filename']
         }
         
         # Add descriptive warnings for extreme but acceptable ratios
@@ -6877,7 +7005,6 @@ def process_html_file_batch(args):
     import hashlib
     
     is_quick_scan = (mode == 'quick-scan')
-    disable_dup = (mode == 'custom' and custom_sample_size == 0)
 
     # Custom mode: allow sample_size to limit duplicate comparison work
     # Sentinel: -1 = use all characters
@@ -6889,6 +7016,8 @@ def process_html_file_batch(args):
                 custom_sample_size = int(cms.get('sample_size'))
     except Exception:
         custom_sample_size = None
+    disable_dup = (mode == 'custom' and custom_sample_size == 0)
+    small_file_word_threshold = _get_small_file_word_threshold(qa_settings)
     
     for idx, filename in file_batch:
         full_path = os.path.join(folder_path, filename)
@@ -6924,8 +7053,11 @@ def process_html_file_batch(args):
         except Exception:
             dup_text = raw_text
 
-        # Quick per-file word-count hint for downstream checks
-        translated_wc_hint = _count_words_cached(raw_text) if isinstance(raw_text, str) else 0
+        # Quick per-file word-count hint for downstream small-file checks.
+        translated_wc_hint = _count_small_file_words(raw_text) if isinstance(raw_text, str) else 0
+        skip_small_file_checks = bool(
+            small_file_word_threshold and translated_wc_hint < small_file_word_threshold
+        )
         
         # Check minimum file length
         min_length = qa_settings.get('min_file_length', 0)
@@ -7470,7 +7602,8 @@ def process_html_file_batch(args):
                 if clean_filename in original_word_counts:
                     # Found matching chunk!
                     translated_wc = _count_words_cached(raw_text)
-                    original_wc = original_word_counts[clean_filename]
+                    original_wc = _source_word_count_value(original_word_counts[clean_filename])
+                    original_small_wc = _source_small_file_word_count(original_word_counts[clean_filename], original_wc)
                 else:
                     # Try matching with different extension (e.g., chunk_1.html vs chunk_1.txt)
                     base_name = os.path.splitext(clean_filename)[0]
@@ -7482,16 +7615,25 @@ def process_html_file_batch(args):
                     
                     if matched_key:
                         translated_wc = _count_words_cached(raw_text)
-                        original_wc = original_word_counts[matched_key]
+                        original_wc = _source_word_count_value(original_word_counts[matched_key])
+                        original_small_wc = _source_small_file_word_count(original_word_counts[matched_key], original_wc)
                         clean_filename = matched_key  # Update for display
                     else:
                         # No match found, skip this file
                         translated_wc = None
                         original_wc = None
+                        original_small_wc = None
                 
                 if original_wc is not None:
+                        if small_file_word_threshold and original_small_wc is not None and original_small_wc < small_file_word_threshold:
+                            word_count_check = _small_file_word_count_result(
+                                original_wc,
+                                translated_wc,
+                                clean_filename,
+                                small_file_word_threshold
+                            )
                         # If both sides are basically empty, skip mismatch
-                        if original_wc < 5 and translated_wc < 2:
+                        elif original_wc < 5 and translated_wc < 2:
                             word_count_check = {
                                 'found_match': True,
                                 'chapter_num': clean_filename,
@@ -7626,7 +7768,10 @@ def process_html_file_batch(args):
             "hashes": hashes,
             "raw_text": raw_text,
             "dup_text": dup_text,
-            "translation_artifacts": artifacts
+            "translation_artifacts": artifacts,
+            "small_file_word_count": translated_wc_hint,
+            "small_file_word_threshold": small_file_word_threshold,
+            "skip_small_file_checks": skip_small_file_checks
         }
         
         # Add optional fields
@@ -7758,6 +7903,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_glossary_leakage': True,
             'check_missing_images': True,
             'min_file_length': 0,
+            'min_duplicate_word_count': 500,
             'report_format': 'detailed',
             'auto_save_report': True,
             'check_missing_html_tag': True,
@@ -7953,12 +8099,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 chunk_path = os.path.join(word_count_folder, chunk_file)
                                 with open(chunk_path, 'r', encoding='utf-8') as f:
                                     chunk_text = f.read()
-                                chunk_word_count = len(chunk_text.split())
+                                if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
+                                    soup = BeautifulSoup(chunk_text, 'html.parser')
+                                    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                                        tag.decompose()
+                                    chunk_text = soup.get_text(separator=' ', strip=True)
+                                chunk_word_count = _count_small_file_words(chunk_text)
                                 # Store with filename as key
                                 original_word_counts[chunk_file] = chunk_word_count
                             
                             log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
-                            log(f"   Total source words: {sum(original_word_counts.values()):,}")
+                            log(f"   Total source words: {_sum_source_word_counts(original_word_counts):,}")
                         else:
                             log(f"   ⚠️ word_count folder exists but contains no .txt or .html files")
                             check_word_count = False
@@ -8150,6 +8301,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if mode == 'custom' and qa_settings and 'custom_mode_settings' in qa_settings:
         custom_settings = qa_settings['custom_mode_settings']
     config = DuplicateDetectionConfig(mode, custom_settings)
+    small_file_word_threshold = _get_small_file_word_threshold(qa_settings, config, mode)
+    if mode in config.thresholds:
+        config.thresholds[mode]['min_duplicate_word_count'] = small_file_word_threshold
 
     # Custom mode: sample_size sentinel values
     #   0  => disable duplicate detection
@@ -8191,6 +8345,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     log(f"{mode_messages.get(mode, '📋 Standard')} duplicate detection mode")
     log(f"   Thresholds: {config.thresholds[mode]}")
+    log(f"   ✓ Small-file skip threshold: <{small_file_word_threshold} words")
     
     if mode == 'ai-hunter':
         log("   ⚠️ WARNING: This mode will flag almost everything as potential duplicates!")
@@ -8465,7 +8620,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 if '_total' in original_word_counts:
                     original_wc = original_word_counts['_total']
                 else:
-                    original_wc = sum(original_word_counts.values())
+                    original_wc = _sum_source_word_counts(original_word_counts)
                 
                 if original_wc > 0:
                     ratio = translated_word_count / original_wc
@@ -8535,9 +8690,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         raw_text = result['raw_text']
         
         # Non-English content
-        has_non_english, lang_issues = detect_non_english_content(raw_text, qa_settings)
-        if has_non_english:
-            issues.extend(lang_issues)
+        if not result.get('skip_small_file_checks'):
+            has_non_english, lang_issues = detect_non_english_content(raw_text, qa_settings)
+            if has_non_english:
+                issues.extend(lang_issues)
         
         # Spacing/formatting issues
         if qa_settings.get('check_encoding_issues', True):

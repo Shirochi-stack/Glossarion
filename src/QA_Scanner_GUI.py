@@ -1292,6 +1292,7 @@ class QAScannerMixin:
                 custom_settings['check_all_pairs'] = saved_custom_settings.get('check_all_pairs', False)
                 custom_settings['sample_size'] = saved_custom_settings.get('sample_size', 3000)
                 custom_settings['min_text_length'] = saved_custom_settings.get('min_text_length', 500)
+                custom_settings['min_duplicate_word_count'] = saved_custom_settings.get('min_duplicate_word_count', 500)
 
                 self.append_log("📥 Loaded saved custom mode settings from config")
 
@@ -2872,7 +2873,7 @@ class QAScannerMixin:
             min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
             min_dup_words_layout.setContentsMargins(0, 10, 0, 10)
 
-            min_dup_words_label = QLabel("Skip small files as duplicates if <N words:")
+            min_dup_words_label = QLabel("Skip small files from duplicate and character country check if <N words:")
             min_dup_words_label.setFont(QFont('Arial', 10))
             min_dup_words_layout.addWidget(min_dup_words_label)
 
@@ -2885,7 +2886,7 @@ class QAScannerMixin:
             disable_wheel_event(min_dup_words_spinbox)
             min_dup_words_layout.addWidget(min_dup_words_spinbox)
 
-            min_dup_hint = QLabel("(prevents section/notice files from being flagged)")
+            min_dup_hint = QLabel("(also skips word-count mismatch for small source chunks)")
             min_dup_hint.setFont(QFont('Arial', 9))
             min_dup_hint.setStyleSheet("color: gray;")
             min_dup_words_layout.addWidget(min_dup_hint)
@@ -4737,6 +4738,7 @@ class QAScannerMixin:
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
+                            ('QA_MIN_DUPLICATE_WORD_COUNT', str(qa_settings.get('min_duplicate_word_count', 500))),
                             ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
                             ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
                             ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
@@ -5238,7 +5240,7 @@ def show_custom_detection_dialog(parent=None):
     min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
     min_dup_words_layout.setContentsMargins(0, 5, 0, 5)
 
-    min_dup_words_label = QLabel("Minimum words to flag as duplicate (skip small files like sections/notices):")
+    min_dup_words_label = QLabel("Skip small files from duplicate and character country check if <N words:")
     min_dup_words_label.setFont(QFont('Arial', 11))
     min_dup_words_layout.addWidget(min_dup_words_label)
 

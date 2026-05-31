@@ -3682,8 +3682,9 @@ Text to analyze:
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
             "Return only valid JSON using the same structure as the input.\n\n"
-            "The JSON requests identify leftover source-language text in HTML fragments. Translate that leftover text "
-            "into {target_lang} while preserving the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
+            "The JSON object contains all affected requests for this refinement run. Each request identifies leftover "
+            "source-language text in an HTML fragment. Translate that leftover text into {target_lang} while preserving "
+            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
             "and html field. Each html value is wrapped in a placeholder HTML tag; retain every placeholder opening/closing "
             "tag and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
             "Example html value to preserve exactly around the refined content: "
@@ -9161,7 +9162,7 @@ Recent translations to summarize:
             "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
             "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends affected HTML tag entries one request at a time.<br>"
             "<b>Partial.b</b>: batches all affected entries for each chapter into one placeholder-tagged HTML request.<br>"
-            "<b>Partial.b2</b>: batches all affected entries for each chapter into one JSON request with per-entry QA issue prompts and placeholder-tagged HTML."
+            "<b>Partial.b2</b>: batches all affected entries across the refinement run into one JSON request with per-entry QA issue prompts and placeholder-tagged HTML."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))

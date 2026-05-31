@@ -706,8 +706,9 @@ class TranslationConfig:
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
             "Return only valid JSON using the same structure as the input.\n\n"
-            "The JSON requests identify leftover source-language text in HTML fragments. Translate that leftover text "
-            "into {target_lang} while preserving the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
+            "The JSON object contains all affected requests for this refinement run. Each request identifies leftover "
+            "source-language text in an HTML fragment. Translate that leftover text into {target_lang} while preserving "
+            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
             "and html field. Each html value is wrapped in a placeholder HTML tag; retain every placeholder opening/closing "
             "tag and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
             "Example html value to preserve exactly around the refined content: "
@@ -14421,7 +14422,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         partial_requests.append((target_index, target, messages))
 
                     partial_request_count = len(partial_requests)
-                    if partial_refinement_mode in ("partial.b", "partial.b2"):
+                    if partial_refinement_mode == "partial.b":
                         batch_requests = []
                         for target_index, target, _messages in partial_requests:
                             fragment_html = _partial_refinement_target_fragment(target, partial_document)
@@ -14439,39 +14440,18 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 "request_id": _partial_refinement_request_id(target_index),
                             })
 
-                        if partial_refinement_mode == "partial.b2":
-                            batch_payload = json.dumps(
-                                {
-                                    "requests": [
-                                        {
-                                            "id": request["request_id"],
-                                            "qa_issue_prompt": request["qa_issue_prompt"],
-                                            "html": _wrap_partial_refinement_placeholder(
-                                                request["fragment_html"],
-                                                request["request_id"],
-                                            ),
-                                        }
-                                        for request in batch_requests
-                                    ]
-                                },
-                                ensure_ascii=False,
-                                indent=2,
+                        batch_payload = "\n".join(
+                            _wrap_partial_refinement_placeholder(
+                                request["fragment_html"],
+                                request["request_id"],
                             )
-                            batch_kind = "json"
-                        else:
-                            batch_payload = "\n".join(
-                                _wrap_partial_refinement_placeholder(
-                                    request["fragment_html"],
-                                    request["request_id"],
-                                )
-                                for request in batch_requests
-                            )
-                            batch_kind = "batch"
+                            for request in batch_requests
+                        )
 
                         messages = _build_refinement_messages(
                             batch_payload,
                             partial=True,
-                            partial_kind=batch_kind,
+                            partial_kind="batch",
                             qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                             partial_mode=partial_refinement_mode,
                         )
@@ -14496,13 +14476,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 f"Partial batch refinement returned no usable content for Chapter {actual_num} "
                                 f"(finish_reason={finish_reason})"
                             )
-                        if partial_refinement_mode == "partial.b2":
-                            refined_by_id = _partial_refinement_json_response_map(refined_batch, batch_requests)
-                        else:
-                            refined_by_id = _partial_refinement_placeholder_response_map(
-                                refined_batch,
-                                [request["request_id"] for request in batch_requests],
-                            )
+                        refined_by_id = _partial_refinement_placeholder_response_map(
+                            refined_batch,
+                            [request["request_id"] for request in batch_requests],
+                        )
                         for request in batch_requests:
                             if _force_stop_requested():
                                 return "skipped", f"â¹ï¸ Refinement stopped before applying Chapter {actual_num} partial batch"
@@ -14790,6 +14767,276 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if message:
             print(message)
 
+    def _process_partial_b2_all_chapters():
+        collected = []
+        all_requests = []
+
+        def _collect_chapter(idx, chapter):
+            if _force_stop_requested():
+                return "skipped", f"Post-processing stopped before item {idx + 1}"
+
+            actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
+            if actual_num is None:
+                actual_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=config) or idx + 1
+
+            with progress_lock:
+                output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
+            if not output_path:
+                return "skipped", f"Chapter {actual_num}: translated output not found ({output_file})"
+
+            normalized_output_path = os.path.normcase(os.path.abspath(output_path))
+            with progress_lock:
+                if normalized_output_path in refined_output_paths:
+                    return "skipped", None, {
+                        "kind": "already_refined",
+                        "chapter": actual_num,
+                        "reason": "already refined in this pass",
+                    }
+                refined_output_paths.add(normalized_output_path)
+
+            with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+                html_content = f.read()
+            content_hash = ContentProcessor.get_content_hash(html_content)
+
+            with progress_lock:
+                _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
+                pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+            pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
+            pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
+
+            if pre_existing_qa_source_entry is not None and not pre_existing_has_foreign_qa_issue:
+                return "excluded", None, {
+                    "kind": "not_targeted",
+                    "chapter": actual_num,
+                    "reason": "non foreign-character QA issue",
+                }
+
+            skip_reason = _refinement_skip_reason_for_qa(
+                pre_existing_entry,
+                html_content,
+                failed_mode=multipass_failed_mode,
+            )
+            if skip_reason:
+                if multipass_failed_mode and skip_reason == "completed":
+                    return "excluded", None, {
+                        "kind": "not_targeted",
+                        "chapter": actual_num,
+                        "reason": "completed",
+                    }
+                return "skipped", None, {
+                    "kind": "refinement_skip",
+                    "chapter": actual_num,
+                    "reason": skip_reason,
+                }
+
+            if not pre_existing_has_foreign_qa_issue:
+                return "excluded", None, {
+                    "kind": "not_targeted",
+                    "chapter": actual_num,
+                    "reason": "no foreign-character QA issue",
+                }
+
+            qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
+            if not isinstance(qa_settings, dict):
+                qa_settings = _load_qa_scanner_settings_from_env()
+            partial_document, partial_targets = _collect_partial_refinement_tag_groups(
+                html_content,
+                qa_settings,
+            )
+            if not partial_targets:
+                return "skipped", None, {
+                    "kind": "refinement_skip",
+                    "chapter": actual_num,
+                    "reason": "no foreign-character valid tag or line found",
+                }
+
+            item_requests = []
+            for target_index, target in enumerate(partial_targets, start=1):
+                fragment_html = _partial_refinement_target_fragment(target, partial_document)
+                fragment_qa_entry = _partial_refinement_qa_entry_for_fragment(
+                    pre_existing_qa_source_entry or pre_existing_entry,
+                    fragment_html,
+                    qa_settings,
+                )
+                request_id = f"chapter-{idx + 1:04d}-partial-{target_index:04d}"
+                item_requests.append({
+                    "request_id": request_id,
+                    "chapter": actual_num,
+                    "output_file": output_file,
+                    "target": target,
+                    "fragment_html": fragment_html,
+                    "qa_issue_prompt": _partial_refinement_qa_prompt_text(fragment_qa_entry),
+                })
+
+            return "collected", {
+                "idx": idx,
+                "chapter": chapter,
+                "actual_num": actual_num,
+                "output_file": output_file,
+                "output_path": output_path,
+                "content_hash": content_hash,
+                "partial_document": partial_document,
+                "partial_targets": partial_targets,
+                "requests": item_requests,
+                "pre_existing_entry": pre_existing_entry,
+                "pre_existing_qa_source_entry": pre_existing_qa_source_entry,
+            }
+
+        for idx, chapter in enumerate(chapters):
+            if _force_stop_requested():
+                print("Force stop requested; stopping Partial.b2 collection.")
+                break
+            result = _collect_chapter(idx, chapter)
+            if result[0] == "collected":
+                item = result[1]
+                collected.append(item)
+                all_requests.extend(item["requests"])
+            else:
+                _record_result(result)
+
+        if not all_requests:
+            return
+
+        payload = json.dumps(
+            {
+                "requests": [
+                    {
+                        "id": request["request_id"],
+                        "chapter": str(request["chapter"]),
+                        "output_file": request["output_file"],
+                        "qa_issue_prompt": request["qa_issue_prompt"],
+                        "html": _wrap_partial_refinement_placeholder(
+                            request["fragment_html"],
+                            request["request_id"],
+                        ),
+                    }
+                    for request in all_requests
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        def _mark_partial_b2_progress_on_send():
+            with progress_lock:
+                for item in collected:
+                    progress_manager.update(
+                        item["idx"],
+                        item["actual_num"],
+                        item["content_hash"],
+                        item["output_file"],
+                        status="in_progress",
+                        chapter_obj=item["chapter"],
+                    )
+                    progress_manager.update_refinement_status(
+                        item["idx"],
+                        item["actual_num"],
+                        item["content_hash"],
+                        item["output_file"],
+                        "in_progress",
+                        chapter_obj=item["chapter"],
+                    )
+                progress_manager.save()
+
+        try:
+            messages = _build_refinement_messages(
+                payload,
+                partial=True,
+                partial_kind="json",
+                qa_entry=None,
+                partial_mode="partial.b2",
+            )
+            refined_batch, finish_reason, _raw_obj = send_with_interrupt(
+                messages,
+                client,
+                config.TEMP,
+                config.MAX_OUTPUT_TOKENS,
+                check_stop,
+                chunk_timeout=None,
+                context="refinement",
+                chapter_context={"chapter": "all", "chunk": 1, "total_chunks": 1},
+                bypass_graceful_stop=True,
+                before_send_callback=_mark_partial_b2_progress_on_send,
+            )
+            if (
+                not refined_batch
+                or not str(refined_batch).strip()
+                or finish_reason in ("content_filter", "prohibited_content", "error")
+            ):
+                raise RuntimeError(f"Partial.b2 refinement returned no usable JSON (finish_reason={finish_reason})")
+
+            refined_by_id = _partial_refinement_json_response_map(refined_batch, all_requests)
+            for item in collected:
+                if _force_stop_requested():
+                    _record_result(("skipped", f"Refinement stopped before applying Partial.b2 Chapter {item['actual_num']}"))
+                    continue
+                for request in item["requests"]:
+                    _apply_partial_refinement_response(
+                        item["partial_document"],
+                        request["target"],
+                        refined_by_id[request["request_id"]],
+                    )
+                refined = _render_partial_refinement_document(item["partial_document"])
+                backup_path = _backup_unrefined_file(item["output_path"], backup_dir)
+                with open(item["output_path"], "w", encoding="utf-8") as f:
+                    f.write(refined)
+                new_hash = ContentProcessor.get_content_hash(refined)
+                with progress_lock:
+                    progress_manager.update(
+                        item["idx"],
+                        item["actual_num"],
+                        new_hash,
+                        item["output_file"],
+                        status="completed",
+                        chapter_obj=item["chapter"],
+                    )
+                    progress_manager.update_refinement_status(
+                        item["idx"],
+                        item["actual_num"],
+                        new_hash,
+                        item["output_file"],
+                        "refined",
+                        chapter_obj=item["chapter"],
+                    )
+                    progress_manager.prog["chapters"][
+                        progress_manager._get_chapter_key(
+                            item["actual_num"],
+                            item["output_file"],
+                            item["chapter"],
+                            new_hash,
+                        )
+                    ]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    progress_manager.save()
+                _record_result((
+                    "processed",
+                    f"Partial.b2 refined Chapter {item['actual_num']}: {item['output_file']} "
+                    f"(1 shared JSON request, {len(item['requests'])} target(s))",
+                ))
+        except Exception as exc:
+            for item in collected:
+                preserved_qa_issues = (item["pre_existing_qa_source_entry"] or item["pre_existing_entry"]).get("qa_issues_found", [])
+                with progress_lock:
+                    progress_manager.update(
+                        item["idx"],
+                        item["actual_num"],
+                        item["content_hash"],
+                        item["output_file"],
+                        status="qa_failed",
+                        chapter_obj=item["chapter"],
+                        qa_issues_found=preserved_qa_issues if isinstance(preserved_qa_issues, list) else [preserved_qa_issues],
+                    )
+                    progress_manager.update_refinement_status(
+                        item["idx"],
+                        item["actual_num"],
+                        item["content_hash"],
+                        item["output_file"],
+                        "failed",
+                        chapter_obj=item["chapter"],
+                        error=exc,
+                    )
+                    progress_manager.save()
+                _record_result(("failed", f"Partial.b2 refinement failed for Chapter {item['actual_num']}: {exc}"))
+
     previous_batch_env = os.environ.get("BATCH_TRANSLATION")
     previous_batch_size_env = os.environ.get("BATCH_SIZE")
     refinement_pool_state = None
@@ -14802,7 +15049,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             except Exception as exc:
                 print(f"⚠️ Failed to activate refinement key pool for batch: {exc}")
     try:
-        if use_batch and len(chapters) > 1:
+        if mode == "refinement" and multipass_partial_mode and partial_refinement_mode == "partial.b2":
+            _process_partial_b2_all_chapters()
+        elif use_batch and len(chapters) > 1:
             executor = ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker")
             futures = {
                 executor.submit(_process_one, idx, chapter): (idx, chapter)
