@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Glossarion</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/halgakos-48.png" alt="" width="48" height="48">
+        <div>
+          <h1>Glossarion</h1>
+          <p>Page translator</p>
+        </div>
+      </header>
+
+      <label>
+        Model
+        <input id="model" list="models" spellcheck="false" autocomplete="off">
+        <datalist id="models"></datalist>
+      </label>
+
+      <label>
+        API key
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false">
+      </label>
+
+      <div id="authgptControls" class="authgpt hidden">
+        <div>
+          <strong>ChatGPT subscription</strong>
+          <span id="authgptStatus">Not logged in</span>
+        </div>
+        <div class="auth-actions">
+          <button id="authgptLogin" type="button">Login</button>
+          <button id="authgptLogout" type="button" class="secondary">Logout</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <label>
+          From
+          <input id="sourceLanguage" autocomplete="off">
+        </label>
+        <label>
+          To
+          <input id="targetLanguage" autocomplete="off">
+        </label>
+      </div>
+
+      <div class="grid">
+        <label>
+          Batch
+          <input id="batchSize" type="number" min="1" max="80">
+        </label>
+        <label>
+          Output tokens
+          <input id="maxTokens" type="number" min="256" max="200000" step="256">
+        </label>
+      </div>
+
+      <label class="toggle">
+        <input id="thinkingEnabled" type="checkbox">
+        <span>Enable thinking</span>
+      </label>
+
+      <div id="thinkingControls" class="grid hidden">
+        <label>
+          Effort
+          <select id="thinkingEffort">
+            <option value="none">none</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </label>
+      </div>
+
+      <details>
+        <summary>OpenAI-compatible routing</summary>
+        <label class="toggle">
+          <input id="useCustomOpenAIEndpoint" type="checkbox">
+          <span>Use custom base URL</span>
+        </label>
+        <label>
+          Custom base URL
+          <input id="customOpenAIBaseUrl" spellcheck="false" placeholder="https://example.com/v1">
+        </label>
+        <label>
+          Custom prefix routes
+          <textarea id="customPrefixRoutes" spellcheck="false" rows="5" placeholder='[{"prefix":"my/","routing":"https://example.com/v1","endpoint_type":"/chat/completions"}]'></textarea>
+        </label>
+      </details>
+
+      <div class="actions">
+        <button id="save">Save</button>
+        <button id="translate" class="primary">Translate page</button>
+      </div>
+      <button id="restore" class="secondary">Restore original page</button>
+      <p id="status" role="status"></p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

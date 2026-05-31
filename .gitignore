@@ -23,6 +23,8 @@ requirements-dev.txt
 tools/**
 !tools/msix/
 !tools/msix/**
+!extension/
+!extension/**
 
 # Only include src, but exclude all subfolders; allow only top-level .py and .spec files
 !src/
