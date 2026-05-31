@@ -3066,15 +3066,18 @@ class RetranslationMixin:
                 _cached = getattr(dialog, '_glossary_progress_dialog', None)
                 if _cached is not None:
                     try:
-                        # Refresh all panels before showing
-                        for rfn in getattr(dialog, '_gp_refresh_funcs', []):
-                            try:
-                                rfn()
-                            except Exception:
-                                pass
                         _cached.show()
                         _cached.raise_()
                         _cached.activateWindow()
+
+                        def _refresh_cached_gp_panels():
+                            for rfn in getattr(dialog, '_gp_refresh_funcs', []):
+                                try:
+                                    rfn()
+                                except Exception:
+                                    pass
+
+                        QTimer.singleShot(0, _refresh_cached_gp_panels)
                         return
                     except RuntimeError:
                         # Widget was deleted
@@ -3674,142 +3677,7 @@ class RetranslationMixin:
         lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated', 'not_refined', 'no_tts'))
         lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
         
-        # Populate listbox with dynamic column widths
-        status_icons = {
-            'completed': '✅',
-            'merged': '🔗',
-            'failed': '❌',
-            'qa_failed': '❌',
-            'in_progress': '🔄',
-            'pending': '❓',
-            'not_translated': '⬜',
-            'not_refined': '✨',
-            'no_tts': '🔊',
-            'unknown': '❓'
-        }
-        
-        status_labels = {
-            'completed': 'Completed',
-            'merged': 'Merged',
-            'failed': 'Failed',
-            'qa_failed': 'QA Failed',
-            'in_progress': 'In Progress',
-            'pending': 'Pending',
-            'not_translated': 'Not Translated',
-            'not_refined': 'Not Refined',
-            'no_tts': 'No TTS',
-            'unknown': 'Unknown'
-        }
-        
-        # Calculate maximum widths for dynamic column sizing
-        max_original_len = 0
-        max_output_len = 0
-        _display_data = {'prog': prog, 'show_model_info_state': show_model_info[0]}
-        
-        for info in chapter_display_info:
-            if 'opf_position' in info:
-                original_file = info.get('original_filename', '')
-                output_file = self._progress_model_column_text(info, _display_data, info['output_file'])
-                max_original_len = max(max_original_len, len(original_file))
-                max_output_len = max(max_output_len, len(output_file))
-        
-        # Set minimum widths to prevent too narrow columns
-        max_original_len = max(max_original_len, 20)
-        max_output_len = max(max_output_len, 25)
-        
-        for info in chapter_display_info:
-            chapter_num = info['num']
-            status = self._progress_display_status(info, {'prog': prog})
-            output_file = info['output_file']
-            output_display = self._progress_model_column_text(info, _display_data, output_file)
-            icon = status_icons.get(status, '❓')
-            status_label = status_labels.get(status, status)
-            if status == 'completed' and self._progress_entry_is_refined(info):
-                status_label = f"{status_label} ⭐"
-            chapter_info = info.get('info') or info.get('progress_entry') or {}
-            ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
-            if status == 'in_progress' and isinstance(ocr_progress, dict):
-                try:
-                    ocr_done = int(ocr_progress.get('done', 0))
-                    ocr_total = int(ocr_progress.get('total', 0))
-                except (TypeError, ValueError):
-                    ocr_done = 0
-                    ocr_total = 0
-                if ocr_total > 0:
-                    status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
-            
-            # Format display with OPF info if available
-            if 'opf_position' in info:
-                # OPF-based display with dynamic widths
-                original_file = info.get('original_filename', '')
-                opf_pos = info['opf_position'] + 1  # 1-based for display
-                
-                # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
-                if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-                else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-            else:
-                # Original format
-                if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
-                elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
-                else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
-            
-            # Add QA issues if status is qa_failed
-            if status == 'qa_failed':
-                chapter_info = info.get('info', {})
-                qa_issues = chapter_info.get('qa_issues_found', [])
-                if qa_issues:
-                    # Format issues for display (show first 2)
-                    issues_display = ', '.join(qa_issues[:2])
-                    if len(qa_issues) > 2:
-                        issues_display += f' (+{len(qa_issues)-2} more)'
-                    display += f" | {issues_display}"
-            
-            # Add parent chapter info if status is merged
-            if status == 'merged':
-                chapter_info = info.get('info', {})
-                parent_chapter = chapter_info.get('merged_parent_chapter')
-                if parent_chapter:
-                    display += f" | → Ch.{parent_chapter}"
-            
-            if info.get('duplicate_count', 1) > 1:
-                display += f" | ({info['duplicate_count']} entries)"
-            
-            item = QListWidgetItem(display)
-            
-            # Color code based on status
-            if status == 'completed':
-                item.setForeground(QColor('green'))
-            elif status == 'merged':
-                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
-            elif status in ['failed', 'qa_failed']:
-                item.setForeground(QColor('red'))
-            elif status == 'not_translated':
-                item.setForeground(QColor('#2b6cb0'))
-            elif status in ['not_refined', 'no_tts']:
-                item.setForeground(QColor('#8a63d2'))
-            elif status == 'in_progress':
-                item.setForeground(QColor('orange'))
-            elif status == 'pending':
-                item.setForeground(QColor('white'))  # White for pending
-            
-            # Store metadata in item for filtering
-            is_special = info.get('is_special', False)
-            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
-            item.setData(Qt.UserRole + 2, status)
-            
-            # Add item to listbox first
-            self._add_compact_inline_list_item(listbox, item)
-            
-            # Then hide skipped special files if toggle is off (must be done after adding to listbox)
-            _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-            is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
-            if is_skipped_special and not show_special_files[0]:
-                item.setHidden(True)
+        # Large progress lists are populated after result setup so the dialog can paint first.
         
         # Selection count label
         selection_count_label = QLabel("Selected: 0")
@@ -3842,6 +3710,7 @@ class RetranslationMixin:
             'show_model_info_cb': show_model_info_cb
         }
         show_model_info_cb._progress_data_ref = result
+        self._populate_progress_listbox_streamed(result)
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
@@ -3894,16 +3763,22 @@ class RetranslationMixin:
         
         def select_status(status_to_select):
             data['listbox'].clearSelection()
-            for idx, info in enumerate(data['chapter_display_info']):
+            for idx in range(data['listbox'].count()):
+                item = data['listbox'].item(idx)
+                if not item or item.isHidden():
+                    continue
+                display_status = item.data(Qt.UserRole + 2)
+                if not display_status:
+                    payload = item.data(Qt.UserRole) or {}
+                    display_status = self._progress_display_status(payload.get('info', {}), data)
                 if status_to_select == 'failed':
-                    if info['status'] in ['failed', 'qa_failed']:
-                        data['listbox'].item(idx).setSelected(True)
+                    matched = display_status in ['failed', 'qa_failed']
                 elif status_to_select == 'qa_failed':
-                    if info['status'] == 'qa_failed':
-                        data['listbox'].item(idx).setSelected(True)
+                    matched = display_status == 'qa_failed'
                 else:
-                    if info['status'] == status_to_select:
-                        data['listbox'].item(idx).setSelected(True)
+                    matched = display_status == status_to_select
+                if matched:
+                    item.setSelected(True)
             count = len(data['listbox'].selectedItems())
             data['selection_count_label'].setText(f"Selected: {count}")
 
@@ -6433,189 +6308,308 @@ class RetranslationMixin:
         if isinstance(data, dict) and data.get('show_model_info_state'):
             return self._progress_entry_model_name(info, data)
         return fallback_output
-    
-    def _update_listbox_display(self, data):
-        """Update the listbox display with current chapter information"""
-        # Add a check to ensure widgets are still valid before proceeding
-        if not self._is_data_valid(data):
-            print("⚠️ Cannot update listbox display - widgets have been deleted")
-            return
-            
-        listbox = data['listbox']
-        
-        # Clear existing items
-        listbox.clear()
-        
-        # Status icons and labels
+
+    def _progress_list_column_widths(self, chapter_display_info, data):
+        max_original_len = 0
+        max_output_len = 0
+        for info in chapter_display_info or []:
+            if 'opf_position' not in info:
+                continue
+            original_file = info.get('original_filename', '')
+            output_file = self._progress_model_column_text(info, data, info.get('output_file', ''))
+            max_original_len = max(max_original_len, len(original_file))
+            max_output_len = max(max_output_len, len(output_file))
+        return max(max_original_len, 20), max(max_output_len, 25)
+
+    def _progress_list_show_special(self, data):
+        show_special_files = data.get('show_special_files_state', False) if isinstance(data, dict) else False
+        cb = data.get('show_special_files_cb') if isinstance(data, dict) else None
+        if cb:
+            try:
+                show_special_files = cb.isChecked()
+            except RuntimeError:
+                pass
+        if isinstance(data, dict):
+            data['show_special_files_state'] = show_special_files
+        return show_special_files
+
+    def _progress_list_sync_model_toggle(self, data):
+        cb = data.get('show_model_info_cb') if isinstance(data, dict) else None
+        if cb:
+            try:
+                data['show_model_info_state'] = cb.isChecked()
+            except RuntimeError:
+                pass
+
+    def _progress_list_item_key(self, info):
+        if not isinstance(info, dict):
+            return None
+        progress_key = info.get('progress_key')
+        if progress_key:
+            return f"progress:{progress_key}"
+        output_file = info.get('output_file')
+        if output_file:
+            return f"output:{output_file}"
+        return f"row:{info.get('num')}:{info.get('original_filename', '')}:{info.get('key', '')}"
+
+    def _progress_list_display_text(self, info, data, max_original_len, max_output_len):
         status_icons = {
             'completed': '✅',
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
             'in_progress': '🔄',
+            'pending': '❓',
             'not_translated': '⬜',
             'not_refined': '✨',
             'no_tts': '🔊',
             'unknown': '❓'
         }
-        
         status_labels = {
             'completed': 'Completed',
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'in_progress': 'In Progress',
+            'pending': 'Pending',
             'not_translated': 'Not Translated',
             'not_refined': 'Not Refined',
             'no_tts': 'No TTS',
             'unknown': 'Unknown'
         }
-        
-        # Calculate maximum widths for dynamic column sizing
-        max_original_len = 0
-        max_output_len = 0
-        
-        for info in data['chapter_display_info']:
-            if 'opf_position' in info:
-                original_file = info.get('original_filename', '')
-                output_file = info['output_file']
-                max_original_len = max(max_original_len, len(original_file))
-                max_output_len = max(max_output_len, len(output_file))
-        
-        # Set minimum widths to prevent too narrow columns
-        max_original_len = max(max_original_len, 20)
-        max_output_len = max(max_output_len, 25)
-        
-        # Rebuild listbox items with updates/signals disabled to avoid flicker
+
+        chapter_num = info['num']
+        status = self._progress_display_status(info, data)
+        output_file = info['output_file']
+        output_display = self._progress_model_column_text(info, data, output_file)
+        icon = status_icons.get(status, '❓')
+        status_label = status_labels.get(status, status)
+        if status == 'completed' and self._progress_entry_is_refined(info):
+            status_label = f"{status_label} ⭐"
+        chapter_info = info.get('info') or info.get('progress_entry') or {}
+        ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
+        if status == 'in_progress' and isinstance(ocr_progress, dict):
+            try:
+                ocr_done = int(ocr_progress.get('done', 0))
+                ocr_total = int(ocr_progress.get('total', 0))
+            except (TypeError, ValueError):
+                ocr_done = 0
+                ocr_total = 0
+            if ocr_total > 0:
+                status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
+
+        if info.get('pdf_ocr'):
+            display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
+        elif 'opf_position' in info:
+            original_file = info.get('original_filename', '')
+            opf_pos = info['opf_position'] + 1
+            if isinstance(chapter_num, float):
+                if chapter_num.is_integer():
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+                else:
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+            else:
+                display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+        else:
+            if isinstance(chapter_num, float) and chapter_num.is_integer():
+                display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
+            elif isinstance(chapter_num, float):
+                display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
+            else:
+                display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
+
+        if status == 'qa_failed':
+            qa_issues = chapter_info.get('qa_issues_found', []) if isinstance(chapter_info, dict) else []
+            if qa_issues:
+                issues_display = ', '.join(qa_issues[:2])
+                if len(qa_issues) > 2:
+                    issues_display += f' (+{len(qa_issues)-2} more)'
+                display += f" | {issues_display}"
+
+        if status == 'merged':
+            parent_chapter = chapter_info.get('merged_parent_chapter') if isinstance(chapter_info, dict) else None
+            if parent_chapter:
+                display += f" | → Ch.{parent_chapter}"
+
+        if info.get('duplicate_count', 1) > 1:
+            display += f" | ({info['duplicate_count']} entries)"
+
+        return display, status
+
+    def _apply_progress_list_item_visuals(self, item, status):
+        if status == 'completed':
+            item.setForeground(QColor('green'))
+        elif status == 'merged':
+            item.setForeground(QColor('#17a2b8'))
+        elif status in ['failed', 'qa_failed']:
+            item.setForeground(QColor('red'))
+        elif status == 'not_translated':
+            item.setForeground(QColor('#2b6cb0'))
+        elif status in ['not_refined', 'no_tts']:
+            item.setForeground(QColor('#8a63d2'))
+        elif status == 'in_progress':
+            item.setForeground(QColor('orange'))
+        else:
+            item.setForeground(QColor('white'))
+
+    def _set_progress_list_item_metadata(self, item, info, status, show_special_files):
+        is_special = info.get('is_special', False)
+        _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
+        is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
+        item.setData(Qt.UserRole, {
+            'is_special': is_special,
+            'info': info,
+            'progress_key': info.get('progress_key'),
+            'item_key': self._progress_list_item_key(info),
+        })
+        item.setData(Qt.UserRole + 2, status)
+        item.setHidden(is_skipped_special and not show_special_files)
+
+    def _populate_progress_listbox_streamed(self, data, chunk_size=150, preserve_selection=False, preserve_scroll=False):
+        """Populate large progress lists over multiple event-loop turns."""
+        if not self._is_data_valid(data):
+            return
+
+        listbox = data.get('listbox')
+        if not listbox:
+            return
+
+        self._progress_list_sync_model_toggle(data)
+        show_special_files = self._progress_list_show_special(data)
+        infos = list(data.get('chapter_display_info') or [])
+        max_original_len, max_output_len = self._progress_list_column_widths(infos, data)
+
+        selected_keys = set()
+        if preserve_selection:
+            try:
+                for item in listbox.selectedItems():
+                    payload = item.data(Qt.UserRole) or {}
+                    key = payload.get('item_key') or self._progress_list_item_key(payload.get('info') or {})
+                    if key:
+                        selected_keys.add(key)
+            except RuntimeError:
+                selected_keys = set()
+
+        saved_scroll = None
+        if preserve_scroll:
+            try:
+                saved_scroll = listbox.verticalScrollBar().value()
+            except RuntimeError:
+                saved_scroll = None
+
+        generation = int(data.get('_listbox_populate_generation', 0)) + 1
+        data['_listbox_populate_generation'] = generation
+        data['_listbox_populate_active'] = True
+
+        try:
+            listbox.blockSignals(True)
+            listbox.setUpdatesEnabled(False)
+            listbox.clear()
+        except RuntimeError:
+            data['_listbox_populate_active'] = False
+            return
+
+        state = {'idx': 0}
+
+        def _finish():
+            if generation != data.get('_listbox_populate_generation'):
+                return
+            data['_listbox_populate_active'] = False
+            try:
+                if saved_scroll is not None:
+                    sb = listbox.verticalScrollBar()
+                    sb.setValue(min(saved_scroll, sb.maximum()))
+                listbox.blockSignals(False)
+                listbox.setUpdatesEnabled(True)
+                label = data.get('selection_count_label')
+                if label:
+                    label.setText(f"Selected: {len(listbox.selectedItems())}")
+                listbox.viewport().update()
+            except RuntimeError:
+                pass
+
+        def _add_chunk():
+            if generation != data.get('_listbox_populate_generation'):
+                return
+            if not self._is_data_valid(data):
+                return
+            try:
+                listbox.setUpdatesEnabled(False)
+                end_idx = min(state['idx'] + chunk_size, len(infos))
+                for idx in range(state['idx'], end_idx):
+                    info = infos[idx]
+                    display, status = self._progress_list_display_text(
+                        info,
+                        data,
+                        max_original_len,
+                        max_output_len,
+                    )
+                    item = QListWidgetItem(display)
+                    self._apply_progress_list_item_visuals(item, status)
+                    self._set_progress_list_item_metadata(item, info, status, show_special_files)
+                    self._add_compact_inline_list_item(listbox, item)
+                    if selected_keys and self._progress_list_item_key(info) in selected_keys:
+                        item.setSelected(True)
+                state['idx'] = end_idx
+                listbox.setUpdatesEnabled(True)
+                listbox.viewport().update()
+            except RuntimeError:
+                return
+
+            if state['idx'] < len(infos):
+                QTimer.singleShot(0, _add_chunk)
+            else:
+                _finish()
+
+        QTimer.singleShot(0, _add_chunk)
+
+    def _update_listbox_display(self, data):
+        """Update the listbox display with current chapter information"""
+        if not self._is_data_valid(data):
+            print("⚠️ Cannot update listbox display - widgets have been deleted")
+            return
+
+        listbox = data['listbox']
+        self._progress_list_sync_model_toggle(data)
+        count_existing = listbox.count()
+        count_new = len(data.get('chapter_display_info') or [])
+        if data.get('_listbox_populate_active') or count_existing != count_new:
+            self._populate_progress_listbox_streamed(
+                data,
+                preserve_selection=True,
+                preserve_scroll=True,
+            )
+            return
+
+        show_special_files = self._progress_list_show_special(data)
+        max_original_len, max_output_len = self._progress_list_column_widths(
+            data.get('chapter_display_info') or [],
+            data,
+        )
+
         listbox.setUpdatesEnabled(False)
         listbox.blockSignals(True)
-
-        count_existing = listbox.count()
-        count_new = len(data['chapter_display_info'])
-
-        def build_display(info, max_original_len, max_output_len):
-            chapter_num = info['num']
-            status = self._progress_display_status(info, data)
-            output_file = info['output_file']
-            output_display = self._progress_model_column_text(info, data, output_file)
-            icon = status_icons.get(status, '❓')
-            status_label = status_labels.get(status, status)
-            if status == 'completed' and self._progress_entry_is_refined(info):
-                status_label = f"{status_label} ⭐"
-            chapter_info = info.get('info') or info.get('progress_entry') or {}
-            ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
-            if status == 'in_progress' and isinstance(ocr_progress, dict):
-                try:
-                    ocr_done = int(ocr_progress.get('done', 0))
-                    ocr_total = int(ocr_progress.get('total', 0))
-                except (TypeError, ValueError):
-                    ocr_done = 0
-                    ocr_total = 0
-                if ocr_total > 0:
-                    status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
-            if info.get('pdf_ocr'):
-                return f"PDF OCR | {icon} {status_label:18s} | {output_display}"
-            if 'opf_position' in info:
-                original_file = info.get('original_filename', '')
-                opf_pos = info['opf_position'] + 1
-                if isinstance(chapter_num, float):
-                    if chapter_num.is_integer():
-                        display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-                    else:
-                        display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-                else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-            else:
-                if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
-                elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
-                else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
-            if status == 'qa_failed':
-                chapter_info = info.get('info', {})
-                qa_issues = chapter_info.get('qa_issues_found', [])
-                if qa_issues:
-                    issues_display = ', '.join(qa_issues[:2])
-                    if len(qa_issues) > 2:
-                        issues_display += f' (+{len(qa_issues)-2} more)'
-                    display += f" | {issues_display}"
-            if status == 'merged':
-                chapter_info = info.get('info', {})
-                parent_chapter = chapter_info.get('merged_parent_chapter')
-                if parent_chapter:
-                    display += f" | → Ch.{parent_chapter}"
-            if info.get('duplicate_count', 1) > 1:
-                display += f" | ({info['duplicate_count']} entries)"
-            return display
-
-        def apply_item_visuals(item, status):
-            from PySide6.QtGui import QColor
-            if status == 'completed':
-                item.setForeground(QColor('green'))
-            elif status == 'merged':
-                item.setForeground(QColor('#17a2b8'))
-            elif status in ['failed', 'qa_failed']:
-                item.setForeground(QColor('red'))
-            elif status == 'not_translated':
-                item.setForeground(QColor('#2b6cb0'))
-            elif status in ['not_refined', 'no_tts']:
-                item.setForeground(QColor('#8a63d2'))
-            elif status == 'in_progress':
-                item.setForeground(QColor('orange'))
-
-        show_special_files = data.get('show_special_files_state', False)
-        if 'show_special_files_cb' in data and data['show_special_files_cb']:
-            try:
-                show_special_files = data['show_special_files_cb'].isChecked()
-            except RuntimeError:
-                pass
-        if 'show_model_info_cb' in data and data['show_model_info_cb']:
-            try:
-                data['show_model_info_state'] = data['show_model_info_cb'].isChecked()
-            except RuntimeError:
-                pass
-
-        if count_existing == count_new:
-            # Update in place to keep scroll stable
-            for idx, info in enumerate(data['chapter_display_info']):
+        try:
+            for idx, info in enumerate(data.get('chapter_display_info') or []):
                 if idx % 120 == 0:
                     self._ui_yield()
                 item = listbox.item(idx)
                 if not item:
                     continue
-                display_status = self._progress_display_status(info, data)
-                item.setText(build_display(info, max_original_len, max_output_len))
-                apply_item_visuals(item, display_status)
+                display, display_status = self._progress_list_display_text(
+                    info,
+                    data,
+                    max_original_len,
+                    max_output_len,
+                )
+                item.setText(display)
+                self._apply_progress_list_item_visuals(item, display_status)
                 self._set_compact_inline_item_size(listbox, item)
-                is_special = info.get('is_special', False)
-                _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-                is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
-                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
-                item.setData(Qt.UserRole + 2, display_status)
-                item.setHidden(is_skipped_special and not show_special_files)
-        else:
-            # Recreate items
-            listbox.clear()
-            from PySide6.QtWidgets import QListWidgetItem
-            from PySide6.QtCore import Qt
-            for idx, info in enumerate(data['chapter_display_info']):
-                if idx % 120 == 0:
-                    self._ui_yield()
-                item = QListWidgetItem(build_display(info, max_original_len, max_output_len))
-                display_status = self._progress_display_status(info, data)
-                apply_item_visuals(item, display_status)
-                is_special = info.get('is_special', False)
-                _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-                is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
-                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
-                item.setData(Qt.UserRole + 2, display_status)
-                item.setHidden(is_skipped_special and not show_special_files)
-                self._add_compact_inline_list_item(listbox, item)
+                self._set_progress_list_item_metadata(item, info, display_status, show_special_files)
+        finally:
+            listbox.blockSignals(False)
+            listbox.setUpdatesEnabled(True)
 
-        listbox.blockSignals(False)
-        listbox.setUpdatesEnabled(True)
-    
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""
         # Find statistics labels in the container
@@ -7007,9 +7001,15 @@ class RetranslationMixin:
                 self._multi_file_retranslation_dialog and 
                 hasattr(self, '_multi_file_selection_key') and 
                 self._multi_file_selection_key == selection_key):
-                # Reuse existing dialog - refresh all tabs before showing
+                # Reuse existing dialog - show first, then refresh tabs without blocking open.
                 cached_dialog = self._multi_file_retranslation_dialog
-                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
+                cached_dialog.show()
+                cached_dialog.raise_()
+                cached_dialog.activateWindow()
+
+                def _refresh_cached_tabs():
+                    if not hasattr(cached_dialog, '_tab_data') or not cached_dialog._tab_data:
+                        return
                     print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
                     for _td in cached_dialog._tab_data:
                         _rf = _td.get('refresh_func') if _td else None
@@ -7018,9 +7018,8 @@ class RetranslationMixin:
                                 _rf()
                             except Exception as _e:
                                 print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-                cached_dialog.show()
-                cached_dialog.raise_()
-                cached_dialog.activateWindow()
+
+                QTimer.singleShot(0, _refresh_cached_tabs)
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -7330,25 +7329,28 @@ class RetranslationMixin:
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
             
-            # Trigger animated refresh on every tab (same as clicking the Refresh button)
-            if tab_data:
-                print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
-                for _td in tab_data:
-                    _rf = _td.get('refresh_func') if _td else None
-                    if callable(_rf):
-                        try:
-                            _rf()
-                        except Exception as _e:
-                            print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-            else:
-                print(f"[WARN] No tab data to refresh on dialog open")
-            
             # Update dropdown nav state after all tabs are added
             if hasattr(dialog, '_dropdown_update_nav'):
                 dialog._dropdown_update_nav()
 
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
+
+            # Trigger refresh after the dialog has painted so large tabs do not block opening.
+            def _refresh_tabs_after_show():
+                if tab_data:
+                    print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
+                    for _td in tab_data:
+                        _rf = _td.get('refresh_func') if _td else None
+                        if callable(_rf):
+                            try:
+                                _rf()
+                            except Exception as _e:
+                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
+                else:
+                    print(f"[WARN] No tab data to refresh on dialog open")
+
+            QTimer.singleShot(0, _refresh_tabs_after_show)
             
         except Exception as e:
             print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
