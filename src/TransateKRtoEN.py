@@ -52,6 +52,13 @@ from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
+from refinement_prompts import (
+    DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_SYSTEM_PROMPT,
+)
 import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
@@ -659,64 +666,11 @@ class TranslationConfig:
             self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_SYSTEM_PROMPT = os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_USER_PROMPT = os.getenv("REFINEMENT_USER_PROMPT", "").strip()
-        default_refinement_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "{QA_Issues}"
-        )
-        default_refinement_failed_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "{QA_Issues}"
-        )
-        default_refinement_partial_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
-            "If placeholder HTML tags are present, retain every placeholder opening/closing tag and its attributes exactly.\n"
-            "{QA_Issues}"
-        )
-        default_refinement_partial_b_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "The QA issue(s) below identify leftover source-language text in these HTML fragments. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
-            "Each request is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
-            "Retain every <glossarion> opening/closing tag and its id exactly. "
-            "Only refine or translate the content inside each <glossarion> tag. "
-            "Example placeholder to preserve exactly, including the id value: "
-            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
-            "{QA_Issues}"
-        )
-        default_refinement_partial_b2_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only valid JSON using the same structure as the input.\n\n"
-            "The JSON object contains a batch of affected requests from this refinement run. Each request identifies leftover "
-            "source-language text in an HTML fragment. Translate that leftover text into {target_lang} while preserving "
-            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, and html field. "
-            "Each html value is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
-            "Retain every <glossarion> opening/closing tag and its id exactly, and keep the <glossarion id> value "
-            "identical to the JSON request id. Only refine or translate the content inside each <glossarion> tag. "
-            "Example html value to preserve exactly around the refined content, with the same value as the request id: "
-            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
-            "{QA_Issues}"
-        )
+        default_refinement_system_prompt = DEFAULT_REFINEMENT_SYSTEM_PROMPT
+        default_refinement_failed_system_prompt = DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT
+        default_refinement_partial_system_prompt = DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT
+        default_refinement_partial_b_system_prompt = DEFAULT_REFINEMENT_PARTIAL_B_SYSTEM_PROMPT
+        default_refinement_partial_b2_system_prompt = DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT
         if not self.REFINEMENT_SYSTEM_PROMPT:
             self.REFINEMENT_SYSTEM_PROMPT = default_refinement_system_prompt
         _failed_system = _prompt_env_raw("REFINEMENT_FAILED_SYSTEM_PROMPT")
@@ -788,6 +742,10 @@ class TranslationConfig:
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
         self.BATCHING_MODE = os.getenv("BATCHING_MODE", "aggressive")
         self.BATCH_GROUP_SIZE = int(os.getenv("BATCH_GROUP_SIZE", os.getenv("CONSERVATIVE_BATCH_GROUP_SIZE", "3")))
+        try:
+            self.PARTIAL_B2_ENTRIES_PER_REQUEST = int(os.getenv("PARTIAL_B2_ENTRIES_PER_REQUEST", "-1"))
+        except (TypeError, ValueError):
+            self.PARTIAL_B2_ENTRIES_PER_REQUEST = -1
         self.VISION_OCR_SKIP_TRANSLATION = os.getenv("VISION_OCR_SKIP_TRANSLATION", "0") == "1"
         # Note: REQUEST_MERGING_ENABLED and REQUEST_MERGE_COUNT are set earlier (before split_marker_instruction handling)
         # Synthetic header injection for merged requests (Split-the-Merge helper)
@@ -13887,6 +13845,16 @@ def _partial_refinement_spine_request_id(chapter, output_dir, output_file, fallb
 
 def _partial_b2_entries_per_request(config):
     try:
+        configured_entries_raw = getattr(
+            config,
+            "PARTIAL_B2_ENTRIES_PER_REQUEST",
+            os.getenv("PARTIAL_B2_ENTRIES_PER_REQUEST", "-1"),
+        )
+        configured_entries = int(configured_entries_raw or -1)
+    except Exception:
+        configured_entries = -1
+
+    try:
         max_output_tokens = int(config.get_effective_output_limit())
     except Exception:
         try:
@@ -13908,7 +13876,9 @@ def _partial_b2_entries_per_request(config):
 
     available_tokens = int(max_output_tokens / compression_factor)
     entries_per_request = max(10, available_tokens // 50)
-    return max(1, int(entries_per_request)), max_output_tokens, compression_factor, available_tokens
+    if configured_entries > 0:
+        return configured_entries, max_output_tokens, compression_factor, available_tokens, False
+    return max(1, int(entries_per_request)), max_output_tokens, compression_factor, available_tokens, True
 
 
 def _partial_refinement_qa_prompt_text(qa_entry) -> str:
@@ -14994,23 +14964,28 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 + ", ".join(duplicate_request_ids)
             )
 
-        entries_per_request, max_output_tokens, compression_factor, available_tokens = _partial_b2_entries_per_request(config)
+        entries_per_request, max_output_tokens, compression_factor, available_tokens, auto_entries = _partial_b2_entries_per_request(config)
         request_batches = [
             all_requests[start:start + entries_per_request]
             for start in range(0, len(all_requests), entries_per_request)
         ]
-        if len(request_batches) > 1:
+        if auto_entries and len(request_batches) > 1:
             print(
                 f"Partial.b2 batching {len(all_requests)} request(s) into {len(request_batches)} JSON call(s) "
                 f"of up to {entries_per_request} entries "
                 f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
                 f"{available_tokens:,} available tokens, ~50 tok/entry)"
             )
-        else:
+        elif auto_entries:
             print(
                 f"Partial.b2 batching {len(all_requests)} request(s) into 1 JSON call "
                 f"(cap {entries_per_request} entries; {max_output_tokens:,} output / "
                 f"{compression_factor:.1f}x compression)"
+            )
+        else:
+            print(
+                f"Partial.b2 batching {len(all_requests)} request(s) into {len(request_batches)} JSON call(s) "
+                f"of up to {entries_per_request} entries (manual Partial.b2 entries/request setting)"
             )
 
         def _partial_b2_payload(batch_requests):

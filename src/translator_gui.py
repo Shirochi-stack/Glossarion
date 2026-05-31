@@ -50,6 +50,19 @@ from app_version import (
     APP_VERSION,
     get_runtime_app_display_name,
 )
+from refinement_prompts import (
+    DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_FAILED_USER_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B2_USER_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_B_USER_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_PARTIAL_USER_PROMPT,
+    DEFAULT_REFINEMENT_QA_ISSUE_PROMPT,
+    DEFAULT_REFINEMENT_SYSTEM_PROMPT,
+    DEFAULT_REFINEMENT_USER_PROMPT,
+)
 
 
 def _authnd_auto_token_limits():
@@ -2221,6 +2234,7 @@ Text to analyze:
         self.batch_translate_headers_var = self.config.get('batch_translate_headers', True)
         self.headers_per_batch_var = self.config.get('headers_per_batch', '-1')
         self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '-1')
+        self.partial_b2_entries_per_request_var = self.config.get('partial_b2_entries_per_request', '-1')
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
@@ -3630,70 +3644,17 @@ Text to analyze:
         # Default assistant prompt (empty by default - user can optionally set this to prefill)
         self.default_assistant_prompt = ""
 
-        self.default_refinement_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "{QA_Issues}"
-        )
-        self.default_refinement_user_prompt = ""
-        self.default_refinement_qa_issue_prompt = "{QA_Issues}"
-        self.default_refinement_failed_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "{QA_Issues}"
-        )
-        self.default_refinement_failed_user_prompt = ""
-        self.default_refinement_partial_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "The QA issue(s) below identify leftover source-language text in this HTML fragment. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
-            "If placeholder HTML tags are present, retain every placeholder opening/closing tag and its attributes exactly.\n"
-            "{QA_Issues}"
-        )
-        self.default_refinement_partial_user_prompt = ""
-        self.default_refinement_partial_b_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only the refined HTML.\n\n"
-            "The QA issue(s) below identify leftover source-language text in these HTML fragments. "
-            "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
-            "Each request is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
-            "Retain every <glossarion> opening/closing tag and its id exactly. "
-            "Only refine or translate the content inside each <glossarion> tag. "
-            "Example placeholder to preserve exactly, including the id value: "
-            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
-            "{QA_Issues}"
-        )
-        self.default_refinement_partial_b_user_prompt = ""
-        self.default_refinement_partial_b2_system_prompt = (
-            "You are refining an existing {target_lang} translation. Improve clarity, flow, consistency, "
-            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
-            "Retain the original meaning of the translation, while retaining the original translation style. "
-            "Convert any foreign onomatopoeia to romaji. "
-            "Return only valid JSON using the same structure as the input.\n\n"
-            "The JSON object contains a batch of affected requests from this refinement run. Each request identifies leftover "
-            "source-language text in an HTML fragment. Translate that leftover text into {target_lang} while preserving "
-            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, and html field. "
-            "Each html value is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
-            "Retain every <glossarion> opening/closing tag and its id exactly, and keep the <glossarion id> value "
-            "identical to the JSON request id. Only refine or translate the content inside each <glossarion> tag. "
-            "Example html value to preserve exactly around the refined content, with the same value as the request id: "
-            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
-            "{QA_Issues}"
-        )
-        self.default_refinement_partial_b2_user_prompt = ""
+        self.default_refinement_system_prompt = DEFAULT_REFINEMENT_SYSTEM_PROMPT
+        self.default_refinement_user_prompt = DEFAULT_REFINEMENT_USER_PROMPT
+        self.default_refinement_qa_issue_prompt = DEFAULT_REFINEMENT_QA_ISSUE_PROMPT
+        self.default_refinement_failed_system_prompt = DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT
+        self.default_refinement_failed_user_prompt = DEFAULT_REFINEMENT_FAILED_USER_PROMPT
+        self.default_refinement_partial_system_prompt = DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT
+        self.default_refinement_partial_user_prompt = DEFAULT_REFINEMENT_PARTIAL_USER_PROMPT
+        self.default_refinement_partial_b_system_prompt = DEFAULT_REFINEMENT_PARTIAL_B_SYSTEM_PROMPT
+        self.default_refinement_partial_b_user_prompt = DEFAULT_REFINEMENT_PARTIAL_B_USER_PROMPT
+        self.default_refinement_partial_b2_system_prompt = DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT
+        self.default_refinement_partial_b2_user_prompt = DEFAULT_REFINEMENT_PARTIAL_B2_USER_PROMPT
         
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
@@ -4961,6 +4922,7 @@ Recent translations to summarize:
             }
         """)
         editors = {}
+        tab_mode_by_index = {}
 
         def _prompt_value(attr, config_key, default_attr, allow_default=True):
             value = getattr(self, attr, None)
@@ -4987,7 +4949,9 @@ Recent translations to summarize:
             user_editor.setPlainText(_prompt_value(user_attr, user_config_key, default_user_attr, allow_default=False))
             tab_layout.addWidget(user_editor)
             editors[mode_key] = (system_editor, user_editor)
-            tabs.addTab(tab, label)
+            tab_index = tabs.addTab(tab, label)
+            tab_mode_by_index[tab_index] = mode_key
+            return tab, tab_layout, system_editor, user_editor
 
         _add_prompt_tab(
             "all", "All",
@@ -5014,13 +4978,46 @@ Recent translations to summarize:
             "default_refinement_partial_b_system_prompt", "default_refinement_partial_b_user_prompt",
             system_allow_default=False,
         )
-        _add_prompt_tab(
+        _partial_b2_tab, partial_b2_layout, _, _ = _add_prompt_tab(
             "partial.b2", "Partial.b2",
             "refinement_partial_b2_system_prompt", "refinement_partial_b2_user_prompt",
             "refinement_partial_b2_system_prompt", "refinement_partial_b2_user_prompt",
             "default_refinement_partial_b2_system_prompt", "default_refinement_partial_b2_user_prompt",
             system_allow_default=False,
         )
+
+        def _spinbox_int(value, default=-1):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        partial_b2_options = QWidget()
+        partial_b2_options_layout = QHBoxLayout(partial_b2_options)
+        partial_b2_options_layout.setContentsMargins(0, 0, 0, 0)
+        partial_b2_options_layout.setSpacing(8)
+        partial_b2_entries_label = QLabel("Entries per request:")
+        partial_b2_entries_label.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Partial.b2 JSON entries per API call. Leave at -1 to use the automatic output-token/compression calculation."
+            "</p></qt>"
+        )
+        partial_b2_options_layout.addWidget(partial_b2_entries_label)
+        self.partial_b2_entries_per_request_spinbox = QSpinBox()
+        self.partial_b2_entries_per_request_spinbox.setRange(-1, 100000)
+        partial_b2_entries_value = getattr(
+            self,
+            'partial_b2_entries_per_request_var',
+            self.config.get('partial_b2_entries_per_request', -1),
+        )
+        self.partial_b2_entries_per_request_spinbox.setValue(
+            _spinbox_int(partial_b2_entries_value, -1)
+        )
+        self.partial_b2_entries_per_request_spinbox.setToolTip(partial_b2_entries_label.toolTip())
+        self.partial_b2_entries_per_request_spinbox.setFixedWidth(96)
+        partial_b2_options_layout.addWidget(self.partial_b2_entries_per_request_spinbox)
+        partial_b2_options_layout.addStretch()
+        partial_b2_layout.insertWidget(0, partial_b2_options)
 
         key_preview_tab = QWidget()
         key_preview_index = tabs.addTab(key_preview_tab, "Refinement Keys")
@@ -5073,6 +5070,7 @@ Recent translations to summarize:
             self.refinement_partial_b_user_prompt = partial_b_user.toPlainText().strip()
             self.refinement_partial_b2_system_prompt = partial_b2_system.toPlainText().strip()
             self.refinement_partial_b2_user_prompt = partial_b2_user.toPlainText().strip()
+            self.partial_b2_entries_per_request_var = self.partial_b2_entries_per_request_spinbox.value()
 
             self.config['refinement_system_prompt'] = self.refinement_system_prompt
             self.config['refinement_user_prompt'] = self.refinement_user_prompt
@@ -5084,16 +5082,36 @@ Recent translations to summarize:
             self.config['refinement_partial_b_user_prompt'] = self.refinement_partial_b_user_prompt
             self.config['refinement_partial_b2_system_prompt'] = self.refinement_partial_b2_system_prompt
             self.config['refinement_partial_b2_user_prompt'] = self.refinement_partial_b2_user_prompt
+            self.config['partial_b2_entries_per_request'] = self.partial_b2_entries_per_request_var
             self._update_refinement_prompt_button_style()
             self.save_config(show_message=False)
             self.append_log("✅ Refinement prompts updated")
             dialog.accept()
 
-        def reset_prompt():
+        def _reset_prompt_tab(mode_key):
+            system_editor, user_editor = editors[mode_key]
+            if mode_key == "all":
+                system_editor.setPlainText(getattr(self, 'default_refinement_system_prompt', ''))
+                user_editor.setPlainText(getattr(self, 'default_refinement_user_prompt', ''))
+            elif mode_key == "failed":
+                system_editor.setPlainText(getattr(self, 'default_refinement_failed_system_prompt', ''))
+                user_editor.setPlainText(getattr(self, 'default_refinement_failed_user_prompt', ''))
+            elif mode_key == "partial":
+                system_editor.setPlainText(getattr(self, 'default_refinement_partial_system_prompt', ''))
+                user_editor.setPlainText(getattr(self, 'default_refinement_partial_user_prompt', ''))
+            elif mode_key == "partial.b":
+                system_editor.setPlainText(getattr(self, 'default_refinement_partial_b_system_prompt', ''))
+                user_editor.setPlainText(getattr(self, 'default_refinement_partial_b_user_prompt', ''))
+            elif mode_key == "partial.b2":
+                system_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_system_prompt', ''))
+                user_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_user_prompt', ''))
+                self.partial_b2_entries_per_request_spinbox.setValue(-1)
+
+        def _confirm_reset(message):
             msg = QMessageBox(dialog)
             msg.setWindowTitle("Reset Refinement Prompts")
             msg.setIcon(QMessageBox.Question)
-            msg.setText("Reset all refinement prompt tabs to their defaults?")
+            msg.setText(message)
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg.setDefaultButton(QMessageBox.No)
             msg.setStyleSheet("""
@@ -5105,24 +5123,22 @@ Recent translations to summarize:
                     qproperty-centerButtons: true;
                 }
             """)
-            if msg.exec() != QMessageBox.Yes:
+            return msg.exec() == QMessageBox.Yes
+
+        def reset_prompt():
+            mode_key = tab_mode_by_index.get(tabs.currentIndex())
+            if mode_key not in editors:
                 return
-            for mode_key, (system_editor, user_editor) in editors.items():
-                if mode_key == "all":
-                    system_editor.setPlainText(getattr(self, 'default_refinement_system_prompt', ''))
-                    user_editor.setPlainText(getattr(self, 'default_refinement_user_prompt', ''))
-                elif mode_key == "failed":
-                    system_editor.setPlainText(getattr(self, 'default_refinement_failed_system_prompt', ''))
-                    user_editor.setPlainText(getattr(self, 'default_refinement_failed_user_prompt', ''))
-                elif mode_key == "partial":
-                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_system_prompt', ''))
-                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_user_prompt', ''))
-                elif mode_key == "partial.b":
-                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_b_system_prompt', ''))
-                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_b_user_prompt', ''))
-                elif mode_key == "partial.b2":
-                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_system_prompt', ''))
-                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_b2_user_prompt', ''))
+            tab_label = tabs.tabText(tabs.currentIndex())
+            if not _confirm_reset(f"Reset the {tab_label} refinement prompt tab to its defaults?"):
+                return
+            _reset_prompt_tab(mode_key)
+
+        def reset_all_prompts():
+            if not _confirm_reset("Reset all refinement prompt tabs to their defaults?"):
+                return
+            for mode_key in editors:
+                _reset_prompt_tab(mode_key)
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(save_prompt)
@@ -5134,13 +5150,17 @@ Recent translations to summarize:
         reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(reset_btn)
 
+        reset_all_btn = QPushButton("Reset All to Default")
+        reset_all_btn.clicked.connect(reset_all_prompts)
+        reset_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        button_layout.addWidget(reset_all_btn)
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
         cancel_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(cancel_btn)
-        button_layout.setStretch(0, 1)
-        button_layout.setStretch(1, 1)
-        button_layout.setStretch(2, 1)
+        for button_index in range(4):
+            button_layout.setStretch(button_index, 1)
 
         layout.addLayout(button_layout)
         dialog.show()
@@ -17818,6 +17838,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REFINEMENT_PARTIAL_B_USER_PROMPT': _explicit_blank_prompt_value('refinement_partial_b_user_prompt', 'refinement_partial_b_user_prompt', 'default_refinement_partial_b_user_prompt'),
             'REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT': _explicit_blank_prompt_value('refinement_partial_b2_system_prompt', 'refinement_partial_b2_system_prompt', 'default_refinement_partial_b2_system_prompt'),
             'REFINEMENT_PARTIAL_B2_USER_PROMPT': _explicit_blank_prompt_value('refinement_partial_b2_user_prompt', 'refinement_partial_b2_user_prompt', 'default_refinement_partial_b2_user_prompt'),
+            'PARTIAL_B2_ENTRIES_PER_REQUEST': str(getattr(self, 'partial_b2_entries_per_request_var', self.config.get('partial_b2_entries_per_request', '-1'))),
             'ENABLE_IMAGE_TRANSLATION': "1" if (self.enable_image_translation_var and output_mode not in ('refinement', 'audio')) else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -19745,6 +19766,7 @@ Important rules:
             os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var else "0"
             os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
             os.environ['TOC_NCX_PER_BATCH'] = str(self.toc_ncx_per_batch_var)
+            os.environ['PARTIAL_B2_ENTRIES_PER_REQUEST'] = str(getattr(self, 'partial_b2_entries_per_request_var', self.config.get('partial_b2_entries_per_request', '-1')))
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
             os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0"
@@ -26092,6 +26114,7 @@ Important rules:
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
+                ('partial_b2_entries_per_request', ['partial_b2_entries_per_request_var'], -1, lambda v: safe_int(v, -1)),
 
                 # NIM/AuthND runtime settings
                 ('authnd_token_concurrency_auto', ['authnd_token_concurrency_auto_checkbox', 'authnd_token_concurrency_auto_var'], True, bool),
@@ -26467,6 +26490,7 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
+            env_vars_set.append(_update_env('PARTIAL_B2_ENTRIES_PER_REQUEST', self.config.get('partial_b2_entries_per_request', -1)))
             authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
             if authnd_auto_enabled:
                 authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
@@ -26752,6 +26776,7 @@ Important rules:
             'METADATA_TRANSLATION_MODE': 'Metadata translation mode',
             'BATCH_TRANSLATE_HEADERS': 'Batch translate headers',
             'HEADERS_PER_BATCH': 'Headers per batch',
+            'PARTIAL_B2_ENTRIES_PER_REQUEST': 'Partial.b2 entries per JSON request',
             'UPDATE_HTML_HEADERS': 'Update HTML headers',
             'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
             'IGNORE_HEADER': 'Ignore header metadata',
@@ -27267,6 +27292,7 @@ Important rules:
                 ('REFINEMENT_PARTIAL_B_USER_PROMPT', _explicit_blank_prompt_value('refinement_partial_b_user_prompt', 'refinement_partial_b_user_prompt', 'default_refinement_partial_b_user_prompt')),
                 ('REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT', _explicit_blank_prompt_value('refinement_partial_b2_system_prompt', 'refinement_partial_b2_system_prompt', 'default_refinement_partial_b2_system_prompt')),
                 ('REFINEMENT_PARTIAL_B2_USER_PROMPT', _explicit_blank_prompt_value('refinement_partial_b2_user_prompt', 'refinement_partial_b2_user_prompt', 'default_refinement_partial_b2_user_prompt')),
+                ('PARTIAL_B2_ENTRIES_PER_REQUEST', str(getattr(self, 'partial_b2_entries_per_request_var', self.config.get('partial_b2_entries_per_request', '-1')))),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
