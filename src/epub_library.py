@@ -1141,9 +1141,71 @@ def _open_folder_in_explorer(path: str):
         is_file = os.path.isfile(path)
     except OSError:
         is_file = False
-    folder = os.path.dirname(path) if is_file else path
-    normalized = os.path.normpath(path) if is_file else path
+    target_path = os.path.abspath(path)
+    folder = os.path.dirname(target_path) if is_file else target_path
+    normalized = os.path.normpath(target_path) if is_file else target_path
     system_name = platform.system()
+
+    def _run_checked(command):
+        """Run a desktop opener and report whether it accepted the path."""
+        try:
+            completed = subprocess.run(
+                list(command),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            if completed.returncode == 0:
+                return True, ""
+            return False, completed.stderr.strip() or f"{command[0]} exited with {completed.returncode}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _open_linux():
+        last_error = ""
+
+        if is_file:
+            reveal_commands = [
+                ("dolphin", "--select", normalized),
+                ("nautilus", "--select", normalized),
+                ("thunar", normalized),
+                ("nemo", normalized),
+            ]
+            for command in reveal_commands:
+                if not shutil.which(command[0]):
+                    continue
+                ok, error = _run_checked(command)
+                if ok:
+                    return
+                last_error = error
+
+        desktop_openers = [
+            ("xdg-open", folder),
+            ("gio", "open", folder),
+            ("kioclient6", "exec", folder),
+            ("kioclient5", "exec", folder),
+            ("kioclient", "exec", folder),
+        ]
+        for command in desktop_openers:
+            if not shutil.which(command[0]):
+                continue
+            ok, error = _run_checked(command)
+            if ok:
+                return
+            last_error = error
+
+        for manager in ("dolphin", "thunar", "nemo", "nautilus", "pcmanfm", "caja"):
+            if not shutil.which(manager):
+                continue
+            subprocess.Popen(
+                [manager, folder],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+
+        raise RuntimeError(last_error or "No Linux file manager opener was found. Install xdg-utils or a file manager.")
 
     def _worker():
         try:
@@ -1157,10 +1219,10 @@ def _open_folder_in_explorer(path: str):
                     os.startfile(folder)
             elif system_name == "Darwin":
                 subprocess.Popen(
-                    ["open", "-R", path] if is_file else ["open", folder]
+                    ["open", "-R", target_path] if is_file else ["open", folder]
                 )
             else:
-                subprocess.Popen(["xdg-open", folder])
+                _open_linux()
         except Exception as exc:
             logger.warning("Failed to open folder: %s\n%s",
                            exc, traceback.format_exc())
