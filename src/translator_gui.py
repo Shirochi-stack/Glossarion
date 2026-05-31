@@ -402,7 +402,7 @@ def _log_mei_cleanup_on_exit():
         pass
 
 # Standard Library
-import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal, subprocess
+import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
@@ -697,17 +697,8 @@ def _mark_manga_import_pending():
     MANGA_IMPORT_ERROR = None
 
 
-def _mark_manga_import_available():
-    """Record that manga support exists without importing it during GUI startup."""
-    global MANGA_IMPORT_LOADING, MANGA_IMPORT_ERROR
-    MANGA_IMPORT_LOADING = False
-    MANGA_IMPORT_ERROR = None
-
-
 def _start_manga_import_background():
     global MANGA_IMPORT_EXECUTOR
-    if MANGA_SUPPORT and MangaTranslationTab is not None:
-        return MANGA_IMPORT_FUTURE
     if MANGA_IMPORT_FUTURE is not None:
         return MANGA_IMPORT_FUTURE
     _mark_manga_import_pending()
@@ -2352,14 +2343,6 @@ Text to analyze:
         except ImportError:
             print("Metadata translation UI not available")
         
-        # ── MTool Bridge Watcher ──────────────────────────────────────
-        # Polls for bridge_config.json from MTool's Glossarion Bridge
-        # Use current epoch ms as baseline — ignore configs from before Glossarion started
-        import time as _time_mod
-        self._mtool_bridge_last_ts = int(_time_mod.time() * 1000)
-        self._mtool_bridge_timer = QTimer(self)
-        self._mtool_bridge_timer.timeout.connect(self._check_mtool_bridge)
-        self._mtool_bridge_timer.start(3000)  # Check every 3 seconds
         
         # Default prompts
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
@@ -3266,53 +3249,6 @@ Text to analyze:
                 pass
             self._stop_all_operations_running = False
         
-    # ── MTool Bridge Watcher ──────────────────────────────────────────
-    def _check_mtool_bridge(self):
-        """Poll for bridge_config.json from MTool's Glossarion Bridge."""
-        try:
-            bridge_dir = os.path.join(os.path.expanduser("~"), ".glossarion_mtool_bridge")
-            config_path = os.path.join(bridge_dir, "bridge_config.json")
-            
-            if not os.path.isfile(config_path):
-                return
-            
-            import json
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            
-            ts = config.get("timestamp", 0)
-            if ts <= self._mtool_bridge_last_ts:
-                return  # Already processed this export
-            
-            self._mtool_bridge_last_ts = ts
-            export_path = config.get("exportPath", "")
-            line_count = config.get("lineCount", 0)
-            
-            if not export_path or not os.path.isfile(export_path):
-                return
-            
-            # Update input file path
-            if hasattr(self, 'entry_epub'):
-                self.entry_epub.setText(export_path)
-            
-            # Log the event
-            msg = f"📡 MTool Bridge: Received {line_count} lines from MTool"
-            self.append_log(msg)
-            self.append_log(f"   → Input path set to: {export_path}")
-            
-            # Write acknowledgment back so bridge panel can see it
-            ack_path = os.path.join(bridge_dir, "bridge_ack.json")
-            import json as _json
-            with open(ack_path, "w", encoding="utf-8") as f:
-                _json.dump({
-                    "timestamp": ts,
-                    "status": "received",
-                    "glossarion_version": getattr(self, '_app_version', 'unknown'),
-                }, f)
-                
-        except Exception:
-            pass  # Silent — don't disturb the user
-    
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging (async)"""
         if self.update_manager:
@@ -3507,20 +3443,7 @@ Text to analyze:
         except Exception:
             pass
         if MANGA_IMPORT_LOADING:
-            self._manga_open_when_import_ready = True
-            try:
-                self._refresh_manga_import_button_state()
-            except Exception:
-                pass
-            return
-        if not MANGA_SUPPORT and bool(globals().get('manga_available', False)):
-            try:
-                _start_manga_import_background()
-                self._manga_open_when_import_ready = True
-                self._refresh_manga_import_button_state()
-            except Exception as e:
-                print(f"Manga translation modules failed to start loading: {e}")
-                _apply_manga_support(None)
+            QMessageBox.information(self, "Manga Translator", "Manga imports are still loading.")
             return
         if not MANGA_SUPPORT:
             QMessageBox.warning(self, "Not Available", "Manga translation modules not found.")
@@ -4383,24 +4306,28 @@ Recent translations to summarize:
         except Exception:
             pass
 
-        def _prewarm_qa_settings_after_startup():
-            try:
-                self.set_startup_prewarm_button_loading('qa_settings', True, "Loading...")
-            except Exception:
-                pass
-            try:
-                if hasattr(self, 'prewarm_qa_scanner_gui'):
-                    self.prewarm_qa_scanner_gui()
-            finally:
+        # Building the QA settings dialog is expensive and must not run as a
+        # hidden startup task. When needed, the visible dialog paints
+        # incrementally in show_qa_scanner_settings().
+        if os.environ.get("GLOSSARION_PREWARM_QA_SETTINGS", "").strip().lower() in ("1", "true", "yes", "on"):
+            def _prewarm_qa_settings_after_startup():
                 try:
-                    self.set_startup_prewarm_button_loading('qa_settings', False)
+                    self.set_startup_prewarm_button_loading('qa_settings', True, "Loading...")
                 except Exception:
                     pass
+                try:
+                    if hasattr(self, 'prewarm_qa_scanner_gui'):
+                        self.prewarm_qa_scanner_gui()
+                finally:
+                    try:
+                        self.set_startup_prewarm_button_loading('qa_settings', False)
+                    except Exception:
+                        pass
 
-        try:
-            QTimer.singleShot(3500, _prewarm_qa_settings_after_startup)
-        except Exception:
-            pass
+            try:
+                QTimer.singleShot(3500, _prewarm_qa_settings_after_startup)
+            except Exception:
+                pass
     
     def _add_combobox_arrow(self, combobox):
         """Add a unicode arrow overlay to a combobox"""
@@ -10940,6 +10867,8 @@ Recent translations to summarize:
 
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
+        import subprocess
+
         if not hasattr(self, 'selected_files') or not self.selected_files:
              # Try to use self.file_path if set (single file legacy/other mode)
              if hasattr(self, 'file_path') and self.file_path:
@@ -10996,88 +10925,10 @@ Recent translations to summarize:
         # ── Multiple files — show picker dialog ──────────────────────
         self._show_output_folder_picker(files, override_dir)
 
-    def _open_path_in_file_manager(self, path, show_error=True):
-        """Open a folder/file in the OS file manager with Linux fallbacks."""
-        if not path:
-            return False
-
-        system_name = platform.system()
-        try:
-            if system_name == 'Windows':
-                os.startfile(path)
-                return True
-            if system_name == 'Darwin':
-                subprocess.Popen(['open', path])
-                return True
-
-            # Linux / BSD desktop environments vary. Try portal/desktop openers
-            # first, then fall back to common file managers.
-            import shutil
-            opener_commands = [
-                ('xdg-open', ['xdg-open', path], True),
-                ('gio', ['gio', 'open', path], True),
-                ('kde-open', ['kde-open', path], True),
-                ('kde-open5', ['kde-open5', path], True),
-                ('gnome-open', ['gnome-open', path], True),
-                ('gvfs-open', ['gvfs-open', path], True),
-                ('exo-open', ['exo-open', path], True),
-                ('nautilus', ['nautilus', path], False),
-                ('dolphin', ['dolphin', path], False),
-                ('thunar', ['thunar', path], False),
-                ('nemo', ['nemo', path], False),
-                ('caja', ['caja', path], False),
-                ('pcmanfm', ['pcmanfm', path], False),
-            ]
-            for executable, command, wait_for_result in opener_commands:
-                if not shutil.which(executable):
-                    continue
-                try:
-                    if wait_for_result:
-                        result = subprocess.run(
-                            command,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=5,
-                        )
-                        if result.returncode == 0:
-                            return True
-                    else:
-                        subprocess.Popen(
-                            command,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                        return True
-                except subprocess.TimeoutExpired:
-                    return True
-                except Exception:
-                    continue
-        except Exception as e:
-            if show_error:
-                QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
-            return False
-
-        if show_error:
-            try:
-                clipboard = QApplication.clipboard()
-                if clipboard:
-                    clipboard.setText(path)
-                QMessageBox.information(
-                    self,
-                    "Open Output Folder",
-                    "No supported Linux file-manager opener was found.\n\n"
-                    f"The output folder path has been copied to the clipboard:\n{path}"
-                )
-            except Exception:
-                QMessageBox.information(
-                    self,
-                    "Open Output Folder",
-                    f"No supported Linux file-manager opener was found.\n\nOutput folder:\n{path}"
-                )
-        return False
-
     def _open_single_output_folder(self, output_path):
         """Open a single output folder, with fallback to parent if it doesn't exist."""
+        import subprocess
+
         if not os.path.exists(output_path):
             reply = QMessageBox.question(self, "Folder Not Found", 
                                   f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
@@ -11089,10 +10940,20 @@ Recent translations to summarize:
             else:
                 return
         
-        self._open_path_in_file_manager(output_path)
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(output_path)
+            elif platform.system() == 'Darwin':
+                subprocess.call(['open', output_path])
+            else:
+                subprocess.call(['xdg-open', output_path])
+        except Exception as e:
+             QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
 
     def _show_output_folder_picker(self, files, override_dir):
         """Show a dropdown menu to pick which output folder to open."""
+        import subprocess
+
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -11147,7 +11008,15 @@ Recent translations to summarize:
             
             def open_all():
                 for p in existing_paths:
-                    self._open_path_in_file_manager(p, show_error=False)
+                    try:
+                        if platform.system() == 'Windows':
+                            os.startfile(p)
+                        elif platform.system() == 'Darwin':
+                            subprocess.call(['open', p])
+                        else:
+                            subprocess.call(['xdg-open', p])
+                    except Exception:
+                        pass
             
             open_all_action.triggered.connect(open_all)
         
@@ -11878,7 +11747,9 @@ Recent translations to summarize:
     def _update_api_watchdog(self):
         """Update the API watchdog progress bar based on in-flight API calls."""
         try:
-            import unified_api_client
+            unified_api_client = sys.modules.get('unified_api_client')
+            if unified_api_client is None:
+                raise RuntimeError("unified_api_client not loaded")
             state = unified_api_client.get_api_watchdog_state()
         except Exception:
             state = {}
@@ -13033,18 +12904,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if MANGA_SUPPORT:
                 button.setEnabled(True)
                 button.setToolTip("Open the manga panel translator.")
-                if getattr(self, '_manga_open_when_import_ready', False):
-                    self._manga_open_when_import_ready = False
-                    try:
-                        from PySide6.QtCore import QTimer
-                        QTimer.singleShot(0, self.open_manga_translator)
-                    except Exception:
-                        self.open_manga_translator()
-            elif bool(globals().get('manga_available', False)):
-                button.setEnabled(True)
-                button.setToolTip("Load and open the manga panel translator.")
             else:
-                self._manga_open_when_import_ready = False
                 button.setEnabled(False)
                 button.setToolTip(MANGA_IMPORT_ERROR or "Manga translation modules not found.")
         except Exception:
@@ -13493,7 +13353,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         # Place Manga Translator immediately to the right of Progress Manager.
         # If imports are still running, the button stays visible but disabled.
-        if MANGA_SUPPORT or MANGA_IMPORT_LOADING or MANGA_IMPORT_FUTURE is not None or bool(globals().get('manga_available', False)):
+        if MANGA_SUPPORT or MANGA_IMPORT_LOADING or MANGA_IMPORT_FUTURE is not None:
             toolbar_items.append(("🖼️ Manga Translator", self.open_manga_translator, "primary"))
 
         toolbar_items.extend([
@@ -13958,30 +13818,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
  
     # ===== Progress Manager (Retranslation) fast opener =====
-    def _has_cached_progress_manager_dialog(self) -> bool:
-        """Return True if a Progress Manager dialog already exists, without refreshing it."""
-        try:
-            if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
-                p = self.entry_epub.text().strip()
-                if p:
-                    key = os.path.abspath(p)
-                    cache = getattr(self, '_retranslation_dialog_cache', None)
-                    if isinstance(cache, dict) and key in cache and cache[key].get('dialog'):
-                        return True
-
-            if getattr(self, '_multi_file_retranslation_dialog', None):
-                return True
-
-            if hasattr(self, '_image_retranslation_dialog_cache') and hasattr(self, 'selected_files') and self.selected_files:
-                first = self.selected_files[0]
-                folder_key = os.path.abspath(first if os.path.isdir(first) else os.path.dirname(first))
-                cache = getattr(self, '_image_retranslation_dialog_cache', None)
-                if isinstance(cache, dict) and folder_key in cache and cache.get(folder_key):
-                    return True
-        except Exception:
-            pass
-        return False
-
     def _show_cached_progress_manager_if_any(self) -> bool:
         """Bring any cached Progress Manager dialog to front instantly. Returns True if shown."""
         try:
@@ -14023,7 +13859,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         try:
                             dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                             dlg.show(); dlg.raise_(); dlg.activateWindow()
-                            QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
+                            _refresh_dialog(dlg)
                             return True
                         except Exception:
                             pass
@@ -14046,7 +13882,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     try:
                         dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                         dlg.show(); dlg.raise_(); dlg.activateWindow()
-                        QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
+                        _refresh_dialog(dlg)
                         return True
                     except Exception:
                         pass
@@ -14060,7 +13896,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     try:
                         dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                         dlg.show(); dlg.raise_(); dlg.activateWindow()
-                        QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
+                        _refresh_dialog(dlg)
                         return True
                     except Exception:
                         pass
@@ -14145,7 +13981,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         finally:
             # Poll until the actual dialog exists, then stop spinning
             def _finish_when_ready(attempts=0):
-                if self._has_cached_progress_manager_dialog():
+                if self._show_cached_progress_manager_if_any():
                     self._stop_pm_spin()
                 elif attempts >= 60:  # ~6s max
                     self._stop_pm_spin()
@@ -27805,10 +27641,10 @@ if __name__ == "__main__":
             scan_html_folder = loading_results.get('scan')
             manga_available = bool(loading_results.get('manga_available'))
             manga_tab_class = loading_results.get('manga')
-            if manga_available:
-                _mark_manga_import_available()
-            else:
+            if manga_tab_class:
                 _apply_manga_support(manga_tab_class)
+            else:
+                _apply_manga_support(None)
             
             # Count core modules separately so standard/lite builds without manga
             # support do not report a degraded startup.
@@ -27838,10 +27674,10 @@ if __name__ == "__main__":
             translator_gui.fallback_compile_epub = fallback_compile_epub
             translator_gui.scan_html_folder = scan_html_folder
             try:
-                if manga_available:
-                    translator_gui._mark_manga_import_available()
-                else:
+                if manga_tab_class:
                     translator_gui._apply_manga_support(manga_tab_class)
+                else:
+                    translator_gui._apply_manga_support(None)
             except Exception:
                 translator_gui.MangaTranslationTab = manga_tab_class
                 translator_gui.MANGA_SUPPORT = manga_tab_class is not None
@@ -27852,7 +27688,7 @@ if __name__ == "__main__":
             except Exception:
                 manga_available = False
             if manga_available:
-                _mark_manga_import_available()
+                _mark_manga_import_pending()
             else:
                 _apply_manga_support(None)
         
@@ -27883,15 +27719,15 @@ if __name__ == "__main__":
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
 
-        should_show_manga_button = bool(globals().get('manga_available', False))
-        if should_show_manga_button:
+        should_start_manga_imports = bool(globals().get('manga_available', False)) and not MANGA_SUPPORT
+        if should_start_manga_imports:
             try:
                 main_window._refresh_manga_import_button_state()
             except Exception:
                 pass
 
         def _kickoff_manga_import_after_show():
-            if not should_show_manga_button:
+            if not should_start_manga_imports:
                 return
             try:
                 manga_future = _start_manga_import_background()
@@ -27938,6 +27774,15 @@ if __name__ == "__main__":
 
         if splash_manager:
             splash_manager.close_splash()
+
+        if should_start_manga_imports:
+            try:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, _kickoff_manga_import_after_show)
+            except Exception:
+                # Last-resort fallback only; normal Qt startup must not block
+                # on manga imports before the main window is visible.
+                _kickoff_manga_import_after_show()
 
         try:
             if getattr(main_window, '_pending_glossary_mode_welcome', False):

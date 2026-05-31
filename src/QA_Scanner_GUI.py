@@ -7,8 +7,8 @@ import os
 import sys
 import re
 import json
-from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton, 
-                               QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, 
+from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton,
+                               QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
                                QRadioButton, QButtonGroup, QGroupBox, QComboBox,
                                QFileDialog, QMessageBox, QSizePolicy)
@@ -238,17 +238,17 @@ def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
     # Normalize names for comparison
     epub_norm = normalize_name_for_comparison(epub_name)
     folder_norm = normalize_name_for_comparison(folder_name)
-    
+
     # Direct match
     if epub_norm == folder_norm:
         return True
-    
+
     # Check if folder has common output suffixes that should be ignored
     output_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
     if custom_suffixes:
         custom_list = [s.strip() for s in custom_suffixes.split(',') if s.strip()]
         output_suffixes.extend(custom_list)
-    
+
     for suffix in output_suffixes:
         if folder_norm.endswith(suffix):
             folder_base = folder_norm[:-len(suffix)]
@@ -258,29 +258,29 @@ def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
             epub_base = epub_norm[:-len(suffix)]
             if epub_base == folder_norm:
                 return True
-    
+
     # Check for exact match with version numbers removed
     version_pattern = r'[\s_-]v\d+$'
     epub_no_version = re.sub(version_pattern, '', epub_norm)
     folder_no_version = re.sub(version_pattern, '', folder_norm)
-    
+
     if epub_no_version == folder_no_version and (epub_no_version != epub_norm or folder_no_version != folder_norm):
         return True
-    
+
     # STRICT NUMBER CHECK - all numbers must match exactly
     epub_numbers = re.findall(r'\d+', epub_name)
     folder_numbers = re.findall(r'\d+', folder_name)
-    
+
     if epub_numbers != folder_numbers:
         return False
-    
+
     # If we get here, numbers match, so check if the text parts are similar enough
     epub_text_only = re.sub(r'\d+', '', epub_norm).strip()
     folder_text_only = re.sub(r'\d+', '', folder_norm).strip()
-    
+
     if epub_numbers and folder_numbers:
         return epub_text_only == folder_text_only
-    
+
     return False
 
 
@@ -311,11 +311,11 @@ class QAScannerMixin:
     def _create_styled_checkbox(self, text):
         """Create a checkbox with all checkmarks disabled"""
         from PySide6.QtWidgets import QCheckBox
-        
+
         checkbox = QCheckBox(text)
         checkbox.setStyleSheet("""
-            QCheckBox { 
-                color: white; 
+            QCheckBox {
+                color: white;
             }
             QCheckBox::indicator {
                 background-image: none;
@@ -331,14 +331,14 @@ class QAScannerMixin:
             }
         """)
         return checkbox
-    
+
     def _create_styled_radio_button(self, text):
         """Create a radio button with consistent styling"""
         from PySide6.QtWidgets import QRadioButton
-        
+
         radio = QRadioButton(text)
         radio.setStyleSheet("""
-            QRadioButton { 
+            QRadioButton {
                 color: white;
                 font-family: Arial;
                 font-size: 10pt;
@@ -447,7 +447,7 @@ class QAScannerMixin:
             except Exception:
                 pass
             return False
-    
+
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
         # Removed loading screen - initialize directly for smoother experience
@@ -461,11 +461,11 @@ class QAScannerMixin:
                     self._autoscroll_delay_until = _time.time() + 0.6
             except Exception:
                 pass
-            
+
             if not self._lazy_load_modules():
                 self.append_log("❌ Failed to load QA scanner modules")
                 return
-                
+
             # Reset global cancel flags in case of a previous stop
             try:
                 import os
@@ -477,7 +477,7 @@ class QAScannerMixin:
                     unified_api_client._cancel_event.clear()
             except Exception:
                 pass
-            
+
             # Check for scan_html_folder in the global scope from translator_gui
             import sys
             translator_module = sys.modules.get('translator_gui')
@@ -485,31 +485,31 @@ class QAScannerMixin:
                 self.append_log("❌ QA scanner module is not available")
                 QMessageBox.critical(None, "Module Error", "QA scanner module is not available.")
                 return
-            
+
             if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
                 self.stop_requested = True
-                
+
                 # Instantly kill in-flight API requests
                 try:
                     import unified_api_client
                     if hasattr(unified_api_client, 'hard_cancel_all'):
                         unified_api_client.hard_cancel_all()
-                        
+
                     # Stop multi-account key generation logic immediately as well
                     if hasattr(unified_api_client, 'UnifiedClient'):
                         unified_api_client.UnifiedClient._global_cancelled = True
                 except Exception:
                     pass
-                    
+
                 self.append_log("⛔ QA scan stop requested.")
                 return
-            
+
             self.append_log("✅ QA scanner initialized successfully")
-            
+
         except Exception as e:
             self.append_log(f"❌ Error initializing QA scanner: {e}")
             return
-        
+
         # Load and normalize QA scanner settings through the shared runtime so
         # post-translation scans and worker-side Failed multipass scans use the
         # same defaults, target-language handling, and word-count multipliers.
@@ -527,7 +527,7 @@ class QAScannerMixin:
         print(f"[DEBUG] QA Settings: {qa_settings}")
         print(f"[DEBUG] Target language: {qa_settings.get('target_language', 'NOT SET')}")
         print(f"[DEBUG] Word count check enabled: {qa_settings.get('check_word_count_ratio', False)}")
-        
+
         # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)
         selected_mode_value = mode_override if mode_override else None
         _qa_mode_dialog_reused = False
@@ -567,7 +567,7 @@ class QAScannerMixin:
                 screen_height = screen.height()
                 dialog_width = int(screen_width * 0.51)  # 50% of screen width
                 dialog_height = int(screen_height * 0.43)  # 45% of screen height
-                
+
                 mode_dialog = QDialog(self)
                 self._qa_mode_dialog = mode_dialog
                 mode_dialog._selected_mode_value = None
@@ -612,21 +612,21 @@ class QAScannerMixin:
                         mode_dialog.setWindowIcon(QIcon(ico_path))
                 except Exception:
                     pass
-        
+
         if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Set minimum size to prevent dialog from being too small (using ratios)
             # 35% width, 35% height for better content fit
             min_width = int(screen_width * 0.45)
             min_height = int(screen_height * 0.35)
             mode_dialog.setMinimumSize(min_width, min_height)
-            
+
             # Variables
             # selected_mode_value already set above
-            
+
             # Main container with constrained expansion
             main_layout = QVBoxLayout(mode_dialog)
             main_layout.setContentsMargins(10, 10, 10, 10)
-            
+
             # Content widget with padding
             content_widget = QWidget()
             content_layout = QVBoxLayout(content_widget)
@@ -672,27 +672,27 @@ class QAScannerMixin:
             quick_sample_spinbox.editingFinished.connect(lambda: _save_quick_sample(quick_sample_spinbox.value()))
             # Persist current value immediately to ensure config key exists
             _save_quick_sample(qs_initial)
-            
+
             # Title with subtitle
             title_label = QLabel("Select Detection Mode")
             title_label.setFont(QFont("Arial", 20, QFont.Bold))
             title_label.setStyleSheet("color: #f0f0f0;")
             title_label.setAlignment(Qt.AlignCenter)
             content_layout.addWidget(title_label)
-            
+
             subtitle_label = QLabel("Choose how sensitive the duplicate detection should be")
             subtitle_label.setFont(QFont("Arial", 11))
             subtitle_label.setStyleSheet("color: #d0d0d0;")
             subtitle_label.setAlignment(Qt.AlignCenter)
             content_layout.addWidget(subtitle_label)
             content_layout.addSpacing(8)
-            
+
             # Mode cards container
             modes_widget = QWidget()
             modes_layout = QGridLayout(modes_widget)
             modes_layout.setSpacing(8)
             content_layout.addWidget(modes_widget)
-                    
+
             mode_data = [
             {
                 "value": "ai-hunter",
@@ -771,7 +771,7 @@ class QAScannerMixin:
                 "recommendation": None
             }
         ]
-        
+
         # Restore original single-row layout (four cards across)
         if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Scale down the card contents on small screens while keeping the same 4-card row.
@@ -790,7 +790,7 @@ class QAScannerMixin:
             # Make each column share space evenly
             for col in range(len(mode_data)):
                 modes_layout.setColumnStretch(col, 1)
-            
+
             for idx, mi in enumerate(mode_data):
                 # Main card frame with initial background and border
                 card = QFrame()
@@ -807,13 +807,13 @@ class QAScannerMixin:
                 """)
                 card.setCursor(Qt.PointingHandCursor)
                 modes_layout.addWidget(card, 0, idx)
-                
+
                 # Content layout
                 card_layout = QVBoxLayout(card)
                 m = max(6, int(10 * ui_scale))
                 mb = max(3, int(5 * ui_scale))
                 card_layout.setContentsMargins(m, m, m, mb)
-                
+
                 # Icon/Emoji container with fixed height for alignment
                 icon_container = QWidget()
                 icon_container.setFixedHeight(icon_h)
@@ -821,7 +821,7 @@ class QAScannerMixin:
                 icon_container_layout = QVBoxLayout(icon_container)
                 icon_container_layout.setContentsMargins(0, 0, 0, 0)
                 icon_container_layout.setAlignment(Qt.AlignCenter)
-                
+
                 # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others (HiDPI, multi-path, sharp)
                 if mi["value"] == "ai-hunter":
                     icon_label = None
@@ -892,9 +892,9 @@ class QAScannerMixin:
                     emoji_label.setAlignment(Qt.AlignCenter)
                     emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
                     icon_container_layout.addWidget(emoji_label)
-                
+
                 card_layout.addWidget(icon_container)
-                
+
                 # Title
                 title_label = QLabel(mi["title"])
                 title_label.setFont(QFont("Arial", title_pt, QFont.Bold))
@@ -902,7 +902,7 @@ class QAScannerMixin:
                 title_label.setAlignment(Qt.AlignCenter)
                 title_label.setStyleSheet(f"background-color: transparent; color: white; border: none;")
                 card_layout.addWidget(title_label)
-                
+
                 # Subtitle
                 subtitle_label = QLabel(mi["subtitle"])
                 subtitle_label.setFont(QFont("Arial", subtitle_pt))
@@ -911,7 +911,7 @@ class QAScannerMixin:
                 subtitle_label.setStyleSheet(f"background-color: transparent; color: {mi['accent_color']}; border: none;")
                 card_layout.addWidget(subtitle_label)
                 card_layout.addSpacing(6)
-                
+
                 # Features
                 for feature in mi["features"]:
                     feature_label = QLabel(feature)
@@ -919,7 +919,7 @@ class QAScannerMixin:
                     feature_label.setWordWrap(True)
                     feature_label.setStyleSheet(f"background-color: transparent; color: #e0e0e0; border: none;")
                     card_layout.addWidget(feature_label)
-                
+
                 # Recommendation badge if present
                 if mi["recommendation"]:
                     card_layout.addSpacing(6)
@@ -934,9 +934,9 @@ class QAScannerMixin:
                     """)
                     rec_label.setAlignment(Qt.AlignCenter)
                     card_layout.addWidget(rec_label)
-                
+
                 card_layout.addStretch()
-                
+
                 # Click handler
                 def make_click_handler(mode_value):
                     def handler():
@@ -958,10 +958,10 @@ class QAScannerMixin:
                         mode_dialog._selected_mode_value = mode_value
                         mode_dialog.accept()
                     return handler
-                
+
                 # Make card clickable with mouse press event
                 card.mousePressEvent = lambda event, handler=make_click_handler(mi["value"]): handler()
-        
+
         if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Quick Scan sample size control
             qs_row = QWidget()
@@ -985,7 +985,7 @@ class QAScannerMixin:
             separator.setFixedHeight(1)
             content_layout.addWidget(separator)
             content_layout.addSpacing(10)
-            
+
             # Add settings/button layout
             button_layout = QHBoxLayout()
             button_layout.addStretch()
@@ -1010,11 +1010,11 @@ class QAScannerMixin:
             open_report_btn.clicked.connect(lambda: self.open_latest_qa_report())
             button_layout.addWidget(open_report_btn)
             button_layout.addSpacing(10)
-            
+
             def show_qa_settings():
                 """Show QA Scanner settings dialog"""
                 self.show_qa_scanner_settings(mode_dialog, getattr(mode_dialog, "_qa_settings_ref", qa_settings))
-            
+
             # Auto-search checkbox
             if not hasattr(self, 'qa_auto_search_output_checkbox'):
                 self.qa_auto_search_output_checkbox = self._create_styled_checkbox("Auto-search output")
@@ -1023,23 +1023,23 @@ class QAScannerMixin:
                     self.config['qa_auto_search_output'] = checked
                     self.save_config(show_message=False)
                 self.qa_auto_search_save_handler = save_auto_search_state
-            
+
             # Always update checkbox state from current config
             # Block signals temporarily to prevent triggering save during programmatic update
             self.qa_auto_search_output_checkbox.blockSignals(True)
             self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
             self.qa_auto_search_output_checkbox.blockSignals(False)
-            
+
             # Connect or reconnect the signal handler
             try:
                 self.qa_auto_search_output_checkbox.toggled.disconnect()
             except:
                 pass  # No handler was connected
             self.qa_auto_search_output_checkbox.toggled.connect(self.qa_auto_search_save_handler)
-            
+
             button_layout.addWidget(self.qa_auto_search_output_checkbox)
             button_layout.addSpacing(10)
-            
+
             settings_btn = QPushButton("⚙️  Scanner Settings")
             settings_btn.setMinimumWidth(140)
             settings_btn.setStyleSheet("""
@@ -1057,7 +1057,7 @@ class QAScannerMixin:
             settings_btn.clicked.connect(show_qa_settings)
             button_layout.addWidget(settings_btn)
             button_layout.addSpacing(10)
-            
+
             cancel_btn = QPushButton("Cancel")
             cancel_btn.setMinimumWidth(100)
             cancel_btn.setStyleSheet("""
@@ -1074,17 +1074,17 @@ class QAScannerMixin:
             """)
             cancel_btn.clicked.connect(lambda: [setattr(mode_dialog, "_selected_mode_value", None), mode_dialog.reject()])
             button_layout.addWidget(cancel_btn)
-            
+
             button_layout.addStretch()
             content_layout.addLayout(button_layout)
-            
+
             # Handle window close (X button)
             def on_close():
                 nonlocal selected_mode_value
                 selected_mode_value = None
                 mode_dialog._selected_mode_value = None
             mode_dialog.rejected.connect(on_close)
-            
+
             # Show dialog non-modally and wait for result using local event loop
             # This allows interaction with the main window while waiting
             try:
@@ -1100,9 +1100,9 @@ class QAScannerMixin:
                 mode_dialog.finished.disconnect(loop.quit)
             except Exception:
                 pass
-            
+
             result = mode_dialog.result()
-            
+
             # Check if user canceled or selected a mode
             if result == QDialog.Rejected or selected_mode_value is None:
                 self.append_log("⚠️ QA scan canceled.")
@@ -1141,7 +1141,7 @@ class QAScannerMixin:
                 return
 
         # End of optional mode dialog
-        
+
         # Show custom settings dialog if custom mode is selected
         # BUT skip the dialog if non_interactive=True (e.g., post-translation scan)
         if selected_mode_value == "custom" and not non_interactive:
@@ -1191,26 +1191,26 @@ class QAScannerMixin:
                     custom_dialog.setWindowIcon(QIcon(ico_path))
             except Exception:
                 pass
-            
+
             # Main layout
             dialog_layout = QVBoxLayout(custom_dialog)
-            
+
             # Scroll area
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            
+
             # Scrollable content widget
             scroll_widget = QWidget()
             scroll_layout = QVBoxLayout(scroll_widget)
             scroll.setWidget(scroll_widget)
             dialog_layout.addWidget(scroll)
-            
+
             # Variables for custom settings (using native Python values instead of tk vars)
             # Load saved settings from config if they exist
             saved_custom_settings = self.config.get('qa_scanner_settings', {}).get('custom_mode_settings', {})
-            
+
             # Default values
             custom_settings = {
                 'similarity': 85,
@@ -1224,7 +1224,7 @@ class QAScannerMixin:
                 'min_text_length': 500,
                 'min_duplicate_word_count': 500
             }
-            
+
             # Override with saved settings if they exist
             if saved_custom_settings:
                 # Load threshold values (they're stored as decimals, need to convert to percentages)
@@ -1235,23 +1235,23 @@ class QAScannerMixin:
                     custom_settings['structural'] = int(saved_thresholds.get('structural', 0.90) * 100)
                     custom_settings['word_overlap'] = int(saved_thresholds.get('word_overlap', 0.75) * 100)
                     custom_settings['minhash_threshold'] = int(saved_thresholds.get('minhash_threshold', 0.80) * 100)
-                
+
                 # Load other settings
                 custom_settings['consecutive_chapters'] = saved_custom_settings.get('consecutive_chapters', 2)
                 custom_settings['check_all_pairs'] = saved_custom_settings.get('check_all_pairs', False)
                 custom_settings['sample_size'] = saved_custom_settings.get('sample_size', 3000)
                 custom_settings['min_text_length'] = saved_custom_settings.get('min_text_length', 500)
-                
+
                 self.append_log("📥 Loaded saved custom mode settings from config")
-            
+
             # Store widget references
             custom_widgets = {}
-            
+
             # Title with icons on both sides
             title_container = QWidget()
             title_layout = QHBoxLayout(title_container)
             title_layout.setContentsMargins(0, 0, 0, 0)
-            
+
             # Left icon
             left_icon_label = QLabel()
             try:
@@ -1265,13 +1265,13 @@ class QAScannerMixin:
                         left_icon_label.setStyleSheet("background-color: transparent; border: none;")
             except Exception:
                 pass
-            
+
             # Title text
             title_label = QLabel("Configure Custom Detection Settings")
             title_label.setFont(QFont('Arial', 20, QFont.Bold))
             title_label.setAlignment(Qt.AlignCenter)
             title_label.setStyleSheet("background-color: transparent; border: none;")
-            
+
             # Right icon
             right_icon_label = QLabel()
             try:
@@ -1285,7 +1285,7 @@ class QAScannerMixin:
                         right_icon_label.setStyleSheet("background-color: transparent; border: none;")
             except Exception:
                 pass
-            
+
             # Add to layout with proper spacing
             title_layout.addStretch()
             title_layout.addWidget(left_icon_label)
@@ -1294,17 +1294,17 @@ class QAScannerMixin:
             title_layout.addSpacing(15)
             title_layout.addWidget(right_icon_label)
             title_layout.addStretch()
-            
+
             scroll_layout.addWidget(title_container)
             scroll_layout.addSpacing(20)
-            
+
             # Detection Thresholds Section
             threshold_group = QGroupBox("Detection Thresholds (%)")
             threshold_group.setFont(QFont('Arial', 12, QFont.Bold))
             threshold_layout = QVBoxLayout(threshold_group)
             threshold_layout.setContentsMargins(25, 25, 25, 25)
             scroll_layout.addWidget(threshold_group)
-            
+
             threshold_descriptions = {
                 'similarity': ('Text Similarity', 'Character-by-character comparison'),
                 'semantic': ('Semantic Analysis', 'Meaning and context matching'),
@@ -1312,32 +1312,32 @@ class QAScannerMixin:
                 'word_overlap': ('Word Overlap', 'Common words between texts'),
                 'minhash_threshold': ('MinHash Similarity', 'Fast approximate matching')
             }
-            
+
             # Create percentage labels dictionary to store references
             percentage_labels = {}
-            
+
             for setting_key, (label_text, description) in threshold_descriptions.items():
                 # Container for each threshold
                 row_widget = QWidget()
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 8, 0, 8)
-                
+
                 # Left side - labels
                 label_widget = QWidget()
                 label_layout = QVBoxLayout(label_widget)
                 label_layout.setContentsMargins(0, 0, 0, 0)
-                
+
                 main_label = QLabel(f"{label_text} - {description}:")
                 main_label.setFont(QFont('Arial', 11))
                 label_layout.addWidget(main_label)
                 label_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                 row_layout.addWidget(label_widget)
-                
+
                 # Right side - slider and percentage
                 slider_widget = QWidget()
                 slider_layout = QHBoxLayout(slider_widget)
                 slider_layout.setContentsMargins(20, 0, 0, 0)
-                
+
                 # Create slider
                 slider = QSlider(Qt.Horizontal)
                 slider.setMinimum(10)
@@ -1347,7 +1347,7 @@ class QAScannerMixin:
                 # Disable mousewheel scrolling on slider
                 slider.wheelEvent = lambda event: event.ignore()
                 slider_layout.addWidget(slider)
-                
+
                 # Percentage label (shows current value)
                 percentage_label = QLabel(f"{custom_settings[setting_key]}%")
                 percentage_label.setFont(QFont('Arial', 12, QFont.Bold))
@@ -1355,42 +1355,42 @@ class QAScannerMixin:
                 percentage_label.setAlignment(Qt.AlignRight)
                 slider_layout.addWidget(percentage_label)
                 percentage_labels[setting_key] = percentage_label
-                
+
                 row_layout.addWidget(slider_widget)
                 threshold_layout.addWidget(row_widget)
-                
+
                 # Store slider widget reference
                 custom_widgets[setting_key] = slider
-                
+
                 # Update percentage label when slider moves
                 def create_update_function(key, label, settings_dict):
                     def update_percentage(value):
                         settings_dict[key] = value
                         label.setText(f"{value}%")
                     return update_percentage
-                
+
                 # Connect slider to update function
                 update_func = create_update_function(setting_key, percentage_label, custom_settings)
                 slider.valueChanged.connect(update_func)
-            
+
             scroll_layout.addSpacing(15)
-            
+
             # Processing Options Section
             options_group = QGroupBox("Processing Options")
             options_group.setFont(QFont('Arial', 12, QFont.Bold))
             options_layout = QVBoxLayout(options_group)
             options_layout.setContentsMargins(20, 20, 20, 20)
             scroll_layout.addWidget(options_group)
-            
+
             # Consecutive chapters option with spinbox
             consec_widget = QWidget()
             consec_layout = QHBoxLayout(consec_widget)
             consec_layout.setContentsMargins(0, 5, 0, 5)
-            
+
             consec_label = QLabel("Consecutive chapters to check:")
             consec_label.setFont(QFont('Arial', 11))
             consec_layout.addWidget(consec_label)
-            
+
             consec_spinbox = QSpinBox()
             consec_spinbox.setMinimum(1)
             consec_spinbox.setMaximum(10)
@@ -1402,16 +1402,16 @@ class QAScannerMixin:
             consec_layout.addStretch()
             options_layout.addWidget(consec_widget)
             custom_widgets['consecutive_chapters'] = consec_spinbox
-            
+
             # Sample size option
             sample_widget = QWidget()
             sample_layout = QHBoxLayout(sample_widget)
             sample_layout.setContentsMargins(0, 5, 0, 5)
-            
+
             sample_label = QLabel("Sample size for comparison (characters):")
             sample_label.setFont(QFont('Arial', 11))
             sample_layout.addWidget(sample_label)
-            
+
             # Sample size spinbox with larger range
             # -1 = use all characters (no downsampling)
             #  0 = disable duplicate detection
@@ -1429,16 +1429,16 @@ class QAScannerMixin:
             sample_layout.addStretch()
             options_layout.addWidget(sample_widget)
             custom_widgets['sample_size'] = sample_spinbox
-            
+
             # Minimum text length option
             min_length_widget = QWidget()
             min_length_layout = QHBoxLayout(min_length_widget)
             min_length_layout.setContentsMargins(0, 5, 0, 5)
-            
+
             min_length_label = QLabel("Minimum text length to process (characters):")
             min_length_label.setFont(QFont('Arial', 11))
             min_length_layout.addWidget(min_length_label)
-            
+
             # Minimum length spinbox
             min_length_spinbox = QSpinBox()
             min_length_spinbox.setMinimum(100)
@@ -1452,23 +1452,23 @@ class QAScannerMixin:
             min_length_layout.addStretch()
             options_layout.addWidget(min_length_widget)
             custom_widgets['min_text_length'] = min_length_spinbox
-            
+
             # Check all file pairs option
             check_all_checkbox = self._create_styled_checkbox("Check all file pairs (slower but more thorough)")
             check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
             options_layout.addWidget(check_all_checkbox)
             custom_widgets['check_all_pairs'] = check_all_checkbox
-            
+
             scroll_layout.addStretch()
-            
+
             # Create fixed bottom button section (outside scroll area)
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
             button_layout.setContentsMargins(20, 15, 20, 15)
-            
+
             # Flag to track if settings were saved
             settings_saved = False
-            
+
             def save_custom_settings():
                 """Save custom settings and close dialog for scan"""
                 nonlocal settings_saved
@@ -1488,7 +1488,7 @@ class QAScannerMixin:
                 settings_saved = True
                 self.append_log("✅ Custom detection settings saved")
                 custom_dialog.accept()
-            
+
             def save_settings_to_config():
                 """Save settings to config.json without closing dialog"""
                 try:
@@ -1506,37 +1506,37 @@ class QAScannerMixin:
                         'sample_size': custom_widgets['sample_size'].value(),
                         'min_text_length': custom_widgets['min_text_length'].value()
                     }
-                    
+
                     # Ensure qa_scanner_settings exists in config
                     if 'qa_scanner_settings' not in self.config:
                         self.config['qa_scanner_settings'] = {}
-                    
+
                     # Update config with current custom settings - FORCE UPDATE
                     self.config['qa_scanner_settings']['custom_mode_settings'] = current_custom_settings
-                    
+
                     # Also update qa_settings dict for this session
                     qa_settings['custom_mode_settings'] = current_custom_settings
-                    
+
                     # Write config directly to ensure persistence
                     import json
                     from api_key_encryption import encrypt_config
-                    
+
                     google_creds_path = self.config.get('google_cloud_credentials')
                     encrypted_config = encrypt_config(self.config)
                     if google_creds_path:
                         encrypted_config['google_cloud_credentials'] = google_creds_path
-                    
+
                     # Get config file path
                     config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-                    
+
                     # Write to file
                     with open(config_file, 'w', encoding='utf-8') as f:
                         json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
-                    
+
                     # Show success message
                     self.append_log("✅ Custom settings saved to config.json")
                     self.append_log(f"💾 Saved thresholds: similarity={current_custom_settings['thresholds']['similarity']:.0%}, semantic={current_custom_settings['thresholds']['semantic']:.0%}, structural={current_custom_settings['thresholds']['structural']:.0%}")
-                    
+
                     # Animate the save button
                     original_text = save_config_btn.text()
                     original_style = save_config_btn.styleSheet()
@@ -1550,22 +1550,22 @@ class QAScannerMixin:
                             font-weight: bold;
                         }
                     """)
-                    
+
                     # Reset button after delay
                     def reset_button():
                         save_config_btn.setText(original_text)
                         save_config_btn.setStyleSheet(original_style)
-                    
+
                     QTimer.singleShot(1500, reset_button)
-                    
+
                 except Exception as e:
                     self.append_log(f"❌ Error saving settings: {e}")
                     import traceback
                     traceback.print_exc()
-            
+
             def reset_to_defaults():
                 """Reset all values to default settings"""
-                reply = QMessageBox.question(custom_dialog, "Reset to Defaults", 
+                reply = QMessageBox.question(custom_dialog, "Reset to Defaults",
                                            "Reset all values to default settings?",
                                            QMessageBox.Yes | QMessageBox.No)
                 if reply == QMessageBox.Yes:
@@ -1579,18 +1579,18 @@ class QAScannerMixin:
                     custom_widgets['sample_size'].setValue(3000)
                     custom_widgets['min_text_length'].setValue(500)
                     self.append_log("ℹ️ Settings reset to defaults")
-            
+
             # Flag to prevent recursive cancel calls
             cancel_in_progress = False
-            
+
             def cancel_settings():
                 """Cancel without saving"""
                 nonlocal settings_saved, cancel_in_progress
-                
+
                 # Prevent recursive calls
                 if cancel_in_progress:
                     return
-                    
+
                 cancel_in_progress = True
                 try:
                     # Disconnect signal before rejecting to prevent loop
@@ -1601,20 +1601,20 @@ class QAScannerMixin:
                     custom_dialog.reject()
                 finally:
                     cancel_in_progress = False
-            
+
             # Create buttons for bottom section
             cancel_btn = QPushButton("Cancel")
             cancel_btn.setMinimumWidth(140)
             cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 12px; font-weight: bold;")
             cancel_btn.clicked.connect(cancel_settings)
             button_layout.addWidget(cancel_btn)
-            
+
             reset_btn = QPushButton("Reset to Default")
             reset_btn.setMinimumWidth(140)
             reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 6px 12px; font-weight: bold;")
             reset_btn.clicked.connect(reset_to_defaults)
             button_layout.addWidget(reset_btn)
-            
+
             # Save Settings button (saves to config.json)
             save_config_btn = QPushButton("💾 Save Settings")
             save_config_btn.setMinimumWidth(140)
@@ -1632,23 +1632,23 @@ class QAScannerMixin:
             """)
             save_config_btn.clicked.connect(save_settings_to_config)
             button_layout.addWidget(save_config_btn)
-            
+
             start_btn = QPushButton("Start Scan")
             start_btn.setMinimumWidth(140)
             start_btn.setStyleSheet("background-color: #28a745; color: white; padding: 6px 12px; font-weight: bold;")
             start_btn.clicked.connect(save_custom_settings)
             button_layout.addWidget(start_btn)
-            
+
             # Add button widget to main layout (not scroll layout)
             dialog_layout.addWidget(button_widget)
-            
+
             # Handle window close properly - treat as cancel
             # Store the connection so we can disconnect it later if needed
             rejected_connection = custom_dialog.rejected.connect(cancel_settings)
-            
+
             # Show dialog and wait for result
             result = custom_dialog.exec()
-            
+
             # If user cancelled at this dialog, cancel the whole scan
             if not settings_saved:
                 self.append_log("⚠️ QA scan canceled - no custom settings were saved.")
@@ -1657,7 +1657,7 @@ class QAScannerMixin:
         check_word_count = qa_settings.get('check_word_count_ratio', False)
         epub_files_to_scan = []
         primary_epub_path = None
-        
+
         # Determine if text file mode is enabled
         text_file_mode = self.config.get('qa_text_file_mode', False)
         if hasattr(self, 'qa_text_file_mode_checkbox'):
@@ -1665,7 +1665,7 @@ class QAScannerMixin:
                 text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
             except Exception:
                 pass
-        
+
         # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
         # First check if current selection actually contains source files (EPUB, TXT, PDF, or MD)
         current_epub_files = []
@@ -1677,7 +1677,7 @@ class QAScannerMixin:
             pdf_count = len([f for f in current_epub_files if f.lower().endswith('.pdf')])
             md_count = len([f for f in current_epub_files if f.lower().endswith('.md')])
             print(f"[DEBUG] Current selection contains {epub_count} EPUB files, {txt_count} TXT files, {pdf_count} PDF files, and {md_count} MD files")
-        
+
         if current_epub_files:
             # Use source files from current selection
             epub_files_to_scan = current_epub_files
@@ -1686,15 +1686,15 @@ class QAScannerMixin:
             # No source files in current selection - check if we have stored path
             primary_epub_path = self.get_current_epub_path()
             print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
-            
+
             if primary_epub_path:
                 epub_files_to_scan = [primary_epub_path]
                 print(f"[DEBUG] Using stored source file for auto-search")
-        
+
         # Now handle word count specific logic if enabled
         if check_word_count:
             print("[DEBUG] Word count check is enabled, validating EPUB availability...")
-            
+
             # Check if we have source files for word count analysis
             if not epub_files_to_scan:
                 # No source files available for word count analysis
@@ -1709,7 +1709,7 @@ class QAScannerMixin:
                                       "• CANCEL - Cancel the scan")
                 msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
                 result = msg.exec()
-                
+
                 if result == QMessageBox.Cancel:
                     self.append_log("⚠️ QA scan canceled.")
                     return
@@ -1728,7 +1728,7 @@ class QAScannerMixin:
                             "",
                             "EPUB files (*.epub);;All files (*.*)"
                         )
-                    
+
                     if not epub_path:
                         retry = QMessageBox.question(
                             self,
@@ -1737,7 +1737,7 @@ class QAScannerMixin:
                             "Do you want to continue the scan without word count analysis?",
                             QMessageBox.Yes | QMessageBox.No
                         )
-                        
+
                         if retry == QMessageBox.No:
                             self.append_log("⚠️ QA scan canceled.")
                             return
@@ -1766,9 +1766,9 @@ class QAScannerMixin:
                 auto_search_enabled = bool(self.qa_auto_search_output_checkbox.isChecked())
             except Exception:
                 pass
-        
+
         # Debug output for scanning phase removed
-        
+
         if auto_search_enabled and epub_files_to_scan:
             # Process each EPUB file to find its corresponding output folder
             self.append_log(f"🔍 DEBUG: Auto-search running with {len(epub_files_to_scan)} EPUB files")
@@ -1781,12 +1781,12 @@ class QAScannerMixin:
                     epub_parent_dir = os.path.dirname(os.path.abspath(epub_path))
                     current_dir = os.getcwd()
                     script_dir = os.path.dirname(os.path.abspath(__file__))
-                    
+
                     self.append_log(f"🔍 DEBUG: EPUB base name: '{epub_base}'")
                     self.append_log(f"🔍 DEBUG: EPUB parent dir: {epub_parent_dir}")
                     self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
                     self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
-                    
+
                     # Check the most common locations in order of priority
                     # epub_parent_dir first — the translation engine creates output
                     # folders next to the input file
@@ -1796,18 +1796,18 @@ class QAScannerMixin:
                         os.path.join(script_dir, epub_base),         # src directory
                         os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
                     ]
-                    
+
                     # Add output directory override if configured
                     override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
                     if override_dir:
                         candidates.insert(0, os.path.join(override_dir, epub_base))
                         self.append_log(f"🔍 DEBUG: Checking override dir: {override_dir}")
-                    
+
                     folder_found = None
                     for i, candidate in enumerate(candidates):
                         exists = os.path.isdir(candidate)
                         self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
-                        
+
                         if exists:
                             # Verify the folder actually contains appropriate files (HTML/XHTML or TXT)
                             try:
@@ -1819,11 +1819,11 @@ class QAScannerMixin:
                                         text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
                                     except Exception:
                                         pass
-                                
+
                                 # Auto-detect text file mode if source file is .txt or .pdf
                                 if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
                                     text_file_mode = True
-                                
+
                                 if text_file_mode:
                                     # For text mode, check for both .txt AND .html files (PDFs generate .html)
                                     target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
@@ -1831,7 +1831,7 @@ class QAScannerMixin:
                                 else:
                                     target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
                                     file_type = "HTML/XHTML"
-                                
+
                                 if target_files:
                                     folder_found = candidate
                                     self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
@@ -1841,25 +1841,25 @@ class QAScannerMixin:
                                     self.append_log(f"  [{epub_base}] Folder exists but contains no {file_type} files: {candidate}")
                             except Exception as e:
                                 self.append_log(f"  [{epub_base}] Error checking files in {candidate}: {e}")
-                    
+
                     if folder_found:
                         folders_to_scan.append(folder_found)
                         self.append_log(f"🔍 DEBUG: Added to folders_to_scan: {folder_found}")
                     else:
                         self.append_log(f"  ⚠️ No output folder found for {epub_base}")
-                            
+
                 except Exception as e:
                     self.append_log(f"  ❌ Error processing {epub_base}: {e}")
-            
+
             self.append_log(f"🔍 DEBUG: Final folders_to_scan: {folders_to_scan}")
-        
+
         # Fallback behavior - if no folders found through auto-detection
         if not folders_to_scan:
             if auto_search_enabled:
                 # Auto-search failed, offer manual selection as fallback
                 self.append_log("⚠️ Auto-search enabled but no matching output folder found")
                 self.append_log("📁 Falling back to manual folder selection...")
-                
+
                 selected_folder = QFileDialog.getExistingDirectory(
                     self,
                     "Auto-search failed - Select Output Folder to Scan"
@@ -1867,7 +1867,7 @@ class QAScannerMixin:
                 if not selected_folder:
                     self.append_log("⚠️ QA scan canceled - no folder selected.")
                     return
-                
+
                 # Verify the selected folder contains scannable files
                 try:
                     files = os.listdir(selected_folder)
@@ -1878,7 +1878,7 @@ class QAScannerMixin:
                             text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
                         except Exception:
                             pass
-                    
+
                     if text_file_mode:
                         # For text mode, check for both .txt AND .html files (PDFs generate .html)
                         target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
@@ -1886,7 +1886,7 @@ class QAScannerMixin:
                     else:
                         target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
                         file_type = "HTML/XHTML"
-                    
+
                     if target_files:
                         folders_to_scan.append(selected_folder)
                         self.append_log(f"✓ Manual selection: {os.path.basename(selected_folder)} ({len(target_files)} {file_type} files)")
@@ -1906,7 +1906,7 @@ class QAScannerMixin:
                         expected_folder = os.path.join(epub_parent_dir, epub_base)
                         self.append_log(f"  [{epub_base}] Expected: {expected_folder}")
                         self.append_log(f"  [{epub_base}] Exists: {os.path.isdir(expected_folder)}")
-                    
+
                     # List actual folders in EPUB parent directory for debugging
                     try:
                         epub_parent_dir = os.path.dirname(os.path.abspath(epub_files_to_scan[0]))
@@ -1917,15 +1917,15 @@ class QAScannerMixin:
                         pass
                 else:
                     self.append_log("⚠️ Scanning phase: No EPUB files available for folder detection")
-                
+
                 self.append_log("⚠️ Skipping scan")
                 return
-            
+
             # Clean single folder selection - no messageboxes, no harassment
             self.append_log("📁 Select folder to scan...")
-            
+
             folders_to_scan = []
-            
+
             # Simply select one folder - clean and simple
             # Adjust caption to reflect current file mode
             text_file_mode = self.config.get('qa_text_file_mode', False)
@@ -1943,13 +1943,13 @@ class QAScannerMixin:
             if not selected_folder:
                 self.append_log("⚠️ QA scan canceled - no folder selected.")
                 return
-            
+
             folders_to_scan.append(selected_folder)
             self.append_log(f"  ✓ Selected folder: {os.path.basename(selected_folder)}")
             self.append_log(f"📁 Single folder scan mode - scanning: {os.path.basename(folders_to_scan[0])}")
 
         mode = selected_mode_value
-        
+
         # Initialize epub_path for use in run_scan() function
         # This ensures epub_path is always defined even when manually selecting folders
         epub_path = None
@@ -1967,13 +1967,13 @@ class QAScannerMixin:
             self.append_log(f"📚 Using primary EPUB: {os.path.basename(epub_path)}")
         else:
             self.append_log("ℹ️ No EPUB file configured (word count analysis will be disabled if needed)")
-        
+
         # Build lookup map: basename (no extension) -> full path for multi-EPUB matching
         _epub_basename_map = {}
         for _ef in epub_files_to_scan:
             _eb = os.path.splitext(os.path.basename(_ef))[0]
             _epub_basename_map[_eb] = _ef
-        
+
         # Initialize global selected_files that applies to single-folder scans
         global_selected_files = None
         if len(folders_to_scan) == 1 and preselected_files:
@@ -1982,50 +1982,50 @@ class QAScannerMixin:
             # Scan all files in the folder - no messageboxes asking about specific files
             # User can set up file preselection if they need specific files
             pass
-        
+
         # Log bulk scan start
         if len(folders_to_scan) == 1:
             self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folders_to_scan[0]}")
         else:
             self.append_log(f"🔍 Starting bulk QA scan in {mode.upper()} mode for {len(folders_to_scan)} folders")
-        
+
         self.stop_requested = False
- 
+
         def run_scan():
             try:
                 from qa_scan_runtime import run_qa_scan_path
-                
+
                 # Loop through all selected folders for bulk scanning
                 successful_scans = 0
                 failed_scans = 0
-                
+
                 for i, current_folder in enumerate(folders_to_scan):
                     if self.stop_requested:
                         self.append_log(f"⚠️ Bulk scan stopped by user at folder {i+1}/{len(folders_to_scan)}")
                         break
-                    
+
                     folder_name = os.path.basename(current_folder)
                     if len(folders_to_scan) > 1:
                         self.append_log(f"\n📁 [{i+1}/{len(folders_to_scan)}] Scanning folder: {folder_name}")
-                    
+
                     # Determine the correct EPUB path for this specific folder
                     current_epub_path = epub_path
                     current_qa_settings = qa_settings.copy()
-                    
+
                     # Any EPUB-dependent check needs per-folder matching
                     _needs_epub = (
                         current_qa_settings.get('check_word_count_ratio', False)
                         or current_qa_settings.get('check_ai_truncation_detection', False)
                         or current_qa_settings.get('check_silent_truncation', False)
                     )
-                    
+
                     # For bulk scanning, try to find a matching EPUB for each folder
                     # First try the user-selected EPUB list, then fall back to filesystem search
                     if len(folders_to_scan) > 1 and _needs_epub:
                         # Try to find EPUB file matching this specific folder
                         folder_basename = os.path.basename(current_folder.rstrip('/\\'))
                         self.append_log(f"  🔍 Searching for EPUB matching folder: {folder_basename}")
-                        
+
                         # --- Priority 1: Match against user-selected EPUB list ---
                         folder_epub_path = None
                         if _epub_basename_map:
@@ -2044,27 +2044,27 @@ class QAScannerMixin:
                                 if stripped_name != folder_basename and stripped_name in _epub_basename_map:
                                     folder_epub_path = _epub_basename_map[stripped_name]
                                     self.append_log(f"      ✅ Matched from selected files (suffix-stripped): {os.path.basename(folder_epub_path)}")
-                        
+
                         # --- Priority 2: Fall back to filesystem search ---
                         if not folder_epub_path:
                             # Look for EPUB in various locations
                             folder_parent = os.path.dirname(current_folder)
-                            
+
                             # Simple exact matching first, with minimal suffix handling
                             base_name = folder_basename
-                            
+
                             # Only handle the most common output suffixes
                             common_suffixes = ['_output', '_translated', '_en']
                             for suffix in common_suffixes:
                                 if base_name.endswith(suffix):
                                     base_name = base_name[:-len(suffix)]
                                     break
-                            
+
                             # Simple EPUB search - focus on exact matching
                             search_names = [folder_basename]  # Start with exact folder name
                             if base_name != folder_basename:  # Add base name only if different
                                 search_names.append(base_name)
-                            
+
                             potential_epub_paths = [
                                 # Most common locations in order of priority
                                 os.path.join(folder_parent, f"{folder_basename}.epub"),  # Same directory as output folder
@@ -2072,14 +2072,14 @@ class QAScannerMixin:
                                 os.path.join(current_folder, f"{folder_basename}.epub"), # Inside the output folder
                                 os.path.join(current_folder, f"{base_name}.epub"),       # Inside with base name
                             ]
-                            
+
                             # Find the first existing EPUB
                             for potential_path in potential_epub_paths:
                                 if os.path.isfile(potential_path):
                                     folder_epub_path = potential_path
                                     self.append_log(f"      Found matching EPUB on disk: {os.path.basename(potential_path)}")
                                     break
-                        
+
                         if folder_epub_path:
                             current_epub_path = folder_epub_path
                             if len(folders_to_scan) > 1:  # Only log for bulk scans
@@ -2104,19 +2104,19 @@ class QAScannerMixin:
                                 self.append_log(f"  📖 Using global EPUB: {os.path.basename(current_epub_path)} (no folder-specific EPUB found)")
                             else:
                                 current_epub_path = None
-                            
+
                             # Disable all EPUB-dependent checks when no matching EPUB is found
                             if not current_epub_path:
                                 current_qa_settings = current_qa_settings.copy()
                                 current_qa_settings['check_word_count_ratio'] = False
                                 current_qa_settings['check_ai_truncation_detection'] = False
                                 current_qa_settings['check_silent_truncation'] = False
-                    
+
                     # Check for EPUB/folder name mismatch
                     if current_epub_path and current_qa_settings.get('check_word_count_ratio', False) and current_qa_settings.get('warn_name_mismatch', True):
                         epub_name = os.path.splitext(os.path.basename(current_epub_path))[0]
                         folder_name_for_check = os.path.basename(current_folder.rstrip('/\\'))
-                        
+
                         if not check_epub_folder_match(epub_name, folder_name_for_check, current_qa_settings.get('custom_output_suffixes', '')):
                             if len(folders_to_scan) == 1:
                                 # Interactive dialog for single folder scans
@@ -2133,7 +2133,7 @@ class QAScannerMixin:
                                                       "• CANCEL - Cancel the scan")
                                 msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
                                 result = msg.exec()
-                                
+
                                 if result == QMessageBox.Cancel:
                                     self.append_log("⚠️ QA scan canceled due to EPUB/folder mismatch.")
                                     return
@@ -2145,7 +2145,7 @@ class QAScannerMixin:
                                             text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
                                         except Exception:
                                             pass
-                                    
+
                                     if text_file_mode:
                                         new_epub_path, _ = QFileDialog.getOpenFileName(
                                             self,
@@ -2160,7 +2160,7 @@ class QAScannerMixin:
                                             "",
                                             "EPUB files (*.epub);;All files (*.*)"
                                         )
-                                    
+
                                     if new_epub_path:
                                         current_epub_path = new_epub_path
                                         self.selected_epub_path = new_epub_path
@@ -2187,19 +2187,19 @@ class QAScannerMixin:
                             else:
                                 # For bulk scans, just warn and continue
                                 self.append_log(f"  ⚠️ Warning: EPUB/folder name mismatch - {epub_name} vs {folder_name_for_check}")
-                    
+
                     try:
                         # Determine selected_files for this folder
                         current_selected_files = None
                         if global_selected_files and len(folders_to_scan) == 1:
                             current_selected_files = global_selected_files
-                        
+
                         # Auto-detect PDF source file if not already set
                         # Check if the folder name matches a .pdf file in the parent directory
                         if not current_epub_path or not os.path.exists(current_epub_path):
                             folder_basename = os.path.basename(current_folder)
                             parent_dir = os.path.dirname(current_folder)
-                            
+
                             # Try to find a matching PDF file
                             potential_pdf = os.path.join(parent_dir, folder_basename + ".pdf")
                             if os.path.exists(potential_pdf):
@@ -2211,13 +2211,13 @@ class QAScannerMixin:
                                 if os.path.exists(potential_pdf_alt):
                                     current_epub_path = potential_pdf_alt
                                     self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf_alt)}")
-                        
+
                         # Run through the shared configured QA scan path used by worker-side scans too.
                         # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path.
                         run_qa_scan_path(
-                            current_folder, 
-                            log=self.append_log, 
-                            stop_flag=lambda: self.stop_requested, 
+                            current_folder,
+                            log=self.append_log,
+                            stop_flag=lambda: self.stop_requested,
                             mode=mode,
                             qa_settings=current_qa_settings,
                             epub_path=current_epub_path,
@@ -2225,7 +2225,7 @@ class QAScannerMixin:
                             text_file_mode=None,
                             owner=self,
                         )
-                        
+
                         successful_scans += 1
                         # Record last generated report path for quick access
                         report_path = os.path.join(current_folder, "validation_results.html")
@@ -2233,18 +2233,18 @@ class QAScannerMixin:
                             self.last_qa_report_path = report_path
                         if len(folders_to_scan) > 1:
                             self.append_log(f"✅ Folder '{folder_name}' scan completed successfully")
-                    
+
                     except Exception as folder_error:
                         failed_scans += 1
                         self.append_log(f"❌ Folder '{folder_name}' scan failed: {folder_error}")
                         if len(folders_to_scan) == 1:
                             # Re-raise for single folder scans
                             raise
-                
+
                 # Final summary for bulk scans
                 if len(folders_to_scan) > 1:
                     self.append_log(f"\n📋 Bulk scan summary: {successful_scans} successful, {failed_scans} failed")
-                
+
                 # If show_stats is enabled, log cache statistics
                 if qa_settings.get('cache_show_stats', False):
                     from scan_html_folder import get_cache_info
@@ -2254,12 +2254,12 @@ class QAScannerMixin:
                         if info:  # Check if info exists
                             hit_rate = info.hits / (info.hits + info.misses) if (info.hits + info.misses) > 0 else 0
                             self.append_log(f"  {name}: {info.hits} hits, {info.misses} misses ({hit_rate:.1%} hit rate)")
-                
+
                 if len(folders_to_scan) == 1:
                     self.append_log("✅ QA scan completed successfully.")
                 else:
                     self.append_log("✅ Bulk QA scan completed.")
-    
+
             except Exception as e:
                 self.append_log(f"❌ QA scan error: {e}")
                 self.append_log(f"Traceback: {traceback.format_exc()}")
@@ -2273,7 +2273,7 @@ class QAScannerMixin:
                         pass
                 # Emit signal to update button (thread-safe)
                 self.thread_complete_signal.emit()
-        
+
         # Run via shared executor
         self._ensure_executor()
         if self.executor:
@@ -2291,7 +2291,7 @@ class QAScannerMixin:
         else:
             self.qa_thread = threading.Thread(target=run_scan, daemon=True)
             self.qa_thread.start()
-        
+
         # Update button IMMEDIATELY after starting thread (synchronous)
         self.update_run_button()
 
@@ -2343,7 +2343,7 @@ class QAScannerMixin:
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         # Set up icon path
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-        
+
         dialog.setStyleSheet("""
             QDialog {
                 background-color: #2d2d2d;
@@ -2412,33 +2412,7 @@ class QAScannerMixin:
         settings_width = int(screen.width() * 0.52)
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
-        first_paint_done = False
 
-        def pump_settings_open():
-            """Let the visible settings dialog paint while heavy sections build."""
-            nonlocal first_paint_done
-            if not show:
-                return
-            try:
-                dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
-                if not first_paint_done:
-                    try:
-                        layout = dialog.layout()
-                        if layout is not None:
-                            layout.activate()
-                    except Exception:
-                        pass
-                    dialog.setWindowOpacity(1.0)
-                    dialog.show()
-                    dialog.raise_()
-                    dialog.activateWindow()
-                    first_paint_done = True
-                app = QApplication.instance()
-                if app is not None:
-                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
-            except Exception:
-                pass
-        
         # Set window icon and prepare icon path for comboboxes
         try:
             base_dir = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
@@ -2451,16 +2425,16 @@ class QAScannerMixin:
                 dialog.setWindowIcon(QIcon(icon_path))
         except Exception:
             icon_path = os.path.join(os.getcwd(), 'Halgakos.ico')
-        
+
         # Main layout
         main_layout = QVBoxLayout(dialog)
-        
+
         # Scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
+
         # Scrollable content widget
         scroll_widget = QWidget()
         scroll_widget.setObjectName('scroll_widget')
@@ -2468,2496 +2442,2560 @@ class QAScannerMixin:
         scroll_layout.setContentsMargins(30, 20, 30, 20)
         scroll.setWidget(scroll_widget)
         main_layout.addWidget(scroll)
-        
-        # Helper function to disable mousewheel on spinboxes and comboboxes
-        def disable_wheel_event(widget):
-            widget.wheelEvent = lambda event: event.ignore()
 
-        # Word count multiplier defaults (factory) - character-based ratios
-        base_multiplier_defaults = {
-            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
-            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
-            'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
-            'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
-            'other': 1.0
-        }
-        # Merge current settings over factory defaults for initial display
-        wordcount_defaults = dict(base_multiplier_defaults)
-        user_mults = qa_settings.get('word_count_multipliers', {})
-        if isinstance(user_mults, dict):
-            wordcount_defaults.update(user_mults)
-        # Immutable factory defaults for reset
-        default_wordcount_defaults = dict(base_multiplier_defaults)
-        # Title
-        title_label = QLabel("QA Scanner Settings")
-        title_label.setFont(QFont('Arial', 24, QFont.Bold))
-        title_label.setAlignment(Qt.AlignCenter)
-        scroll_layout.addWidget(title_label)
-        scroll_layout.addSpacing(20)
-        
-        # Foreign Character Settings Section
-        foreign_group = QGroupBox("Foreign Character Detection")
-        foreign_group.setFont(QFont('Arial', 12, QFont.Bold))
-        foreign_layout = QVBoxLayout(foreign_group)
-        foreign_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(foreign_group)
+        loading_label = QLabel("Loading settings...")
+        loading_label.setFont(QFont('Arial', 11, QFont.Bold))
+        loading_label.setAlignment(Qt.AlignCenter)
+        loading_label.setStyleSheet("color: #b9c7d5; padding: 24px;")
+        scroll_layout.addWidget(loading_label)
 
-        # Source Language setting (for multiplier selection)
-        source_lang_widget = QWidget()
-        source_lang_layout = QHBoxLayout(source_lang_widget)
-        source_lang_layout.setContentsMargins(0, 0, 0, 6)
-
-        source_lang_label = QLabel("Source language (for word-count multiplier):")
-        source_lang_label.setFont(QFont('Arial', 10))
-        source_lang_layout.addWidget(source_lang_label)
-
-        source_language_options = [
-            'Auto', 'Chinese (Simplified)', 'Chinese (Traditional)',
-            'Japanese', 'Korean', 'English', 'Spanish', 'French', 'German',
-            'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi', 'Turkish',
-            'Hebrew', 'Thai', 'Other'
-        ]
-        source_lang_combo = QComboBox()
-        source_lang_combo.setEditable(True)
-        source_lang_combo.addItems(source_language_options)
-        source_lang_combo.setCurrentText(qa_settings.get('source_language', 'Auto').title())
-        source_lang_combo.setMinimumWidth(240)
-        disable_wheel_event(source_lang_combo)
-        source_lang_layout.addWidget(source_lang_combo)
-
-        source_lang_hint = QLabel("(Auto = detect via script/CJK heuristics)")
-        source_lang_hint.setFont(QFont('Arial', 9))
-        source_lang_hint.setStyleSheet("color: gray;")
-        source_lang_layout.addWidget(source_lang_hint)
-        source_lang_layout.addStretch()
-        foreign_layout.addWidget(source_lang_widget)
-
-        # Target Language setting
-        target_lang_widget = QWidget()
-        target_lang_layout = QHBoxLayout(target_lang_widget)
-        target_lang_layout.setContentsMargins(0, 0, 0, 10)
-
-        target_lang_label = QLabel("Target language:")
-        target_lang_label.setFont(QFont('Arial', 10))
-        target_lang_layout.addWidget(target_lang_label)
-
-        # Capitalize the stored value for display in combobox
-        stored_language = qa_settings.get('target_language', 'english')
-        display_language = stored_language.capitalize()
-        target_language_options = [
-            'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
-            'Russian', 'Arabic', 'Hindi', 'Chinese (Simplified)',
-            'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
-            'Hebrew', 'Thai'
-        ]
-
-        target_language_combo = QComboBox()
-        target_language_combo.setEditable(True)
-        target_language_combo.addItems(target_language_options)
-
-        target_language_combo.setMinimumWidth(360)
-        target_language_combo.setMinimumContentsLength(24)  # ensure popup and line edit stay wide
-        target_language_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        # Prefer the main GUI's target language for display if available
-        initial_display = self.config.get('output_language') or display_language
-        target_language_combo.setCurrentText(initial_display)
-        target_language_combo.setMinimumWidth(150)
-        disable_wheel_event(target_language_combo)
-        target_lang_layout.addWidget(target_language_combo)
-
-        target_lang_hint = QLabel("(characters from other scripts will be flagged)")
-        target_lang_hint.setFont(QFont('Arial', 9))
-        target_lang_hint.setStyleSheet("color: gray;")
-        target_lang_layout.addWidget(target_lang_hint)
-        target_lang_layout.addStretch()
-        foreign_layout.addWidget(target_lang_widget)
-        
-        # Threshold setting
-        threshold_widget = QWidget()
-        threshold_layout = QHBoxLayout(threshold_widget)
-        threshold_layout.setContentsMargins(0, 10, 0, 10)
-        
-        threshold_label = QLabel("Minimum foreign characters to flag:")
-        threshold_label.setFont(QFont('Arial', 10))
-        threshold_layout.addWidget(threshold_label)
-        
-        threshold_spinbox = QSpinBox()
-        threshold_spinbox.setMinimum(0)
-        threshold_spinbox.setMaximum(1000)
-        threshold_spinbox.setValue(qa_settings.get('foreign_char_threshold', 10))
-        threshold_spinbox.setMinimumWidth(100)
-        disable_wheel_event(threshold_spinbox)
-        threshold_layout.addWidget(threshold_spinbox)
-        
-        threshold_hint = QLabel("(0 = always flag, higher = more tolerant)")
-        threshold_hint.setFont(QFont('Arial', 9))
-        threshold_hint.setStyleSheet("color: gray;")
-        threshold_layout.addWidget(threshold_hint)
-        threshold_layout.addStretch()
-        foreign_layout.addWidget(threshold_widget)
-        
-        # Excluded characters
-        excluded_label = QLabel("Additional characters to exclude from detection:")
-        excluded_label.setFont(QFont('Arial', 10))
-        foreign_layout.addWidget(excluded_label)
-        
-        # Text edit for excluded characters
-        excluded_text = QTextEdit()
-        excluded_text.setMaximumHeight(150)
-        excluded_text.setFont(QFont('Consolas', 10))
-        excluded_text.setPlainText(qa_settings.get('excluded_characters', ''))
-        foreign_layout.addWidget(excluded_text)
-        
-        excluded_hint = QLabel("Enter characters separated by spaces (e.g., ™ © ® • …)")
-        excluded_hint.setFont(QFont('Arial', 9))
-        excluded_hint.setStyleSheet("color: gray;")
-        foreign_layout.addWidget(excluded_hint)
-        
-        scroll_layout.addSpacing(20)
-        pump_settings_open()
-        
-        # Detection Options Section
-        detection_group = QGroupBox("Detection Options")
-        detection_group.setFont(QFont('Arial', 12, QFont.Bold))
-        detection_layout = QVBoxLayout(detection_group)
-        detection_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(detection_group)
-        
-        # Checkboxes for detection options
-        check_encoding_checkbox = self._create_styled_checkbox("Check for encoding issues (�, □, ◇)")
-        check_encoding_checkbox.setChecked(qa_settings.get('check_encoding_issues', False))
-        detection_layout.addWidget(check_encoding_checkbox)
-        
-        check_repetition_checkbox = self._create_styled_checkbox("Check for excessive repetition")
-        check_repetition_checkbox.setChecked(qa_settings.get('check_repetition', True))
-        detection_layout.addWidget(check_repetition_checkbox)
-        
-        check_artifacts_checkbox = self._create_styled_checkbox("Check for translation artifacts (MTL notes, watermarks)")
-        check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', True))
-        detection_layout.addWidget(check_artifacts_checkbox)
-
-        # Separate toggle for AI artifacts
-        check_ai_artifacts_checkbox = self._create_styled_checkbox("Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)")
-        check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', True))
-        check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
-        detection_layout.addWidget(check_ai_artifacts_checkbox)
-        
-        check_punctuation_checkbox = self._create_styled_checkbox("Check ?! punctuation mismatches (compares with source file)")
-        check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
-        detection_layout.addWidget(check_punctuation_checkbox)
-        
-        # Punctuation loss threshold setting (indented under the checkbox)
-        punct_threshold_widget = QWidget()
-        punct_threshold_layout = QHBoxLayout(punct_threshold_widget)
-        punct_threshold_layout.setContentsMargins(20, 0, 0, 10)
-        
-        punct_threshold_label = QLabel("Flag if lost >")
-        punct_threshold_label.setFont(QFont('Arial', 10))
-        punct_threshold_layout.addWidget(punct_threshold_label)
-        
-        punct_threshold_spinbox = QSpinBox()
-        punct_threshold_spinbox.setMinimum(0)
-        punct_threshold_spinbox.setMaximum(100)
-        punct_threshold_spinbox.setValue(qa_settings.get('punctuation_loss_threshold', 49))
-        punct_threshold_spinbox.setSuffix("%")
-        punct_threshold_spinbox.setMinimumWidth(80)
-        disable_wheel_event(punct_threshold_spinbox)
-        punct_threshold_layout.addWidget(punct_threshold_spinbox)
-        
-        punct_threshold_hint = QLabel("(0 = flag all, 49 = flag if half lost, 100 = only flag if all lost)")
-        punct_threshold_hint.setFont(QFont('Arial', 9))
-        punct_threshold_hint.setStyleSheet("color: gray;")
-        punct_threshold_layout.addWidget(punct_threshold_hint)
-        punct_threshold_layout.addStretch()
-        detection_layout.addWidget(punct_threshold_widget)
-        
-        # Enable/disable punctuation threshold controls based on checkbox
-        def toggle_punctuation_threshold(checked):
-            punct_threshold_label.setEnabled(checked)
-            punct_threshold_spinbox.setEnabled(checked)
-            punct_threshold_hint.setEnabled(checked)
-            if checked:
-                punct_threshold_label.setStyleSheet("color: white;")
-                punct_threshold_spinbox.setStyleSheet("color: white;")
-                punct_threshold_hint.setStyleSheet("color: gray;")
-            else:
-                punct_threshold_label.setStyleSheet("color: #606060;")
-                punct_threshold_spinbox.setStyleSheet("color: #909090;")
-                punct_threshold_hint.setStyleSheet("color: #404040;")
-        
-        check_punctuation_checkbox.toggled.connect(toggle_punctuation_threshold)
-        toggle_punctuation_threshold(check_punctuation_checkbox.isChecked())  # Set initial state
-        
-        # Excess punctuation checkbox (indented under the punctuation checker)
-        excess_punct_widget = QWidget()
-        excess_punct_layout = QHBoxLayout(excess_punct_widget)
-        excess_punct_layout.setContentsMargins(20, 0, 0, 0)
-        
-        excess_punct_checkbox = self._create_styled_checkbox("Flag excess punctuation (more ? or ! than source)")
-        excess_punct_checkbox.setChecked(qa_settings.get('flag_excess_punctuation', False))
-        excess_punct_layout.addWidget(excess_punct_checkbox)
-        excess_punct_layout.addStretch()
-        detection_layout.addWidget(excess_punct_widget)
-        
-        # Excess punctuation threshold setting (indented under the excess checkbox)
-        excess_threshold_widget = QWidget()
-        excess_threshold_layout = QHBoxLayout(excess_threshold_widget)
-        excess_threshold_layout.setContentsMargins(40, 0, 0, 10)
-        
-        excess_threshold_label = QLabel("Flag if excess >")
-        excess_threshold_label.setFont(QFont('Arial', 10))
-        excess_threshold_layout.addWidget(excess_threshold_label)
-        
-        excess_threshold_spinbox = QSpinBox()
-        excess_threshold_spinbox.setMinimum(0)
-        excess_threshold_spinbox.setMaximum(500)
-        excess_threshold_spinbox.setValue(qa_settings.get('excess_punctuation_threshold', 49))
-        excess_threshold_spinbox.setSuffix("%")
-        excess_threshold_spinbox.setMinimumWidth(80)
-        disable_wheel_event(excess_threshold_spinbox)
-        excess_threshold_layout.addWidget(excess_threshold_spinbox)
-        
-        excess_threshold_hint = QLabel("(0 = flag all excess, 49 = flag if half excess, 100 = only flag if doubled)")
-        excess_threshold_hint.setFont(QFont('Arial', 9))
-        excess_threshold_hint.setStyleSheet("color: gray;")
-        excess_threshold_layout.addWidget(excess_threshold_hint)
-        excess_threshold_layout.addStretch()
-        detection_layout.addWidget(excess_threshold_widget)
-        
-        # Enable/disable excess punctuation controls based on main and excess checkboxes
-        def toggle_excess_punct(main_checked):
-            excess_enabled = main_checked
-            excess_punct_checkbox.setEnabled(excess_enabled)
-            # Threshold only enabled if both main and excess checkboxes are checked
-            threshold_enabled = main_checked and excess_punct_checkbox.isChecked()
-            excess_threshold_label.setEnabled(threshold_enabled)
-            excess_threshold_spinbox.setEnabled(threshold_enabled)
-            excess_threshold_hint.setEnabled(threshold_enabled)
-            if excess_enabled:
-                excess_punct_checkbox.setStyleSheet("color: white;")
-            else:
-                excess_punct_checkbox.setStyleSheet("color: #606060;")
-            if threshold_enabled:
-                excess_threshold_label.setStyleSheet("color: white;")
-                excess_threshold_spinbox.setStyleSheet("color: white;")
-                excess_threshold_hint.setStyleSheet("color: gray;")
-            else:
-                excess_threshold_label.setStyleSheet("color: #606060;")
-                excess_threshold_spinbox.setStyleSheet("color: #909090;")
-                excess_threshold_hint.setStyleSheet("color: #404040;")
-        
-        def toggle_excess_threshold(excess_checked):
-            # Re-evaluate based on current state
-            toggle_excess_punct(check_punctuation_checkbox.isChecked())
-        
-        check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
-        excess_punct_checkbox.toggled.connect(toggle_excess_threshold)
-        toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
-        
-        check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
-        check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
-        detection_layout.addWidget(check_glossary_checkbox)
-        
-        check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential truncation (last sentence missing ending punctuation)")
-        check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', False))
-        detection_layout.addWidget(check_potential_truncation_checkbox)
-        
-        scroll_layout.addSpacing(20)
-        pump_settings_open()
-        
-        # File Processing Section
-        file_group = QGroupBox("File Processing")
-        file_group.setFont(QFont('Arial', 12, QFont.Bold))
-        file_layout = QVBoxLayout(file_group)
-        file_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(file_group)
-        
-        # Minimum file length
-        min_length_widget = QWidget()
-        min_length_layout = QHBoxLayout(min_length_widget)
-        min_length_layout.setContentsMargins(0, 0, 0, 10)
-        
-        min_length_label = QLabel("Minimum file length (characters):")
-        min_length_label.setFont(QFont('Arial', 10))
-        min_length_layout.addWidget(min_length_label)
-        
-        min_length_spinbox = QSpinBox()
-        min_length_spinbox.setMinimum(0)
-        min_length_spinbox.setMaximum(10000)
-        min_length_spinbox.setValue(qa_settings.get('min_file_length', 0))
-        min_length_spinbox.setMinimumWidth(100)
-        disable_wheel_event(min_length_spinbox)
-        min_length_layout.addWidget(min_length_spinbox)
-        min_length_layout.addStretch()
-        file_layout.addWidget(min_length_widget)
-        
-        # Minimum duplicate word count
-        min_dup_words_widget = QWidget()
-        min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
-        min_dup_words_layout.setContentsMargins(0, 10, 0, 10)
-        
-        min_dup_words_label = QLabel("Skip small files as duplicates if <N words:")
-        min_dup_words_label.setFont(QFont('Arial', 10))
-        min_dup_words_layout.addWidget(min_dup_words_label)
-        
-        min_dup_words_spinbox = QSpinBox()
-        min_dup_words_spinbox.setMinimum(0)
-        min_dup_words_spinbox.setMaximum(999999)
-        min_dup_words_spinbox.setSingleStep(50)
-        min_dup_words_spinbox.setValue(qa_settings.get('min_duplicate_word_count', 500))
-        min_dup_words_spinbox.setMinimumWidth(100)
-        disable_wheel_event(min_dup_words_spinbox)
-        min_dup_words_layout.addWidget(min_dup_words_spinbox)
-        
-        min_dup_hint = QLabel("(prevents section/notice files from being flagged)")
-        min_dup_hint.setFont(QFont('Arial', 9))
-        min_dup_hint.setStyleSheet("color: gray;")
-        min_dup_words_layout.addWidget(min_dup_hint)
-        min_dup_words_layout.addStretch()
-        file_layout.addWidget(min_dup_words_widget)
-        
-        # Minimum text length for spacing/linebreaks check
-        min_spacing_text_widget = QWidget()
-        min_spacing_text_layout = QHBoxLayout(min_spacing_text_widget)
-        min_spacing_text_layout.setContentsMargins(0, 10, 0, 10)
-        
-        min_spacing_text_label = QLabel("Minimum text length for spacing check (characters):")
-        min_spacing_text_label.setFont(QFont('Arial', 10))
-        min_spacing_text_layout.addWidget(min_spacing_text_label)
-        
-        min_spacing_text_spinbox = QSpinBox()
-        min_spacing_text_spinbox.setMinimum(0)
-        min_spacing_text_spinbox.setMaximum(999999)
-        min_spacing_text_spinbox.setSingleStep(10)
-        min_spacing_text_spinbox.setValue(qa_settings.get('min_text_length_for_spacing', 100))
-        min_spacing_text_spinbox.setMinimumWidth(100)
-        disable_wheel_event(min_spacing_text_spinbox)
-        min_spacing_text_layout.addWidget(min_spacing_text_spinbox)
-        
-        min_spacing_hint = QLabel("(skips files with very little content like cover pages)")
-        min_spacing_hint.setFont(QFont('Arial', 9))
-        min_spacing_hint.setStyleSheet("color: gray;")
-        min_spacing_text_layout.addWidget(min_spacing_hint)
-        min_spacing_text_layout.addStretch()
-        file_layout.addWidget(min_spacing_text_widget)
-
-        scroll_layout.addSpacing(15)
-        pump_settings_open()
-        
-        # Word Count Cross-Reference Section
-        wordcount_group = QGroupBox("Word Count Analysis")
-        wordcount_group.setFont(QFont('Arial', 12, QFont.Bold))
-        wordcount_layout = QVBoxLayout(wordcount_group)
-        wordcount_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(wordcount_group)
-        
-        check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original source file")
-        check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', True))
-        wordcount_layout.addWidget(check_word_count_checkbox)
-        
-        wordcount_desc = QLabel("Compares word counts between original and translated files to detect missing content.\n" +
-                               "For EPUB: accounts for typical expansion ratios when translating from CJK to English.\n" +
-                               "For Text: compares each section file against the total source .txt word count.")
-        wordcount_desc.setFont(QFont('Arial', 9))
-        wordcount_desc.setStyleSheet("color: gray;")
-        wordcount_desc.setWordWrap(True)
-        wordcount_desc.setMaximumWidth(700)
-        wordcount_layout.addWidget(wordcount_desc)
-        
-        # Counting mode options
-        counting_mode_widget = QWidget()
-        counting_mode_layout = QHBoxLayout(counting_mode_widget)
-        counting_mode_layout.setContentsMargins(0, 10, 0, 5)
-        
-        counting_mode_label = QLabel("Counting mode:")
-        counting_mode_label.setFont(QFont('Arial', 10))
-        counting_mode_layout.addWidget(counting_mode_label)
-        
-        # Get current mode from saved settings (default: exact)
-        saved_counting_mode = qa_settings.get('counting_mode', 'exact')
-        
-        counting_mode_combo = QComboBox()
-        counting_mode_combo.addItem("Character count (sampled) - Fastest", "sampled")
-        counting_mode_combo.addItem("Character count (exact) - Default", "exact")
-        counting_mode_combo.addItem("Word count (legacy)", "word")
-        counting_mode_combo.setMinimumWidth(250)
-        counting_mode_combo.wheelEvent = lambda event: event.ignore()
-        
-        # Set current selection based on saved settings
-        if saved_counting_mode == 'word':
-            counting_mode_combo.setCurrentIndex(2)  # Word count
-        elif saved_counting_mode == 'sampled':
-            counting_mode_combo.setCurrentIndex(0)  # Sampled
-        else:
-            counting_mode_combo.setCurrentIndex(1)  # Exact (default)
-        
-        counting_mode_layout.addWidget(counting_mode_combo)
-        counting_mode_layout.addStretch()
-        wordcount_layout.addWidget(counting_mode_widget)
-
-        # Word count multiplier sliders (2-column grid)
-        multipliers_label = QLabel("Expected translation length multiplier (translated words ÷ source words)")
-        multipliers_label.setFont(QFont('Arial', 10, QFont.Bold))
-        wordcount_layout.addWidget(multipliers_label)
-
-        multiplier_hint = QLabel("Adjust per-language expansion. 100% = same length as source; 150% = 1.5x longer.")
-        multiplier_hint.setFont(QFont('Arial', 9))
-        multiplier_hint.setStyleSheet("color: gray;")
-        multiplier_hint.setWordWrap(True)
-        multiplier_hint.setMaximumWidth(700)
-        wordcount_layout.addWidget(multiplier_hint)
-        
-        # Auto toggle for using default multipliers
-        auto_multipliers_widget = QWidget()
-        auto_multipliers_layout = QHBoxLayout(auto_multipliers_widget)
-        auto_multipliers_layout.setContentsMargins(0, 10, 0, 10)
-        
-        auto_multipliers_checkbox = self._create_styled_checkbox("Auto: Use recommended default multipliers")
-        auto_multipliers_checkbox.setChecked(qa_settings.get('use_auto_multipliers', True))  # Enabled by default
-        auto_multipliers_layout.addWidget(auto_multipliers_checkbox)
-        
-        auto_multipliers_hint = QLabel("(disable to customize per-language ratios)")
-        auto_multipliers_hint.setFont(QFont('Arial', 9))
-        auto_multipliers_hint.setStyleSheet("color: gray;")
-        auto_multipliers_layout.addWidget(auto_multipliers_hint)
-        auto_multipliers_layout.addStretch()
-        wordcount_layout.addWidget(auto_multipliers_widget)
-
-        multiplier_grid_widget = QWidget()
-        multiplier_grid = QGridLayout(multiplier_grid_widget)
-        multiplier_grid.setContentsMargins(0, 6, 0, 6)
-        multiplier_grid.setHorizontalSpacing(16)
-        multiplier_grid.setVerticalSpacing(8)
-        wordcount_layout.addWidget(multiplier_grid_widget)
-
-        # Keep slider refs for saving and enabling/disabling
-        word_multiplier_sliders = {}
-        word_multiplier_labels = []
-        # Ordered language list for stable UI
-        multiplier_order = [
-            'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
-            'russian', 'arabic', 'hindi', 'turkish',
-            'chinese', 'chinese (simplified)', 'chinese (traditional)',
-            'japanese', 'korean', 'hebrew', 'thai', 'other'
-        ]
-
-        # Build sliders in 2 columns
-        for idx, lang_key in enumerate(multiplier_order):
-            row = idx // 2
-            col = idx % 2
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-
-            display_name = lang_key.capitalize() if '(' not in lang_key else lang_key.title()
-            lang_label = QLabel(display_name + ":")
-            lang_label.setFont(QFont('Arial', 9))
-            row_layout.addWidget(lang_label)
-
-            # Slider
-            slider = QSlider(Qt.Horizontal)
-            slider.setMinimum(10)   # 0.10x
-            slider.setMaximum(1000) # 10.0x
-            slider.setSingleStep(5)
-            slider.setTickInterval(50)
-            slider.setMinimumWidth(140)
-            slider.wheelEvent = lambda event: event.ignore()
-            current_mult = wordcount_defaults.get(lang_key, 1.0)
-            slider.setValue(int(current_mult * 100))
-            row_layout.addWidget(slider)
-
-            # Editable spinbox (same range, %)
-            spin = QSpinBox()
-            spin.setMinimum(10)
-            spin.setMaximum(1000)
-            spin.setSingleStep(1)
-            spin.setValue(int(current_mult * 100))
-            spin.setSuffix("%")
-            spin.setMinimumWidth(70)
-            spin.wheelEvent = lambda event: event.ignore()
-            row_layout.addWidget(spin)
-
-            # Keep in sync both ways
-            slider.valueChanged.connect(spin.setValue)
-            spin.valueChanged.connect(slider.setValue)
-
-            word_multiplier_sliders[lang_key] = slider
-            word_multiplier_sliders[f"{lang_key}__spin"] = spin
-            word_multiplier_labels.append(lang_label)
-            multiplier_grid.addWidget(row_widget, row, col)
-        
-        # Function to toggle multiplier controls based on auto checkbox
-        def toggle_multiplier_controls(auto_enabled):
-            for lang_key in multiplier_order:
-                slider = word_multiplier_sliders.get(lang_key)
-                spin = word_multiplier_sliders.get(f"{lang_key}__spin")
-                
-                if slider:
-                    slider.setEnabled(not auto_enabled)
-                
-                if spin:
-                    spin.setEnabled(not auto_enabled)
-                    # Apply enable/disable styling to spinbox
-                    if auto_enabled:
-                        spin.setStyleSheet("background-color: #303030; color: #808080;")
-                    else:
-                        spin.setStyleSheet("background-color: #404040; color: white;")  # Enabled styling
-            
-            # Apply enable/disable styling to labels
-            for label in word_multiplier_labels:
-                if auto_enabled:
-                    label.setStyleSheet("color: #808080;")  # Gray out when disabled
-                else:
-                    label.setStyleSheet("color: white;")  # White when enabled
-        
-        # Connect auto checkbox to toggle function
-        auto_multipliers_checkbox.toggled.connect(toggle_multiplier_controls)
-        
-        # Set initial state
-        toggle_multiplier_controls(auto_multipliers_checkbox.isChecked())
-
-        wordcount_layout.addSpacing(6)
- 
-        # Show current EPUB status and allow selection
-        epub_widget = QWidget()
-        epub_layout = QHBoxLayout(epub_widget)
-        epub_layout.setContentsMargins(0, 10, 0, 5)
-
-        status_label = QLabel()
-        status_label.setFont(QFont('Arial', 10))
-        epub_layout.addWidget(status_label)
-
-        def _selected_source_files_for_qa():
-            source_exts = ('.epub', '.txt', '.pdf', '.md')
-            files = []
+        if show:
             try:
-                files = [
-                    f for f in (getattr(self, 'selected_files', []) or [])
-                    if isinstance(f, str) and f.lower().endswith(source_exts)
-                ]
-            except Exception:
-                files = []
-            if not files:
-                try:
-                    files = [
-                        f for f in (getattr(self, 'selected_epub_files', []) or [])
-                        if isinstance(f, str) and f.lower().endswith(source_exts)
-                    ]
-                except Exception:
-                    files = []
-            if not files:
-                for attr in ('selected_epub_path',):
-                    try:
-                        p = getattr(self, attr, None)
-                    except Exception:
-                        p = None
-                    if isinstance(p, str) and p.lower().endswith(source_exts):
-                        files = [p]
-                        break
-            return files
-
-        def _source_file_type(path):
-            lower_name = str(path or '').lower()
-            if lower_name.endswith('.txt'):
-                return "TXT"
-            if lower_name.endswith('.pdf'):
-                return "PDF"
-            if lower_name.endswith('.md'):
-                return "MD"
-            return "EPUB"
-
-        def refresh_source_status():
-            current_source_files = _selected_source_files_for_qa()
-            if len(current_source_files) > 1:
-                primary_file = os.path.basename(_qa_vision_ocr_source_path(current_source_files[0], self))
-                status_label.setText(f"📖 {len(current_source_files)} source files selected (Primary: {primary_file})")
-                status_label.setStyleSheet("color: green;")
-            elif len(current_source_files) == 1:
-                source_path = current_source_files[0]
-                display_source_path = _qa_vision_ocr_source_path(source_path, self)
-                status_label.setText(f"📖 Current {_source_file_type(source_path)}: {os.path.basename(display_source_path)}")
-                status_label.setStyleSheet("color: green;")
-            else:
-                status_label.setText("📖 No EPUB/TXT/PDF/MD in current selection")
-                status_label.setStyleSheet("color: orange;")
-
-        refresh_source_status()
-        try:
-            self._qa_settings_refresh_source_status = refresh_source_status
-        except Exception:
-            pass
-
-        def select_epub_for_qa():
-            # Allow selecting EPUB, TXT, PDF, or MD files as source
-            epub_path, _ = QFileDialog.getOpenFileName(
-                dialog,
-                "Select Source File",
-                "",
-                "Source files (*.epub *.txt *.pdf *.md);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;Markdown files (*.md);;All files (*.*)"
-            )
-            
-            if epub_path:
-                self.selected_epub_path = epub_path
-                self.config['last_epub_path'] = epub_path
-                self.save_config(show_message=False)
-                
-                # Clear multiple EPUB tracking when manually selecting a single file
-                if hasattr(self, 'selected_epub_files'):
-                    self.selected_epub_files = [epub_path]
-                
-                file_type = _source_file_type(epub_path)
-                display_source_path = _qa_vision_ocr_source_path(epub_path, self)
-                refresh_source_status()
-                self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
-                if display_source_path != epub_path:
-                    self.append_log(f"   Vision QA source: {os.path.basename(display_source_path)}")
-
-        select_epub_btn = QPushButton("Select Source File")
-        select_epub_btn.setFont(QFont('Arial', 9))
-        select_epub_btn.clicked.connect(select_epub_for_qa)
-        epub_layout.addWidget(select_epub_btn)
-        epub_layout.addStretch()
-        wordcount_layout.addWidget(epub_widget)
-
-        # Add option to disable mismatch warning
-        warn_mismatch_checkbox = self._create_styled_checkbox("Warn when EPUB and folder names don't match")
-        warn_mismatch_checkbox.setChecked(qa_settings.get('warn_name_mismatch', True))
-        wordcount_layout.addWidget(warn_mismatch_checkbox)
-        
-        wordcount_layout.addSpacing(10)
-        
-        # Missing images check (requires source file like word count does)
-        check_missing_images_checkbox = self._create_styled_checkbox("Check for missing image tags (images lost during translation)")
-        check_missing_images_checkbox.setChecked(qa_settings.get('check_missing_images', True))
-        wordcount_layout.addWidget(check_missing_images_checkbox)
-        
-        images_desc = QLabel("Compares image tags between original and translated HTML files.\n" +
-                            "Detects when <img> tags are lost during translation process.")
-        images_desc.setFont(QFont('Arial', 9))
-        images_desc.setStyleSheet("color: gray;")
-        images_desc.setWordWrap(True)
-        images_desc.setMaximumWidth(700)
-        wordcount_layout.addWidget(images_desc)
-
-        scroll_layout.addSpacing(20)
-        pump_settings_open()
-        
-        # Additional Checks Section
-        additional_group = QGroupBox("Additional Checks")
-        additional_group.setFont(QFont('Arial', 12, QFont.Bold))
-        additional_layout = QVBoxLayout(additional_group)
-        additional_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(additional_group)
-
-        # Missing header tags check
-        check_missing_header_tags_checkbox = self._create_styled_checkbox("Flags HTML files missing header tags (h1-h6)")
-        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', True))
-        additional_layout.addWidget(check_missing_header_tags_checkbox)
-        additional_layout.addSpacing(10)
-
-        # Multiple headers check
-        check_multiple_headers_checkbox = self._create_styled_checkbox("Detect files with 2 or more headers (h1-h6 tags)")
-        check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
-        additional_layout.addWidget(check_multiple_headers_checkbox)
-
-        headers_desc = QLabel("Identifies files that may have been incorrectly split or merged.\n" +
-                             "Useful for detecting chapters that contain multiple sections.")
-        headers_desc.setFont(QFont('Arial', 9))
-        headers_desc.setStyleSheet("color: gray;")
-        headers_desc.setWordWrap(True)
-        headers_desc.setMaximumWidth(700)
-        additional_layout.addWidget(headers_desc)
-        additional_layout.addSpacing(10)
-
-        # Missing HTML tag check
-        check_missing_html_tag_checkbox = self._create_styled_checkbox("Check HTML structure and tag consistency")
-        check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
-        additional_layout.addWidget(check_missing_html_tag_checkbox)
-
-        # Body tag check (separate, disabled by default)
-        body_tag_widget = QWidget()
-        body_tag_layout = QHBoxLayout(body_tag_widget)
-        body_tag_layout.setContentsMargins(0, 0, 0, 5)
-        
-        check_body_tag_checkbox = self._create_styled_checkbox("Check for <body> tag consistency")
-        check_body_tag_checkbox.setChecked(qa_settings.get('check_body_tag', False))
-        body_tag_layout.addWidget(check_body_tag_checkbox)
-        
-        body_tag_hint = QLabel("(Disabled by default - body tags not required in EPUBs)")
-        body_tag_hint.setFont(QFont('Arial', 9))
-        body_tag_hint.setStyleSheet("color: gray;")
-        body_tag_layout.addWidget(body_tag_hint)
-        body_tag_layout.addStretch()
-        additional_layout.addWidget(body_tag_widget)
-
-        # Detect chapters where (almost) all text is wrapped in one header tag
-        check_all_text_in_header_checkbox = self._create_styled_checkbox(
-            "Detect chapters where all text is inside a single <h1>-<h6> tag"
-        )
-        check_all_text_in_header_checkbox.setChecked(qa_settings.get('check_all_text_in_header', True))
-        additional_layout.addWidget(check_all_text_in_header_checkbox)
-
-        all_text_in_header_desc = QLabel(
-            "Flags translations where the chapter body was collapsed into one huge heading,\n"
-            "e.g. the entire chapter text appears inside a single <h1>...</h1> wrapper."
-        )
-        all_text_in_header_desc.setFont(QFont('Arial', 9))
-        all_text_in_header_desc.setStyleSheet("color: gray;")
-        all_text_in_header_desc.setWordWrap(True)
-        all_text_in_header_desc.setMaximumWidth(700)
-        all_text_in_header_desc.setContentsMargins(20, 0, 0, 5)
-        additional_layout.addWidget(all_text_in_header_desc)
-
-        # Invalid / custom HTML tag mismatch check (e.g. <concept>)
-        check_invalid_tag_mismatch_checkbox = self._create_styled_checkbox(
-            "Detect invalid/custom HTML tags missing or invisible in translation"
-        )
-        check_invalid_tag_mismatch_checkbox.setChecked(qa_settings.get('check_invalid_tag_mismatch', False))
-        additional_layout.addWidget(check_invalid_tag_mismatch_checkbox)
-
-        invalid_tag_desc = QLabel(
-            "Compares source and translated HTML for non-standard tags like <concept>.\n"
-            "Flags two issues: (1) tags present in source but dropped from translation\n"
-            "(HTML entity forms such as &lt;concept&gt; still count as present),\n"
-            "and (2) tags that appear in the translation as raw angle brackets,\n"
-            "which are invisible to readers because browsers ignore unknown tags.\n"
-            "Requires the original source file (EPUB / word_count folder)."
-        )
-        invalid_tag_desc.setFont(QFont('Arial', 9))
-        invalid_tag_desc.setStyleSheet("color: gray;")
-        invalid_tag_desc.setWordWrap(True)
-        invalid_tag_desc.setMaximumWidth(700)
-        invalid_tag_desc.setContentsMargins(20, 0, 0, 5)
-        additional_layout.addWidget(invalid_tag_desc)
-
-        # Invalid nesting check (separate toggle)
-        check_invalid_nesting_checkbox = self._create_styled_checkbox("Check for invalid tag nesting")
-        check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
-        additional_layout.addWidget(check_invalid_nesting_checkbox)
-
-        # Silent truncation detection (optional, requires heavy deps)
-        check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")
-        additional_layout.addWidget(check_truncation_checkbox)
-
-        # Check if required dependencies are installed
-        _truncation_deps_missing = []
-        try:
-            import sentence_transformers
-        except ImportError:
-            _truncation_deps_missing.append("sentence-transformers")
-        try:
-            import deep_translator
-        except ImportError:
-            _truncation_deps_missing.append("deep-translator")
-        try:
-            import sklearn
-        except ImportError:
-            _truncation_deps_missing.append("scikit-learn")
-
-        if _truncation_deps_missing:
-            # Dependencies missing — disable and grey out
-            check_truncation_checkbox.setChecked(False)
-            check_truncation_checkbox.setEnabled(False)
-            check_truncation_checkbox.setStyleSheet("color: #606060;")
-            missing_str = ", ".join(_truncation_deps_missing)
-            truncation_desc = QLabel(f"⚠️ Missing dependencies: {missing_str}\n"
-                                     f"Install with: pip install {' '.join(_truncation_deps_missing)}")
-            truncation_desc.setFont(QFont('Arial', 9))
-            truncation_desc.setStyleSheet("color: #b06040;")
-        else:
-            # All deps available — normal behavior
-            check_truncation_checkbox.setChecked(qa_settings.get('check_silent_truncation', False))
-            truncation_desc = QLabel("Detects when translated content silently drops paragraphs from the end of chapters.\n"
-                                     "Uses embedding similarity + back-translation to compare source vs translated tails.\n"
-                                     "Requires: sentence-transformers, deep-translator, scikit-learn. Loads ~80MB model on first use.")
-            truncation_desc.setFont(QFont('Arial', 9))
-            truncation_desc.setStyleSheet("color: gray;")
-
-        truncation_desc.setWordWrap(True)
-        truncation_desc.setMaximumWidth(700)
-        truncation_desc.setContentsMargins(20, 0, 0, 0)
-        additional_layout.addWidget(truncation_desc)
-
-        # ---- Truncation threshold sliders ----
-        _truncation_deps_ok = not _truncation_deps_missing
-
-        truncation_sliders_widget = QWidget()
-        truncation_sliders_layout = QVBoxLayout(truncation_sliders_widget)
-        truncation_sliders_layout.setContentsMargins(20, 5, 0, 0)
-        truncation_sliders_layout.setSpacing(4)
-
-        def _make_threshold_slider(label_text, setting_key, default_val, tooltip=""):
-            """Create a labeled slider (0-100) for a truncation threshold."""
-            row = QWidget()
-            hl = QHBoxLayout(row)
-            hl.setContentsMargins(0, 0, 0, 0)
-            hl.setSpacing(8)
-
-            lbl = QLabel(label_text)
-            lbl.setFont(QFont('Arial', 9))
-            lbl.setFixedWidth(160)
-            hl.addWidget(lbl)
-
-            slider = QSlider(Qt.Horizontal)
-            slider.setMinimum(0)
-            slider.setMaximum(100)
-            val = int(qa_settings.get(setting_key, default_val))
-            slider.setValue(val)
-            slider.setFixedWidth(200)
-            if tooltip:
-                slider.setToolTip(tooltip)
-            hl.addWidget(slider)
-
-            val_label = QLabel(f"{val / 100:.2f}")
-            val_label.setFont(QFont('Arial', 9))
-            val_label.setFixedWidth(40)
-            hl.addWidget(val_label)
-
-            slider.valueChanged.connect(lambda v: val_label.setText(f"{v / 100:.2f}"))
-
-            hl.addStretch()
-            return row, slider, lbl, val_label
-
-        # Collect all slider labels for toggle styling
-        _truncation_slider_labels = []
-
-        cheap_row, truncation_cheap_slider, _cl, _cv = _make_threshold_slider(
-            "Cheap score threshold:", 'truncation_cheap_threshold', 12,
-            "Below this composite score AND below length threshold → immediately flagged (default: 0.12)")
-        _truncation_slider_labels.extend([_cl, _cv])
-        truncation_sliders_layout.addWidget(cheap_row)
-
-        borderline_row, truncation_borderline_slider, _bl, _bv = _make_threshold_slider(
-            "Borderline pass score:", 'truncation_borderline_score', 40,
-            "Above this composite score → considered OK without embedding check (default: 0.40)")
-        _truncation_slider_labels.extend([_bl, _bv])
-        truncation_sliders_layout.addWidget(borderline_row)
-
-        length_row, truncation_length_slider, _ll, _lv = _make_threshold_slider(
-            "Length ratio threshold:", 'truncation_length_threshold', 30,
-            "Minimum length ratio for the cheap-fail gate (default: 0.30)")
-        _truncation_slider_labels.extend([_ll, _lv])
-        truncation_sliders_layout.addWidget(length_row)
-
-        embed_row, truncation_embed_slider, _el, _ev = _make_threshold_slider(
-            "Embedding threshold:", 'truncation_embed_threshold', 45,
-            "Below this embedding similarity → flagged in borderline cases (default: 0.45)")
-        _truncation_slider_labels.extend([_el, _ev])
-        truncation_sliders_layout.addWidget(embed_row)
-
-        _truncation_all_sliders = [truncation_cheap_slider, truncation_borderline_slider,
-                                    truncation_length_slider, truncation_embed_slider]
-
-        additional_layout.addWidget(truncation_sliders_widget)
-
-        # Wire checkbox toggle to enable/disable sliders with explicit label styling
-        def _toggle_truncation_sliders(checked):
-            enabled = checked and _truncation_deps_ok
-            for s in _truncation_all_sliders:
-                s.setEnabled(enabled)
-            for lbl in _truncation_slider_labels:
-                if enabled:
-                    lbl.setStyleSheet("color: white;")
-                else:
-                    lbl.setStyleSheet("color: #808080;")
-
-        check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
-        # Set initial state
-        _toggle_truncation_sliders(check_truncation_checkbox.isChecked())
-
-        additional_layout.addSpacing(10)
-
-        # ---- AI Truncation Detection (no heavy deps needed) ----
-        check_ai_truncation_checkbox = self._create_styled_checkbox(
-            "AI Truncation Detection (uses your API to detect truncated chapters)"
-        )
-        check_ai_truncation_checkbox.setChecked(qa_settings.get('check_ai_truncation_detection', False))
-        additional_layout.addWidget(check_ai_truncation_checkbox)
-
-        ai_truncation_desc = QLabel(
-            "Sends the tail of source and translated text to your configured AI model and asks whether\n"
-            "the translation appears truncated. Much more reliable than heuristic detection.\n"
-            "Uses your active API key(s) — works with single and multi-key modes. No extra dependencies."
-        )
-        ai_truncation_desc.setFont(QFont('Arial', 9))
-        ai_truncation_desc.setStyleSheet("color: gray;")
-        ai_truncation_desc.setWordWrap(True)
-        ai_truncation_desc.setMaximumWidth(700)
-        ai_truncation_desc.setContentsMargins(20, 0, 0, 0)
-        additional_layout.addWidget(ai_truncation_desc)
-
-        # Tail character count spinbox
-        ai_trunc_tail_widget = QWidget()
-        ai_trunc_tail_layout = QHBoxLayout(ai_trunc_tail_widget)
-        ai_trunc_tail_layout.setContentsMargins(20, 5, 0, 0)
-        ai_trunc_tail_layout.setSpacing(8)
-
-        ai_trunc_tail_label = QLabel("Tail characters to send:")
-        ai_trunc_tail_label.setFont(QFont('Arial', 9))
-        ai_trunc_tail_layout.addWidget(ai_trunc_tail_label)
-
-        ai_truncation_tail_spinbox = QSpinBox()
-        ai_truncation_tail_spinbox.setMinimum(200)
-        ai_truncation_tail_spinbox.setMaximum(5000)
-        ai_truncation_tail_spinbox.setSingleStep(100)
-        ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 400)))
-        ai_truncation_tail_spinbox.setMinimumWidth(80)
-        disable_wheel_event(ai_truncation_tail_spinbox)
-        ai_trunc_tail_layout.addWidget(ai_truncation_tail_spinbox)
-
-        ai_trunc_tail_hint = QLabel("chars from end of source and translated text")
-        ai_trunc_tail_hint.setFont(QFont('Arial', 9))
-        ai_trunc_tail_hint.setStyleSheet("color: #9ca3af;")
-        ai_trunc_tail_layout.addWidget(ai_trunc_tail_hint)
-        ai_trunc_tail_layout.addStretch()
-
-        additional_layout.addWidget(ai_trunc_tail_widget)
-
-        # "Edit Prompt" button
-        _ai_trunc_default_prompt = (
-            "You are a strict translation quality analyst. Your ONLY job is to determine if "
-            "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
-            "or completely missing the final paragraphs/sentences present in the source).\n"
-            "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
-            "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
-            "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
-            "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
-            "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
-            "Respond with ONLY the word YES or NO. Do not explain."
-        )
-        # Store current custom prompt (or default) in a mutable container for the closure
-        _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
-        # Store prompt role: 'system' or 'user' (default: system)
-        _ai_trunc_prompt_role_holder = [qa_settings.get('ai_truncation_prompt_role', 'system')]
-
-        ai_trunc_btn_row = QWidget()
-        ai_trunc_btn_layout = QHBoxLayout(ai_trunc_btn_row)
-        ai_trunc_btn_layout.setContentsMargins(20, 2, 0, 0)
-        ai_trunc_btn_layout.setSpacing(8)
-
-        edit_prompt_btn = QPushButton("✏️  Edit Prompt")
-        edit_prompt_btn.setFixedWidth(130)
-        edit_prompt_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4a5568;
-                color: white;
-                border: 1px solid #4a5568;
-                padding: 4px 10px;
-                border-radius: 3px;
-                font-size: 9pt;
-            }
-            QPushButton:hover {
-                background-color: #5a6778;
-                border-color: #6b7a8d;
-            }
-            QPushButton:disabled {
-                background-color: #2a2a2a;
-                color: #666666;
-                border-color: #3a3a3a;
-            }
-        """)
-
-        def _open_prompt_editor():
-            prompt_dlg = QDialog(dialog)
-            prompt_dlg.setWindowTitle("AI Truncation Detection — Edit Prompt")
-            prompt_dlg.resize(620, 400)
-            prompt_dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
-            playout = QVBoxLayout(prompt_dlg)
-            playout.setContentsMargins(12, 12, 12, 12)
-
-            # ─── Prompt role toggle (System / User) ───
-            role_row = QWidget()
-            role_h = QHBoxLayout(role_row)
-            role_h.setContentsMargins(0, 0, 0, 6)
-            role_h.setSpacing(12)
-
-            role_label = QLabel("Send prompt as:")
-            role_label.setFont(QFont('Arial', 9))
-            role_label.setStyleSheet("color: #9ca3af;")
-            role_h.addWidget(role_label)
-
-            _radio_style = """
-                QRadioButton {
-                    color: #e0e0e0;
-                    font-size: 9pt;
-                    spacing: 4px;
-                }
-                QRadioButton::indicator {
-                    width: 14px;
-                    height: 14px;
-                }
-                QRadioButton::indicator:checked {
-                    background-color: #4a90d9;
-                    border: 2px solid #6bade0;
-                    border-radius: 7px;
-                }
-                QRadioButton::indicator:unchecked {
-                    background-color: #353535;
-                    border: 2px solid #555;
-                    border-radius: 7px;
-                }
-            """
-
-            system_radio = QRadioButton("System prompt")
-            system_radio.setStyleSheet(_radio_style)
-            system_radio.setToolTip(
-                "The prompt is sent as a system message (role='system').\n"
-                "Best for models that support system instructions."
-            )
-            user_radio = QRadioButton("User prompt")
-            user_radio.setStyleSheet(_radio_style)
-            user_radio.setToolTip(
-                "The prompt is prepended to the user message (role='user').\n"
-                "Use this for models that ignore or don't support system prompts."
-            )
-
-            if _ai_trunc_prompt_role_holder[0] == 'user':
-                user_radio.setChecked(True)
-            else:
-                system_radio.setChecked(True)
-
-            role_group = QButtonGroup(prompt_dlg)
-            role_group.addButton(system_radio, 0)
-            role_group.addButton(user_radio, 1)
-            role_h.addWidget(system_radio)
-            role_h.addWidget(user_radio)
-            role_h.addStretch()
-            playout.addWidget(role_row)
-
-            plabel = QLabel("Prompt sent to your AI model for each chapter check:")
-            plabel.setFont(QFont('Arial', 9))
-            plabel.setStyleSheet("color: #9ca3af;")
-            playout.addWidget(plabel)
-
-            p_edit = QTextEdit()
-            p_edit.setPlainText(_ai_trunc_prompt_holder[0])
-            p_edit.setFont(QFont('Consolas', 10))
-            p_edit.setStyleSheet("""
-                QTextEdit {
-                    background-color: #2d2d2d;
-                    color: #e0e0e0;
-                    border: 1px solid #4a5568;
-                    border-radius: 3px;
-                    padding: 6px;
-                }
-            """)
-            playout.addWidget(p_edit)
-
-            btn_row = QHBoxLayout()
-            reset_btn = QPushButton("🔄 Reset to Default")
-            reset_btn.setStyleSheet(
-                "QPushButton { background-color: #ffc107; color: black; padding: 6px 14px; "
-                "border-radius: 3px; font-weight: bold; } "
-                "QPushButton:hover { background-color: #e0a800; }"
-            )
-            def _reset_all_defaults():
-                reply = QMessageBox.question(
-                    prompt_dlg, "Confirm Reset", 
-                    "Are you sure you want to reset the prompt to its default?\nThis action cannot be undone.",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-                )
-                if reply == QMessageBox.Yes:
-                    p_edit.setPlainText(_ai_trunc_default_prompt)
-                    system_radio.setChecked(True)
-            reset_btn.clicked.connect(_reset_all_defaults)
-            btn_row.addWidget(reset_btn)
-            btn_row.addStretch()
-
-            save_btn = QPushButton("💾 Save")
-            save_btn.setStyleSheet(
-                "QPushButton { background-color: #28a745; color: white; padding: 6px 14px; "
-                "border-radius: 3px; font-weight: bold; } "
-                "QPushButton:hover { background-color: #218838; }"
-            )
-            def _save_prompt():
-                _ai_trunc_prompt_holder[0] = p_edit.toPlainText().strip()
-                _ai_trunc_prompt_role_holder[0] = 'user' if user_radio.isChecked() else 'system'
-                # Update status label
-                if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
-                    prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
-                    prompt_status_label.setStyleSheet("color: #f0ad4e;")
-                else:
-                    prompt_status_label.setText("(using default prompt)")
-                    prompt_status_label.setStyleSheet("color: #808080;")
-                prompt_dlg.accept()
-            save_btn.clicked.connect(_save_prompt)
-            btn_row.addWidget(save_btn)
-
-            cancel_btn = QPushButton("Cancel")
-            cancel_btn.setStyleSheet(
-                "QPushButton { background-color: #6c757d; color: white; padding: 6px 14px; "
-                "border-radius: 3px; } "
-                "QPushButton:hover { background-color: #5a6268; }"
-            )
-            cancel_btn.clicked.connect(prompt_dlg.reject)
-            btn_row.addWidget(cancel_btn)
-
-            playout.addLayout(btn_row)
-            prompt_dlg.show()
-
-        edit_prompt_btn.clicked.connect(_open_prompt_editor)
-        ai_trunc_btn_layout.addWidget(edit_prompt_btn)
-
-        prompt_status_label = QLabel("(using default prompt)")
-        prompt_status_label.setFont(QFont('Arial', 9))
-        prompt_status_label.setStyleSheet("color: #808080;")
-        if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
-            prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
-            prompt_status_label.setStyleSheet("color: #f0ad4e;")
-        ai_trunc_btn_layout.addWidget(prompt_status_label)
-        ai_trunc_btn_layout.addStretch()
-
-        additional_layout.addWidget(ai_trunc_btn_row)
-
-        # Toggle spinbox and button enabled state
-        def _toggle_ai_truncation(checked):
-            ai_truncation_tail_spinbox.setEnabled(checked)
-            edit_prompt_btn.setEnabled(checked)
-            if checked:
-                ai_trunc_tail_label.setStyleSheet("color: white;")
-                ai_truncation_tail_spinbox.setStyleSheet("color: white;")
-                ai_trunc_tail_hint.setStyleSheet("color: gray;")
-            else:
-                ai_trunc_tail_label.setStyleSheet("color: #606060;")
-                ai_truncation_tail_spinbox.setStyleSheet("color: #909090;")
-                ai_trunc_tail_hint.setStyleSheet("color: #404040;")
-
-        check_ai_truncation_checkbox.toggled.connect(_toggle_ai_truncation)
-        _toggle_ai_truncation(check_ai_truncation_checkbox.isChecked())
-
-        # ── AI Truncation Detector — Dedicated API Settings ──────────────
-        ai_api_group = QGroupBox("AI Truncation Detector — API Settings")
-        ai_api_group.setFont(QFont('Arial', 10, QFont.Bold))
-        ai_api_group.setCheckable(False)
-        ai_api_group.setStyleSheet("""
-            QGroupBox {
-                color: #e0e0e0;
-                border: 1px solid #4a5568;
-                margin-top: 8px;
-                padding-top: 18px;
-                border-radius: 4px;
-            }
-            QGroupBox::title {
-                color: #9ca3af;
-                left: 12px;
-                padding: 0 6px;
-                font-size: 10pt;
-            }
-        """)
-        ai_api_layout = QVBoxLayout(ai_api_group)
-        ai_api_layout.setContentsMargins(20, 10, 20, 10)
-        ai_api_layout.setSpacing(8)
-
-        ai_api_desc_row = QWidget()
-        ai_api_desc_layout = QHBoxLayout(ai_api_desc_row)
-        ai_api_desc_layout.setContentsMargins(0, 0, 0, 0)
-        ai_api_desc_layout.setSpacing(8)
-
-        ai_api_desc = QLabel(
-            "Override the global API settings for AI truncation detection only.\n"
-            "Leave API key blank to use your main key. Set temperature or output tokens to -1 to use global defaults."
-        )
-        ai_api_desc.setFont(QFont('Arial', 9))
-        ai_api_desc.setStyleSheet("color: #808080;")
-        ai_api_desc.setWordWrap(True)
-        ai_api_desc_layout.addWidget(ai_api_desc, 1)
-
-        try:
-            from multi_api_key_manager import create_preview_pool_button
-            qa_scan_keys_btn = create_preview_pool_button(
-                dialog,
-                self,
-                'ai_truncation_detection',
-                "QA Scan Keys",
-                "Open the Multi API Key Manager focused on the QA Scan key pool for AI truncation detection.",
-            )
-            ai_api_desc_layout.addWidget(qa_scan_keys_btn)
-        except Exception:
-            pass
-
-        ai_api_layout.addWidget(ai_api_desc_row)
-
-        # ─── Row 1: API Key ───
-        ai_key_row = QWidget()
-        ai_key_h = QHBoxLayout(ai_key_row)
-        ai_key_h.setContentsMargins(0, 0, 0, 0)
-        ai_key_h.setSpacing(8)
-
-        ai_key_label = QLabel("API Key:")
-        ai_key_label.setFont(QFont('Arial', 9))
-        ai_key_label.setFixedWidth(100)
-        ai_key_h.addWidget(ai_key_label)
-
-        from PySide6.QtWidgets import QLineEdit as _QLE
-        ai_key_entry = _QLE()
-        ai_key_entry.setEchoMode(_QLE.Password)
-        ai_key_entry.setPlaceholderText("(blank = use main API key)")
-        ai_key_entry.setText(qa_settings.get('ai_truncation_api_key', ''))
-        ai_key_h.addWidget(ai_key_entry)
-
-        # Toggle visibility button
-        ai_key_show_btn = QPushButton("👁")
-        ai_key_show_btn.setFixedWidth(32)
-        ai_key_show_btn.setToolTip("Toggle API key visibility")
-        ai_key_show_btn.setStyleSheet("""
-            QPushButton { background-color: #404040; color: white; border: 1px solid #555;
-                          padding: 3px; border-radius: 3px; font-size: 10pt; }
-            QPushButton:hover { background-color: #505050; }
-        """)
-        def _toggle_key_vis():
-            if ai_key_entry.echoMode() == _QLE.Password:
-                ai_key_entry.setEchoMode(_QLE.Normal)
-                ai_key_show_btn.setText("🔒")
-            else:
-                ai_key_entry.setEchoMode(_QLE.Password)
-                ai_key_show_btn.setText("👁")
-        ai_key_show_btn.clicked.connect(_toggle_key_vis)
-        ai_key_h.addWidget(ai_key_show_btn)
-
-        ai_api_layout.addWidget(ai_key_row)
-
-        # ─── Row 2: Model selector (searchable combobox) ───
-        ai_model_row = QWidget()
-        ai_model_h = QHBoxLayout(ai_model_row)
-        ai_model_h.setContentsMargins(0, 0, 0, 0)
-        ai_model_h.setSpacing(8)
-
-        ai_model_label = QLabel("Model:")
-        ai_model_label.setFont(QFont('Arial', 9))
-        ai_model_label.setFixedWidth(100)
-        ai_model_h.addWidget(ai_model_label)
-
-        ai_model_combo = QComboBox()
-        ai_model_combo.setEditable(True)
-        ai_model_combo.setInsertPolicy(QComboBox.NoInsert)
-        # Load model catalog
-        try:
-            from model_options import get_model_options
-            _ai_model_list = get_model_options()
-        except Exception:
-            _ai_model_list = ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-5-mini", "gpt-5-nano"]
-        ai_model_combo.addItems(_ai_model_list)
-        # Set completer for search
-        from PySide6.QtWidgets import QCompleter
-        ai_model_completer = QCompleter(_ai_model_list)
-        ai_model_completer.setCaseSensitivity(Qt.CaseInsensitive)
-        ai_model_completer.setFilterMode(Qt.MatchContains)
-        ai_model_completer.setMaxVisibleItems(15)
-        ai_model_combo.setCompleter(ai_model_completer)
-        disable_wheel_event(ai_model_combo)
-
-        # Restore saved value or default to blank (= use main model)
-        _saved_ai_model = qa_settings.get('ai_truncation_model', '')
-        if _saved_ai_model:
-            ai_model_combo.setCurrentText(_saved_ai_model)
-        else:
-            ai_model_combo.setCurrentText('')
-        ai_model_combo.lineEdit().setPlaceholderText("(blank = use main model)")
-        ai_model_h.addWidget(ai_model_combo)
-
-        ai_api_layout.addWidget(ai_model_row)
-
-        # ─── Row 3: Temperature + Output Tokens ───
-        ai_params_row = QWidget()
-        ai_params_h = QHBoxLayout(ai_params_row)
-        ai_params_h.setContentsMargins(0, 0, 0, 0)
-        ai_params_h.setSpacing(16)
-
-        # Temperature
-        ai_temp_label = QLabel("Temperature:")
-        ai_temp_label.setFont(QFont('Arial', 9))
-        ai_params_h.addWidget(ai_temp_label)
-
-        from PySide6.QtWidgets import QDoubleSpinBox
-        ai_temp_spin = QDoubleSpinBox()
-        ai_temp_spin.setMinimum(-1.0)
-        ai_temp_spin.setMaximum(1.0)
-        ai_temp_spin.setSingleStep(0.1)
-        ai_temp_spin.setDecimals(2)
-        ai_temp_spin.setValue(float(qa_settings.get('ai_truncation_temperature', 0.0)))
-        ai_temp_spin.setFixedWidth(80)
-        ai_temp_spin.setToolTip("-1 = use global temperature")
-        disable_wheel_event(ai_temp_spin)
-        ai_params_h.addWidget(ai_temp_spin)
-        
-        # Snap negative values in-between 0 and -1 directly
-        ai_temp_spin.setProperty("last_val", ai_temp_spin.value())
-        def enforce_temp_snap(val):
-            last_val = ai_temp_spin.property("last_val")
-            ai_temp_spin.blockSignals(True)
-            if -1.0 < val < 0.0:
-                if last_val >= 0.0:
-                    val = -1.0
-                elif last_val <= -1.0:
-                    val = 0.0
-                else:
-                    val = -1.0
-                ai_temp_spin.setValue(val)
-            ai_temp_spin.setProperty("last_val", val)
-            ai_temp_spin.blockSignals(False)
-        ai_temp_spin.valueChanged.connect(enforce_temp_snap)
-
-        ai_temp_hint = QLabel("(-1 = global)")
-        ai_temp_hint.setFont(QFont('Arial', 8))
-        ai_temp_hint.setStyleSheet("color: #707070;")
-        ai_params_h.addWidget(ai_temp_hint)
-
-        ai_params_h.addSpacing(20)
-
-        # Output Tokens
-        ai_tokens_label = QLabel("Output Tokens:")
-        ai_tokens_label.setFont(QFont('Arial', 9))
-        ai_params_h.addWidget(ai_tokens_label)
-
-        ai_tokens_spin = QSpinBox()
-        ai_tokens_spin.setMinimum(-1)
-        ai_tokens_spin.setMaximum(1000000)
-        ai_tokens_spin.setSingleStep(100)
-        ai_tokens_spin.setValue(int(qa_settings.get('ai_truncation_max_tokens', 2000)))
-        ai_tokens_spin.setFixedWidth(100)
-        ai_tokens_spin.setToolTip("-1 = use global output token limit")
-        disable_wheel_event(ai_tokens_spin)
-        ai_params_h.addWidget(ai_tokens_spin)
-
-        ai_tokens_hint = QLabel("(-1 = global)")
-        ai_tokens_hint.setFont(QFont('Arial', 8))
-        ai_tokens_hint.setStyleSheet("color: #707070;")
-        ai_params_h.addWidget(ai_tokens_hint)
-
-        ai_params_h.addStretch()
-        ai_api_layout.addWidget(ai_params_row)
-
-        # ─── Row 4: API Call Delay ───
-        ai_delay_row = QWidget()
-        ai_delay_h = QHBoxLayout(ai_delay_row)
-        ai_delay_h.setContentsMargins(0, 0, 0, 0)
-        ai_delay_h.setSpacing(8)
-
-        ai_delay_label = QLabel("API Call Delay:")
-        ai_delay_label.setFont(QFont('Arial', 9))
-        ai_delay_label.setFixedWidth(100)
-        ai_delay_h.addWidget(ai_delay_label)
-
-        ai_delay_spin = QDoubleSpinBox()
-        ai_delay_spin.setMinimum(-1.0)
-        ai_delay_spin.setMaximum(60.0)
-        ai_delay_spin.setSingleStep(0.5)
-        ai_delay_spin.setValue(float(qa_settings.get('ai_truncation_api_call_delay', -1.0)))
-        ai_delay_spin.setFixedWidth(100)
-        ai_delay_spin.setToolTip("-1 = use global API call delay")
-        disable_wheel_event(ai_delay_spin)
-        ai_delay_h.addWidget(ai_delay_spin)
-        
-        # Snap negative values in-between 0 and -1 directly
-        ai_delay_spin.setProperty("last_val", ai_delay_spin.value())
-        def enforce_delay_snap(val):
-            last_val = ai_delay_spin.property("last_val")
-            ai_delay_spin.blockSignals(True)
-            if -1.0 < val < 0.0:
-                if last_val >= 0.0:
-                    val = -1.0
-                elif last_val <= -1.0:
-                    val = 0.0
-                else:
-                    val = -1.0
-                ai_delay_spin.setValue(val)
-            ai_delay_spin.setProperty("last_val", val)
-            ai_delay_spin.blockSignals(False)
-        ai_delay_spin.valueChanged.connect(enforce_delay_snap)
-
-        ai_delay_hint = QLabel("sec  (-1 = global)")
-        ai_delay_hint.setFont(QFont('Arial', 8))
-        ai_delay_hint.setStyleSheet("color: #707070;")
-        ai_delay_h.addWidget(ai_delay_hint)
-        
-        ai_delay_h.addStretch()
-        ai_api_layout.addWidget(ai_delay_row)
-
-        # ─── Row 4: Custom URL endpoint override ───
-        ai_url_row = QWidget()
-        ai_url_h = QHBoxLayout(ai_url_row)
-        ai_url_h.setContentsMargins(0, 0, 0, 0)
-        ai_url_h.setSpacing(8)
-
-        ai_url_label = QLabel("Endpoint URL:")
-        ai_url_label.setFont(QFont('Arial', 9))
-        ai_url_label.setFixedWidth(100)
-        ai_url_h.addWidget(ai_url_label)
-
-        ai_url_entry = _QLE()
-        ai_url_entry.setPlaceholderText("(blank = use default endpoint, e.g. http://localhost:1234/v1)")
-        ai_url_entry.setText(qa_settings.get('ai_truncation_endpoint_url', ''))
-        ai_url_h.addWidget(ai_url_entry)
-        ai_api_layout.addWidget(ai_url_row)
-        
-        # ─── Row 5: Disable Thinking Toggle ───
-        ai_thinking_row = QWidget()
-        ai_thinking_h = QHBoxLayout(ai_thinking_row)
-        ai_thinking_h.setContentsMargins(0, 5, 0, 0)
-        ai_thinking_h.setSpacing(8)
-        
-        ai_disable_thinking_check = self._create_styled_checkbox("Disable all thinking (removes thinking params for fast checks)")
-        ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', True))
-        ai_thinking_h.addWidget(ai_disable_thinking_check)
-        ai_thinking_h.addStretch()
-        ai_api_layout.addWidget(ai_thinking_row)
-
-        # Toggle entire API settings group enabled state with the main checkbox
-        def _toggle_ai_api_section(checked):
-            ai_api_group.setEnabled(checked)
-            color = "white" if checked else "#909090"
-            label_color = "white" if checked else "#606060"
-            hint_color = "gray" if checked else "#404040"
-
-            ai_api_desc.setStyleSheet(f"color: {hint_color};")
-            
-            ai_key_label.setStyleSheet(f"color: {label_color};")
-            ai_key_entry.setStyleSheet(f"color: {color};")
-            
-            ai_model_label.setStyleSheet(f"color: {label_color};")
-            ai_model_combo.setStyleSheet(f"color: {color};")
-            
-            ai_temp_label.setStyleSheet(f"color: {label_color};")
-            ai_temp_spin.setStyleSheet(f"color: {color};")
-            ai_temp_hint.setStyleSheet(f"color: {hint_color};")
-            
-            ai_tokens_label.setStyleSheet(f"color: {label_color};")
-            ai_tokens_spin.setStyleSheet(f"color: {color};")
-            ai_tokens_hint.setStyleSheet(f"color: {hint_color};")
-            
-            ai_delay_label.setStyleSheet(f"color: {label_color};")
-            ai_delay_spin.setStyleSheet(f"color: {color};")
-            ai_delay_hint.setStyleSheet(f"color: {hint_color};")
-            
-            ai_url_label.setStyleSheet(f"color: {label_color};")
-            ai_url_entry.setStyleSheet(f"color: {color};")
-        check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
-        _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
-
-        # Indent this group under the main checkbox
-        ai_api_group.setContentsMargins(20, 0, 0, 0)
-        additional_layout.addWidget(ai_api_group)
-
-        additional_layout.addSpacing(15)
-        
-        # NEW: Paragraph Structure Check
-        # Separator line
-        separator_line = QFrame()
-        separator_line.setFrameShape(QFrame.HLine)
-        separator_line.setFrameShadow(QFrame.Sunken)
-        additional_layout.addWidget(separator_line)
-        additional_layout.addSpacing(10)
-        
-        # Checkbox for paragraph structure check
-        check_paragraph_structure_checkbox = self._create_styled_checkbox("Check for insufficient paragraph tags")
-        check_paragraph_structure_checkbox.setChecked(qa_settings.get('check_paragraph_structure', True))
-        additional_layout.addWidget(check_paragraph_structure_checkbox)
-        
-        # Threshold setting frame
-        threshold_widget = QWidget()
-        threshold_layout = QHBoxLayout(threshold_widget)
-        threshold_layout.setContentsMargins(20, 10, 0, 5)
-        
-        threshold_label = QLabel("Minimum text in <p> tags:")
-        threshold_label.setFont(QFont('Arial', 10))
-        threshold_layout.addWidget(threshold_label)
-        
-        # Get current threshold value (default 30%)
-        current_threshold = int(qa_settings.get('paragraph_threshold', 0.3) * 100)
-        
-        # Spinbox for threshold
-        paragraph_threshold_spinbox = QSpinBox()
-        paragraph_threshold_spinbox.setMinimum(0)
-        paragraph_threshold_spinbox.setMaximum(100)
-        paragraph_threshold_spinbox.setValue(current_threshold)
-        paragraph_threshold_spinbox.setMinimumWidth(80)
-        disable_wheel_event(paragraph_threshold_spinbox)
-        threshold_layout.addWidget(paragraph_threshold_spinbox)
-        
-        percent_label = QLabel("%")
-        percent_label.setFont(QFont('Arial', 10))
-        threshold_layout.addWidget(percent_label)
-        
-        # Threshold value label
-        threshold_value_label = QLabel(f"(currently {current_threshold}%)")
-        threshold_value_label.setFont(QFont('Arial', 9))
-        threshold_value_label.setStyleSheet("color: gray;")
-        threshold_layout.addWidget(threshold_value_label)
-        threshold_layout.addStretch()
-        additional_layout.addWidget(threshold_widget)
-        
-        # Update label when spinbox changes
-        def update_threshold_label(value):
-            threshold_value_label.setText(f"(currently {value}%)")
-        paragraph_threshold_spinbox.valueChanged.connect(update_threshold_label)
-        
-        # Description
-        para_desc = QLabel("Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
-                          "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
-                          "Also checks for large blocks of unwrapped text directly in the body element.")
-        para_desc.setFont(QFont('Arial', 9))
-        para_desc.setStyleSheet("color: gray;")
-        para_desc.setWordWrap(True)
-        para_desc.setMaximumWidth(700)
-        para_desc.setContentsMargins(20, 5, 0, 0)
-        additional_layout.addWidget(para_desc)
-        
-        # Enable/disable threshold setting based on checkbox
-        def toggle_paragraph_threshold(checked):
-            paragraph_threshold_spinbox.setEnabled(checked)
-            threshold_label.setEnabled(checked)
-            percent_label.setEnabled(checked)
-            threshold_value_label.setEnabled(checked)
-        
-        check_paragraph_structure_checkbox.toggled.connect(toggle_paragraph_threshold)
-        toggle_paragraph_threshold(check_paragraph_structure_checkbox.isChecked())  # Set initial state
-
-        scroll_layout.addSpacing(20)
-        pump_settings_open()
-        
-        # Report Settings Section
-        report_group = QGroupBox("Report Settings")
-        report_group.setFont(QFont('Arial', 12, QFont.Bold))
-        report_layout = QVBoxLayout(report_group)
-        report_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(report_group)
-        
-        # Report format
-        format_widget = QWidget()
-        format_layout = QHBoxLayout(format_widget)
-        format_layout.setContentsMargins(0, 0, 0, 10)
-        
-        format_label = QLabel("Report format:")
-        format_label.setFont(QFont('Arial', 10))
-        format_layout.addWidget(format_label)
-        
-        current_format_value = qa_settings.get('report_format', 'detailed')
-        format_options = [
-            ("Summary only", "summary"),
-            ("Detailed (recommended)", "detailed"),
-            ("Verbose (all data)", "verbose")
-        ]
-        
-        # Create radio buttons for format options
-        format_radio_buttons = []
-        for idx, (text, value) in enumerate(format_options):
-            rb = self._create_styled_radio_button(text)
-            if value == current_format_value:
-                rb.setChecked(True)
-            format_layout.addWidget(rb)
-            format_radio_buttons.append((rb, value))
-        
-        format_layout.addStretch()
-        report_layout.addWidget(format_widget)
-        
-        # Auto-save report
-        auto_save_checkbox = self._create_styled_checkbox("Automatically save report after scan")
-        auto_save_checkbox.setChecked(qa_settings.get('auto_save_report', True))
-        report_layout.addWidget(auto_save_checkbox)
-
-        # Add word count ratio threshold settings
-        # Min/Max normalized ratio thresholds
-        ratio_thresholds_widget = QWidget()
-        ratio_thresholds_layout = QHBoxLayout(ratio_thresholds_widget)
-        ratio_thresholds_layout.setContentsMargins(0, 10, 0, 5)
-        
-        ratio_min_label = QLabel("Min Ratio (normalized):")
-        ratio_min_label.setFont(QFont('Arial', 10))
-        ratio_thresholds_layout.addWidget(ratio_min_label)
-        
-        # Min ratio spinbox
-        ratio_min_spin = QComboBox()
-        ratio_min_spin.setEditable(True)
-        ratio_min_spin.addItem("Auto")
-        # Add reasonable range options
-        for val in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-            ratio_min_spin.addItem(str(val))
-        
-        saved_min = qa_settings.get('word_count_min_ratio', 'Auto')
-        ratio_min_spin.setCurrentText(str(saved_min))
-        ratio_min_spin.setMinimumWidth(100)  # Increased from 80
-        disable_wheel_event(ratio_min_spin)
-        ratio_thresholds_layout.addWidget(ratio_min_spin)
-        
-        ratio_thresholds_layout.addSpacing(20)
-        
-        ratio_max_label = QLabel("Max Ratio (normalized):")
-        ratio_max_label.setFont(QFont('Arial', 10))
-        ratio_thresholds_layout.addWidget(ratio_max_label)
-        
-        # Max ratio spinbox
-        ratio_max_spin = QComboBox()
-        ratio_max_spin.setEditable(True)
-        ratio_max_spin.addItem("Auto")
-        # Add reasonable range options
-        for val in [1.2, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 4.0, 5.0]:
-            ratio_max_spin.addItem(str(val))
-            
-        saved_max = qa_settings.get('word_count_max_ratio', 'Auto')
-        ratio_max_spin.setCurrentText(str(saved_max))
-        ratio_max_spin.setMinimumWidth(100)  # Increased from 80
-        disable_wheel_event(ratio_max_spin)
-        ratio_thresholds_layout.addWidget(ratio_max_spin)
-        
-        ratio_thresholds_layout.addStretch()
-        wordcount_layout.addWidget(ratio_thresholds_widget)
-        
-        ratio_hint = QLabel("(Auto CJK: Min 0.6, Max 2.0 | Auto Non-CJK: Min 0.7, Max 1.5)\nValues are normalized by the language multiplier above.")
-        ratio_hint.setFont(QFont('Arial', 9))
-        ratio_hint.setStyleSheet("color: gray;")
-        wordcount_layout.addWidget(ratio_hint)
-
-        scroll_layout.addSpacing(15)
-        pump_settings_open()
-        
-        # HTML Structure Analysis Section
-        cache_group = QGroupBox("Performance Cache Settings")
-        cache_group.setFont(QFont('Arial', 12, QFont.Bold))
-        cache_layout = QVBoxLayout(cache_group)
-        cache_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(cache_group)
-        
-        # Enable cache checkbox
-        cache_enabled_checkbox = self._create_styled_checkbox("Enable performance cache (speeds up duplicate detection)")
-        cache_enabled_checkbox.setChecked(qa_settings.get('cache_enabled', True))
-        cache_layout.addWidget(cache_enabled_checkbox)
-
-        # ------------------------------------------------------------------
-        # Thread vs Process executor toggle.
-        #
-        # Default (OFF): ProcessPoolExecutor — each worker is a separate
-        # Python process. Best CPU parallelism but on Windows every worker
-        # pays a large spawn cost (re-import all modules). In dev mode this
-        # can add tens of seconds of startup per scan; the bundled .exe
-        # doesn't suffer because its PYZ archive loads pre-compiled
-        # bytecode.
-        #
-        # When enabled: ThreadPoolExecutor — workers share the interpreter,
-        # zero spawn cost. Great for dev runs and for small scans where
-        # startup dominates. Slightly slower on CPU-bound duplicate
-        # detection for very large scans because of the GIL, but HTML
-        # parsing / I/O dominates most workloads.
-        # ------------------------------------------------------------------
-        use_threads_checkbox = self._create_styled_checkbox(
-            "Use threads instead of processes (faster cold start, good for dev mode)"
-        )
-        use_threads_checkbox.setChecked(
-            bool(qa_settings.get('use_thread_executor', False))
-        )
-        cache_layout.addWidget(use_threads_checkbox)
-        use_threads_hint = QLabel(
-            "Avoids the ProcessPoolExecutor spawn overhead (each child re-imports every module).\n"
-            "Recommended ON when running from source; .exe builds are fast either way."
-        )
-        use_threads_hint.setFont(QFont('Arial', 9))
-        use_threads_hint.setStyleSheet("color: gray;")
-        use_threads_hint.setContentsMargins(20, 0, 0, 0)
-        cache_layout.addWidget(use_threads_hint)
-
-        cache_layout.addSpacing(10)
-        
-        # Cache size settings
-        cache_desc_label = QLabel("Cache sizes (0 = disabled, -1 = unlimited):")
-        cache_desc_label.setFont(QFont('Arial', 10))
-        cache_layout.addWidget(cache_desc_label)
-        cache_layout.addSpacing(5)
-        
-        # Cache size variables - store spinboxes and buttons
-        cache_spinboxes = {}
-        cache_buttons = {}
-        cache_defaults = {
-            'normalize_text': 10000,
-            'similarity_ratio': 20000,
-            'content_hashes': 5000,
-            'semantic_fingerprint': 2000,
-            'structural_signature': 2000,
-            'translation_artifacts': 1000
-        }
-        
-        # Create input fields for each cache type
-        for cache_name, default_value in cache_defaults.items():
-            row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 2, 0, 2)
-            
-            # Label
-            label_text = cache_name.replace('_', ' ').title() + ":"
-            cache_label = QLabel(label_text)
-            cache_label.setFont(QFont('Arial', 9))
-            cache_label.setMinimumWidth(200)
-            row_layout.addWidget(cache_label)
-            
-            # Get current value
-            current_value = qa_settings.get(f'cache_{cache_name}', default_value)
-            
-            # Spinbox
-            spinbox = QSpinBox()
-            spinbox.setMinimum(-1)
-            spinbox.setMaximum(50000)
-            spinbox.setValue(current_value)
-            spinbox.setMinimumWidth(100)
-            disable_wheel_event(spinbox)
-            row_layout.addWidget(spinbox)
-            cache_spinboxes[cache_name] = spinbox
-            
-            # Quick preset buttons
-            def make_preset_handler(sb, val):
-                return lambda: sb.setValue(val)
-            
-            off_btn = QPushButton("Off")
-            off_btn.setFont(QFont('Arial', 8))
-            off_btn.setMinimumWidth(40)
-            off_btn.clicked.connect(make_preset_handler(spinbox, 0))
-            row_layout.addWidget(off_btn)
-            
-            small_btn = QPushButton("Small")
-            small_btn.setFont(QFont('Arial', 8))
-            small_btn.setMinimumWidth(50)
-            small_btn.clicked.connect(make_preset_handler(spinbox, 1000))
-            row_layout.addWidget(small_btn)
-            
-            medium_btn = QPushButton("Medium")
-            medium_btn.setFont(QFont('Arial', 8))
-            medium_btn.setMinimumWidth(60)
-            medium_btn.clicked.connect(make_preset_handler(spinbox, default_value))
-            row_layout.addWidget(medium_btn)
-            
-            large_btn = QPushButton("Large")
-            large_btn.setFont(QFont('Arial', 8))
-            large_btn.setMinimumWidth(50)
-            large_btn.clicked.connect(make_preset_handler(spinbox, default_value * 2))
-            row_layout.addWidget(large_btn)
-            
-            max_btn = QPushButton("Max")
-            max_btn.setFont(QFont('Arial', 8))
-            max_btn.setMinimumWidth(40)
-            max_btn.clicked.connect(make_preset_handler(spinbox, -1))
-            row_layout.addWidget(max_btn)
-            
-            # Store buttons for enabling/disabling
-            cache_buttons[cache_name] = [cache_label, off_btn, small_btn, medium_btn, large_btn, max_btn]
-            
-            row_layout.addStretch()
-            cache_layout.addWidget(row_widget)
-        
-        # Enable/disable cache size controls based on checkbox
-        def toggle_cache_controls(checked):
-            for cache_name in cache_defaults.keys():
-                spinbox = cache_spinboxes[cache_name]
-                spinbox.setEnabled(checked)
-                for widget in cache_buttons[cache_name]:
-                    widget.setEnabled(checked)
-        
-        cache_enabled_checkbox.toggled.connect(toggle_cache_controls)
-        toggle_cache_controls(cache_enabled_checkbox.isChecked())  # Set initial state
-        
-        cache_layout.addSpacing(10)
-        
-        # Auto-size cache option
-        auto_size_widget = QWidget()
-        auto_size_layout = QHBoxLayout(auto_size_widget)
-        auto_size_layout.setContentsMargins(0, 0, 0, 5)
-        
-        auto_size_checkbox = self._create_styled_checkbox("Auto-size caches based on available RAM")
-        auto_size_checkbox.setChecked(qa_settings.get('cache_auto_size', False))
-        auto_size_layout.addWidget(auto_size_checkbox)
-        
-        auto_size_hint = QLabel("(overrides manual settings)")
-        auto_size_hint.setFont(QFont('Arial', 9))
-        auto_size_hint.setStyleSheet("color: gray;")
-        auto_size_layout.addWidget(auto_size_hint)
-        auto_size_layout.addStretch()
-        cache_layout.addWidget(auto_size_widget)
-        
-        cache_layout.addSpacing(10)
-        
-        # Cache statistics display
-        show_stats_checkbox = self._create_styled_checkbox("Show cache hit/miss statistics after scan")
-        show_stats_checkbox.setChecked(qa_settings.get('cache_show_stats', False))
-        cache_layout.addWidget(show_stats_checkbox)
-        
-        cache_layout.addSpacing(10)
-        
-        # Info about cache
-        cache_info = QLabel("Larger cache sizes use more memory but improve performance for:\n" +
-                           "• Large datasets (100+ files)\n" +
-                           "• AI Hunter mode (all file pairs compared)\n" +
-                           "• Repeated scans of the same folder")
-        cache_info.setFont(QFont('Arial', 9))
-        cache_info.setStyleSheet("color: gray;")
-        cache_info.setWordWrap(True)
-        cache_info.setMaximumWidth(700)
-        cache_info.setContentsMargins(20, 0, 0, 0)
-        cache_layout.addWidget(cache_info)
-
-        scroll_layout.addSpacing(20)
-        pump_settings_open()
-        
-        # AI Hunter Performance Section
-        ai_hunter_group = QGroupBox("AI Hunter Performance Settings")
-        ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))
-        ai_hunter_layout = QVBoxLayout(ai_hunter_group)
-        ai_hunter_layout.setContentsMargins(20, 15, 20, 15)
-        scroll_layout.addWidget(ai_hunter_group)
-
-        # Description
-        ai_hunter_desc = QLabel("AI Hunter mode performs exhaustive duplicate detection by comparing every file pair.\n" +
-                               "Parallel processing can significantly speed up this process on multi-core systems.")
-        ai_hunter_desc.setFont(QFont('Arial', 9))
-        ai_hunter_desc.setStyleSheet("color: gray;")
-        ai_hunter_desc.setWordWrap(True)
-        ai_hunter_desc.setMaximumWidth(700)
-        ai_hunter_layout.addWidget(ai_hunter_desc)
-        ai_hunter_layout.addSpacing(10)
-
-        # Parallel workers setting
-        workers_widget = QWidget()
-        workers_layout = QHBoxLayout(workers_widget)
-        workers_layout.setContentsMargins(0, 0, 0, 10)
-
-        workers_label = QLabel("Maximum parallel workers:")
-        workers_label.setFont(QFont('Arial', 10))
-        workers_layout.addWidget(workers_label)
-
-        # Get current value from AI Hunter config
-        ai_hunter_config = self.config.get('ai_hunter_config', {})
-        current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 1)
-
-        ai_hunter_workers_spinbox = QSpinBox()
-        ai_hunter_workers_spinbox.setMinimum(0)
-        ai_hunter_workers_spinbox.setMaximum(64)
-        ai_hunter_workers_spinbox.setValue(current_max_workers)
-        ai_hunter_workers_spinbox.setMinimumWidth(100)
-        disable_wheel_event(ai_hunter_workers_spinbox)
-        workers_layout.addWidget(ai_hunter_workers_spinbox)
-
-        # CPU count display
-        import multiprocessing
-        cpu_count = multiprocessing.cpu_count()
-        cpu_hint = QLabel(f"(0 = use all {cpu_count} cores)")
-        cpu_hint.setFont(QFont('Arial', 9))
-        cpu_hint.setStyleSheet("color: gray;")
-        workers_layout.addWidget(cpu_hint)
-        workers_layout.addStretch()
-        ai_hunter_layout.addWidget(workers_widget)
-
-        # Quick preset buttons
-        preset_widget = QWidget()
-        preset_layout = QHBoxLayout(preset_widget)
-        preset_layout.setContentsMargins(0, 0, 0, 0)
-
-        preset_label = QLabel("Quick presets:")
-        preset_label.setFont(QFont('Arial', 9))
-        preset_layout.addWidget(preset_label)
-        preset_layout.addSpacing(10)
-
-        all_cores_btn = QPushButton(f"All cores ({cpu_count})")
-        all_cores_btn.setFont(QFont('Arial', 9))
-        all_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(0))
-        preset_layout.addWidget(all_cores_btn)
-
-        half_cores_btn = QPushButton("Half cores")
-        half_cores_btn.setFont(QFont('Arial', 9))
-        half_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(max(1, cpu_count // 2)))
-        preset_layout.addWidget(half_cores_btn)
-
-        four_cores_btn = QPushButton("4 cores")
-        four_cores_btn.setFont(QFont('Arial', 9))
-        four_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(4))
-        preset_layout.addWidget(four_cores_btn)
-
-        eight_cores_btn = QPushButton("8 cores")
-        eight_cores_btn.setFont(QFont('Arial', 9))
-        eight_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(8))
-        preset_layout.addWidget(eight_cores_btn)
-
-        single_thread_btn = QPushButton("Single thread")
-        single_thread_btn.setFont(QFont('Arial', 9))
-        single_thread_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(1))
-        preset_layout.addWidget(single_thread_btn)
-
-        preset_layout.addStretch()
-        ai_hunter_layout.addWidget(preset_widget)
-
-        # Performance tips
-        tips_text = "Performance Tips:\n" + \
-                    f"• Your system has {cpu_count} CPU cores available\n" + \
-                    "• Using all cores provides maximum speed but may slow other applications\n" + \
-                    "• 4-8 cores usually provides good balance of speed and system responsiveness\n" + \
-                    "• Single thread (1) disables parallel processing for debugging"
-
-        tips_label = QLabel(tips_text)
-        tips_label.setFont(QFont('Arial', 9))
-        tips_label.setStyleSheet("color: gray;")
-        tips_label.setWordWrap(True)
-        tips_label.setMaximumWidth(700)
-        tips_label.setContentsMargins(20, 10, 0, 0)
-        ai_hunter_layout.addWidget(tips_label)
-
-
-        
-        def save_settings():
-            """Save QA scanner settings with comprehensive debugging"""
-            try:
-                # Check if debug mode is enabled
-                debug_mode = self.config.get('show_debug_buttons', False)
-                
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
-                
-                # Helper to get the selected radio button value
-                def get_selected_radio_value(radio_button_list):
-                    for rb, value in radio_button_list:
-                        if rb.isChecked():
-                            return value
-                    return None
-                
-                # Core QA Settings with debugging
-                core_settings_to_save = {
-                    'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
-                    'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
-                    'source_language': (source_lang_combo, lambda x: _normalize_source_language(x.currentText())),
-                    'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
-                    'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
-                    'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
-                    'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
-                    'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
-                    'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
-                    'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
-                    'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
-                    'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
-                    'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
-                    'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
-                    'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
-                    'min_file_length': (min_length_spinbox, lambda x: x.value()),
-                    'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),
-                    'min_text_length_for_spacing': (min_spacing_text_spinbox, lambda x: x.value()),
-                    'report_format': (format_radio_buttons, get_selected_radio_value),
-                    'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
-                    'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),
-                    'counting_mode': (counting_mode_combo, lambda x: x.currentData()),
-                    'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
-                    'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
-                    'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
-                    'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
-                    'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
-                    'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
-                    'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),
-                    'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
-                    'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
-                    'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
-                    'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),
-                    'truncation_borderline_score': (truncation_borderline_slider, lambda x: x.value()),
-                    'truncation_length_threshold': (truncation_length_slider, lambda x: x.value()),
-                    'truncation_embed_threshold': (truncation_embed_slider, lambda x: x.value()),
-                    'check_ai_truncation_detection': (check_ai_truncation_checkbox, lambda x: x.isChecked()),
-                    'ai_truncation_tail_chars': (ai_truncation_tail_spinbox, lambda x: x.value()),
-                    'ai_truncation_prompt': (_ai_trunc_prompt_holder, lambda x: x[0]),
-                    'ai_truncation_prompt_role': (_ai_trunc_prompt_role_holder, lambda x: x[0]),
-                    'ai_truncation_api_key': (ai_key_entry, lambda x: x.text().strip()),
-                    'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
-                    'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
-                    'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
-                    'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: x.value()),
-                    'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
-                    'ai_truncation_disable_thinking': (ai_disable_thinking_check, lambda x: x.isChecked()),
-                    'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
-                    'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
-                }
-                
-                failed_core_settings = []
-                for setting_name, (var_obj, converter) in core_settings_to_save.items():
-                    try:
-                        old_value = qa_settings.get(setting_name, '<NOT SET>')
-                        new_value = converter(var_obj)
-                        qa_settings[setting_name] = new_value
-                        
-                        if debug_mode:
-                            if old_value != new_value:
-                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
-                            else:
-                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
-                            
-                    except Exception as e:
-                        failed_core_settings.append(f"{setting_name} ({str(e)})")
-                        if debug_mode:
-                            self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
-                
-                if failed_core_settings and debug_mode:
-                    self.append_log(f"⚠️ [DEBUG] Failed QA core settings: {', '.join(failed_core_settings)}")
-                
-                # Cache settings with debugging
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Saving QA cache settings...")
-                cache_settings_to_save = {
-                    'cache_enabled': (cache_enabled_checkbox, lambda x: x.isChecked()),
-                    'cache_auto_size': (auto_size_checkbox, lambda x: x.isChecked()),
-                    'cache_show_stats': (show_stats_checkbox, lambda x: x.isChecked()),
-                }
-                
-                failed_cache_settings = []
-                for setting_name, (var_obj, converter) in cache_settings_to_save.items():
-                    try:
-                        old_value = qa_settings.get(setting_name, '<NOT SET>')
-                        new_value = converter(var_obj)
-                        qa_settings[setting_name] = new_value
-                        
-                        if debug_mode:
-                            if old_value != new_value:
-                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
-                            else:
-                                self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
-                    except Exception as e:
-                        failed_cache_settings.append(f"{setting_name} ({str(e)})")
-                        if debug_mode:
-                            self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
-                
-                # Save individual cache sizes with debugging
-                saved_cache_vars = []
-                failed_cache_vars = []
-                for cache_name, cache_spinbox in cache_spinboxes.items():
-                    try:
-                        cache_key = f'cache_{cache_name}'
-                        old_value = qa_settings.get(cache_key, '<NOT SET>')
-                        new_value = cache_spinbox.value()
-                        qa_settings[cache_key] = new_value
-                        saved_cache_vars.append(cache_name)
-                        
-                        if debug_mode and old_value != new_value:
-                            self.append_log(f"🔍 [DEBUG] QA {cache_key}: '{old_value}' → '{new_value}'")
-                    except Exception as e:
-                        failed_cache_vars.append(f"{cache_name} ({str(e)})")
-                        if debug_mode:
-                            self.append_log(f"❌ [DEBUG] Failed to save QA cache_{cache_name}: {e}")
-                
-                if debug_mode:
-                    if saved_cache_vars:
-                        self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
-                    if failed_cache_vars:
-                        self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
-                # Save the thread-vs-process executor toggle so scan_html_folder
-                # can pick it up without relying on env vars (env may be stripped
-                # by subprocess isolation in some runs).
-                try:
-                    qa_settings['use_thread_executor'] = bool(use_threads_checkbox.isChecked())
-                    if debug_mode:
-                        self.append_log(
-                            f"🔍 [DEBUG] QA use_thread_executor: {qa_settings['use_thread_executor']}"
-                        )
-                except Exception as _e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Failed to save use_thread_executor: {_e}")
-
-                # Save word count multipliers
-                try:
-                    # Save auto toggle state
-                    use_auto = auto_multipliers_checkbox.isChecked()
-                    qa_settings['use_auto_multipliers'] = use_auto
-                    
-                    # If auto is enabled, use default values; otherwise use slider values
-                    if use_auto:
-                        wc_mults = dict(default_wordcount_defaults)
-                        if debug_mode:
-                            self.append_log("🔍 [DEBUG] Using default word count multipliers (auto mode)")
-                    else:
-                        wc_mults = {}
-                        for lang_key, widget in word_multiplier_sliders.items():
-                            if lang_key.endswith('__spin'):
-                                base_key = lang_key[:-6]
-                                wc_mults[base_key] = widget.value() / 100.0
-                            elif f"{lang_key}__spin" not in word_multiplier_sliders:
-                                wc_mults[lang_key] = widget.value() / 100.0
-                        if debug_mode:
-                            self.append_log("🔍 [DEBUG] Using custom word count multipliers (manual mode)")
-                    
-                    qa_settings['word_count_multipliers'] = wc_mults
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Failed to save word count multipliers: {e}")
-                
-                # AI Hunter config with debugging
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Saving AI Hunter config...")
-                try:
-                    if 'ai_hunter_config' not in self.config:
-                        self.config['ai_hunter_config'] = {}
-                        if debug_mode:
-                            self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
-                    
-                    old_workers = self.config['ai_hunter_config'].get('ai_hunter_max_workers', '<NOT SET>')
-                    new_workers = ai_hunter_workers_spinbox.value()
-                    self.config['ai_hunter_config']['ai_hunter_max_workers'] = new_workers
-                    
-                    if debug_mode:
-                        if old_workers != new_workers:
-                            self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: '{old_workers}' → '{new_workers}'")
-                        else:
-                            self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: unchanged ('{new_workers}')")
-                        
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
-    
-                # Validate and save paragraph threshold with debugging
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
-                try:
-                    threshold_value = paragraph_threshold_spinbox.value()
-                    old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
-                    
-                    if 0 <= threshold_value <= 100:
-                        new_threshold = threshold_value / 100.0  # Convert to decimal
-                        qa_settings['paragraph_threshold'] = new_threshold
-                        
-                        if debug_mode:
-                            if old_threshold != new_threshold:
-                                self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
-                            else:
-                                self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
-                    else:
-                        raise ValueError("Threshold must be between 0 and 100")
-                        
-                except (ValueError, Exception) as e:
-                    # Default to 30% if invalid
-                    qa_settings['paragraph_threshold'] = 0.3
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
-                    self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
-
-                # Save to main config with debugging
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
-                try:
-                    old_qa_config = self.config.get('qa_scanner_settings', {})
-                    self.config['qa_scanner_settings'] = qa_settings
-                    
-                    if debug_mode:
-                        # Count changed settings
-                        changed_settings = []
-                        for key, new_value in qa_settings.items():
-                            if old_qa_config.get(key) != new_value:
-                                changed_settings.append(key)
-                        
-                        if changed_settings:
-                            self.append_log(f"🔍 [DEBUG] Changed {len(changed_settings)} QA settings: {', '.join(changed_settings[:5])}{'...' if len(changed_settings) > 5 else ''}")
-                        else:
-                            self.append_log("🔍 [DEBUG] No QA settings changed")
-                        
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
-                
-                # Sync target language with the main translation UI so all
-                # dropdowns stay in sync.
-                try:
-                    display_lang = target_language_combo.currentText().strip()
-                    if display_lang and hasattr(self, 'update_target_language'):
-                        self.update_target_language(display_lang)
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"⚠️ [DEBUG] Failed to sync target language with main UI: {e}")
-
-                # Environment variables setup for QA Scanner
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
-                qa_env_vars_set = []
-                
-                try:
-                    # QA Scanner environment variables
-                    qa_env_mappings = [
-                        ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
-                        ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
-                        ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
-                        ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
-                        ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
-                        ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
-                        ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
-                        ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
-                        ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
-                        ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
-                        ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
-                        ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
-                        ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
-                        # Thread-vs-process executor for the scan
-                        ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
-                        ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
-                        # Counting mode: set env vars based on selection
-                        ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
-                        ('QA_EXACT_CHAR_COUNT', '1' if qa_settings.get('counting_mode') == 'exact' else '0'),
-                    ]
-                    
-                    for env_key, env_value in qa_env_mappings:
-                        try:
-                            old_value = os.environ.get(env_key, '<NOT SET>')
-                            os.environ[env_key] = str(env_value)
-                            new_value = os.environ[env_key]
-                            qa_env_vars_set.append(env_key)
-                            
-                            if debug_mode:
-                                if old_value != new_value:
-                                    self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value}'")
-                                else:
-                                    self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{new_value}')")
-                                
-                        except Exception as e:
-                            if debug_mode:
-                                self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
-                    
-                    if debug_mode:
-                        self.append_log(f"🔍 [DEBUG] Successfully set {len(qa_env_vars_set)} QA environment variables")
-                    
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] QA environment variable setup failed: {e}")
-                        import traceback
-                        self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
-                
-                # Call save_config with show_message=False to avoid the error
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Calling main save_config method...")
-                try:
-                    self.save_config(show_message=False)
-                    if debug_mode:
-                        self.append_log("🔍 [DEBUG] Main save_config completed successfully")
-                except Exception as e:
-                    if debug_mode:
-                        self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
-                    raise
-                
-                # Final QA environment variable verification
-                if debug_mode:
-                    self.append_log("🔍 [DEBUG] Final QA environment variable check:")
-                    critical_qa_vars = ['QA_FOREIGN_CHAR_THRESHOLD', 'QA_TARGET_LANGUAGE', 'QA_REPORT_FORMAT', 'AI_HUNTER_MAX_WORKERS']
-                    for var in critical_qa_vars:
-                        value = os.environ.get(var, '<NOT SET>')
-                        if value == '<NOT SET>' or not value:
-                            self.append_log(f"❌ [DEBUG] CRITICAL QA: {var} is not set or empty!")
-                        else:
-                            self.append_log(f"✅ [DEBUG] QA {var}: {value}")
-                
-                self.append_log("✅ QA Scanner settings saved successfully")
-                dialog._cleanup_scrolling()  # Clean up scrolling bindings
-                dialog.hide()
-                
-            except Exception as e:
-                # Get debug_mode again in case of early exception
-                debug_mode = self.config.get('show_debug_buttons', False)
-                if debug_mode:
-                    self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
-                    import traceback
-                    self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
-                self.append_log(f"❌ Error saving QA settings: {str(e)}")
-                QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
-        
-        def reset_defaults():
-            """Reset to default settings"""
-            result = QMessageBox.question(
-                dialog,
-                "Reset to Defaults",
-                "Are you sure you want to reset all settings to defaults?\n\n(Your excluded characters list will be preserved)",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if result == QMessageBox.Yes:
-                # Save current excluded characters before reset
-                saved_excluded_chars = excluded_text.toPlainText()
-
-                # Foreign character / language defaults
-                threshold_spinbox.setValue(10)
-                source_lang_combo.setCurrentText('Auto')
-                target_language_combo.setCurrentText('English')
-
-                # Detection defaults
-                check_encoding_checkbox.setChecked(False)
-                check_repetition_checkbox.setChecked(True)
-                check_artifacts_checkbox.setChecked(True)
-                check_ai_artifacts_checkbox.setChecked(True)
-                check_punctuation_checkbox.setChecked(False)
-                punct_threshold_spinbox.setValue(49)
-                excess_punct_checkbox.setChecked(False)
-                excess_threshold_spinbox.setValue(49)
-
-                # Word count analysis defaults
-                check_word_count_checkbox.setChecked(True)
-                try:
-                    idx = counting_mode_combo.findData('exact')
-                    counting_mode_combo.setCurrentIndex(idx if idx >= 0 else 1)
-                except Exception:
-                    pass
-                ratio_min_spin.setCurrentText('Auto')
-                ratio_max_spin.setCurrentText('Auto')
-
-                # Reset auto multipliers checkbox to default (enabled)
-                auto_multipliers_checkbox.setChecked(True)
-
-                # Reset word count multipliers to defaults
-                for lang_key, widget in word_multiplier_sliders.items():
-                    if lang_key.endswith('__spin'):
-                        base_key = lang_key[:-6]
-                        default_val = default_wordcount_defaults.get(base_key, 1.0)
-                        widget.setValue(int(default_val * 100))
-                    elif f"{lang_key}__spin" not in word_multiplier_sliders:
-                        default_val = default_wordcount_defaults.get(lang_key, 1.0)
-                        widget.setValue(int(default_val * 100))
-
-                check_glossary_checkbox.setChecked(True)
-                check_potential_truncation_checkbox.setChecked(False)
-                check_missing_images_checkbox.setChecked(True)
-                min_length_spinbox.setValue(0)
-                # Set 'detailed' radio button as checked
-                for rb, value in format_radio_buttons:
-                    rb.setChecked(value == 'detailed')
-                auto_save_checkbox.setChecked(True)
-                check_multiple_headers_checkbox.setChecked(True)
-                warn_mismatch_checkbox.setChecked(True)
-                check_missing_html_tag_checkbox.setChecked(True)
-                check_missing_header_tags_checkbox.setChecked(True)
-                check_all_text_in_header_checkbox.setChecked(True)
-                check_invalid_tag_mismatch_checkbox.setChecked(False)
-                check_paragraph_structure_checkbox.setChecked(True)
-                check_invalid_nesting_checkbox.setChecked(False)
-                check_truncation_checkbox.setChecked(False)
-                truncation_cheap_slider.setValue(12)
-                truncation_borderline_slider.setValue(40)
-                truncation_length_slider.setValue(30)
-                truncation_embed_slider.setValue(30)
-                check_ai_truncation_checkbox.setChecked(False)
-                ai_truncation_tail_spinbox.setValue(400)
-                _ai_trunc_prompt_holder[0] = _ai_trunc_default_prompt
-                _ai_trunc_prompt_role_holder[0] = 'system'
-                ai_key_entry.setText('')
-                ai_model_combo.setCurrentText('')
-                ai_temp_spin.setValue(0.0)
-                ai_tokens_spin.setValue(2000)
-                ai_url_entry.setText('')
-                paragraph_threshold_spinbox.setValue(30)  # 30% default
-
-                # Reset cache settings
-                cache_enabled_checkbox.setChecked(True)
-                auto_size_checkbox.setChecked(False)
-                show_stats_checkbox.setChecked(False)
-
-                # Thread-vs-process executor toggle resets to OFF
-                # (ProcessPoolExecutor is the historical default and is
-                # optimal for .exe builds; users running from source can
-                # re-enable threads manually).
-                use_threads_checkbox.setChecked(False)
-
-                # Reset cache sizes to defaults
-                for cache_name, default_value in cache_defaults.items():
-                    cache_spinboxes[cache_name].setValue(default_value)
-
-                ai_hunter_workers_spinbox.setValue(1)
-
-                # Restore excluded characters (per confirmation text)
-                excluded_text.setPlainText(saved_excluded_chars)
-        
-        scroll_layout.addStretch()
-
-        # Add a dummy _cleanup_scrolling method for compatibility
-        dialog._cleanup_scrolling = lambda: None
-
-        def hide_qa_settings_dialog():
-            try:
-                dialog._cleanup_scrolling()
-            except Exception:
-                pass
-            try:
-                dialog.setResult(QDialog.Rejected)
-            except Exception:
-                pass
-            dialog.hide()
-        
-        # Create fixed bottom button section (outside scroll area)
-        button_widget = QWidget()
-        button_layout = QHBoxLayout(button_widget)
-        button_layout.setContentsMargins(20, 15, 20, 15)
-        
-        save_btn = QPushButton("Save Settings")
-        save_btn.setMinimumWidth(120)
-        save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px; font-weight: bold;")
-        save_btn.clicked.connect(save_settings)
-        button_layout.addWidget(save_btn)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setMinimumWidth(120)
-        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
-        cancel_btn.clicked.connect(hide_qa_settings_dialog)
-        button_layout.addWidget(cancel_btn)
-        
-        reset_btn = QPushButton("Reset to Default")
-        reset_btn.setMinimumWidth(120)
-        reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 8px;")
-        reset_btn.clicked.connect(reset_defaults)
-        button_layout.addWidget(reset_btn)
-        
-        # Add button widget to main layout (not scroll layout)
-        main_layout.addWidget(button_widget)
-        
-        # Show the dialog (PySide6 handles sizing automatically)
-        # Note: The dialog size is already set in the constructor (800x600)
-        
-        # Handle window close - hide instead of destroying so reopen is instant
-        def handle_close_event(event):
-            try:
-                event.ignore()
-                hide_qa_settings_dialog()
-            except Exception:
-                dialog.hide()
-        dialog.closeEvent = handle_close_event
-        try:
-            dialog.destroyed.connect(
-                lambda *_: setattr(self, '_qa_settings_refresh_source_status', None)
-            )
-        except Exception:
-            pass
-
-        if not show:
-            _prewarm_dialog_offscreen(dialog)
-            return dialog
-        dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
-
-        if dialog.isVisible():
-            try:
+                dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                dialog.setWindowOpacity(1.0)
+                dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
             except Exception:
                 pass
+
+        def _finish_settings_stream():
+            try:
+                loading_label.hide()
+                loading_label.deleteLater()
+            except Exception:
+                pass
+            try:
+                dialog._qa_settings_stream_builder = None
+                dialog._qa_settings_stream_loading = False
+            except Exception:
+                pass
+
+        def _run_settings_stream_step(schedule_next=True):
+            builder = getattr(dialog, '_qa_settings_stream_builder', None)
+            if builder is None:
+                return
+            try:
+                next(builder)
+            except StopIteration:
+                _finish_settings_stream()
+                return
+            except RuntimeError:
+                _finish_settings_stream()
+                return
+            except Exception as exc:
+                _finish_settings_stream()
+                try:
+                    print(f"QA settings stream failed: {exc}")
+                except Exception:
+                    pass
+                return
+            if schedule_next:
+                QTimer.singleShot(45, _run_settings_stream_step)
+
+        def _build_settings_dialog_stream():
+            # Helper function to disable mousewheel on spinboxes and comboboxes
+            def disable_wheel_event(widget):
+                widget.wheelEvent = lambda event: event.ignore()
+
+            # Word count multiplier defaults (factory) - character-based ratios
+            base_multiplier_defaults = {
+                'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
+                'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
+                'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
+                'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
+                'other': 1.0
+            }
+            # Merge current settings over factory defaults for initial display
+            wordcount_defaults = dict(base_multiplier_defaults)
+            user_mults = qa_settings.get('word_count_multipliers', {})
+            if isinstance(user_mults, dict):
+                wordcount_defaults.update(user_mults)
+            # Immutable factory defaults for reset
+            default_wordcount_defaults = dict(base_multiplier_defaults)
+            # Title
+            title_label = QLabel("QA Scanner Settings")
+            title_label.setFont(QFont('Arial', 24, QFont.Bold))
+            title_label.setAlignment(Qt.AlignCenter)
+            scroll_layout.addWidget(title_label)
+            scroll_layout.addSpacing(20)
+
+            # Foreign Character Settings Section
+            foreign_group = QGroupBox("Foreign Character Detection")
+            foreign_group.setFont(QFont('Arial', 12, QFont.Bold))
+            foreign_layout = QVBoxLayout(foreign_group)
+            foreign_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(foreign_group)
+
+            # Source Language setting (for multiplier selection)
+            source_lang_widget = QWidget()
+            source_lang_layout = QHBoxLayout(source_lang_widget)
+            source_lang_layout.setContentsMargins(0, 0, 0, 6)
+
+            source_lang_label = QLabel("Source language (for word-count multiplier):")
+            source_lang_label.setFont(QFont('Arial', 10))
+            source_lang_layout.addWidget(source_lang_label)
+
+            source_language_options = [
+                'Auto', 'Chinese (Simplified)', 'Chinese (Traditional)',
+                'Japanese', 'Korean', 'English', 'Spanish', 'French', 'German',
+                'Italian', 'Portuguese', 'Russian', 'Arabic', 'Hindi', 'Turkish',
+                'Hebrew', 'Thai', 'Other'
+            ]
+            source_lang_combo = QComboBox()
+            source_lang_combo.setEditable(True)
+            source_lang_combo.addItems(source_language_options)
+            source_lang_combo.setCurrentText(qa_settings.get('source_language', 'Auto').title())
+            source_lang_combo.setMinimumWidth(240)
+            disable_wheel_event(source_lang_combo)
+            source_lang_layout.addWidget(source_lang_combo)
+
+            source_lang_hint = QLabel("(Auto = detect via script/CJK heuristics)")
+            source_lang_hint.setFont(QFont('Arial', 9))
+            source_lang_hint.setStyleSheet("color: gray;")
+            source_lang_layout.addWidget(source_lang_hint)
+            source_lang_layout.addStretch()
+            foreign_layout.addWidget(source_lang_widget)
+
+            # Target Language setting
+            target_lang_widget = QWidget()
+            target_lang_layout = QHBoxLayout(target_lang_widget)
+            target_lang_layout.setContentsMargins(0, 0, 0, 10)
+
+            target_lang_label = QLabel("Target language:")
+            target_lang_label.setFont(QFont('Arial', 10))
+            target_lang_layout.addWidget(target_lang_label)
+
+            # Capitalize the stored value for display in combobox
+            stored_language = qa_settings.get('target_language', 'english')
+            display_language = stored_language.capitalize()
+            target_language_options = [
+                'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
+                'Russian', 'Arabic', 'Hindi', 'Chinese (Simplified)',
+                'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
+                'Hebrew', 'Thai'
+            ]
+
+            target_language_combo = QComboBox()
+            target_language_combo.setEditable(True)
+            target_language_combo.addItems(target_language_options)
+
+            target_language_combo.setMinimumWidth(360)
+            target_language_combo.setMinimumContentsLength(24)  # ensure popup and line edit stay wide
+            target_language_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            # Prefer the main GUI's target language for display if available
+            initial_display = self.config.get('output_language') or display_language
+            target_language_combo.setCurrentText(initial_display)
+            target_language_combo.setMinimumWidth(150)
+            disable_wheel_event(target_language_combo)
+            target_lang_layout.addWidget(target_language_combo)
+
+            target_lang_hint = QLabel("(characters from other scripts will be flagged)")
+            target_lang_hint.setFont(QFont('Arial', 9))
+            target_lang_hint.setStyleSheet("color: gray;")
+            target_lang_layout.addWidget(target_lang_hint)
+            target_lang_layout.addStretch()
+            foreign_layout.addWidget(target_lang_widget)
+
+            # Threshold setting
+            threshold_widget = QWidget()
+            threshold_layout = QHBoxLayout(threshold_widget)
+            threshold_layout.setContentsMargins(0, 10, 0, 10)
+
+            threshold_label = QLabel("Minimum foreign characters to flag:")
+            threshold_label.setFont(QFont('Arial', 10))
+            threshold_layout.addWidget(threshold_label)
+
+            threshold_spinbox = QSpinBox()
+            threshold_spinbox.setMinimum(0)
+            threshold_spinbox.setMaximum(1000)
+            threshold_spinbox.setValue(qa_settings.get('foreign_char_threshold', 10))
+            threshold_spinbox.setMinimumWidth(100)
+            disable_wheel_event(threshold_spinbox)
+            threshold_layout.addWidget(threshold_spinbox)
+
+            threshold_hint = QLabel("(0 = always flag, higher = more tolerant)")
+            threshold_hint.setFont(QFont('Arial', 9))
+            threshold_hint.setStyleSheet("color: gray;")
+            threshold_layout.addWidget(threshold_hint)
+            threshold_layout.addStretch()
+            foreign_layout.addWidget(threshold_widget)
+
+            # Excluded characters
+            excluded_label = QLabel("Additional characters to exclude from detection:")
+            excluded_label.setFont(QFont('Arial', 10))
+            foreign_layout.addWidget(excluded_label)
+
+            # Text edit for excluded characters
+            excluded_text = QTextEdit()
+            excluded_text.setMaximumHeight(150)
+            excluded_text.setFont(QFont('Consolas', 10))
+            excluded_text.setPlainText(qa_settings.get('excluded_characters', ''))
+            foreign_layout.addWidget(excluded_text)
+
+            excluded_hint = QLabel("Enter characters separated by spaces (e.g., ™ © ® • …)")
+            excluded_hint.setFont(QFont('Arial', 9))
+            excluded_hint.setStyleSheet("color: gray;")
+            foreign_layout.addWidget(excluded_hint)
+
+            scroll_layout.addSpacing(20)
+            yield
+
+            # Detection Options Section
+            detection_group = QGroupBox("Detection Options")
+            detection_group.setFont(QFont('Arial', 12, QFont.Bold))
+            detection_layout = QVBoxLayout(detection_group)
+            detection_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(detection_group)
+
+            # Checkboxes for detection options
+            check_encoding_checkbox = self._create_styled_checkbox("Check for encoding issues (�, □, ◇)")
+            check_encoding_checkbox.setChecked(qa_settings.get('check_encoding_issues', False))
+            detection_layout.addWidget(check_encoding_checkbox)
+
+            check_repetition_checkbox = self._create_styled_checkbox("Check for excessive repetition")
+            check_repetition_checkbox.setChecked(qa_settings.get('check_repetition', True))
+            detection_layout.addWidget(check_repetition_checkbox)
+
+            check_artifacts_checkbox = self._create_styled_checkbox("Check for translation artifacts (MTL notes, watermarks)")
+            check_artifacts_checkbox.setChecked(qa_settings.get('check_translation_artifacts', True))
+            detection_layout.addWidget(check_artifacts_checkbox)
+
+            # Separate toggle for AI artifacts
+            check_ai_artifacts_checkbox = self._create_styled_checkbox("Check for AI artifacts (\"Sure, here’s…\", thinking tags, JSON)")
+            check_ai_artifacts_checkbox.setChecked(qa_settings.get('check_ai_artifacts', True))
+            check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
+            detection_layout.addWidget(check_ai_artifacts_checkbox)
+
+            check_punctuation_checkbox = self._create_styled_checkbox("Check ?! punctuation mismatches (compares with source file)")
+            check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
+            detection_layout.addWidget(check_punctuation_checkbox)
+
+            # Punctuation loss threshold setting (indented under the checkbox)
+            punct_threshold_widget = QWidget()
+            punct_threshold_layout = QHBoxLayout(punct_threshold_widget)
+            punct_threshold_layout.setContentsMargins(20, 0, 0, 10)
+
+            punct_threshold_label = QLabel("Flag if lost >")
+            punct_threshold_label.setFont(QFont('Arial', 10))
+            punct_threshold_layout.addWidget(punct_threshold_label)
+
+            punct_threshold_spinbox = QSpinBox()
+            punct_threshold_spinbox.setMinimum(0)
+            punct_threshold_spinbox.setMaximum(100)
+            punct_threshold_spinbox.setValue(qa_settings.get('punctuation_loss_threshold', 49))
+            punct_threshold_spinbox.setSuffix("%")
+            punct_threshold_spinbox.setMinimumWidth(80)
+            disable_wheel_event(punct_threshold_spinbox)
+            punct_threshold_layout.addWidget(punct_threshold_spinbox)
+
+            punct_threshold_hint = QLabel("(0 = flag all, 49 = flag if half lost, 100 = only flag if all lost)")
+            punct_threshold_hint.setFont(QFont('Arial', 9))
+            punct_threshold_hint.setStyleSheet("color: gray;")
+            punct_threshold_layout.addWidget(punct_threshold_hint)
+            punct_threshold_layout.addStretch()
+            detection_layout.addWidget(punct_threshold_widget)
+
+            # Enable/disable punctuation threshold controls based on checkbox
+            def toggle_punctuation_threshold(checked):
+                punct_threshold_label.setEnabled(checked)
+                punct_threshold_spinbox.setEnabled(checked)
+                punct_threshold_hint.setEnabled(checked)
+                if checked:
+                    punct_threshold_label.setStyleSheet("color: white;")
+                    punct_threshold_spinbox.setStyleSheet("color: white;")
+                    punct_threshold_hint.setStyleSheet("color: gray;")
+                else:
+                    punct_threshold_label.setStyleSheet("color: #606060;")
+                    punct_threshold_spinbox.setStyleSheet("color: #909090;")
+                    punct_threshold_hint.setStyleSheet("color: #404040;")
+
+            check_punctuation_checkbox.toggled.connect(toggle_punctuation_threshold)
+            toggle_punctuation_threshold(check_punctuation_checkbox.isChecked())  # Set initial state
+
+            # Excess punctuation checkbox (indented under the punctuation checker)
+            excess_punct_widget = QWidget()
+            excess_punct_layout = QHBoxLayout(excess_punct_widget)
+            excess_punct_layout.setContentsMargins(20, 0, 0, 0)
+
+            excess_punct_checkbox = self._create_styled_checkbox("Flag excess punctuation (more ? or ! than source)")
+            excess_punct_checkbox.setChecked(qa_settings.get('flag_excess_punctuation', False))
+            excess_punct_layout.addWidget(excess_punct_checkbox)
+            excess_punct_layout.addStretch()
+            detection_layout.addWidget(excess_punct_widget)
+
+            # Excess punctuation threshold setting (indented under the excess checkbox)
+            excess_threshold_widget = QWidget()
+            excess_threshold_layout = QHBoxLayout(excess_threshold_widget)
+            excess_threshold_layout.setContentsMargins(40, 0, 0, 10)
+
+            excess_threshold_label = QLabel("Flag if excess >")
+            excess_threshold_label.setFont(QFont('Arial', 10))
+            excess_threshold_layout.addWidget(excess_threshold_label)
+
+            excess_threshold_spinbox = QSpinBox()
+            excess_threshold_spinbox.setMinimum(0)
+            excess_threshold_spinbox.setMaximum(500)
+            excess_threshold_spinbox.setValue(qa_settings.get('excess_punctuation_threshold', 49))
+            excess_threshold_spinbox.setSuffix("%")
+            excess_threshold_spinbox.setMinimumWidth(80)
+            disable_wheel_event(excess_threshold_spinbox)
+            excess_threshold_layout.addWidget(excess_threshold_spinbox)
+
+            excess_threshold_hint = QLabel("(0 = flag all excess, 49 = flag if half excess, 100 = only flag if doubled)")
+            excess_threshold_hint.setFont(QFont('Arial', 9))
+            excess_threshold_hint.setStyleSheet("color: gray;")
+            excess_threshold_layout.addWidget(excess_threshold_hint)
+            excess_threshold_layout.addStretch()
+            detection_layout.addWidget(excess_threshold_widget)
+
+            # Enable/disable excess punctuation controls based on main and excess checkboxes
+            def toggle_excess_punct(main_checked):
+                excess_enabled = main_checked
+                excess_punct_checkbox.setEnabled(excess_enabled)
+                # Threshold only enabled if both main and excess checkboxes are checked
+                threshold_enabled = main_checked and excess_punct_checkbox.isChecked()
+                excess_threshold_label.setEnabled(threshold_enabled)
+                excess_threshold_spinbox.setEnabled(threshold_enabled)
+                excess_threshold_hint.setEnabled(threshold_enabled)
+                if excess_enabled:
+                    excess_punct_checkbox.setStyleSheet("color: white;")
+                else:
+                    excess_punct_checkbox.setStyleSheet("color: #606060;")
+                if threshold_enabled:
+                    excess_threshold_label.setStyleSheet("color: white;")
+                    excess_threshold_spinbox.setStyleSheet("color: white;")
+                    excess_threshold_hint.setStyleSheet("color: gray;")
+                else:
+                    excess_threshold_label.setStyleSheet("color: #606060;")
+                    excess_threshold_spinbox.setStyleSheet("color: #909090;")
+                    excess_threshold_hint.setStyleSheet("color: #404040;")
+
+            def toggle_excess_threshold(excess_checked):
+                # Re-evaluate based on current state
+                toggle_excess_punct(check_punctuation_checkbox.isChecked())
+
+            check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
+            excess_punct_checkbox.toggled.connect(toggle_excess_threshold)
+            toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
+
+            check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
+            check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
+            detection_layout.addWidget(check_glossary_checkbox)
+
+            check_potential_truncation_checkbox = self._create_styled_checkbox("Check for potential truncation (last sentence missing ending punctuation)")
+            check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', False))
+            detection_layout.addWidget(check_potential_truncation_checkbox)
+
+            scroll_layout.addSpacing(20)
+            yield
+
+            # File Processing Section
+            file_group = QGroupBox("File Processing")
+            file_group.setFont(QFont('Arial', 12, QFont.Bold))
+            file_layout = QVBoxLayout(file_group)
+            file_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(file_group)
+
+            # Minimum file length
+            min_length_widget = QWidget()
+            min_length_layout = QHBoxLayout(min_length_widget)
+            min_length_layout.setContentsMargins(0, 0, 0, 10)
+
+            min_length_label = QLabel("Minimum file length (characters):")
+            min_length_label.setFont(QFont('Arial', 10))
+            min_length_layout.addWidget(min_length_label)
+
+            min_length_spinbox = QSpinBox()
+            min_length_spinbox.setMinimum(0)
+            min_length_spinbox.setMaximum(10000)
+            min_length_spinbox.setValue(qa_settings.get('min_file_length', 0))
+            min_length_spinbox.setMinimumWidth(100)
+            disable_wheel_event(min_length_spinbox)
+            min_length_layout.addWidget(min_length_spinbox)
+            min_length_layout.addStretch()
+            file_layout.addWidget(min_length_widget)
+
+            # Minimum duplicate word count
+            min_dup_words_widget = QWidget()
+            min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
+            min_dup_words_layout.setContentsMargins(0, 10, 0, 10)
+
+            min_dup_words_label = QLabel("Skip small files as duplicates if <N words:")
+            min_dup_words_label.setFont(QFont('Arial', 10))
+            min_dup_words_layout.addWidget(min_dup_words_label)
+
+            min_dup_words_spinbox = QSpinBox()
+            min_dup_words_spinbox.setMinimum(0)
+            min_dup_words_spinbox.setMaximum(999999)
+            min_dup_words_spinbox.setSingleStep(50)
+            min_dup_words_spinbox.setValue(qa_settings.get('min_duplicate_word_count', 500))
+            min_dup_words_spinbox.setMinimumWidth(100)
+            disable_wheel_event(min_dup_words_spinbox)
+            min_dup_words_layout.addWidget(min_dup_words_spinbox)
+
+            min_dup_hint = QLabel("(prevents section/notice files from being flagged)")
+            min_dup_hint.setFont(QFont('Arial', 9))
+            min_dup_hint.setStyleSheet("color: gray;")
+            min_dup_words_layout.addWidget(min_dup_hint)
+            min_dup_words_layout.addStretch()
+            file_layout.addWidget(min_dup_words_widget)
+
+            # Minimum text length for spacing/linebreaks check
+            min_spacing_text_widget = QWidget()
+            min_spacing_text_layout = QHBoxLayout(min_spacing_text_widget)
+            min_spacing_text_layout.setContentsMargins(0, 10, 0, 10)
+
+            min_spacing_text_label = QLabel("Minimum text length for spacing check (characters):")
+            min_spacing_text_label.setFont(QFont('Arial', 10))
+            min_spacing_text_layout.addWidget(min_spacing_text_label)
+
+            min_spacing_text_spinbox = QSpinBox()
+            min_spacing_text_spinbox.setMinimum(0)
+            min_spacing_text_spinbox.setMaximum(999999)
+            min_spacing_text_spinbox.setSingleStep(10)
+            min_spacing_text_spinbox.setValue(qa_settings.get('min_text_length_for_spacing', 100))
+            min_spacing_text_spinbox.setMinimumWidth(100)
+            disable_wheel_event(min_spacing_text_spinbox)
+            min_spacing_text_layout.addWidget(min_spacing_text_spinbox)
+
+            min_spacing_hint = QLabel("(skips files with very little content like cover pages)")
+            min_spacing_hint.setFont(QFont('Arial', 9))
+            min_spacing_hint.setStyleSheet("color: gray;")
+            min_spacing_text_layout.addWidget(min_spacing_hint)
+            min_spacing_text_layout.addStretch()
+            file_layout.addWidget(min_spacing_text_widget)
+
+            scroll_layout.addSpacing(15)
+            yield
+
+            # Word Count Cross-Reference Section
+            wordcount_group = QGroupBox("Word Count Analysis")
+            wordcount_group.setFont(QFont('Arial', 12, QFont.Bold))
+            wordcount_layout = QVBoxLayout(wordcount_group)
+            wordcount_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(wordcount_group)
+
+            check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original source file")
+            check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', True))
+            wordcount_layout.addWidget(check_word_count_checkbox)
+
+            wordcount_desc = QLabel("Compares word counts between original and translated files to detect missing content.\n" +
+                                   "For EPUB: accounts for typical expansion ratios when translating from CJK to English.\n" +
+                                   "For Text: compares each section file against the total source .txt word count.")
+            wordcount_desc.setFont(QFont('Arial', 9))
+            wordcount_desc.setStyleSheet("color: gray;")
+            wordcount_desc.setWordWrap(True)
+            wordcount_desc.setMaximumWidth(700)
+            wordcount_layout.addWidget(wordcount_desc)
+
+            # Counting mode options
+            counting_mode_widget = QWidget()
+            counting_mode_layout = QHBoxLayout(counting_mode_widget)
+            counting_mode_layout.setContentsMargins(0, 10, 0, 5)
+
+            counting_mode_label = QLabel("Counting mode:")
+            counting_mode_label.setFont(QFont('Arial', 10))
+            counting_mode_layout.addWidget(counting_mode_label)
+
+            # Get current mode from saved settings (default: exact)
+            saved_counting_mode = qa_settings.get('counting_mode', 'exact')
+
+            counting_mode_combo = QComboBox()
+            counting_mode_combo.addItem("Character count (sampled) - Fastest", "sampled")
+            counting_mode_combo.addItem("Character count (exact) - Default", "exact")
+            counting_mode_combo.addItem("Word count (legacy)", "word")
+            counting_mode_combo.setMinimumWidth(250)
+            counting_mode_combo.wheelEvent = lambda event: event.ignore()
+
+            # Set current selection based on saved settings
+            if saved_counting_mode == 'word':
+                counting_mode_combo.setCurrentIndex(2)  # Word count
+            elif saved_counting_mode == 'sampled':
+                counting_mode_combo.setCurrentIndex(0)  # Sampled
+            else:
+                counting_mode_combo.setCurrentIndex(1)  # Exact (default)
+
+            counting_mode_layout.addWidget(counting_mode_combo)
+            counting_mode_layout.addStretch()
+            wordcount_layout.addWidget(counting_mode_widget)
+
+            # Word count multiplier sliders (2-column grid)
+            multipliers_label = QLabel("Expected translation length multiplier (translated words ÷ source words)")
+            multipliers_label.setFont(QFont('Arial', 10, QFont.Bold))
+            wordcount_layout.addWidget(multipliers_label)
+
+            multiplier_hint = QLabel("Adjust per-language expansion. 100% = same length as source; 150% = 1.5x longer.")
+            multiplier_hint.setFont(QFont('Arial', 9))
+            multiplier_hint.setStyleSheet("color: gray;")
+            multiplier_hint.setWordWrap(True)
+            multiplier_hint.setMaximumWidth(700)
+            wordcount_layout.addWidget(multiplier_hint)
+
+            # Auto toggle for using default multipliers
+            auto_multipliers_widget = QWidget()
+            auto_multipliers_layout = QHBoxLayout(auto_multipliers_widget)
+            auto_multipliers_layout.setContentsMargins(0, 10, 0, 10)
+
+            auto_multipliers_checkbox = self._create_styled_checkbox("Auto: Use recommended default multipliers")
+            auto_multipliers_checkbox.setChecked(qa_settings.get('use_auto_multipliers', True))  # Enabled by default
+            auto_multipliers_layout.addWidget(auto_multipliers_checkbox)
+
+            auto_multipliers_hint = QLabel("(disable to customize per-language ratios)")
+            auto_multipliers_hint.setFont(QFont('Arial', 9))
+            auto_multipliers_hint.setStyleSheet("color: gray;")
+            auto_multipliers_layout.addWidget(auto_multipliers_hint)
+            auto_multipliers_layout.addStretch()
+            wordcount_layout.addWidget(auto_multipliers_widget)
+
+            multiplier_grid_widget = QWidget()
+            multiplier_grid = QGridLayout(multiplier_grid_widget)
+            multiplier_grid.setContentsMargins(0, 6, 0, 6)
+            multiplier_grid.setHorizontalSpacing(16)
+            multiplier_grid.setVerticalSpacing(8)
+            wordcount_layout.addWidget(multiplier_grid_widget)
+
+            # Keep slider refs for saving and enabling/disabling
+            word_multiplier_sliders = {}
+            word_multiplier_labels = []
+            # Ordered language list for stable UI
+            multiplier_order = [
+                'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
+                'russian', 'arabic', 'hindi', 'turkish',
+                'chinese', 'chinese (simplified)', 'chinese (traditional)',
+                'japanese', 'korean', 'hebrew', 'thai', 'other'
+            ]
+
+            # Build sliders in 2 columns
+            for idx, lang_key in enumerate(multiplier_order):
+                row = idx // 2
+                col = idx % 2
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+
+                display_name = lang_key.capitalize() if '(' not in lang_key else lang_key.title()
+                lang_label = QLabel(display_name + ":")
+                lang_label.setFont(QFont('Arial', 9))
+                row_layout.addWidget(lang_label)
+
+                # Slider
+                slider = QSlider(Qt.Horizontal)
+                slider.setMinimum(10)   # 0.10x
+                slider.setMaximum(1000) # 10.0x
+                slider.setSingleStep(5)
+                slider.setTickInterval(50)
+                slider.setMinimumWidth(140)
+                slider.wheelEvent = lambda event: event.ignore()
+                current_mult = wordcount_defaults.get(lang_key, 1.0)
+                slider.setValue(int(current_mult * 100))
+                row_layout.addWidget(slider)
+
+                # Editable spinbox (same range, %)
+                spin = QSpinBox()
+                spin.setMinimum(10)
+                spin.setMaximum(1000)
+                spin.setSingleStep(1)
+                spin.setValue(int(current_mult * 100))
+                spin.setSuffix("%")
+                spin.setMinimumWidth(70)
+                spin.wheelEvent = lambda event: event.ignore()
+                row_layout.addWidget(spin)
+
+                # Keep in sync both ways
+                slider.valueChanged.connect(spin.setValue)
+                spin.valueChanged.connect(slider.setValue)
+
+                word_multiplier_sliders[lang_key] = slider
+                word_multiplier_sliders[f"{lang_key}__spin"] = spin
+                word_multiplier_labels.append(lang_label)
+                multiplier_grid.addWidget(row_widget, row, col)
+
+            # Function to toggle multiplier controls based on auto checkbox
+            def toggle_multiplier_controls(auto_enabled):
+                for lang_key in multiplier_order:
+                    slider = word_multiplier_sliders.get(lang_key)
+                    spin = word_multiplier_sliders.get(f"{lang_key}__spin")
+
+                    if slider:
+                        slider.setEnabled(not auto_enabled)
+
+                    if spin:
+                        spin.setEnabled(not auto_enabled)
+                        # Apply enable/disable styling to spinbox
+                        if auto_enabled:
+                            spin.setStyleSheet("background-color: #303030; color: #808080;")
+                        else:
+                            spin.setStyleSheet("background-color: #404040; color: white;")  # Enabled styling
+
+                # Apply enable/disable styling to labels
+                for label in word_multiplier_labels:
+                    if auto_enabled:
+                        label.setStyleSheet("color: #808080;")  # Gray out when disabled
+                    else:
+                        label.setStyleSheet("color: white;")  # White when enabled
+
+            # Connect auto checkbox to toggle function
+            auto_multipliers_checkbox.toggled.connect(toggle_multiplier_controls)
+
+            # Set initial state
+            toggle_multiplier_controls(auto_multipliers_checkbox.isChecked())
+
+            wordcount_layout.addSpacing(6)
+
+            # Show current EPUB status and allow selection
+            epub_widget = QWidget()
+            epub_layout = QHBoxLayout(epub_widget)
+            epub_layout.setContentsMargins(0, 10, 0, 5)
+
+            status_label = QLabel()
+            status_label.setFont(QFont('Arial', 10))
+            epub_layout.addWidget(status_label)
+
+            def _selected_source_files_for_qa():
+                source_exts = ('.epub', '.txt', '.pdf', '.md')
+                files = []
+                try:
+                    files = [
+                        f for f in (getattr(self, 'selected_files', []) or [])
+                        if isinstance(f, str) and f.lower().endswith(source_exts)
+                    ]
+                except Exception:
+                    files = []
+                if not files:
+                    try:
+                        files = [
+                            f for f in (getattr(self, 'selected_epub_files', []) or [])
+                            if isinstance(f, str) and f.lower().endswith(source_exts)
+                        ]
+                    except Exception:
+                        files = []
+                if not files:
+                    for attr in ('selected_epub_path',):
+                        try:
+                            p = getattr(self, attr, None)
+                        except Exception:
+                            p = None
+                        if isinstance(p, str) and p.lower().endswith(source_exts):
+                            files = [p]
+                            break
+                return files
+
+            def _source_file_type(path):
+                lower_name = str(path or '').lower()
+                if lower_name.endswith('.txt'):
+                    return "TXT"
+                if lower_name.endswith('.pdf'):
+                    return "PDF"
+                if lower_name.endswith('.md'):
+                    return "MD"
+                return "EPUB"
+
+            def refresh_source_status():
+                current_source_files = _selected_source_files_for_qa()
+                if len(current_source_files) > 1:
+                    primary_file = os.path.basename(_qa_vision_ocr_source_path(current_source_files[0], self))
+                    status_label.setText(f"📖 {len(current_source_files)} source files selected (Primary: {primary_file})")
+                    status_label.setStyleSheet("color: green;")
+                elif len(current_source_files) == 1:
+                    source_path = current_source_files[0]
+                    display_source_path = _qa_vision_ocr_source_path(source_path, self)
+                    status_label.setText(f"📖 Current {_source_file_type(source_path)}: {os.path.basename(display_source_path)}")
+                    status_label.setStyleSheet("color: green;")
+                else:
+                    status_label.setText("📖 No EPUB/TXT/PDF/MD in current selection")
+                    status_label.setStyleSheet("color: orange;")
+
+            refresh_source_status()
+            try:
+                self._qa_settings_refresh_source_status = refresh_source_status
+            except Exception:
+                pass
+
+            def select_epub_for_qa():
+                # Allow selecting EPUB, TXT, PDF, or MD files as source
+                epub_path, _ = QFileDialog.getOpenFileName(
+                    dialog,
+                    "Select Source File",
+                    "",
+                    "Source files (*.epub *.txt *.pdf *.md);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;Markdown files (*.md);;All files (*.*)"
+                )
+
+                if epub_path:
+                    self.selected_epub_path = epub_path
+                    self.config['last_epub_path'] = epub_path
+                    self.save_config(show_message=False)
+
+                    # Clear multiple EPUB tracking when manually selecting a single file
+                    if hasattr(self, 'selected_epub_files'):
+                        self.selected_epub_files = [epub_path]
+
+                    file_type = _source_file_type(epub_path)
+                    display_source_path = _qa_vision_ocr_source_path(epub_path, self)
+                    refresh_source_status()
+                    self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
+                    if display_source_path != epub_path:
+                        self.append_log(f"   Vision QA source: {os.path.basename(display_source_path)}")
+
+            select_epub_btn = QPushButton("Select Source File")
+            select_epub_btn.setFont(QFont('Arial', 9))
+            select_epub_btn.clicked.connect(select_epub_for_qa)
+            epub_layout.addWidget(select_epub_btn)
+            epub_layout.addStretch()
+            wordcount_layout.addWidget(epub_widget)
+
+            # Add option to disable mismatch warning
+            warn_mismatch_checkbox = self._create_styled_checkbox("Warn when EPUB and folder names don't match")
+            warn_mismatch_checkbox.setChecked(qa_settings.get('warn_name_mismatch', True))
+            wordcount_layout.addWidget(warn_mismatch_checkbox)
+
+            wordcount_layout.addSpacing(10)
+
+            # Missing images check (requires source file like word count does)
+            check_missing_images_checkbox = self._create_styled_checkbox("Check for missing image tags (images lost during translation)")
+            check_missing_images_checkbox.setChecked(qa_settings.get('check_missing_images', True))
+            wordcount_layout.addWidget(check_missing_images_checkbox)
+
+            images_desc = QLabel("Compares image tags between original and translated HTML files.\n" +
+                                "Detects when <img> tags are lost during translation process.")
+            images_desc.setFont(QFont('Arial', 9))
+            images_desc.setStyleSheet("color: gray;")
+            images_desc.setWordWrap(True)
+            images_desc.setMaximumWidth(700)
+            wordcount_layout.addWidget(images_desc)
+
+            scroll_layout.addSpacing(20)
+            yield
+
+            # Additional Checks Section
+            additional_group = QGroupBox("Additional Checks")
+            additional_group.setFont(QFont('Arial', 12, QFont.Bold))
+            additional_layout = QVBoxLayout(additional_group)
+            additional_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(additional_group)
+
+            # Missing header tags check
+            check_missing_header_tags_checkbox = self._create_styled_checkbox("Flags HTML files missing header tags (h1-h6)")
+            check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', True))
+            additional_layout.addWidget(check_missing_header_tags_checkbox)
+            additional_layout.addSpacing(10)
+
+            # Multiple headers check
+            check_multiple_headers_checkbox = self._create_styled_checkbox("Detect files with 2 or more headers (h1-h6 tags)")
+            check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
+            additional_layout.addWidget(check_multiple_headers_checkbox)
+
+            headers_desc = QLabel("Identifies files that may have been incorrectly split or merged.\n" +
+                                 "Useful for detecting chapters that contain multiple sections.")
+            headers_desc.setFont(QFont('Arial', 9))
+            headers_desc.setStyleSheet("color: gray;")
+            headers_desc.setWordWrap(True)
+            headers_desc.setMaximumWidth(700)
+            additional_layout.addWidget(headers_desc)
+            additional_layout.addSpacing(10)
+
+            # Missing HTML tag check
+            check_missing_html_tag_checkbox = self._create_styled_checkbox("Check HTML structure and tag consistency")
+            check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
+            additional_layout.addWidget(check_missing_html_tag_checkbox)
+
+            # Body tag check (separate, disabled by default)
+            body_tag_widget = QWidget()
+            body_tag_layout = QHBoxLayout(body_tag_widget)
+            body_tag_layout.setContentsMargins(0, 0, 0, 5)
+
+            check_body_tag_checkbox = self._create_styled_checkbox("Check for <body> tag consistency")
+            check_body_tag_checkbox.setChecked(qa_settings.get('check_body_tag', False))
+            body_tag_layout.addWidget(check_body_tag_checkbox)
+
+            body_tag_hint = QLabel("(Disabled by default - body tags not required in EPUBs)")
+            body_tag_hint.setFont(QFont('Arial', 9))
+            body_tag_hint.setStyleSheet("color: gray;")
+            body_tag_layout.addWidget(body_tag_hint)
+            body_tag_layout.addStretch()
+            additional_layout.addWidget(body_tag_widget)
+
+            # Detect chapters where (almost) all text is wrapped in one header tag
+            check_all_text_in_header_checkbox = self._create_styled_checkbox(
+                "Detect chapters where all text is inside a single <h1>-<h6> tag"
+            )
+            check_all_text_in_header_checkbox.setChecked(qa_settings.get('check_all_text_in_header', True))
+            additional_layout.addWidget(check_all_text_in_header_checkbox)
+
+            all_text_in_header_desc = QLabel(
+                "Flags translations where the chapter body was collapsed into one huge heading,\n"
+                "e.g. the entire chapter text appears inside a single <h1>...</h1> wrapper."
+            )
+            all_text_in_header_desc.setFont(QFont('Arial', 9))
+            all_text_in_header_desc.setStyleSheet("color: gray;")
+            all_text_in_header_desc.setWordWrap(True)
+            all_text_in_header_desc.setMaximumWidth(700)
+            all_text_in_header_desc.setContentsMargins(20, 0, 0, 5)
+            additional_layout.addWidget(all_text_in_header_desc)
+
+            # Invalid / custom HTML tag mismatch check (e.g. <concept>)
+            check_invalid_tag_mismatch_checkbox = self._create_styled_checkbox(
+                "Detect invalid/custom HTML tags missing or invisible in translation"
+            )
+            check_invalid_tag_mismatch_checkbox.setChecked(qa_settings.get('check_invalid_tag_mismatch', False))
+            additional_layout.addWidget(check_invalid_tag_mismatch_checkbox)
+
+            invalid_tag_desc = QLabel(
+                "Compares source and translated HTML for non-standard tags like <concept>.\n"
+                "Flags two issues: (1) tags present in source but dropped from translation\n"
+                "(HTML entity forms such as &lt;concept&gt; still count as present),\n"
+                "and (2) tags that appear in the translation as raw angle brackets,\n"
+                "which are invisible to readers because browsers ignore unknown tags.\n"
+                "Requires the original source file (EPUB / word_count folder)."
+            )
+            invalid_tag_desc.setFont(QFont('Arial', 9))
+            invalid_tag_desc.setStyleSheet("color: gray;")
+            invalid_tag_desc.setWordWrap(True)
+            invalid_tag_desc.setMaximumWidth(700)
+            invalid_tag_desc.setContentsMargins(20, 0, 0, 5)
+            additional_layout.addWidget(invalid_tag_desc)
+
+            # Invalid nesting check (separate toggle)
+            check_invalid_nesting_checkbox = self._create_styled_checkbox("Check for invalid tag nesting")
+            check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
+            additional_layout.addWidget(check_invalid_nesting_checkbox)
+
+            # Silent truncation detection (optional, requires heavy deps)
+            check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")
+            additional_layout.addWidget(check_truncation_checkbox)
+
+            # Check if required dependencies are installed
+            _truncation_deps_missing = []
+            try:
+                import sentence_transformers
+            except ImportError:
+                _truncation_deps_missing.append("sentence-transformers")
+            try:
+                import deep_translator
+            except ImportError:
+                _truncation_deps_missing.append("deep-translator")
+            try:
+                import sklearn
+            except ImportError:
+                _truncation_deps_missing.append("scikit-learn")
+
+            if _truncation_deps_missing:
+                # Dependencies missing — disable and grey out
+                check_truncation_checkbox.setChecked(False)
+                check_truncation_checkbox.setEnabled(False)
+                check_truncation_checkbox.setStyleSheet("color: #606060;")
+                missing_str = ", ".join(_truncation_deps_missing)
+                truncation_desc = QLabel(f"⚠️ Missing dependencies: {missing_str}\n"
+                                         f"Install with: pip install {' '.join(_truncation_deps_missing)}")
+                truncation_desc.setFont(QFont('Arial', 9))
+                truncation_desc.setStyleSheet("color: #b06040;")
+            else:
+                # All deps available — normal behavior
+                check_truncation_checkbox.setChecked(qa_settings.get('check_silent_truncation', False))
+                truncation_desc = QLabel("Detects when translated content silently drops paragraphs from the end of chapters.\n"
+                                         "Uses embedding similarity + back-translation to compare source vs translated tails.\n"
+                                         "Requires: sentence-transformers, deep-translator, scikit-learn. Loads ~80MB model on first use.")
+                truncation_desc.setFont(QFont('Arial', 9))
+                truncation_desc.setStyleSheet("color: gray;")
+
+            truncation_desc.setWordWrap(True)
+            truncation_desc.setMaximumWidth(700)
+            truncation_desc.setContentsMargins(20, 0, 0, 0)
+            additional_layout.addWidget(truncation_desc)
+
+            # ---- Truncation threshold sliders ----
+            _truncation_deps_ok = not _truncation_deps_missing
+
+            truncation_sliders_widget = QWidget()
+            truncation_sliders_layout = QVBoxLayout(truncation_sliders_widget)
+            truncation_sliders_layout.setContentsMargins(20, 5, 0, 0)
+            truncation_sliders_layout.setSpacing(4)
+
+            def _make_threshold_slider(label_text, setting_key, default_val, tooltip=""):
+                """Create a labeled slider (0-100) for a truncation threshold."""
+                row = QWidget()
+                hl = QHBoxLayout(row)
+                hl.setContentsMargins(0, 0, 0, 0)
+                hl.setSpacing(8)
+
+                lbl = QLabel(label_text)
+                lbl.setFont(QFont('Arial', 9))
+                lbl.setFixedWidth(160)
+                hl.addWidget(lbl)
+
+                slider = QSlider(Qt.Horizontal)
+                slider.setMinimum(0)
+                slider.setMaximum(100)
+                val = int(qa_settings.get(setting_key, default_val))
+                slider.setValue(val)
+                slider.setFixedWidth(200)
+                if tooltip:
+                    slider.setToolTip(tooltip)
+                hl.addWidget(slider)
+
+                val_label = QLabel(f"{val / 100:.2f}")
+                val_label.setFont(QFont('Arial', 9))
+                val_label.setFixedWidth(40)
+                hl.addWidget(val_label)
+
+                slider.valueChanged.connect(lambda v: val_label.setText(f"{v / 100:.2f}"))
+
+                hl.addStretch()
+                return row, slider, lbl, val_label
+
+            # Collect all slider labels for toggle styling
+            _truncation_slider_labels = []
+
+            cheap_row, truncation_cheap_slider, _cl, _cv = _make_threshold_slider(
+                "Cheap score threshold:", 'truncation_cheap_threshold', 12,
+                "Below this composite score AND below length threshold → immediately flagged (default: 0.12)")
+            _truncation_slider_labels.extend([_cl, _cv])
+            truncation_sliders_layout.addWidget(cheap_row)
+
+            borderline_row, truncation_borderline_slider, _bl, _bv = _make_threshold_slider(
+                "Borderline pass score:", 'truncation_borderline_score', 40,
+                "Above this composite score → considered OK without embedding check (default: 0.40)")
+            _truncation_slider_labels.extend([_bl, _bv])
+            truncation_sliders_layout.addWidget(borderline_row)
+
+            length_row, truncation_length_slider, _ll, _lv = _make_threshold_slider(
+                "Length ratio threshold:", 'truncation_length_threshold', 30,
+                "Minimum length ratio for the cheap-fail gate (default: 0.30)")
+            _truncation_slider_labels.extend([_ll, _lv])
+            truncation_sliders_layout.addWidget(length_row)
+
+            embed_row, truncation_embed_slider, _el, _ev = _make_threshold_slider(
+                "Embedding threshold:", 'truncation_embed_threshold', 45,
+                "Below this embedding similarity → flagged in borderline cases (default: 0.45)")
+            _truncation_slider_labels.extend([_el, _ev])
+            truncation_sliders_layout.addWidget(embed_row)
+
+            _truncation_all_sliders = [truncation_cheap_slider, truncation_borderline_slider,
+                                        truncation_length_slider, truncation_embed_slider]
+
+            additional_layout.addWidget(truncation_sliders_widget)
+
+            # Wire checkbox toggle to enable/disable sliders with explicit label styling
+            def _toggle_truncation_sliders(checked):
+                enabled = checked and _truncation_deps_ok
+                for s in _truncation_all_sliders:
+                    s.setEnabled(enabled)
+                for lbl in _truncation_slider_labels:
+                    if enabled:
+                        lbl.setStyleSheet("color: white;")
+                    else:
+                        lbl.setStyleSheet("color: #808080;")
+
+            check_truncation_checkbox.toggled.connect(_toggle_truncation_sliders)
+            # Set initial state
+            _toggle_truncation_sliders(check_truncation_checkbox.isChecked())
+
+            additional_layout.addSpacing(10)
+
+            yield
+            # ---- AI Truncation Detection (no heavy deps needed) ----
+            check_ai_truncation_checkbox = self._create_styled_checkbox(
+                "AI Truncation Detection (uses your API to detect truncated chapters)"
+            )
+            check_ai_truncation_checkbox.setChecked(qa_settings.get('check_ai_truncation_detection', False))
+            additional_layout.addWidget(check_ai_truncation_checkbox)
+
+            ai_truncation_desc = QLabel(
+                "Sends the tail of source and translated text to your configured AI model and asks whether\n"
+                "the translation appears truncated. Much more reliable than heuristic detection.\n"
+                "Uses your active API key(s) — works with single and multi-key modes. No extra dependencies."
+            )
+            ai_truncation_desc.setFont(QFont('Arial', 9))
+            ai_truncation_desc.setStyleSheet("color: gray;")
+            ai_truncation_desc.setWordWrap(True)
+            ai_truncation_desc.setMaximumWidth(700)
+            ai_truncation_desc.setContentsMargins(20, 0, 0, 0)
+            additional_layout.addWidget(ai_truncation_desc)
+
+            # Tail character count spinbox
+            ai_trunc_tail_widget = QWidget()
+            ai_trunc_tail_layout = QHBoxLayout(ai_trunc_tail_widget)
+            ai_trunc_tail_layout.setContentsMargins(20, 5, 0, 0)
+            ai_trunc_tail_layout.setSpacing(8)
+
+            ai_trunc_tail_label = QLabel("Tail characters to send:")
+            ai_trunc_tail_label.setFont(QFont('Arial', 9))
+            ai_trunc_tail_layout.addWidget(ai_trunc_tail_label)
+
+            ai_truncation_tail_spinbox = QSpinBox()
+            ai_truncation_tail_spinbox.setMinimum(200)
+            ai_truncation_tail_spinbox.setMaximum(5000)
+            ai_truncation_tail_spinbox.setSingleStep(100)
+            ai_truncation_tail_spinbox.setValue(int(qa_settings.get('ai_truncation_tail_chars', 400)))
+            ai_truncation_tail_spinbox.setMinimumWidth(80)
+            disable_wheel_event(ai_truncation_tail_spinbox)
+            ai_trunc_tail_layout.addWidget(ai_truncation_tail_spinbox)
+
+            ai_trunc_tail_hint = QLabel("chars from end of source and translated text")
+            ai_trunc_tail_hint.setFont(QFont('Arial', 9))
+            ai_trunc_tail_hint.setStyleSheet("color: #9ca3af;")
+            ai_trunc_tail_layout.addWidget(ai_trunc_tail_hint)
+            ai_trunc_tail_layout.addStretch()
+
+            additional_layout.addWidget(ai_trunc_tail_widget)
+
+            # "Edit Prompt" button
+            _ai_trunc_default_prompt = (
+                "You are a strict translation quality analyst. Your ONLY job is to determine if "
+                "a translated text has been accidentally TRUNCATED (cut off abruptly mid-sentence, "
+                "or completely missing the final paragraphs/sentences present in the source).\n"
+                "You must be forgiving of minor structural changes, combined paragraphs, or paraphrasing. "
+                "Only evaluate the final sentences of the provided texts. Ignore mismatches occurring at the beginning "
+                "of the provided tail segment, as it may have been cleanly cut from a larger document.\n"
+                "Only answer YES if there is a glaring, obvious failure where the translation explicitly ends prematurely "
+                "compared to the source text. If it is a complete, well-formed ending that conveys the general final message, answer NO.\n"
+                "Respond with ONLY the word YES or NO. Do not explain."
+            )
+            # Store current custom prompt (or default) in a mutable container for the closure
+            _ai_trunc_prompt_holder = [qa_settings.get('ai_truncation_prompt', _ai_trunc_default_prompt)]
+            # Store prompt role: 'system' or 'user' (default: system)
+            _ai_trunc_prompt_role_holder = [qa_settings.get('ai_truncation_prompt_role', 'system')]
+
+            ai_trunc_btn_row = QWidget()
+            ai_trunc_btn_layout = QHBoxLayout(ai_trunc_btn_row)
+            ai_trunc_btn_layout.setContentsMargins(20, 2, 0, 0)
+            ai_trunc_btn_layout.setSpacing(8)
+
+            edit_prompt_btn = QPushButton("✏️  Edit Prompt")
+            edit_prompt_btn.setFixedWidth(130)
+            edit_prompt_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4a5568;
+                    color: white;
+                    border: 1px solid #4a5568;
+                    padding: 4px 10px;
+                    border-radius: 3px;
+                    font-size: 9pt;
+                }
+                QPushButton:hover {
+                    background-color: #5a6778;
+                    border-color: #6b7a8d;
+                }
+                QPushButton:disabled {
+                    background-color: #2a2a2a;
+                    color: #666666;
+                    border-color: #3a3a3a;
+                }
+            """)
+
+            def _open_prompt_editor():
+                prompt_dlg = QDialog(dialog)
+                prompt_dlg.setWindowTitle("AI Truncation Detection — Edit Prompt")
+                prompt_dlg.resize(620, 400)
+                prompt_dlg.setStyleSheet("background-color: #1e1e1e; color: white;")
+                playout = QVBoxLayout(prompt_dlg)
+                playout.setContentsMargins(12, 12, 12, 12)
+
+                # ─── Prompt role toggle (System / User) ───
+                role_row = QWidget()
+                role_h = QHBoxLayout(role_row)
+                role_h.setContentsMargins(0, 0, 0, 6)
+                role_h.setSpacing(12)
+
+                role_label = QLabel("Send prompt as:")
+                role_label.setFont(QFont('Arial', 9))
+                role_label.setStyleSheet("color: #9ca3af;")
+                role_h.addWidget(role_label)
+
+                _radio_style = """
+                    QRadioButton {
+                        color: #e0e0e0;
+                        font-size: 9pt;
+                        spacing: 4px;
+                    }
+                    QRadioButton::indicator {
+                        width: 14px;
+                        height: 14px;
+                    }
+                    QRadioButton::indicator:checked {
+                        background-color: #4a90d9;
+                        border: 2px solid #6bade0;
+                        border-radius: 7px;
+                    }
+                    QRadioButton::indicator:unchecked {
+                        background-color: #353535;
+                        border: 2px solid #555;
+                        border-radius: 7px;
+                    }
+                """
+
+                system_radio = QRadioButton("System prompt")
+                system_radio.setStyleSheet(_radio_style)
+                system_radio.setToolTip(
+                    "The prompt is sent as a system message (role='system').\n"
+                    "Best for models that support system instructions."
+                )
+                user_radio = QRadioButton("User prompt")
+                user_radio.setStyleSheet(_radio_style)
+                user_radio.setToolTip(
+                    "The prompt is prepended to the user message (role='user').\n"
+                    "Use this for models that ignore or don't support system prompts."
+                )
+
+                if _ai_trunc_prompt_role_holder[0] == 'user':
+                    user_radio.setChecked(True)
+                else:
+                    system_radio.setChecked(True)
+
+                role_group = QButtonGroup(prompt_dlg)
+                role_group.addButton(system_radio, 0)
+                role_group.addButton(user_radio, 1)
+                role_h.addWidget(system_radio)
+                role_h.addWidget(user_radio)
+                role_h.addStretch()
+                playout.addWidget(role_row)
+
+                plabel = QLabel("Prompt sent to your AI model for each chapter check:")
+                plabel.setFont(QFont('Arial', 9))
+                plabel.setStyleSheet("color: #9ca3af;")
+                playout.addWidget(plabel)
+
+                p_edit = QTextEdit()
+                p_edit.setPlainText(_ai_trunc_prompt_holder[0])
+                p_edit.setFont(QFont('Consolas', 10))
+                p_edit.setStyleSheet("""
+                    QTextEdit {
+                        background-color: #2d2d2d;
+                        color: #e0e0e0;
+                        border: 1px solid #4a5568;
+                        border-radius: 3px;
+                        padding: 6px;
+                    }
+                """)
+                playout.addWidget(p_edit)
+
+                btn_row = QHBoxLayout()
+                reset_btn = QPushButton("🔄 Reset to Default")
+                reset_btn.setStyleSheet(
+                    "QPushButton { background-color: #ffc107; color: black; padding: 6px 14px; "
+                    "border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #e0a800; }"
+                )
+                def _reset_all_defaults():
+                    reply = QMessageBox.question(
+                        prompt_dlg, "Confirm Reset",
+                        "Are you sure you want to reset the prompt to its default?\nThis action cannot be undone.",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        p_edit.setPlainText(_ai_trunc_default_prompt)
+                        system_radio.setChecked(True)
+                reset_btn.clicked.connect(_reset_all_defaults)
+                btn_row.addWidget(reset_btn)
+                btn_row.addStretch()
+
+                save_btn = QPushButton("💾 Save")
+                save_btn.setStyleSheet(
+                    "QPushButton { background-color: #28a745; color: white; padding: 6px 14px; "
+                    "border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #218838; }"
+                )
+                def _save_prompt():
+                    _ai_trunc_prompt_holder[0] = p_edit.toPlainText().strip()
+                    _ai_trunc_prompt_role_holder[0] = 'user' if user_radio.isChecked() else 'system'
+                    # Update status label
+                    if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
+                        prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
+                        prompt_status_label.setStyleSheet("color: #f0ad4e;")
+                    else:
+                        prompt_status_label.setText("(using default prompt)")
+                        prompt_status_label.setStyleSheet("color: #808080;")
+                    prompt_dlg.accept()
+                save_btn.clicked.connect(_save_prompt)
+                btn_row.addWidget(save_btn)
+
+                cancel_btn = QPushButton("Cancel")
+                cancel_btn.setStyleSheet(
+                    "QPushButton { background-color: #6c757d; color: white; padding: 6px 14px; "
+                    "border-radius: 3px; } "
+                    "QPushButton:hover { background-color: #5a6268; }"
+                )
+                cancel_btn.clicked.connect(prompt_dlg.reject)
+                btn_row.addWidget(cancel_btn)
+
+                playout.addLayout(btn_row)
+                prompt_dlg.show()
+
+            edit_prompt_btn.clicked.connect(_open_prompt_editor)
+            ai_trunc_btn_layout.addWidget(edit_prompt_btn)
+
+            prompt_status_label = QLabel("(using default prompt)")
+            prompt_status_label.setFont(QFont('Arial', 9))
+            prompt_status_label.setStyleSheet("color: #808080;")
+            if _ai_trunc_prompt_holder[0] != _ai_trunc_default_prompt or _ai_trunc_prompt_role_holder[0] != 'system':
+                prompt_status_label.setText(f"(custom prompt, {_ai_trunc_prompt_role_holder[0]} role)")
+                prompt_status_label.setStyleSheet("color: #f0ad4e;")
+            ai_trunc_btn_layout.addWidget(prompt_status_label)
+            ai_trunc_btn_layout.addStretch()
+
+            additional_layout.addWidget(ai_trunc_btn_row)
+
+            # Toggle spinbox and button enabled state
+            def _toggle_ai_truncation(checked):
+                ai_truncation_tail_spinbox.setEnabled(checked)
+                edit_prompt_btn.setEnabled(checked)
+                if checked:
+                    ai_trunc_tail_label.setStyleSheet("color: white;")
+                    ai_truncation_tail_spinbox.setStyleSheet("color: white;")
+                    ai_trunc_tail_hint.setStyleSheet("color: gray;")
+                else:
+                    ai_trunc_tail_label.setStyleSheet("color: #606060;")
+                    ai_truncation_tail_spinbox.setStyleSheet("color: #909090;")
+                    ai_trunc_tail_hint.setStyleSheet("color: #404040;")
+
+            check_ai_truncation_checkbox.toggled.connect(_toggle_ai_truncation)
+            _toggle_ai_truncation(check_ai_truncation_checkbox.isChecked())
+
+            yield
+            # ── AI Truncation Detector — Dedicated API Settings ──────────────
+            ai_api_group = QGroupBox("AI Truncation Detector — API Settings")
+            ai_api_group.setFont(QFont('Arial', 10, QFont.Bold))
+            ai_api_group.setCheckable(False)
+            ai_api_group.setStyleSheet("""
+                QGroupBox {
+                    color: #e0e0e0;
+                    border: 1px solid #4a5568;
+                    margin-top: 8px;
+                    padding-top: 18px;
+                    border-radius: 4px;
+                }
+                QGroupBox::title {
+                    color: #9ca3af;
+                    left: 12px;
+                    padding: 0 6px;
+                    font-size: 10pt;
+                }
+            """)
+            ai_api_layout = QVBoxLayout(ai_api_group)
+            ai_api_layout.setContentsMargins(20, 10, 20, 10)
+            ai_api_layout.setSpacing(8)
+
+            ai_api_desc_row = QWidget()
+            ai_api_desc_layout = QHBoxLayout(ai_api_desc_row)
+            ai_api_desc_layout.setContentsMargins(0, 0, 0, 0)
+            ai_api_desc_layout.setSpacing(8)
+
+            ai_api_desc = QLabel(
+                "Override the global API settings for AI truncation detection only.\n"
+                "Leave API key blank to use your main key. Set temperature or output tokens to -1 to use global defaults."
+            )
+            ai_api_desc.setFont(QFont('Arial', 9))
+            ai_api_desc.setStyleSheet("color: #808080;")
+            ai_api_desc.setWordWrap(True)
+            ai_api_desc_layout.addWidget(ai_api_desc, 1)
+
+            try:
+                from multi_api_key_manager import create_preview_pool_button
+                qa_scan_keys_btn = create_preview_pool_button(
+                    dialog,
+                    self,
+                    'ai_truncation_detection',
+                    "QA Scan Keys",
+                    "Open the Multi API Key Manager focused on the QA Scan key pool for AI truncation detection.",
+                )
+                ai_api_desc_layout.addWidget(qa_scan_keys_btn)
+            except Exception:
+                pass
+
+            ai_api_layout.addWidget(ai_api_desc_row)
+
+            # ─── Row 1: API Key ───
+            ai_key_row = QWidget()
+            ai_key_h = QHBoxLayout(ai_key_row)
+            ai_key_h.setContentsMargins(0, 0, 0, 0)
+            ai_key_h.setSpacing(8)
+
+            ai_key_label = QLabel("API Key:")
+            ai_key_label.setFont(QFont('Arial', 9))
+            ai_key_label.setFixedWidth(100)
+            ai_key_h.addWidget(ai_key_label)
+
+            from PySide6.QtWidgets import QLineEdit as _QLE
+            ai_key_entry = _QLE()
+            ai_key_entry.setEchoMode(_QLE.Password)
+            ai_key_entry.setPlaceholderText("(blank = use main API key)")
+            ai_key_entry.setText(qa_settings.get('ai_truncation_api_key', ''))
+            ai_key_h.addWidget(ai_key_entry)
+
+            # Toggle visibility button
+            ai_key_show_btn = QPushButton("👁")
+            ai_key_show_btn.setFixedWidth(32)
+            ai_key_show_btn.setToolTip("Toggle API key visibility")
+            ai_key_show_btn.setStyleSheet("""
+                QPushButton { background-color: #404040; color: white; border: 1px solid #555;
+                              padding: 3px; border-radius: 3px; font-size: 10pt; }
+                QPushButton:hover { background-color: #505050; }
+            """)
+            def _toggle_key_vis():
+                if ai_key_entry.echoMode() == _QLE.Password:
+                    ai_key_entry.setEchoMode(_QLE.Normal)
+                    ai_key_show_btn.setText("🔒")
+                else:
+                    ai_key_entry.setEchoMode(_QLE.Password)
+                    ai_key_show_btn.setText("👁")
+            ai_key_show_btn.clicked.connect(_toggle_key_vis)
+            ai_key_h.addWidget(ai_key_show_btn)
+
+            ai_api_layout.addWidget(ai_key_row)
+
+            # ─── Row 2: Model selector (searchable combobox) ───
+            ai_model_row = QWidget()
+            ai_model_h = QHBoxLayout(ai_model_row)
+            ai_model_h.setContentsMargins(0, 0, 0, 0)
+            ai_model_h.setSpacing(8)
+
+            ai_model_label = QLabel("Model:")
+            ai_model_label.setFont(QFont('Arial', 9))
+            ai_model_label.setFixedWidth(100)
+            ai_model_h.addWidget(ai_model_label)
+
+            ai_model_combo = QComboBox()
+            ai_model_combo.setEditable(True)
+            ai_model_combo.setInsertPolicy(QComboBox.NoInsert)
+            # Load model catalog
+            try:
+                from model_options import get_model_options
+                _ai_model_list = get_model_options()
+            except Exception:
+                _ai_model_list = ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-5-mini", "gpt-5-nano"]
+            ai_model_combo.addItems(_ai_model_list)
+            # Set completer for search
+            from PySide6.QtWidgets import QCompleter
+            ai_model_completer = QCompleter(_ai_model_list)
+            ai_model_completer.setCaseSensitivity(Qt.CaseInsensitive)
+            ai_model_completer.setFilterMode(Qt.MatchContains)
+            ai_model_completer.setMaxVisibleItems(15)
+            ai_model_combo.setCompleter(ai_model_completer)
+            disable_wheel_event(ai_model_combo)
+
+            # Restore saved value or default to blank (= use main model)
+            _saved_ai_model = qa_settings.get('ai_truncation_model', '')
+            if _saved_ai_model:
+                ai_model_combo.setCurrentText(_saved_ai_model)
+            else:
+                ai_model_combo.setCurrentText('')
+            ai_model_combo.lineEdit().setPlaceholderText("(blank = use main model)")
+            ai_model_h.addWidget(ai_model_combo)
+
+            ai_api_layout.addWidget(ai_model_row)
+
+            # ─── Row 3: Temperature + Output Tokens ───
+            ai_params_row = QWidget()
+            ai_params_h = QHBoxLayout(ai_params_row)
+            ai_params_h.setContentsMargins(0, 0, 0, 0)
+            ai_params_h.setSpacing(16)
+
+            # Temperature
+            ai_temp_label = QLabel("Temperature:")
+            ai_temp_label.setFont(QFont('Arial', 9))
+            ai_params_h.addWidget(ai_temp_label)
+
+            from PySide6.QtWidgets import QDoubleSpinBox
+            ai_temp_spin = QDoubleSpinBox()
+            ai_temp_spin.setMinimum(-1.0)
+            ai_temp_spin.setMaximum(1.0)
+            ai_temp_spin.setSingleStep(0.1)
+            ai_temp_spin.setDecimals(2)
+            ai_temp_spin.setValue(float(qa_settings.get('ai_truncation_temperature', 0.0)))
+            ai_temp_spin.setFixedWidth(80)
+            ai_temp_spin.setToolTip("-1 = use global temperature")
+            disable_wheel_event(ai_temp_spin)
+            ai_params_h.addWidget(ai_temp_spin)
+
+            # Snap negative values in-between 0 and -1 directly
+            ai_temp_spin.setProperty("last_val", ai_temp_spin.value())
+            def enforce_temp_snap(val):
+                last_val = ai_temp_spin.property("last_val")
+                ai_temp_spin.blockSignals(True)
+                if -1.0 < val < 0.0:
+                    if last_val >= 0.0:
+                        val = -1.0
+                    elif last_val <= -1.0:
+                        val = 0.0
+                    else:
+                        val = -1.0
+                    ai_temp_spin.setValue(val)
+                ai_temp_spin.setProperty("last_val", val)
+                ai_temp_spin.blockSignals(False)
+            ai_temp_spin.valueChanged.connect(enforce_temp_snap)
+
+            ai_temp_hint = QLabel("(-1 = global)")
+            ai_temp_hint.setFont(QFont('Arial', 8))
+            ai_temp_hint.setStyleSheet("color: #707070;")
+            ai_params_h.addWidget(ai_temp_hint)
+
+            ai_params_h.addSpacing(20)
+
+            # Output Tokens
+            ai_tokens_label = QLabel("Output Tokens:")
+            ai_tokens_label.setFont(QFont('Arial', 9))
+            ai_params_h.addWidget(ai_tokens_label)
+
+            ai_tokens_spin = QSpinBox()
+            ai_tokens_spin.setMinimum(-1)
+            ai_tokens_spin.setMaximum(1000000)
+            ai_tokens_spin.setSingleStep(100)
+            ai_tokens_spin.setValue(int(qa_settings.get('ai_truncation_max_tokens', 2000)))
+            ai_tokens_spin.setFixedWidth(100)
+            ai_tokens_spin.setToolTip("-1 = use global output token limit")
+            disable_wheel_event(ai_tokens_spin)
+            ai_params_h.addWidget(ai_tokens_spin)
+
+            ai_tokens_hint = QLabel("(-1 = global)")
+            ai_tokens_hint.setFont(QFont('Arial', 8))
+            ai_tokens_hint.setStyleSheet("color: #707070;")
+            ai_params_h.addWidget(ai_tokens_hint)
+
+            ai_params_h.addStretch()
+            ai_api_layout.addWidget(ai_params_row)
+
+            # ─── Row 4: API Call Delay ───
+            ai_delay_row = QWidget()
+            ai_delay_h = QHBoxLayout(ai_delay_row)
+            ai_delay_h.setContentsMargins(0, 0, 0, 0)
+            ai_delay_h.setSpacing(8)
+
+            ai_delay_label = QLabel("API Call Delay:")
+            ai_delay_label.setFont(QFont('Arial', 9))
+            ai_delay_label.setFixedWidth(100)
+            ai_delay_h.addWidget(ai_delay_label)
+
+            ai_delay_spin = QDoubleSpinBox()
+            ai_delay_spin.setMinimum(-1.0)
+            ai_delay_spin.setMaximum(60.0)
+            ai_delay_spin.setSingleStep(0.5)
+            ai_delay_spin.setValue(float(qa_settings.get('ai_truncation_api_call_delay', -1.0)))
+            ai_delay_spin.setFixedWidth(100)
+            ai_delay_spin.setToolTip("-1 = use global API call delay")
+            disable_wheel_event(ai_delay_spin)
+            ai_delay_h.addWidget(ai_delay_spin)
+
+            # Snap negative values in-between 0 and -1 directly
+            ai_delay_spin.setProperty("last_val", ai_delay_spin.value())
+            def enforce_delay_snap(val):
+                last_val = ai_delay_spin.property("last_val")
+                ai_delay_spin.blockSignals(True)
+                if -1.0 < val < 0.0:
+                    if last_val >= 0.0:
+                        val = -1.0
+                    elif last_val <= -1.0:
+                        val = 0.0
+                    else:
+                        val = -1.0
+                    ai_delay_spin.setValue(val)
+                ai_delay_spin.setProperty("last_val", val)
+                ai_delay_spin.blockSignals(False)
+            ai_delay_spin.valueChanged.connect(enforce_delay_snap)
+
+            ai_delay_hint = QLabel("sec  (-1 = global)")
+            ai_delay_hint.setFont(QFont('Arial', 8))
+            ai_delay_hint.setStyleSheet("color: #707070;")
+            ai_delay_h.addWidget(ai_delay_hint)
+
+            ai_delay_h.addStretch()
+            ai_api_layout.addWidget(ai_delay_row)
+
+            # ─── Row 4: Custom URL endpoint override ───
+            ai_url_row = QWidget()
+            ai_url_h = QHBoxLayout(ai_url_row)
+            ai_url_h.setContentsMargins(0, 0, 0, 0)
+            ai_url_h.setSpacing(8)
+
+            ai_url_label = QLabel("Endpoint URL:")
+            ai_url_label.setFont(QFont('Arial', 9))
+            ai_url_label.setFixedWidth(100)
+            ai_url_h.addWidget(ai_url_label)
+
+            ai_url_entry = _QLE()
+            ai_url_entry.setPlaceholderText("(blank = use default endpoint, e.g. http://localhost:1234/v1)")
+            ai_url_entry.setText(qa_settings.get('ai_truncation_endpoint_url', ''))
+            ai_url_h.addWidget(ai_url_entry)
+            ai_api_layout.addWidget(ai_url_row)
+
+            # ─── Row 5: Disable Thinking Toggle ───
+            ai_thinking_row = QWidget()
+            ai_thinking_h = QHBoxLayout(ai_thinking_row)
+            ai_thinking_h.setContentsMargins(0, 5, 0, 0)
+            ai_thinking_h.setSpacing(8)
+
+            ai_disable_thinking_check = self._create_styled_checkbox("Disable all thinking (removes thinking params for fast checks)")
+            ai_disable_thinking_check.setChecked(qa_settings.get('ai_truncation_disable_thinking', True))
+            ai_thinking_h.addWidget(ai_disable_thinking_check)
+            ai_thinking_h.addStretch()
+            ai_api_layout.addWidget(ai_thinking_row)
+
+            # Toggle entire API settings group enabled state with the main checkbox
+            def _toggle_ai_api_section(checked):
+                ai_api_group.setEnabled(checked)
+                color = "white" if checked else "#909090"
+                label_color = "white" if checked else "#606060"
+                hint_color = "gray" if checked else "#404040"
+
+                ai_api_desc.setStyleSheet(f"color: {hint_color};")
+
+                ai_key_label.setStyleSheet(f"color: {label_color};")
+                ai_key_entry.setStyleSheet(f"color: {color};")
+
+                ai_model_label.setStyleSheet(f"color: {label_color};")
+                ai_model_combo.setStyleSheet(f"color: {color};")
+
+                ai_temp_label.setStyleSheet(f"color: {label_color};")
+                ai_temp_spin.setStyleSheet(f"color: {color};")
+                ai_temp_hint.setStyleSheet(f"color: {hint_color};")
+
+                ai_tokens_label.setStyleSheet(f"color: {label_color};")
+                ai_tokens_spin.setStyleSheet(f"color: {color};")
+                ai_tokens_hint.setStyleSheet(f"color: {hint_color};")
+
+                ai_delay_label.setStyleSheet(f"color: {label_color};")
+                ai_delay_spin.setStyleSheet(f"color: {color};")
+                ai_delay_hint.setStyleSheet(f"color: {hint_color};")
+
+                ai_url_label.setStyleSheet(f"color: {label_color};")
+                ai_url_entry.setStyleSheet(f"color: {color};")
+            check_ai_truncation_checkbox.toggled.connect(_toggle_ai_api_section)
+            _toggle_ai_api_section(check_ai_truncation_checkbox.isChecked())
+
+            # Indent this group under the main checkbox
+            ai_api_group.setContentsMargins(20, 0, 0, 0)
+            additional_layout.addWidget(ai_api_group)
+
+            additional_layout.addSpacing(15)
+
+            # NEW: Paragraph Structure Check
+            # Separator line
+            separator_line = QFrame()
+            separator_line.setFrameShape(QFrame.HLine)
+            separator_line.setFrameShadow(QFrame.Sunken)
+            additional_layout.addWidget(separator_line)
+            additional_layout.addSpacing(10)
+
+            # Checkbox for paragraph structure check
+            check_paragraph_structure_checkbox = self._create_styled_checkbox("Check for insufficient paragraph tags")
+            check_paragraph_structure_checkbox.setChecked(qa_settings.get('check_paragraph_structure', True))
+            additional_layout.addWidget(check_paragraph_structure_checkbox)
+
+            # Threshold setting frame
+            threshold_widget = QWidget()
+            threshold_layout = QHBoxLayout(threshold_widget)
+            threshold_layout.setContentsMargins(20, 10, 0, 5)
+
+            threshold_label = QLabel("Minimum text in <p> tags:")
+            threshold_label.setFont(QFont('Arial', 10))
+            threshold_layout.addWidget(threshold_label)
+
+            # Get current threshold value (default 30%)
+            current_threshold = int(qa_settings.get('paragraph_threshold', 0.3) * 100)
+
+            # Spinbox for threshold
+            paragraph_threshold_spinbox = QSpinBox()
+            paragraph_threshold_spinbox.setMinimum(0)
+            paragraph_threshold_spinbox.setMaximum(100)
+            paragraph_threshold_spinbox.setValue(current_threshold)
+            paragraph_threshold_spinbox.setMinimumWidth(80)
+            disable_wheel_event(paragraph_threshold_spinbox)
+            threshold_layout.addWidget(paragraph_threshold_spinbox)
+
+            percent_label = QLabel("%")
+            percent_label.setFont(QFont('Arial', 10))
+            threshold_layout.addWidget(percent_label)
+
+            # Threshold value label
+            threshold_value_label = QLabel(f"(currently {current_threshold}%)")
+            threshold_value_label.setFont(QFont('Arial', 9))
+            threshold_value_label.setStyleSheet("color: gray;")
+            threshold_layout.addWidget(threshold_value_label)
+            threshold_layout.addStretch()
+            additional_layout.addWidget(threshold_widget)
+
+            # Update label when spinbox changes
+            def update_threshold_label(value):
+                threshold_value_label.setText(f"(currently {value}%)")
+            paragraph_threshold_spinbox.valueChanged.connect(update_threshold_label)
+
+            # Description
+            para_desc = QLabel("Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
+                              "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
+                              "Also checks for large blocks of unwrapped text directly in the body element.")
+            para_desc.setFont(QFont('Arial', 9))
+            para_desc.setStyleSheet("color: gray;")
+            para_desc.setWordWrap(True)
+            para_desc.setMaximumWidth(700)
+            para_desc.setContentsMargins(20, 5, 0, 0)
+            additional_layout.addWidget(para_desc)
+
+            # Enable/disable threshold setting based on checkbox
+            def toggle_paragraph_threshold(checked):
+                paragraph_threshold_spinbox.setEnabled(checked)
+                threshold_label.setEnabled(checked)
+                percent_label.setEnabled(checked)
+                threshold_value_label.setEnabled(checked)
+
+            check_paragraph_structure_checkbox.toggled.connect(toggle_paragraph_threshold)
+            toggle_paragraph_threshold(check_paragraph_structure_checkbox.isChecked())  # Set initial state
+
+            scroll_layout.addSpacing(20)
+            yield
+
+            yield
+            # Report Settings Section
+            report_group = QGroupBox("Report Settings")
+            report_group.setFont(QFont('Arial', 12, QFont.Bold))
+            report_layout = QVBoxLayout(report_group)
+            report_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(report_group)
+
+            # Report format
+            format_widget = QWidget()
+            format_layout = QHBoxLayout(format_widget)
+            format_layout.setContentsMargins(0, 0, 0, 10)
+
+            format_label = QLabel("Report format:")
+            format_label.setFont(QFont('Arial', 10))
+            format_layout.addWidget(format_label)
+
+            current_format_value = qa_settings.get('report_format', 'detailed')
+            format_options = [
+                ("Summary only", "summary"),
+                ("Detailed (recommended)", "detailed"),
+                ("Verbose (all data)", "verbose")
+            ]
+
+            # Create radio buttons for format options
+            format_radio_buttons = []
+            for idx, (text, value) in enumerate(format_options):
+                rb = self._create_styled_radio_button(text)
+                if value == current_format_value:
+                    rb.setChecked(True)
+                format_layout.addWidget(rb)
+                format_radio_buttons.append((rb, value))
+
+            format_layout.addStretch()
+            report_layout.addWidget(format_widget)
+
+            # Auto-save report
+            auto_save_checkbox = self._create_styled_checkbox("Automatically save report after scan")
+            auto_save_checkbox.setChecked(qa_settings.get('auto_save_report', True))
+            report_layout.addWidget(auto_save_checkbox)
+
+            # Add word count ratio threshold settings
+            # Min/Max normalized ratio thresholds
+            ratio_thresholds_widget = QWidget()
+            ratio_thresholds_layout = QHBoxLayout(ratio_thresholds_widget)
+            ratio_thresholds_layout.setContentsMargins(0, 10, 0, 5)
+
+            ratio_min_label = QLabel("Min Ratio (normalized):")
+            ratio_min_label.setFont(QFont('Arial', 10))
+            ratio_thresholds_layout.addWidget(ratio_min_label)
+
+            # Min ratio spinbox
+            ratio_min_spin = QComboBox()
+            ratio_min_spin.setEditable(True)
+            ratio_min_spin.addItem("Auto")
+            # Add reasonable range options
+            for val in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+                ratio_min_spin.addItem(str(val))
+
+            saved_min = qa_settings.get('word_count_min_ratio', 'Auto')
+            ratio_min_spin.setCurrentText(str(saved_min))
+            ratio_min_spin.setMinimumWidth(100)  # Increased from 80
+            disable_wheel_event(ratio_min_spin)
+            ratio_thresholds_layout.addWidget(ratio_min_spin)
+
+            ratio_thresholds_layout.addSpacing(20)
+
+            ratio_max_label = QLabel("Max Ratio (normalized):")
+            ratio_max_label.setFont(QFont('Arial', 10))
+            ratio_thresholds_layout.addWidget(ratio_max_label)
+
+            # Max ratio spinbox
+            ratio_max_spin = QComboBox()
+            ratio_max_spin.setEditable(True)
+            ratio_max_spin.addItem("Auto")
+            # Add reasonable range options
+            for val in [1.2, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 4.0, 5.0]:
+                ratio_max_spin.addItem(str(val))
+
+            saved_max = qa_settings.get('word_count_max_ratio', 'Auto')
+            ratio_max_spin.setCurrentText(str(saved_max))
+            ratio_max_spin.setMinimumWidth(100)  # Increased from 80
+            disable_wheel_event(ratio_max_spin)
+            ratio_thresholds_layout.addWidget(ratio_max_spin)
+
+            ratio_thresholds_layout.addStretch()
+            wordcount_layout.addWidget(ratio_thresholds_widget)
+
+            ratio_hint = QLabel("(Auto CJK: Min 0.6, Max 2.0 | Auto Non-CJK: Min 0.7, Max 1.5)\nValues are normalized by the language multiplier above.")
+            ratio_hint.setFont(QFont('Arial', 9))
+            ratio_hint.setStyleSheet("color: gray;")
+            wordcount_layout.addWidget(ratio_hint)
+
+            scroll_layout.addSpacing(15)
+            yield
+
+            # HTML Structure Analysis Section
+            cache_group = QGroupBox("Performance Cache Settings")
+            cache_group.setFont(QFont('Arial', 12, QFont.Bold))
+            cache_layout = QVBoxLayout(cache_group)
+            cache_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(cache_group)
+
+            # Enable cache checkbox
+            cache_enabled_checkbox = self._create_styled_checkbox("Enable performance cache (speeds up duplicate detection)")
+            cache_enabled_checkbox.setChecked(qa_settings.get('cache_enabled', True))
+            cache_layout.addWidget(cache_enabled_checkbox)
+
+            # ------------------------------------------------------------------
+            # Thread vs Process executor toggle.
+            #
+            # Default (OFF): ProcessPoolExecutor — each worker is a separate
+            # Python process. Best CPU parallelism but on Windows every worker
+            # pays a large spawn cost (re-import all modules). In dev mode this
+            # can add tens of seconds of startup per scan; the bundled .exe
+            # doesn't suffer because its PYZ archive loads pre-compiled
+            # bytecode.
+            #
+            # When enabled: ThreadPoolExecutor — workers share the interpreter,
+            # zero spawn cost. Great for dev runs and for small scans where
+            # startup dominates. Slightly slower on CPU-bound duplicate
+            # detection for very large scans because of the GIL, but HTML
+            # parsing / I/O dominates most workloads.
+            # ------------------------------------------------------------------
+            use_threads_checkbox = self._create_styled_checkbox(
+                "Use threads instead of processes (faster cold start, good for dev mode)"
+            )
+            use_threads_checkbox.setChecked(
+                bool(qa_settings.get('use_thread_executor', False))
+            )
+            cache_layout.addWidget(use_threads_checkbox)
+            use_threads_hint = QLabel(
+                "Avoids the ProcessPoolExecutor spawn overhead (each child re-imports every module).\n"
+                "Recommended ON when running from source; .exe builds are fast either way."
+            )
+            use_threads_hint.setFont(QFont('Arial', 9))
+            use_threads_hint.setStyleSheet("color: gray;")
+            use_threads_hint.setContentsMargins(20, 0, 0, 0)
+            cache_layout.addWidget(use_threads_hint)
+
+            cache_layout.addSpacing(10)
+
+            # Cache size settings
+            cache_desc_label = QLabel("Cache sizes (0 = disabled, -1 = unlimited):")
+            cache_desc_label.setFont(QFont('Arial', 10))
+            cache_layout.addWidget(cache_desc_label)
+            cache_layout.addSpacing(5)
+
+            # Cache size variables - store spinboxes and buttons
+            cache_spinboxes = {}
+            cache_buttons = {}
+            cache_defaults = {
+                'normalize_text': 10000,
+                'similarity_ratio': 20000,
+                'content_hashes': 5000,
+                'semantic_fingerprint': 2000,
+                'structural_signature': 2000,
+                'translation_artifacts': 1000
+            }
+
+            # Create input fields for each cache type
+            for cache_name, default_value in cache_defaults.items():
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 2, 0, 2)
+
+                # Label
+                label_text = cache_name.replace('_', ' ').title() + ":"
+                cache_label = QLabel(label_text)
+                cache_label.setFont(QFont('Arial', 9))
+                cache_label.setMinimumWidth(200)
+                row_layout.addWidget(cache_label)
+
+                # Get current value
+                current_value = qa_settings.get(f'cache_{cache_name}', default_value)
+
+                # Spinbox
+                spinbox = QSpinBox()
+                spinbox.setMinimum(-1)
+                spinbox.setMaximum(50000)
+                spinbox.setValue(current_value)
+                spinbox.setMinimumWidth(100)
+                disable_wheel_event(spinbox)
+                row_layout.addWidget(spinbox)
+                cache_spinboxes[cache_name] = spinbox
+
+                # Quick preset buttons
+                def make_preset_handler(sb, val):
+                    return lambda: sb.setValue(val)
+
+                off_btn = QPushButton("Off")
+                off_btn.setFont(QFont('Arial', 8))
+                off_btn.setMinimumWidth(40)
+                off_btn.clicked.connect(make_preset_handler(spinbox, 0))
+                row_layout.addWidget(off_btn)
+
+                small_btn = QPushButton("Small")
+                small_btn.setFont(QFont('Arial', 8))
+                small_btn.setMinimumWidth(50)
+                small_btn.clicked.connect(make_preset_handler(spinbox, 1000))
+                row_layout.addWidget(small_btn)
+
+                medium_btn = QPushButton("Medium")
+                medium_btn.setFont(QFont('Arial', 8))
+                medium_btn.setMinimumWidth(60)
+                medium_btn.clicked.connect(make_preset_handler(spinbox, default_value))
+                row_layout.addWidget(medium_btn)
+
+                large_btn = QPushButton("Large")
+                large_btn.setFont(QFont('Arial', 8))
+                large_btn.setMinimumWidth(50)
+                large_btn.clicked.connect(make_preset_handler(spinbox, default_value * 2))
+                row_layout.addWidget(large_btn)
+
+                max_btn = QPushButton("Max")
+                max_btn.setFont(QFont('Arial', 8))
+                max_btn.setMinimumWidth(40)
+                max_btn.clicked.connect(make_preset_handler(spinbox, -1))
+                row_layout.addWidget(max_btn)
+
+                # Store buttons for enabling/disabling
+                cache_buttons[cache_name] = [cache_label, off_btn, small_btn, medium_btn, large_btn, max_btn]
+
+                row_layout.addStretch()
+                cache_layout.addWidget(row_widget)
+
+            # Enable/disable cache size controls based on checkbox
+            def toggle_cache_controls(checked):
+                for cache_name in cache_defaults.keys():
+                    spinbox = cache_spinboxes[cache_name]
+                    spinbox.setEnabled(checked)
+                    for widget in cache_buttons[cache_name]:
+                        widget.setEnabled(checked)
+
+            cache_enabled_checkbox.toggled.connect(toggle_cache_controls)
+            toggle_cache_controls(cache_enabled_checkbox.isChecked())  # Set initial state
+
+            cache_layout.addSpacing(10)
+
+            # Auto-size cache option
+            auto_size_widget = QWidget()
+            auto_size_layout = QHBoxLayout(auto_size_widget)
+            auto_size_layout.setContentsMargins(0, 0, 0, 5)
+
+            auto_size_checkbox = self._create_styled_checkbox("Auto-size caches based on available RAM")
+            auto_size_checkbox.setChecked(qa_settings.get('cache_auto_size', False))
+            auto_size_layout.addWidget(auto_size_checkbox)
+
+            auto_size_hint = QLabel("(overrides manual settings)")
+            auto_size_hint.setFont(QFont('Arial', 9))
+            auto_size_hint.setStyleSheet("color: gray;")
+            auto_size_layout.addWidget(auto_size_hint)
+            auto_size_layout.addStretch()
+            cache_layout.addWidget(auto_size_widget)
+
+            cache_layout.addSpacing(10)
+
+            # Cache statistics display
+            show_stats_checkbox = self._create_styled_checkbox("Show cache hit/miss statistics after scan")
+            show_stats_checkbox.setChecked(qa_settings.get('cache_show_stats', False))
+            cache_layout.addWidget(show_stats_checkbox)
+
+            cache_layout.addSpacing(10)
+
+            # Info about cache
+            cache_info = QLabel("Larger cache sizes use more memory but improve performance for:\n" +
+                               "• Large datasets (100+ files)\n" +
+                               "• AI Hunter mode (all file pairs compared)\n" +
+                               "• Repeated scans of the same folder")
+            cache_info.setFont(QFont('Arial', 9))
+            cache_info.setStyleSheet("color: gray;")
+            cache_info.setWordWrap(True)
+            cache_info.setMaximumWidth(700)
+            cache_info.setContentsMargins(20, 0, 0, 0)
+            cache_layout.addWidget(cache_info)
+
+            scroll_layout.addSpacing(20)
+            yield
+
+            yield
+            # AI Hunter Performance Section
+            ai_hunter_group = QGroupBox("AI Hunter Performance Settings")
+            ai_hunter_group.setFont(QFont('Arial', 12, QFont.Bold))
+            ai_hunter_layout = QVBoxLayout(ai_hunter_group)
+            ai_hunter_layout.setContentsMargins(20, 15, 20, 15)
+            scroll_layout.addWidget(ai_hunter_group)
+
+            # Description
+            ai_hunter_desc = QLabel("AI Hunter mode performs exhaustive duplicate detection by comparing every file pair.\n" +
+                                   "Parallel processing can significantly speed up this process on multi-core systems.")
+            ai_hunter_desc.setFont(QFont('Arial', 9))
+            ai_hunter_desc.setStyleSheet("color: gray;")
+            ai_hunter_desc.setWordWrap(True)
+            ai_hunter_desc.setMaximumWidth(700)
+            ai_hunter_layout.addWidget(ai_hunter_desc)
+            ai_hunter_layout.addSpacing(10)
+
+            # Parallel workers setting
+            workers_widget = QWidget()
+            workers_layout = QHBoxLayout(workers_widget)
+            workers_layout.setContentsMargins(0, 0, 0, 10)
+
+            workers_label = QLabel("Maximum parallel workers:")
+            workers_label.setFont(QFont('Arial', 10))
+            workers_layout.addWidget(workers_label)
+
+            # Get current value from AI Hunter config
+            ai_hunter_config = self.config.get('ai_hunter_config', {})
+            current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 1)
+
+            ai_hunter_workers_spinbox = QSpinBox()
+            ai_hunter_workers_spinbox.setMinimum(0)
+            ai_hunter_workers_spinbox.setMaximum(64)
+            ai_hunter_workers_spinbox.setValue(current_max_workers)
+            ai_hunter_workers_spinbox.setMinimumWidth(100)
+            disable_wheel_event(ai_hunter_workers_spinbox)
+            workers_layout.addWidget(ai_hunter_workers_spinbox)
+
+            # CPU count display
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            cpu_hint = QLabel(f"(0 = use all {cpu_count} cores)")
+            cpu_hint.setFont(QFont('Arial', 9))
+            cpu_hint.setStyleSheet("color: gray;")
+            workers_layout.addWidget(cpu_hint)
+            workers_layout.addStretch()
+            ai_hunter_layout.addWidget(workers_widget)
+
+            # Quick preset buttons
+            preset_widget = QWidget()
+            preset_layout = QHBoxLayout(preset_widget)
+            preset_layout.setContentsMargins(0, 0, 0, 0)
+
+            preset_label = QLabel("Quick presets:")
+            preset_label.setFont(QFont('Arial', 9))
+            preset_layout.addWidget(preset_label)
+            preset_layout.addSpacing(10)
+
+            all_cores_btn = QPushButton(f"All cores ({cpu_count})")
+            all_cores_btn.setFont(QFont('Arial', 9))
+            all_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(0))
+            preset_layout.addWidget(all_cores_btn)
+
+            half_cores_btn = QPushButton("Half cores")
+            half_cores_btn.setFont(QFont('Arial', 9))
+            half_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(max(1, cpu_count // 2)))
+            preset_layout.addWidget(half_cores_btn)
+
+            four_cores_btn = QPushButton("4 cores")
+            four_cores_btn.setFont(QFont('Arial', 9))
+            four_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(4))
+            preset_layout.addWidget(four_cores_btn)
+
+            eight_cores_btn = QPushButton("8 cores")
+            eight_cores_btn.setFont(QFont('Arial', 9))
+            eight_cores_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(8))
+            preset_layout.addWidget(eight_cores_btn)
+
+            single_thread_btn = QPushButton("Single thread")
+            single_thread_btn.setFont(QFont('Arial', 9))
+            single_thread_btn.clicked.connect(lambda: ai_hunter_workers_spinbox.setValue(1))
+            preset_layout.addWidget(single_thread_btn)
+
+            preset_layout.addStretch()
+            ai_hunter_layout.addWidget(preset_widget)
+
+            # Performance tips
+            tips_text = "Performance Tips:\n" + \
+                        f"• Your system has {cpu_count} CPU cores available\n" + \
+                        "• Using all cores provides maximum speed but may slow other applications\n" + \
+                        "• 4-8 cores usually provides good balance of speed and system responsiveness\n" + \
+                        "• Single thread (1) disables parallel processing for debugging"
+
+            tips_label = QLabel(tips_text)
+            tips_label.setFont(QFont('Arial', 9))
+            tips_label.setStyleSheet("color: gray;")
+            tips_label.setWordWrap(True)
+            tips_label.setMaximumWidth(700)
+            tips_label.setContentsMargins(20, 10, 0, 0)
+            ai_hunter_layout.addWidget(tips_label)
+
+
+
+            def save_settings():
+                """Save QA scanner settings with comprehensive debugging"""
+                try:
+                    # Check if debug mode is enabled
+                    debug_mode = self.config.get('show_debug_buttons', False)
+
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Starting QA Scanner settings save process...")
+
+                    # Helper to get the selected radio button value
+                    def get_selected_radio_value(radio_button_list):
+                        for rb, value in radio_button_list:
+                            if rb.isChecked():
+                                return value
+                        return None
+
+                    # Core QA Settings with debugging
+                    core_settings_to_save = {
+                        'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
+                        'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
+                        'source_language': (source_lang_combo, lambda x: _normalize_source_language(x.currentText())),
+                        'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
+                        'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
+                        'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
+                        'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
+                        'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
+                        'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
+                        'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
+                        'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
+                        'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
+                        'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
+                        'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
+                        'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
+                        'min_file_length': (min_length_spinbox, lambda x: x.value()),
+                        'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),
+                        'min_text_length_for_spacing': (min_spacing_text_spinbox, lambda x: x.value()),
+                        'report_format': (format_radio_buttons, get_selected_radio_value),
+                        'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
+                        'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),
+                        'counting_mode': (counting_mode_combo, lambda x: x.currentData()),
+                        'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
+                        'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
+                        'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
+                        'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
+                        'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
+                        'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
+                        'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),
+                        'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
+                        'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
+                        'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
+                        'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),
+                        'truncation_borderline_score': (truncation_borderline_slider, lambda x: x.value()),
+                        'truncation_length_threshold': (truncation_length_slider, lambda x: x.value()),
+                        'truncation_embed_threshold': (truncation_embed_slider, lambda x: x.value()),
+                        'check_ai_truncation_detection': (check_ai_truncation_checkbox, lambda x: x.isChecked()),
+                        'ai_truncation_tail_chars': (ai_truncation_tail_spinbox, lambda x: x.value()),
+                        'ai_truncation_prompt': (_ai_trunc_prompt_holder, lambda x: x[0]),
+                        'ai_truncation_prompt_role': (_ai_trunc_prompt_role_holder, lambda x: x[0]),
+                        'ai_truncation_api_key': (ai_key_entry, lambda x: x.text().strip()),
+                        'ai_truncation_model': (ai_model_combo, lambda x: x.currentText().strip()),
+                        'ai_truncation_temperature': (ai_temp_spin, lambda x: x.value()),
+                        'ai_truncation_max_tokens': (ai_tokens_spin, lambda x: x.value()),
+                        'ai_truncation_api_call_delay': (ai_delay_spin, lambda x: x.value()),
+                        'ai_truncation_endpoint_url': (ai_url_entry, lambda x: x.text().strip()),
+                        'ai_truncation_disable_thinking': (ai_disable_thinking_check, lambda x: x.isChecked()),
+                        'word_count_min_ratio': (ratio_min_spin, lambda x: x.currentText()),
+                        'word_count_max_ratio': (ratio_max_spin, lambda x: x.currentText()),
+                    }
+
+                    failed_core_settings = []
+                    for setting_name, (var_obj, converter) in core_settings_to_save.items():
+                        try:
+                            old_value = qa_settings.get(setting_name, '<NOT SET>')
+                            new_value = converter(var_obj)
+                            qa_settings[setting_name] = new_value
+
+                            if debug_mode:
+                                if old_value != new_value:
+                                    self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                                else:
+                                    self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+
+                        except Exception as e:
+                            failed_core_settings.append(f"{setting_name} ({str(e)})")
+                            if debug_mode:
+                                self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+
+                    if failed_core_settings and debug_mode:
+                        self.append_log(f"⚠️ [DEBUG] Failed QA core settings: {', '.join(failed_core_settings)}")
+
+                    # Cache settings with debugging
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Saving QA cache settings...")
+                    cache_settings_to_save = {
+                        'cache_enabled': (cache_enabled_checkbox, lambda x: x.isChecked()),
+                        'cache_auto_size': (auto_size_checkbox, lambda x: x.isChecked()),
+                        'cache_show_stats': (show_stats_checkbox, lambda x: x.isChecked()),
+                    }
+
+                    failed_cache_settings = []
+                    for setting_name, (var_obj, converter) in cache_settings_to_save.items():
+                        try:
+                            old_value = qa_settings.get(setting_name, '<NOT SET>')
+                            new_value = converter(var_obj)
+                            qa_settings[setting_name] = new_value
+
+                            if debug_mode:
+                                if old_value != new_value:
+                                    self.append_log(f"🔍 [DEBUG] QA {setting_name}: '{old_value}' → '{new_value}'")
+                                else:
+                                    self.append_log(f"🔍 [DEBUG] QA {setting_name}: unchanged ('{new_value}')")
+                        except Exception as e:
+                            failed_cache_settings.append(f"{setting_name} ({str(e)})")
+                            if debug_mode:
+                                self.append_log(f"❌ [DEBUG] Failed to save QA {setting_name}: {e}")
+
+                    # Save individual cache sizes with debugging
+                    saved_cache_vars = []
+                    failed_cache_vars = []
+                    for cache_name, cache_spinbox in cache_spinboxes.items():
+                        try:
+                            cache_key = f'cache_{cache_name}'
+                            old_value = qa_settings.get(cache_key, '<NOT SET>')
+                            new_value = cache_spinbox.value()
+                            qa_settings[cache_key] = new_value
+                            saved_cache_vars.append(cache_name)
+
+                            if debug_mode and old_value != new_value:
+                                self.append_log(f"🔍 [DEBUG] QA {cache_key}: '{old_value}' → '{new_value}'")
+                        except Exception as e:
+                            failed_cache_vars.append(f"{cache_name} ({str(e)})")
+                            if debug_mode:
+                                self.append_log(f"❌ [DEBUG] Failed to save QA cache_{cache_name}: {e}")
+
+                    if debug_mode:
+                        if saved_cache_vars:
+                            self.append_log(f"🔍 [DEBUG] Saved {len(saved_cache_vars)} cache settings: {', '.join(saved_cache_vars)}")
+                        if failed_cache_vars:
+                            self.append_log(f"⚠️ [DEBUG] Failed cache settings: {', '.join(failed_cache_vars)}")
+                    # Save the thread-vs-process executor toggle so scan_html_folder
+                    # can pick it up without relying on env vars (env may be stripped
+                    # by subprocess isolation in some runs).
+                    try:
+                        qa_settings['use_thread_executor'] = bool(use_threads_checkbox.isChecked())
+                        if debug_mode:
+                            self.append_log(
+                                f"🔍 [DEBUG] QA use_thread_executor: {qa_settings['use_thread_executor']}"
+                            )
+                    except Exception as _e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save use_thread_executor: {_e}")
+
+                    # Save word count multipliers
+                    try:
+                        # Save auto toggle state
+                        use_auto = auto_multipliers_checkbox.isChecked()
+                        qa_settings['use_auto_multipliers'] = use_auto
+
+                        # If auto is enabled, use default values; otherwise use slider values
+                        if use_auto:
+                            wc_mults = dict(default_wordcount_defaults)
+                            if debug_mode:
+                                self.append_log("🔍 [DEBUG] Using default word count multipliers (auto mode)")
+                        else:
+                            wc_mults = {}
+                            for lang_key, widget in word_multiplier_sliders.items():
+                                if lang_key.endswith('__spin'):
+                                    base_key = lang_key[:-6]
+                                    wc_mults[base_key] = widget.value() / 100.0
+                                elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                                    wc_mults[lang_key] = widget.value() / 100.0
+                            if debug_mode:
+                                self.append_log("🔍 [DEBUG] Using custom word count multipliers (manual mode)")
+
+                        qa_settings['word_count_multipliers'] = wc_mults
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save word count multipliers: {e}")
+
+                    # AI Hunter config with debugging
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Saving AI Hunter config...")
+                    try:
+                        if 'ai_hunter_config' not in self.config:
+                            self.config['ai_hunter_config'] = {}
+                            if debug_mode:
+                                self.append_log("🔍 [DEBUG] Created new ai_hunter_config section")
+
+                        old_workers = self.config['ai_hunter_config'].get('ai_hunter_max_workers', '<NOT SET>')
+                        new_workers = ai_hunter_workers_spinbox.value()
+                        self.config['ai_hunter_config']['ai_hunter_max_workers'] = new_workers
+
+                        if debug_mode:
+                            if old_workers != new_workers:
+                                self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: '{old_workers}' → '{new_workers}'")
+                            else:
+                                self.append_log(f"🔍 [DEBUG] AI Hunter max_workers: unchanged ('{new_workers}')")
+
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
+
+                    # Validate and save paragraph threshold with debugging
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
+                    try:
+                        threshold_value = paragraph_threshold_spinbox.value()
+                        old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
+
+                        if 0 <= threshold_value <= 100:
+                            new_threshold = threshold_value / 100.0  # Convert to decimal
+                            qa_settings['paragraph_threshold'] = new_threshold
+
+                            if debug_mode:
+                                if old_threshold != new_threshold:
+                                    self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
+                                else:
+                                    self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
+                        else:
+                            raise ValueError("Threshold must be between 0 and 100")
+
+                    except (ValueError, Exception) as e:
+                        # Default to 30% if invalid
+                        qa_settings['paragraph_threshold'] = 0.3
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
+                        self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
+
+                    # Save to main config with debugging
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
+                    try:
+                        old_qa_config = self.config.get('qa_scanner_settings', {})
+                        self.config['qa_scanner_settings'] = qa_settings
+
+                        if debug_mode:
+                            # Count changed settings
+                            changed_settings = []
+                            for key, new_value in qa_settings.items():
+                                if old_qa_config.get(key) != new_value:
+                                    changed_settings.append(key)
+
+                            if changed_settings:
+                                self.append_log(f"🔍 [DEBUG] Changed {len(changed_settings)} QA settings: {', '.join(changed_settings[:5])}{'...' if len(changed_settings) > 5 else ''}")
+                            else:
+                                self.append_log("🔍 [DEBUG] No QA settings changed")
+
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
+
+                    # Sync target language with the main translation UI so all
+                    # dropdowns stay in sync.
+                    try:
+                        display_lang = target_language_combo.currentText().strip()
+                        if display_lang and hasattr(self, 'update_target_language'):
+                            self.update_target_language(display_lang)
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"⚠️ [DEBUG] Failed to sync target language with main UI: {e}")
+
+                    # Environment variables setup for QA Scanner
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
+                    qa_env_vars_set = []
+
+                    try:
+                        # QA Scanner environment variables
+                        qa_env_mappings = [
+                            ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
+                            ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
+                            ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
+                            ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
+                            ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
+                            ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
+                            ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
+                            ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
+                            ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
+                            ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
+                            ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
+                            ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
+                            ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                            # Thread-vs-process executor for the scan
+                            ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
+                            ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
+                            # Counting mode: set env vars based on selection
+                            ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
+                            ('QA_EXACT_CHAR_COUNT', '1' if qa_settings.get('counting_mode') == 'exact' else '0'),
+                        ]
+
+                        for env_key, env_value in qa_env_mappings:
+                            try:
+                                old_value = os.environ.get(env_key, '<NOT SET>')
+                                os.environ[env_key] = str(env_value)
+                                new_value = os.environ[env_key]
+                                qa_env_vars_set.append(env_key)
+
+                                if debug_mode:
+                                    if old_value != new_value:
+                                        self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value}'")
+                                    else:
+                                        self.append_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{new_value}')")
+
+                            except Exception as e:
+                                if debug_mode:
+                                    self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
+
+                        if debug_mode:
+                            self.append_log(f"🔍 [DEBUG] Successfully set {len(qa_env_vars_set)} QA environment variables")
+
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] QA environment variable setup failed: {e}")
+                            import traceback
+                            self.append_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
+
+                    # Call save_config with show_message=False to avoid the error
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Calling main save_config method...")
+                    try:
+                        self.save_config(show_message=False)
+                        if debug_mode:
+                            self.append_log("🔍 [DEBUG] Main save_config completed successfully")
+                    except Exception as e:
+                        if debug_mode:
+                            self.append_log(f"❌ [DEBUG] Main save_config failed: {e}")
+                        raise
+
+                    # Final QA environment variable verification
+                    if debug_mode:
+                        self.append_log("🔍 [DEBUG] Final QA environment variable check:")
+                        critical_qa_vars = ['QA_FOREIGN_CHAR_THRESHOLD', 'QA_TARGET_LANGUAGE', 'QA_REPORT_FORMAT', 'AI_HUNTER_MAX_WORKERS']
+                        for var in critical_qa_vars:
+                            value = os.environ.get(var, '<NOT SET>')
+                            if value == '<NOT SET>' or not value:
+                                self.append_log(f"❌ [DEBUG] CRITICAL QA: {var} is not set or empty!")
+                            else:
+                                self.append_log(f"✅ [DEBUG] QA {var}: {value}")
+
+                    self.append_log("✅ QA Scanner settings saved successfully")
+                    dialog._cleanup_scrolling()  # Clean up scrolling bindings
+                    dialog.hide()
+
+                except Exception as e:
+                    # Get debug_mode again in case of early exception
+                    debug_mode = self.config.get('show_debug_buttons', False)
+                    if debug_mode:
+                        self.append_log(f"❌ [DEBUG] QA save_settings full exception: {str(e)}")
+                        import traceback
+                        self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
+                    self.append_log(f"❌ Error saving QA settings: {str(e)}")
+                    QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
+
+            def reset_defaults():
+                """Reset to default settings"""
+                result = QMessageBox.question(
+                    dialog,
+                    "Reset to Defaults",
+                    "Are you sure you want to reset all settings to defaults?\n\n(Your excluded characters list will be preserved)",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if result == QMessageBox.Yes:
+                    # Save current excluded characters before reset
+                    saved_excluded_chars = excluded_text.toPlainText()
+
+                    # Foreign character / language defaults
+                    threshold_spinbox.setValue(10)
+                    source_lang_combo.setCurrentText('Auto')
+                    target_language_combo.setCurrentText('English')
+
+                    # Detection defaults
+                    check_encoding_checkbox.setChecked(False)
+                    check_repetition_checkbox.setChecked(True)
+                    check_artifacts_checkbox.setChecked(True)
+                    check_ai_artifacts_checkbox.setChecked(True)
+                    check_punctuation_checkbox.setChecked(False)
+                    punct_threshold_spinbox.setValue(49)
+                    excess_punct_checkbox.setChecked(False)
+                    excess_threshold_spinbox.setValue(49)
+
+                    # Word count analysis defaults
+                    check_word_count_checkbox.setChecked(True)
+                    try:
+                        idx = counting_mode_combo.findData('exact')
+                        counting_mode_combo.setCurrentIndex(idx if idx >= 0 else 1)
+                    except Exception:
+                        pass
+                    ratio_min_spin.setCurrentText('Auto')
+                    ratio_max_spin.setCurrentText('Auto')
+
+                    # Reset auto multipliers checkbox to default (enabled)
+                    auto_multipliers_checkbox.setChecked(True)
+
+                    # Reset word count multipliers to defaults
+                    for lang_key, widget in word_multiplier_sliders.items():
+                        if lang_key.endswith('__spin'):
+                            base_key = lang_key[:-6]
+                            default_val = default_wordcount_defaults.get(base_key, 1.0)
+                            widget.setValue(int(default_val * 100))
+                        elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                            default_val = default_wordcount_defaults.get(lang_key, 1.0)
+                            widget.setValue(int(default_val * 100))
+
+                    check_glossary_checkbox.setChecked(True)
+                    check_potential_truncation_checkbox.setChecked(False)
+                    check_missing_images_checkbox.setChecked(True)
+                    min_length_spinbox.setValue(0)
+                    # Set 'detailed' radio button as checked
+                    for rb, value in format_radio_buttons:
+                        rb.setChecked(value == 'detailed')
+                    auto_save_checkbox.setChecked(True)
+                    check_multiple_headers_checkbox.setChecked(True)
+                    warn_mismatch_checkbox.setChecked(True)
+                    check_missing_html_tag_checkbox.setChecked(True)
+                    check_missing_header_tags_checkbox.setChecked(True)
+                    check_all_text_in_header_checkbox.setChecked(True)
+                    check_invalid_tag_mismatch_checkbox.setChecked(False)
+                    check_paragraph_structure_checkbox.setChecked(True)
+                    check_invalid_nesting_checkbox.setChecked(False)
+                    check_truncation_checkbox.setChecked(False)
+                    truncation_cheap_slider.setValue(12)
+                    truncation_borderline_slider.setValue(40)
+                    truncation_length_slider.setValue(30)
+                    truncation_embed_slider.setValue(30)
+                    check_ai_truncation_checkbox.setChecked(False)
+                    ai_truncation_tail_spinbox.setValue(400)
+                    _ai_trunc_prompt_holder[0] = _ai_trunc_default_prompt
+                    _ai_trunc_prompt_role_holder[0] = 'system'
+                    ai_key_entry.setText('')
+                    ai_model_combo.setCurrentText('')
+                    ai_temp_spin.setValue(0.0)
+                    ai_tokens_spin.setValue(2000)
+                    ai_url_entry.setText('')
+                    paragraph_threshold_spinbox.setValue(30)  # 30% default
+
+                    # Reset cache settings
+                    cache_enabled_checkbox.setChecked(True)
+                    auto_size_checkbox.setChecked(False)
+                    show_stats_checkbox.setChecked(False)
+
+                    # Thread-vs-process executor toggle resets to OFF
+                    # (ProcessPoolExecutor is the historical default and is
+                    # optimal for .exe builds; users running from source can
+                    # re-enable threads manually).
+                    use_threads_checkbox.setChecked(False)
+
+                    # Reset cache sizes to defaults
+                    for cache_name, default_value in cache_defaults.items():
+                        cache_spinboxes[cache_name].setValue(default_value)
+
+                    ai_hunter_workers_spinbox.setValue(1)
+
+                    # Restore excluded characters (per confirmation text)
+                    excluded_text.setPlainText(saved_excluded_chars)
+
+            scroll_layout.addStretch()
+
+            # Add a dummy _cleanup_scrolling method for compatibility
+            dialog._cleanup_scrolling = lambda: None
+
+            def hide_qa_settings_dialog():
+                try:
+                    dialog._cleanup_scrolling()
+                except Exception:
+                    pass
+                try:
+                    dialog.setResult(QDialog.Rejected)
+                except Exception:
+                    pass
+                dialog.hide()
+
+            # Create fixed bottom button section (outside scroll area)
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            button_layout.setContentsMargins(20, 15, 20, 15)
+
+            save_btn = QPushButton("Save Settings")
+            save_btn.setMinimumWidth(120)
+            save_btn.setStyleSheet("background-color: #28a745; color: white; padding: 8px; font-weight: bold;")
+            save_btn.clicked.connect(save_settings)
+            button_layout.addWidget(save_btn)
+
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(120)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
+            cancel_btn.clicked.connect(hide_qa_settings_dialog)
+            button_layout.addWidget(cancel_btn)
+
+            reset_btn = QPushButton("Reset to Default")
+            reset_btn.setMinimumWidth(120)
+            reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 8px;")
+            reset_btn.clicked.connect(reset_defaults)
+            button_layout.addWidget(reset_btn)
+
+            # Add button widget to main layout (not scroll layout)
+            main_layout.addWidget(button_widget)
+
+            # Show the dialog (PySide6 handles sizing automatically)
+            # Note: The dialog size is already set in the constructor (800x600)
+
+            # Handle window close - hide instead of destroying so reopen is instant
+            def handle_close_event(event):
+                try:
+                    event.ignore()
+                    hide_qa_settings_dialog()
+                except Exception:
+                    dialog.hide()
+            dialog.closeEvent = handle_close_event
+            try:
+                dialog.destroyed.connect(
+                    lambda *_: setattr(self, '_qa_settings_refresh_source_status', None)
+                )
+            except Exception:
+                pass
+
+            if not show:
+                _prewarm_dialog_offscreen(dialog)
+                return dialog
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+
+            if dialog.isVisible():
+                try:
+                    dialog.raise_()
+                    dialog.activateWindow()
+                except Exception:
+                    pass
+                return dialog
+
+            # Show the dialog with fade animation and keep it alive for reuse
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dialog, duration=250)
+            except Exception:
+                dialog.show()
             return dialog
-        
-        # Show the dialog with fade animation and keep it alive for reuse
-        try:
-            from dialog_animations import show_dialog_with_fade
-            show_dialog_with_fade(dialog, duration=250)
-        except Exception:
-            dialog.show()
+
+
+
+        dialog._qa_settings_stream_builder = _build_settings_dialog_stream()
+        dialog._qa_settings_stream_loading = True
+        if show:
+            QTimer.singleShot(25, _run_settings_stream_step)
+        else:
+            while getattr(dialog, '_qa_settings_stream_builder', None) is not None:
+                _run_settings_stream_step(schedule_next=False)
         return dialog
-
-
 def show_custom_detection_dialog(parent=None):
     """
     Standalone function to show the custom detection settings dialog.
     Returns a dictionary with the settings if user confirms, None if cancelled.
-    
+
     This function can be called from anywhere, including scan_html_folder.py
     """
-    from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton, 
+    from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButton,
                                    QVBoxLayout, QHBoxLayout, QScrollArea, QGroupBox,
                                    QCheckBox, QSpinBox, QSlider, QMessageBox, QSizePolicy)
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QIcon
     import os
-    
+
     # Create dialog
     custom_dialog = QDialog(parent)
     custom_dialog.setWindowTitle("Custom Mode Settings")
     custom_dialog.setModal(True)
-    
+
     # Set dialog size
     screen = QApplication.primaryScreen().geometry()
     custom_width = int(screen.width() * 0.51)
     custom_height = int(screen.height() * 0.60)
     custom_dialog.resize(custom_width, custom_height)
-    
+
     # Set window icon
     try:
         # Try to find the icon in common locations
@@ -4971,22 +5009,22 @@ def show_custom_detection_dialog(parent=None):
                 break
     except Exception:
         pass
-    
+
     # Main layout
     dialog_layout = QVBoxLayout(custom_dialog)
-    
+
     # Scroll area
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-    
+
     # Scrollable content widget
     scroll_widget = QWidget()
     scroll_layout = QVBoxLayout(scroll_widget)
     scroll.setWidget(scroll_widget)
     dialog_layout.addWidget(scroll)
-    
+
     # Default settings
     default_settings = {
         'text_similarity': 85,
@@ -5000,24 +5038,24 @@ def show_custom_detection_dialog(parent=None):
         'min_text_length': 500,
         'min_duplicate_word_count': 500
     }
-    
+
     # Store widget references
     custom_widgets = {}
-    
+
     # Title
     title_label = QLabel("Configure Custom Detection Settings")
     title_label.setFont(QFont('Arial', 20, QFont.Bold))
     title_label.setAlignment(Qt.AlignCenter)
     scroll_layout.addWidget(title_label)
     scroll_layout.addSpacing(20)
-    
+
     # Detection Thresholds Section
     threshold_group = QGroupBox("Detection Thresholds (%)")
     threshold_group.setFont(QFont('Arial', 12, QFont.Bold))
     threshold_layout = QVBoxLayout(threshold_group)
     threshold_layout.setContentsMargins(25, 25, 25, 25)
     scroll_layout.addWidget(threshold_group)
-    
+
     threshold_descriptions = {
         'text_similarity': ('Text Similarity', 'Character-by-character comparison'),
         'semantic_analysis': ('Semantic Analysis', 'Meaning and context matching'),
@@ -5025,32 +5063,32 @@ def show_custom_detection_dialog(parent=None):
         'word_overlap': ('Word Overlap', 'Common words between texts'),
         'minhash_similarity': ('MinHash Similarity', 'Fast approximate matching')
     }
-    
+
     # Create percentage labels dictionary
     percentage_labels = {}
-    
+
     for setting_key, (label_text, description) in threshold_descriptions.items():
         # Container for each threshold
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 8, 0, 8)
-        
+
         # Left side - labels
         label_widget = QWidget()
         label_layout = QVBoxLayout(label_widget)
         label_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         main_label = QLabel(f"{label_text} - {description}:")
         main_label.setFont(QFont('Arial', 11))
         label_layout.addWidget(main_label)
         label_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         row_layout.addWidget(label_widget)
-        
+
         # Right side - slider and percentage
         slider_widget = QWidget()
         slider_layout = QHBoxLayout(slider_widget)
         slider_layout.setContentsMargins(20, 0, 0, 0)
-        
+
         # Create slider
         slider = QSlider(Qt.Horizontal)
         slider.setMinimum(10)
@@ -5059,7 +5097,7 @@ def show_custom_detection_dialog(parent=None):
         slider.setMinimumWidth(300)
         slider.wheelEvent = lambda event: event.ignore()
         slider_layout.addWidget(slider)
-        
+
         # Percentage label
         percentage_label = QLabel(f"{custom_settings[setting_key]}%")
         percentage_label.setFont(QFont('Arial', 12, QFont.Bold))
@@ -5067,41 +5105,41 @@ def show_custom_detection_dialog(parent=None):
         percentage_label.setAlignment(Qt.AlignRight)
         slider_layout.addWidget(percentage_label)
         percentage_labels[setting_key] = percentage_label
-        
+
         row_layout.addWidget(slider_widget)
         threshold_layout.addWidget(row_widget)
-        
+
         # Store slider widget reference
         custom_widgets[setting_key] = slider
-        
+
         # Update percentage label when slider moves
         def create_update_function(key, label, settings_dict):
             def update_percentage(value):
                 settings_dict[key] = value
                 label.setText(f"{value}%")
             return update_percentage
-        
+
         update_func = create_update_function(setting_key, percentage_label, custom_settings)
         slider.valueChanged.connect(update_func)
-    
+
     scroll_layout.addSpacing(15)
-    
+
     # Processing Options Section
     options_group = QGroupBox("Processing Options")
     options_group.setFont(QFont('Arial', 12, QFont.Bold))
     options_layout = QVBoxLayout(options_group)
     options_layout.setContentsMargins(20, 20, 20, 20)
     scroll_layout.addWidget(options_group)
-    
+
     # Consecutive chapters option
     consec_widget = QWidget()
     consec_layout = QHBoxLayout(consec_widget)
     consec_layout.setContentsMargins(0, 5, 0, 5)
-    
+
     consec_label = QLabel("Consecutive chapters to check:")
     consec_label.setFont(QFont('Arial', 11))
     consec_layout.addWidget(consec_label)
-    
+
     consec_spinbox = QSpinBox()
     consec_spinbox.setMinimum(1)
     consec_spinbox.setMaximum(10)
@@ -5112,16 +5150,16 @@ def show_custom_detection_dialog(parent=None):
     consec_layout.addStretch()
     options_layout.addWidget(consec_widget)
     custom_widgets['consecutive_chapters'] = consec_spinbox
-    
+
     # Sample size option
     sample_widget = QWidget()
     sample_layout = QHBoxLayout(sample_widget)
     sample_layout.setContentsMargins(0, 5, 0, 5)
-    
+
     sample_label = QLabel("Sample size for comparison (characters):")
     sample_label.setFont(QFont('Arial', 11))
     sample_layout.addWidget(sample_label)
-    
+
     sample_spinbox = QSpinBox()
     sample_spinbox.setMinimum(-1)
     # QSpinBox requires a maximum; set it extremely high to be effectively "no maximum"
@@ -5135,16 +5173,16 @@ def show_custom_detection_dialog(parent=None):
     sample_layout.addStretch()
     options_layout.addWidget(sample_widget)
     custom_widgets['sample_size'] = sample_spinbox
-    
+
     # Minimum text length option
     min_length_widget = QWidget()
     min_length_layout = QHBoxLayout(min_length_widget)
     min_length_layout.setContentsMargins(0, 5, 0, 5)
-    
+
     min_length_label = QLabel("Minimum text length to process (characters):")
     min_length_label.setFont(QFont('Arial', 11))
     min_length_layout.addWidget(min_length_label)
-    
+
     min_length_spinbox = QSpinBox()
     min_length_spinbox.setMinimum(100)
     min_length_spinbox.setMaximum(5000)
@@ -5156,16 +5194,16 @@ def show_custom_detection_dialog(parent=None):
     min_length_layout.addStretch()
     options_layout.addWidget(min_length_widget)
     custom_widgets['min_text_length'] = min_length_spinbox
-    
+
     # Minimum word count for duplicate detection
     min_dup_words_widget = QWidget()
     min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
     min_dup_words_layout.setContentsMargins(0, 5, 0, 5)
-    
+
     min_dup_words_label = QLabel("Minimum words to flag as duplicate (skip small files like sections/notices):")
     min_dup_words_label.setFont(QFont('Arial', 11))
     min_dup_words_layout.addWidget(min_dup_words_label)
-    
+
     min_dup_words_spinbox = QSpinBox()
     min_dup_words_spinbox.setMinimum(100)
     min_dup_words_spinbox.setMaximum(2000)
@@ -5177,29 +5215,29 @@ def show_custom_detection_dialog(parent=None):
     min_dup_words_layout.addStretch()
     options_layout.addWidget(min_dup_words_widget)
     custom_widgets['min_duplicate_word_count'] = min_dup_words_spinbox
-    
+
     # Check all file pairs option
     check_all_checkbox = QCheckBox("Check all file pairs (slower but more thorough)")
     check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
     options_layout.addWidget(check_all_checkbox)
     custom_widgets['check_all_pairs'] = check_all_checkbox
-    
+
     scroll_layout.addSpacing(30)
-    
+
     # Button layout
     button_widget = QWidget()
     button_layout = QHBoxLayout(button_widget)
     button_layout.addStretch()
     scroll_layout.addWidget(button_widget)
-    
+
     # Flag to track if settings were confirmed
     settings_confirmed = False
     result_settings = None
-    
+
     def confirm_settings():
         """Confirm settings and close dialog"""
         nonlocal settings_confirmed, result_settings
-        
+
         result_settings = {
             'text_similarity': custom_widgets['text_similarity'].value(),
             'semantic_analysis': custom_widgets['semantic_analysis'].value(),
@@ -5214,10 +5252,10 @@ def show_custom_detection_dialog(parent=None):
         }
         settings_confirmed = True
         custom_dialog.accept()
-    
+
     def reset_to_defaults():
         """Reset all values to defaults"""
-        reply = QMessageBox.question(custom_dialog, "Reset to Defaults", 
+        reply = QMessageBox.question(custom_dialog, "Reset to Defaults",
                                    "Reset all values to default settings?",
                                    QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
@@ -5231,18 +5269,18 @@ def show_custom_detection_dialog(parent=None):
             custom_widgets['sample_size'].setValue(3000)
             custom_widgets['min_text_length'].setValue(500)
             custom_widgets['min_duplicate_word_count'].setValue(500)
-    
+
     # Create buttons
     cancel_btn = QPushButton("Cancel")
     cancel_btn.setMinimumWidth(120)
     cancel_btn.clicked.connect(custom_dialog.reject)
     button_layout.addWidget(cancel_btn)
-    
+
     reset_btn = QPushButton("Reset Defaults")
     reset_btn.setMinimumWidth(120)
     reset_btn.clicked.connect(reset_to_defaults)
     button_layout.addWidget(reset_btn)
-    
+
     start_btn = QPushButton("Start Scan")
     start_btn.setMinimumWidth(120)
     start_btn.setStyleSheet("""
@@ -5259,15 +5297,15 @@ def show_custom_detection_dialog(parent=None):
     """)
     start_btn.clicked.connect(confirm_settings)
     button_layout.addWidget(start_btn)
-    
+
     button_layout.addStretch()
-    
+
     # Show dialog with fade animation and return result
     try:
         from dialog_animations import exec_dialog_with_fade
         exec_dialog_with_fade(custom_dialog, duration=250)
     except Exception:
         custom_dialog.exec()
-    
+
     # Return settings if confirmed, None otherwise
     return result_settings if settings_confirmed else None

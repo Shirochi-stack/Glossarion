@@ -831,6 +831,17 @@ class SplashManager(QObject):
             },
         ]
         results["manga_available"] = manga_available
+        if manga_available:
+            specs.append({
+                "key": "manga",
+                "module": "manga_integration",
+                "display": "manga translator",
+                "loading": "Loading manga translator...",
+                "loaded": "🖼️ Manga translator loaded",
+                "required": ("MangaTranslationTab",),
+                "result": lambda mod: mod.MangaTranslationTab,
+                "optional": True,
+            })
 
         def _load_spec(spec):
             module = importlib.import_module(spec["module"])
@@ -852,11 +863,14 @@ class SplashManager(QObject):
                         if spec.get("key") == "manga":
                             self._manual_progress_auto_cap = None
                             self._manual_progress_auto_boost = 1.0
+                            results["manga_available"] = False
                         print(f"Optional startup module unavailable ({spec['module']}): {e}")
                     else:
                         print(f"Warning: Could not import {spec['module']}: {e}")
                 if self.app:
                     self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            if manga_available and results.get("manga") is None:
+                results["manga_available"] = False
             return results
 
         cpu_cap = _cpu_worker_cap()
@@ -906,6 +920,7 @@ class SplashManager(QObject):
                             if spec.get("key") == "manga":
                                 self._manual_progress_auto_cap = None
                                 self._manual_progress_auto_boost = 1.0
+                                results["manga_available"] = False
                             print(f"Optional startup module unavailable ({spec['module']}): {e}")
                         else:
                             print(f"Warning: Could not import {spec['module']}: {e}")
@@ -915,6 +930,8 @@ class SplashManager(QObject):
                     time.sleep(0.01)
 
         self._settle_startup_progress_before_finalizing()
+        if manga_available and results.get("manga") is None:
+            results["manga_available"] = False
         return results
 
     def validate_all_scripts(self, base_dir=None):

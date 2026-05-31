@@ -13,8 +13,6 @@ import traceback
 import concurrent.futures
 import re
 import shutil
-import importlib
-import importlib.util
 from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout, QHBoxLayout,
                                QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
@@ -26,80 +24,10 @@ from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPix
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
 import logging
+from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
 from glossary_paths import get_book_glossary_dir, migrate_legacy_named_files
-
-
-class _LazyModuleProxy:
-    """Import a heavy helper module only when an attribute is actually used."""
-
-    def __init__(self, module_name: str):
-        self._module_name = module_name
-        self._module = None
-
-    def _load(self):
-        if self._module is None:
-            self._module = importlib.import_module(self._module_name)
-        return self._module
-
-    def __getattr__(self, name):
-        return getattr(self._load(), name)
-
-
-class _LazyMangaTranslatorProxy:
-    """Proxy MangaTranslator class access without importing cv2/numpy at GUI startup."""
-
-    def __init__(self):
-        self._klass = None
-
-    def _load(self):
-        if self._klass is None:
-            module = importlib.import_module("manga_translator")
-            self._klass = module.MangaTranslator
-        return self._klass
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._load(), name)
-
-
-class _LazyUnifiedClientProxy:
-    """Proxy UnifiedClient so opening the main GUI does not import the API stack."""
-
-    def __init__(self):
-        self._klass = None
-        self._available = None
-
-    def _load(self):
-        if self._klass is None:
-            try:
-                module = importlib.import_module("unified_api_client")
-                self._klass = module.UnifiedClient
-                self._available = True
-            except ImportError:
-                self._available = False
-                raise
-        return self._klass
-
-    def __call__(self, *args, **kwargs):
-        return self._load()(*args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._load(), name)
-
-    def __bool__(self):
-        if self._available is False:
-            return False
-        if self._available is True:
-            return True
-        return importlib.util.find_spec("unified_api_client") is not None
-
-
-MangaTranslator = _LazyMangaTranslatorProxy()
-GOOGLE_CLOUD_VISION_AVAILABLE = importlib.util.find_spec("google.cloud.vision") is not None
-ImageRenderer = _LazyModuleProxy("ImageRenderer")
+import ImageRenderer  # Import module-level methods
 
 # Optional: psutil/ctypes helpers to reduce GUI lag by lowering background thread priority
 try:
@@ -246,7 +174,11 @@ else:
     def _demote_non_main_threads(main_tid: int, reserve_env_key: str = 'MANGA_RESERVE_CORES'):
         return
 
-UnifiedClient = _LazyUnifiedClientProxy()
+# Try to import UnifiedClient for API initialization
+try:
+    from unified_api_client import UnifiedClient
+except ImportError:
+    UnifiedClient = None
 
 
 # Module-level worker function for state management (must be picklable)

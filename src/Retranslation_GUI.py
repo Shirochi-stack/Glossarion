@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView)
-from PySide6.QtCore import Qt, Signal, Slot, QObject, QTimer, QThread, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
-from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
+from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -21,390 +21,8 @@ import traceback
 import subprocess
 import platform
 import time
-import threading
 
 _IS_MACOS = (sys.platform == 'darwin')
-
-
-def _progress_row_normalize_output_name(name):
-    if not name:
-        return ""
-    base = os.path.basename(str(name).replace("\\", "/"))
-    if base.lower().startswith("response_"):
-        base = base[len("response_"):]
-    while True:
-        stem, ext = os.path.splitext(base)
-        if not ext:
-            break
-        base = stem
-    return base.lower()
-
-
-def _progress_row_resolve_existing_output_path(output_dir, output_file=None, display_info=None, prog=None):
-    display_info = display_info or {}
-    progress_entry = display_info.get("info") or display_info.get("progress_entry") or {}
-    prog = prog or {}
-    chapters = prog.get("chapters", {}) if isinstance(prog, dict) else {}
-    candidates = []
-
-    def add_candidate(value):
-        if value:
-            text = str(value).replace("\\", "/")
-            if text not in candidates:
-                candidates.append(text)
-
-    add_candidate(output_file)
-    add_candidate(display_info.get("output_file"))
-    add_candidate(progress_entry.get("output_file") if isinstance(progress_entry, dict) else None)
-    if isinstance(progress_entry, dict):
-        previous = progress_entry.get("previous_progress_entry")
-        if isinstance(previous, dict):
-            add_candidate(previous.get("output_file"))
-
-    progress_key = display_info.get("progress_key")
-    if progress_key and isinstance(chapters.get(progress_key), dict):
-        tracked = chapters[progress_key]
-        add_candidate(tracked.get("output_file"))
-        previous = tracked.get("previous_progress_entry")
-        if isinstance(previous, dict):
-            add_candidate(previous.get("output_file"))
-
-    target_num = display_info.get("num")
-    original_names = {
-        _progress_row_normalize_output_name(display_info.get("original_filename")),
-        _progress_row_normalize_output_name(display_info.get("original_basename")),
-    }
-    original_names.discard("")
-
-    for tracked in chapters.values():
-        if not isinstance(tracked, dict):
-            continue
-        tracked_num = tracked.get("actual_num", tracked.get("chapter_num"))
-        tracked_names = {
-            _progress_row_normalize_output_name(tracked.get("output_file")),
-            _progress_row_normalize_output_name(tracked.get("original_basename")),
-            _progress_row_normalize_output_name(tracked.get("original_filename")),
-        }
-        if str(tracked_num) == str(target_num) or (original_names and tracked_names & original_names):
-            add_candidate(tracked.get("output_file"))
-            previous = tracked.get("previous_progress_entry")
-            if isinstance(previous, dict):
-                add_candidate(previous.get("output_file"))
-
-    for candidate in candidates:
-        path = candidate if os.path.isabs(candidate) else os.path.join(output_dir, candidate)
-        if os.path.isfile(path):
-            rel = os.path.relpath(path, output_dir).replace("\\", "/") if os.path.isabs(candidate) else candidate
-            return rel, path
-
-    target_norms = {_progress_row_normalize_output_name(value) for value in candidates if value}
-    target_norms |= original_names
-    target_norms.discard("")
-    if not target_norms:
-        return None, None
-    try:
-        for fname in os.listdir(output_dir):
-            path = os.path.join(output_dir, fname)
-            if os.path.isfile(path) and _progress_row_normalize_output_name(fname) in target_norms:
-                return fname, path
-    except Exception:
-        pass
-    return None, None
-
-
-def _progress_row_display_status(info, output_mode='text', output_dir=None, prog=None):
-    status = info.get('status', 'unknown')
-    entry = info.get('progress_entry') or info.get('info') or {}
-    mode = str(output_mode or 'text').lower().strip()
-
-    if status in ('completed_empty', 'completed_image_only'):
-        status = 'completed'
-
-    ref_status = str(entry.get('refinement_status') or '').lower().strip() if isinstance(entry, dict) else ''
-    tts_status = str(entry.get('tts_status') or '').lower().strip() if isinstance(entry, dict) else ''
-    if status == 'in_progress' and (ref_status == 'in_progress' or tts_status == 'in_progress'):
-        return 'in_progress'
-
-    if status == 'in_progress' and output_dir:
-        previous_status = str(entry.get('previous_status') or '').lower().strip() if isinstance(entry, dict) else ''
-        previous_entry = entry.get('previous_progress_entry') if isinstance(entry, dict) else None
-        if previous_status in ('completed', 'completed_empty', 'completed_image_only') or (
-            isinstance(previous_entry, dict)
-            and str(previous_entry.get('status') or '').lower().strip() in ('completed', 'completed_empty', 'completed_image_only')
-        ):
-            _resolved_file, resolved_path = _progress_row_resolve_existing_output_path(
-                output_dir,
-                info.get('output_file') or (entry.get('output_file') if isinstance(entry, dict) else None),
-                info,
-                prog,
-            )
-            if resolved_path and os.path.exists(resolved_path):
-                return 'completed'
-
-    if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
-        return status
-    if mode == 'refinement':
-        ref_status = ref_status or 'not_refined'
-        if ref_status in ('failed', 'error'):
-            return 'failed'
-        if ref_status == 'in_progress':
-            return 'in_progress'
-        if ref_status not in ('refined', 'completed'):
-            return 'not_refined'
-    if mode == 'audio':
-        tts_status = tts_status or 'no_tts'
-        if tts_status in ('failed', 'error'):
-            return 'failed'
-        if tts_status == 'in_progress':
-            return 'in_progress'
-        if tts_status not in ('tts_completed', 'completed'):
-            return 'no_tts'
-    return status
-
-
-def _progress_row_entry_model_name(info, prog=None):
-    candidates = []
-    if isinstance(info, dict):
-        candidates.append(info)
-        for key in ('info', 'progress_entry'):
-            value = info.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-                previous = value.get('previous_progress_entry')
-                if isinstance(previous, dict):
-                    candidates.append(previous)
-        progress_key = info.get('progress_key')
-        chapters = (prog or {}).get('chapters', {}) if isinstance(prog, dict) else {}
-        if progress_key and isinstance(chapters.get(progress_key), dict):
-            candidates.append(chapters[progress_key])
-
-    for candidate in candidates:
-        model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
-        if model_name:
-            return model_name
-    return "(model unknown)"
-
-
-def _progress_row_model_column_text(info, show_model_info, prog, fallback_output):
-    if show_model_info:
-        return _progress_row_entry_model_name(info, prog)
-    return fallback_output
-
-
-def _progress_row_is_refined(info):
-    entry = info.get('progress_entry') or info.get('info') or info
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
-
-
-def _progress_row_is_skipped_special(filename, fallback_is_special, options):
-    if options.get('translate_special'):
-        return False
-    is_special = bool(fallback_is_special)
-    if filename:
-        base = os.path.basename(str(filename).lower())
-        if base.startswith("response_"):
-            base = base[len("response_"):]
-        name_noext = os.path.splitext(base)[0]
-        keywords = [
-            k.strip().lower()
-            for k in str(options.get('special_keywords') or '').split(',')
-            if k.strip()
-        ]
-        exact = [
-            k.strip().lower()
-            for k in str(options.get('special_exact') or '').split(',')
-            if k.strip()
-        ]
-        if keywords and any(kw in name_noext for kw in keywords):
-            is_special = True
-        if exact and name_noext in exact:
-            is_special = True
-    if not is_special:
-        return False
-    if options.get('translate_all_numbered'):
-        stem = os.path.splitext(os.path.basename(str(filename or '')))[0]
-        if stem.lower().startswith('response_'):
-            stem = stem[len('response_'):]
-        if re.search(r'\d', stem):
-            return False
-    return True
-
-
-class _ProgressRowPrepThread(QThread):
-    """Prepare Progress Manager row text away from the UI thread."""
-    batch_ready = Signal(int, object, bool)
-
-    def __init__(self, generation, infos, options, parent=None):
-        super().__init__(parent)
-        self._generation = int(generation)
-        self._infos = [dict(info or {}) for info in (infos or [])]
-        self._options = dict(options or {})
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-        self.requestInterruption()
-
-    def _build_payload(self, info, max_original_len, max_output_len):
-        status_icons = {
-            'completed': '✅',
-            'merged': '🔗',
-            'failed': '❌',
-            'qa_failed': '❌',
-            'in_progress': '🔄',
-            'pending': '❓',
-            'not_translated': '⬜',
-            'not_refined': '✨',
-            'no_tts': '🔊',
-            'unknown': '❓'
-        }
-        status_labels = {
-            'completed': 'Completed',
-            'merged': 'Merged',
-            'failed': 'Failed',
-            'qa_failed': 'QA Failed',
-            'in_progress': 'In Progress',
-            'pending': 'Pending',
-            'not_translated': 'Not Translated',
-            'not_refined': 'Not Refined',
-            'no_tts': 'No TTS',
-            'unknown': 'Unknown'
-        }
-        prog = self._options.get('prog') if isinstance(self._options.get('prog'), dict) else {}
-        status = _progress_row_display_status(
-            info,
-            self._options.get('output_mode', 'text'),
-            self._options.get('output_dir'),
-            prog,
-        )
-        chapter_num = info.get('num', 0)
-        output_file = info.get('output_file', '')
-        output_display = _progress_row_model_column_text(
-            info,
-            bool(self._options.get('show_model_info_state')),
-            prog,
-            output_file,
-        )
-        icon = status_icons.get(status, '❓')
-        status_label = status_labels.get(status, status)
-        if status == 'completed' and _progress_row_is_refined(info):
-            status_label = f"{status_label} ⭐"
-        chapter_info = info.get('info') or info.get('progress_entry') or {}
-        ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
-        if status == 'in_progress' and isinstance(ocr_progress, dict):
-            try:
-                ocr_done = int(ocr_progress.get('done', 0))
-                ocr_total = int(ocr_progress.get('total', 0))
-            except (TypeError, ValueError):
-                ocr_done = 0
-                ocr_total = 0
-            if ocr_total > 0:
-                status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
-
-        if 'opf_position' in info:
-            original_file = info.get('original_filename', '')
-            opf_pos = int(info.get('opf_position', 0)) + 1
-            if isinstance(chapter_num, float):
-                chapter_label = f"{int(chapter_num):03d}" if chapter_num.is_integer() else f"{chapter_num:06.1f}"
-            else:
-                try:
-                    chapter_label = f"{int(chapter_num):03d}"
-                except (TypeError, ValueError):
-                    chapter_label = str(chapter_num)
-            display = f"[{opf_pos:03d}] Ch.{chapter_label} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
-        else:
-            if isinstance(chapter_num, float) and chapter_num.is_integer():
-                display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
-            elif isinstance(chapter_num, float):
-                display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
-            else:
-                try:
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
-                except (TypeError, ValueError):
-                    display = f"Chapter {chapter_num} | {icon} {status_label:11s} | {output_display}"
-
-        if status == 'qa_failed':
-            qa_issues = (info.get('info') or {}).get('qa_issues_found', [])
-            if qa_issues:
-                issues_display = ', '.join(qa_issues[:2])
-                if len(qa_issues) > 2:
-                    issues_display += f' (+{len(qa_issues)-2} more)'
-                display += f" | {issues_display}"
-        if status == 'merged':
-            parent_chapter = (info.get('info') or {}).get('merged_parent_chapter')
-            if parent_chapter:
-                display += f" | → Ch.{parent_chapter}"
-        if info.get('duplicate_count', 1) > 1:
-            display += f" | ({info['duplicate_count']} entries)"
-
-        is_special = info.get('is_special', False)
-        filename = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-        return {
-            'display': display,
-            'status': status,
-            'is_special': is_special,
-            'is_skipped_special': _progress_row_is_skipped_special(filename, is_special, self._options),
-            'info': info,
-        }
-
-    def run(self):
-        batch = []
-        try:
-            prog = self._options.get('prog') if isinstance(self._options.get('prog'), dict) else {}
-            show_model = bool(self._options.get('show_model_info_state'))
-            max_original_len = 0
-            max_output_len = 0
-            for info in self._infos:
-                if self._cancelled or self.isInterruptionRequested():
-                    return
-                if 'opf_position' in info:
-                    original_file = info.get('original_filename', '')
-                    output_file = _progress_row_model_column_text(info, show_model, prog, info.get('output_file', ''))
-                    max_original_len = max(max_original_len, len(original_file))
-                    max_output_len = max(max_output_len, len(output_file))
-            max_original_len = max(max_original_len, 20)
-            max_output_len = max(max_output_len, 25)
-
-            for info in self._infos:
-                if self._cancelled or self.isInterruptionRequested():
-                    return
-                batch.append(self._build_payload(info, max_original_len, max_output_len))
-                if len(batch) >= 80:
-                    self.batch_ready.emit(self._generation, batch, False)
-                    batch = []
-            if not (self._cancelled or self.isInterruptionRequested()):
-                self.batch_ready.emit(self._generation, batch, True)
-        except Exception:
-            if not (self._cancelled or self.isInterruptionRequested()):
-                self.batch_ready.emit(self._generation, batch, True)
-
-
-class _ProgressRowStreamBridge(QObject):
-    """Deliver Progress Manager worker signals on the GUI thread."""
-
-    def __init__(self, on_batch, on_finished, parent=None):
-        super().__init__(parent)
-        self._on_batch = on_batch
-        self._on_finished = on_finished
-        self._worker = None
-        self._generation = 0
-
-    def bind_worker(self, worker, generation):
-        self._worker = worker
-        self._generation = int(generation)
-
-    @Slot(int, object, bool)
-    def handle_batch(self, generation, payloads, done):
-        self._on_batch(generation, payloads, done)
-
-    @Slot()
-    def handle_finished(self):
-        try:
-            self._on_finished(self._worker, self._generation)
-        finally:
-            self.deleteLater()
 
 def _get_app_dir() -> str:
     """Return the application's base directory (Windows-safe)."""
@@ -779,246 +397,6 @@ class RetranslationMixin:
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
-    def _retranslation_output_dir_for_file(self, file_path):
-        epub_base = os.path.splitext(os.path.basename(file_path))[0]
-        override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
-        if not override_dir and hasattr(self, 'config'):
-            try:
-                override_dir = self.config.get('output_directory')
-            except Exception:
-                override_dir = None
-
-        output_dir = os.path.join(override_dir, epub_base) if override_dir else epub_base
-        # On macOS .app bundles, cwd can be '/' (read-only root).
-        # Resolve relative output paths against the input file's directory.
-        # Only on macOS - on Windows this would change the output dir and break progress tracking.
-        if _IS_MACOS and not os.path.isabs(output_dir):
-            output_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), output_dir)
-        return output_dir
-
-    def _apply_progress_dialog_chrome(self, dialog, parent_widget=None):
-        """Apply dark window chrome before a Progress Manager dialog can paint."""
-        try:
-            dialog.setAttribute(Qt.WA_StyledBackground, True)
-            dialog.setAutoFillBackground(True)
-        except Exception:
-            pass
-
-        try:
-            palette = dialog.palette()
-            palette.setColor(QPalette.Window, QColor('#1e1e1e'))
-            palette.setColor(QPalette.Base, QColor('#1e1e1e'))
-            palette.setColor(QPalette.AlternateBase, QColor('#252525'))
-            palette.setColor(QPalette.Text, QColor('#f5f5f5'))
-            palette.setColor(QPalette.WindowText, QColor('#f5f5f5'))
-            dialog.setPalette(palette)
-        except Exception:
-            pass
-
-        try:
-            style_source = parent_widget if parent_widget is not None else (self if isinstance(self, QWidget) else None)
-            ss = style_source.styleSheet() if style_source is not None else ""
-            if ss:
-                dialog.setStyleSheet(ss)
-            else:
-                dialog.setStyleSheet("""
-                    QDialog, QWidget {
-                        background-color: #1e1e1e;
-                        color: #f5f5f5;
-                    }
-                    QLabel {
-                        color: #f5f5f5;
-                        background: transparent;
-                    }
-                    QListWidget, QScrollArea, QTabWidget::pane {
-                        background-color: #1e1e1e;
-                        color: #f5f5f5;
-                        border-color: #3a3a3a;
-                    }
-                    QPushButton {
-                        color: #f5f5f5;
-                    }
-                """)
-        except Exception:
-            pass
-
-    def _show_progress_dialog_ready(self, dialog):
-        """Show a fully-built Progress Manager dialog without exposing a blank native paint."""
-        try:
-            dialog.ensurePolished()
-        except Exception:
-            pass
-        try:
-            layout = dialog.layout()
-            if layout is not None:
-                layout.activate()
-        except Exception:
-            pass
-
-        try:
-            dialog.setWindowOpacity(0.0)
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-
-            def _restore_opacity():
-                try:
-                    dialog.setWindowOpacity(1.0)
-                except Exception:
-                    pass
-
-            QTimer.singleShot(0, _restore_opacity)
-            QTimer.singleShot(40, _restore_opacity)
-        except Exception:
-            dialog.show()
-
-    def _ensure_retranslation_output_dir(self, output_dir):
-        progress_file_path = os.path.join(output_dir, "translation_progress.json")
-        created = False
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
-            empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
-            with open(progress_file_path, 'w', encoding='utf-8') as f:
-                json.dump(empty_prog, f, ensure_ascii=False, indent=2)
-            created = True
-        return created, progress_file_path
-
-    def _cleanup_missing_progress_files(self, prog, output_dir):
-        """Lightweight local copy of ProgressManager.cleanup_missing_files."""
-        if not isinstance(prog, dict):
-            return prog
-
-        chapters = prog.setdefault("chapters", {})
-        chapter_chunks = prog.setdefault("chapter_chunks", {})
-        cleaned_count = 0
-        deleted_parents = set()
-        parents_with_missing_files = set()
-
-        def _norm_cleanup(fn):
-            html_exts = {'.html', '.xhtml', '.htm', '.xml'}
-            base = os.path.basename(fn or "")
-            if base.startswith('response_'):
-                base = base[len('response_'):]
-            while True:
-                base_no_ext, ext = os.path.splitext(base)
-                if ext.lower() in html_exts:
-                    base = base_no_ext
-                else:
-                    break
-            return base.lower()
-
-        html_files = None
-        for chapter_key, chapter_info in list(chapters.items()):
-            if not isinstance(chapter_info, dict):
-                continue
-
-            output_file = chapter_info.get("output_file")
-            status = chapter_info.get("status")
-            status_l = status.lower().strip() if isinstance(status, str) else (str(status).lower().strip() if status is not None else "")
-
-            if status == "merged":
-                continue
-
-            if status_l.startswith("pending") or status_l in ["qa_failed", "failed", "in_progress"]:
-                continue
-
-            if not output_file:
-                continue
-
-            output_path = os.path.join(output_dir, output_file)
-            if os.path.exists(output_path):
-                continue
-
-            expected_norm = _norm_cleanup(output_file)
-            renamed_match = None
-            try:
-                if html_files is None:
-                    html_files = [
-                        f for f in os.listdir(output_dir)
-                        if f.lower().endswith(('.html', '.xhtml', '.htm'))
-                    ]
-                for fname in html_files:
-                    if _norm_cleanup(fname) == expected_norm:
-                        renamed_match = fname
-                        break
-            except Exception:
-                pass
-
-            if renamed_match:
-                chapter_info['output_file'] = renamed_match
-                continue
-
-            actual_num = chapter_info.get("actual_num")
-            if actual_num is not None:
-                deleted_parents.add(actual_num)
-                if chapter_info.get("merged_chapters"):
-                    parents_with_missing_files.add(actual_num)
-
-            del chapters[chapter_key]
-            if chapter_key in chapter_chunks:
-                del chapter_chunks[chapter_key]
-            cleaned_count += 1
-
-        all_affected_parents = deleted_parents | parents_with_missing_files
-        if all_affected_parents:
-            for chapter_key, chapter_info in list(chapters.items()):
-                if not isinstance(chapter_info, dict):
-                    continue
-                if chapter_info.get("status") == "merged":
-                    parent_num = chapter_info.get("merged_parent_chapter")
-                    if parent_num in all_affected_parents:
-                        del chapters[chapter_key]
-                        cleaned_count += 1
-
-        if cleaned_count > 0:
-            print(f"Removed {cleaned_count} missing file entries")
-        return prog
-
-    def _start_retranslation_output_preflight(self, file_path, output_dir):
-        """Create the output folder/progress file off the UI thread, then reopen PM."""
-        file_key = os.path.abspath(file_path)
-
-        if not hasattr(self, '_retranslation_output_preflight_pending'):
-            self._retranslation_output_preflight_pending = set()
-        if not hasattr(self, '_retranslation_output_preflight_created'):
-            self._retranslation_output_preflight_created = {}
-        if not hasattr(self, '_retranslation_output_preflight_errors'):
-            self._retranslation_output_preflight_errors = {}
-
-        if file_key in self._retranslation_output_preflight_pending:
-            return True
-
-        self._retranslation_output_preflight_pending.add(file_key)
-
-        def _worker():
-            try:
-                created, _progress_file = self._ensure_retranslation_output_dir(output_dir)
-                if created:
-                    self._retranslation_output_preflight_created[file_key] = output_dir
-            except Exception as e:
-                self._retranslation_output_preflight_errors[file_key] = str(e)
-            finally:
-                try:
-                    self._retranslation_output_preflight_pending.discard(file_key)
-                except Exception:
-                    pass
-
-                signal = getattr(self, 'open_progress_manager_signal', None)
-                if signal is not None and hasattr(signal, 'emit'):
-                    signal.emit()
-                else:
-                    try:
-                        QTimer.singleShot(0, self.force_retranslation)
-                    except Exception:
-                        pass
-
-        threading.Thread(
-            target=_worker,
-            name="PMOutputPreflight",
-            daemon=True,
-        ).start()
-        return True
-
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
         
@@ -1056,28 +434,6 @@ class RetranslationMixin:
         
         # Check if dialog already exists for this file and is just hidden
         file_key = os.path.abspath(input_path)
-        expected_output_dir = self._retranslation_output_dir_for_file(input_path)
-
-        preflight_errors = getattr(self, '_retranslation_output_preflight_errors', {})
-        preflight_error = preflight_errors.pop(file_key, None) if isinstance(preflight_errors, dict) else None
-        if preflight_error:
-            self._show_message('error', "Error", f"Could not create output folder: {preflight_error}")
-            if hasattr(self, '_stop_pm_spin'):
-                try:
-                    self._stop_pm_spin()
-                except Exception:
-                    pass
-            return
-
-        preflight_created = getattr(self, '_retranslation_output_preflight_created', {})
-        created_folder = preflight_created.pop(file_key, None) if isinstance(preflight_created, dict) else None
-        if created_folder:
-            self._flash_pm_button_green(created_folder)
-
-        if not os.path.exists(expected_output_dir):
-            self._start_retranslation_output_preflight(input_path, expected_output_dir)
-            return
-
         if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
             # Reuse existing dialog - just show it and refresh data
             cached_data = self._retranslation_dialog_cache[file_key]
@@ -1114,12 +470,16 @@ class RetranslationMixin:
                     if not os.path.exists(output_dir):
                         # Output folder doesn't exist - create it with an empty progress file
                         try:
-                            created, pf = self._ensure_retranslation_output_dir(output_dir)
+                            os.makedirs(output_dir, exist_ok=True)
+                            empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                            pf = os.path.join(output_dir, "translation_progress.json")
+                            with open(pf, 'w', encoding='utf-8') as f:
+                                json.dump(empty_prog, f, ensure_ascii=False, indent=2)
                             cached_data['output_dir'] = output_dir
                             cached_data['progress_file'] = pf
+                            print(f"📁 Created output folder: {output_dir}")
                             # Flash the PM button green to signal folder creation
-                            if created:
-                                self._flash_pm_button_green(output_dir)
+                            self._flash_pm_button_green(output_dir)
                         except Exception as e:
                             self._show_message('error', "Error", f"Could not create output folder: {e}")
                             del self._retranslation_dialog_cache[file_key]
@@ -1134,21 +494,18 @@ class RetranslationMixin:
                         del self._retranslation_dialog_cache[file_key]
                     else:
                         dialog = cached_data['dialog']
+                        # Trigger animated refresh (same as clicking the Refresh button)
+                        _rf = cached_data.get('refresh_func')
+                        if callable(_rf):
+                            try:
+                                _rf()
+                            except Exception:
+                                self._refresh_retranslation_data(cached_data)
+                        else:
+                            self._refresh_retranslation_data(cached_data)
                         dialog.show()
                         dialog.raise_()
                         dialog.activateWindow()
-
-                        # Trigger animated refresh (same as clicking the Refresh button)
-                        _rf = cached_data.get('refresh_func')
-                        def _refresh_cached_dialog():
-                            if callable(_rf):
-                                try:
-                                    _rf()
-                                    return
-                                except Exception:
-                                    pass
-                            self._refresh_retranslation_data(cached_data)
-                        QTimer.singleShot(0, _refresh_cached_dialog)
                         return
         
         # For EPUB/text files, use the shared logic
@@ -1200,10 +557,14 @@ class RetranslationMixin:
         if not os.path.exists(output_dir):
             # Output folder doesn't exist - create it with an empty progress file
             try:
-                created, _progress_file_path = self._ensure_retranslation_output_dir(output_dir)
+                os.makedirs(output_dir, exist_ok=True)
+                empty_prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+                progress_file_path = os.path.join(output_dir, "translation_progress.json")
+                with open(progress_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(empty_prog, f, ensure_ascii=False, indent=2)
+                print(f"📁 Created output folder: {output_dir}")
                 # Flash the PM button green to signal folder creation
-                if created:
-                    self._flash_pm_button_green(output_dir)
+                self._flash_pm_button_green(output_dir)
             except Exception as e:
                 if not parent_dialog:
                     self._show_message('error', "Error", f"Could not create output folder: {e}")
@@ -1286,7 +647,11 @@ class RetranslationMixin:
         
         # Clean up missing files and merged children when opening the GUI
         # This handles the case where parent files were manually deleted
-        prog = self._cleanup_missing_progress_files(prog, output_dir)
+        from TransateKRtoEN import ProgressManager
+        temp_progress = ProgressManager(os.path.dirname(progress_file))
+        temp_progress.prog = prog
+        temp_progress.cleanup_missing_files(output_dir)
+        prog = temp_progress.prog
         
         # Save the cleaned progress back to file
         with open(progress_file, 'w', encoding='utf-8') as f:
@@ -2066,7 +1431,6 @@ class RetranslationMixin:
             # dark stylesheet and will fall back to the OS theme (white on some Win10 setups).
             parent_widget = self if isinstance(self, QWidget) else None
             dialog = QDialog(parent_widget)
-            self._apply_progress_dialog_chrome(dialog, parent_widget)
             dialog.setWindowTitle("Progress Manager - OPF Based" if spine_chapters else "Progress Manager")
             # Keep above the translator window but allow interaction with it
             # Parent-child windowing keeps this above the translator GUI
@@ -4310,9 +3674,142 @@ class RetranslationMixin:
         lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated', 'not_refined', 'no_tts'))
         lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
         
-        # Row display payloads are prepared on a worker thread after the
-        # dialog shell is shown, matching the EPUB details chapter list flow.
-        row_payloads = []
+        # Populate listbox with dynamic column widths
+        status_icons = {
+            'completed': '✅',
+            'merged': '🔗',
+            'failed': '❌',
+            'qa_failed': '❌',
+            'in_progress': '🔄',
+            'pending': '❓',
+            'not_translated': '⬜',
+            'not_refined': '✨',
+            'no_tts': '🔊',
+            'unknown': '❓'
+        }
+        
+        status_labels = {
+            'completed': 'Completed',
+            'merged': 'Merged',
+            'failed': 'Failed',
+            'qa_failed': 'QA Failed',
+            'in_progress': 'In Progress',
+            'pending': 'Pending',
+            'not_translated': 'Not Translated',
+            'not_refined': 'Not Refined',
+            'no_tts': 'No TTS',
+            'unknown': 'Unknown'
+        }
+        
+        # Calculate maximum widths for dynamic column sizing
+        max_original_len = 0
+        max_output_len = 0
+        _display_data = {'prog': prog, 'show_model_info_state': show_model_info[0]}
+        
+        for info in chapter_display_info:
+            if 'opf_position' in info:
+                original_file = info.get('original_filename', '')
+                output_file = self._progress_model_column_text(info, _display_data, info['output_file'])
+                max_original_len = max(max_original_len, len(original_file))
+                max_output_len = max(max_output_len, len(output_file))
+        
+        # Set minimum widths to prevent too narrow columns
+        max_original_len = max(max_original_len, 20)
+        max_output_len = max(max_output_len, 25)
+        
+        for info in chapter_display_info:
+            chapter_num = info['num']
+            status = self._progress_display_status(info, {'prog': prog})
+            output_file = info['output_file']
+            output_display = self._progress_model_column_text(info, _display_data, output_file)
+            icon = status_icons.get(status, '❓')
+            status_label = status_labels.get(status, status)
+            if status == 'completed' and self._progress_entry_is_refined(info):
+                status_label = f"{status_label} ⭐"
+            chapter_info = info.get('info') or info.get('progress_entry') or {}
+            ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
+            if status == 'in_progress' and isinstance(ocr_progress, dict):
+                try:
+                    ocr_done = int(ocr_progress.get('done', 0))
+                    ocr_total = int(ocr_progress.get('total', 0))
+                except (TypeError, ValueError):
+                    ocr_done = 0
+                    ocr_total = 0
+                if ocr_total > 0:
+                    status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
+            
+            # Format display with OPF info if available
+            if 'opf_position' in info:
+                # OPF-based display with dynamic widths
+                original_file = info.get('original_filename', '')
+                opf_pos = info['opf_position'] + 1  # 1-based for display
+                
+                # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+                else:
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
+            else:
+                # Original format
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
+                elif isinstance(chapter_num, float):
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
+                else:
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
+            
+            # Add QA issues if status is qa_failed
+            if status == 'qa_failed':
+                chapter_info = info.get('info', {})
+                qa_issues = chapter_info.get('qa_issues_found', [])
+                if qa_issues:
+                    # Format issues for display (show first 2)
+                    issues_display = ', '.join(qa_issues[:2])
+                    if len(qa_issues) > 2:
+                        issues_display += f' (+{len(qa_issues)-2} more)'
+                    display += f" | {issues_display}"
+            
+            # Add parent chapter info if status is merged
+            if status == 'merged':
+                chapter_info = info.get('info', {})
+                parent_chapter = chapter_info.get('merged_parent_chapter')
+                if parent_chapter:
+                    display += f" | → Ch.{parent_chapter}"
+            
+            if info.get('duplicate_count', 1) > 1:
+                display += f" | ({info['duplicate_count']} entries)"
+            
+            item = QListWidgetItem(display)
+            
+            # Color code based on status
+            if status == 'completed':
+                item.setForeground(QColor('green'))
+            elif status == 'merged':
+                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
+            elif status in ['failed', 'qa_failed']:
+                item.setForeground(QColor('red'))
+            elif status == 'not_translated':
+                item.setForeground(QColor('#2b6cb0'))
+            elif status in ['not_refined', 'no_tts']:
+                item.setForeground(QColor('#8a63d2'))
+            elif status == 'in_progress':
+                item.setForeground(QColor('orange'))
+            elif status == 'pending':
+                item.setForeground(QColor('white'))  # White for pending
+            
+            # Store metadata in item for filtering
+            is_special = info.get('is_special', False)
+            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+            item.setData(Qt.UserRole + 2, status)
+            
+            # Add item to listbox first
+            self._add_compact_inline_list_item(listbox, item)
+            
+            # Then hide skipped special files if toggle is off (must be done after adding to listbox)
+            _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
+            is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
+            if is_skipped_special and not show_special_files[0]:
+                item.setHidden(True)
         
         # Selection count label
         selection_count_label = QLabel("Selected: 0")
@@ -4325,181 +3822,6 @@ class RetranslationMixin:
             selection_count_label.setText(f"Selected: {count}")
         
         listbox.itemSelectionChanged.connect(update_selection_count)
-
-        row_stream_timer = QTimer(dialog if dialog is not None else container)
-        row_stream_timer.setSingleShot(False)
-        row_stream_timer.setInterval(0)
-        row_stream_state = {
-            'generation': 0,
-            'active': False,
-            'index': 0,
-            'prep_done': False,
-            'worker': None,
-            'bridge': None,
-            'timer': row_stream_timer,
-        }
-
-        def _append_progress_row_payload(payload):
-            item = QListWidgetItem(payload['display'])
-            status = payload['status']
-            if status == 'completed':
-                item.setForeground(QColor('green'))
-            elif status == 'merged':
-                item.setForeground(QColor('#17a2b8'))
-            elif status in ['failed', 'qa_failed']:
-                item.setForeground(QColor('red'))
-            elif status == 'not_translated':
-                item.setForeground(QColor('#2b6cb0'))
-            elif status in ['not_refined', 'no_tts']:
-                item.setForeground(QColor('#8a63d2'))
-            elif status == 'in_progress':
-                item.setForeground(QColor('orange'))
-            elif status == 'pending':
-                item.setForeground(QColor('white'))
-
-            item.setData(Qt.UserRole, {
-                'is_special': payload['is_special'],
-                'info': payload['info'],
-            })
-            item.setData(Qt.UserRole + 2, status)
-            self._add_compact_inline_list_item(listbox, item)
-            if payload['is_skipped_special'] and not show_special_files[0]:
-                item.setHidden(True)
-
-        def _cancel_progress_row_stream():
-            row_stream_state['generation'] += 1
-            row_stream_state['active'] = False
-            row_stream_state['prep_done'] = False
-            try:
-                row_stream_timer.stop()
-            except RuntimeError:
-                pass
-            worker = row_stream_state.get('worker')
-            if worker is not None:
-                try:
-                    if worker.isRunning():
-                        worker.cancel()
-                except RuntimeError:
-                    pass
-            row_stream_state['bridge'] = None
-
-        def _finish_progress_row_stream():
-            row_stream_state['active'] = False
-            try:
-                row_stream_timer.stop()
-            except RuntimeError:
-                pass
-            try:
-                listbox.setUpdatesEnabled(True)
-                update_selection_count()
-            except RuntimeError:
-                pass
-
-        def _stream_progress_rows():
-            generation = row_stream_state['generation']
-            if generation != row_stream_state['generation'] or not row_stream_state['active']:
-                return
-            total = len(row_payloads)
-            start = int(row_stream_state.get('index', 0) or 0)
-            if start >= total:
-                if row_stream_state.get('prep_done'):
-                    _finish_progress_row_stream()
-                else:
-                    row_stream_timer.stop()
-                return
-
-            end = start
-            deadline = time.perf_counter() + 0.008
-            try:
-                listbox.setUpdatesEnabled(False)
-                limit = min(total, start + 60)
-                while end < limit:
-                    _append_progress_row_payload(row_payloads[end])
-                    end += 1
-                    if end > start and time.perf_counter() >= deadline:
-                        break
-                listbox.setUpdatesEnabled(True)
-                listbox.viewport().update()
-                row_stream_state['index'] = end
-                if end < total:
-                    selection_count_label.setText(f"Loading: {end}/{len(chapter_display_info)}")
-                elif row_stream_state.get('prep_done'):
-                    _finish_progress_row_stream()
-                else:
-                    row_stream_timer.stop()
-            except RuntimeError:
-                _cancel_progress_row_stream()
-
-        row_stream_timer.timeout.connect(_stream_progress_rows)
-
-        def _on_progress_row_payload_batch(generation, payloads, done):
-            if generation != row_stream_state['generation'] or not row_stream_state['active']:
-                return
-            if payloads:
-                row_payloads.extend(list(payloads))
-            if done:
-                row_stream_state['prep_done'] = True
-            if not row_stream_timer.isActive():
-                row_stream_timer.start()
-
-        def _on_progress_row_worker_finished(worker, generation):
-            if generation == row_stream_state.get('generation') and row_stream_state.get('worker') is worker:
-                row_stream_state['worker'] = None
-                row_stream_state['bridge'] = None
-            try:
-                worker.deleteLater()
-            except RuntimeError:
-                pass
-
-        def _start_progress_row_stream():
-            _cancel_progress_row_stream()
-            generation = row_stream_state['generation']
-            row_stream_state['active'] = True
-            row_stream_state['index'] = 0
-            row_stream_state['prep_done'] = False
-            row_payloads.clear()
-            try:
-                listbox.clear()
-                total = len(chapter_display_info)
-                if total:
-                    selection_count_label.setText(f"Loading: 0/{total}")
-                    options = {
-                        'prog': prog,
-                        'output_dir': output_dir,
-                        'output_mode': self._current_progress_output_mode({'prog': prog}),
-                        'show_model_info_state': show_model_info[0],
-                        'translate_special': bool(
-                            getattr(self, 'translate_special_files_var', False)
-                            or getattr(self, 'config', {}).get('translate_special_files', False)
-                        ),
-                        'translate_all_numbered': bool(
-                            getattr(self, 'translate_all_numbered_html_var', True)
-                            or getattr(self, 'config', {}).get('translate_all_numbered_html', True)
-                        ),
-                        'special_keywords': getattr(self, 'special_file_keywords_var', ''),
-                        'special_exact': getattr(self, 'special_file_exact_var', ''),
-                    }
-                    worker = _ProgressRowPrepThread(
-                        generation,
-                        chapter_display_info,
-                        options,
-                        dialog if dialog is not None else container,
-                    )
-                    bridge = _ProgressRowStreamBridge(
-                        _on_progress_row_payload_batch,
-                        _on_progress_row_worker_finished,
-                        dialog if dialog is not None else container,
-                    )
-                    bridge.bind_worker(worker, generation)
-                    worker.batch_ready.connect(bridge.handle_batch, Qt.QueuedConnection)
-                    worker.finished.connect(bridge.handle_finished, Qt.QueuedConnection)
-                    row_stream_state['worker'] = worker
-                    row_stream_state['bridge'] = bridge
-                    worker.start()
-                else:
-                    _finish_progress_row_stream()
-            except RuntimeError:
-                _cancel_progress_row_stream()
         
         # Return data structure for external access
         result = {
@@ -4517,10 +3839,7 @@ class RetranslationMixin:
             'show_special_files_state': show_special_files[0],  # Store current toggle state
             'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
             'show_model_info_state': show_model_info[0],
-            'show_model_info_cb': show_model_info_cb,
-            'row_stream_state': row_stream_state,
-            '_start_row_stream': _start_progress_row_stream,
-            '_cancel_row_stream': _cancel_progress_row_stream
+            'show_model_info_cb': show_model_info_cb
         }
         show_model_info_cb._progress_data_ref = result
         
@@ -4543,12 +3862,10 @@ class RetranslationMixin:
             self._retranslation_dialog_cache[file_key] = result
             
             # Show the dialog (non-modal to allow interaction with other windows)
-            self._show_progress_dialog_ready(dialog)
+            dialog.show()
         elif not parent_dialog or tab_frame:
             # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)
-
-        QTimer.singleShot(0, _start_progress_row_stream)
         
         return result
 
@@ -4578,18 +3895,15 @@ class RetranslationMixin:
         def select_status(status_to_select):
             data['listbox'].clearSelection()
             for idx, info in enumerate(data['chapter_display_info']):
-                item = data['listbox'].item(idx)
-                if item is None:
-                    continue
                 if status_to_select == 'failed':
                     if info['status'] in ['failed', 'qa_failed']:
-                        item.setSelected(True)
+                        data['listbox'].item(idx).setSelected(True)
                 elif status_to_select == 'qa_failed':
                     if info['status'] == 'qa_failed':
-                        item.setSelected(True)
+                        data['listbox'].item(idx).setSelected(True)
                 else:
                     if info['status'] == status_to_select:
-                        item.setSelected(True)
+                        data['listbox'].item(idx).setSelected(True)
             count = len(data['listbox'].selectedItems())
             data['selection_count_label'].setText(f"Selected: {count}")
 
@@ -5723,11 +5037,10 @@ class RetranslationMixin:
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
-        # Do not refresh immediately after a fresh build. This method already
-        # read progress, reconciled output files, and populated the list; doing
-        # it again here repeats that UI-thread work and makes opening feel stuck.
+        # Automatically refresh once when dialog is opened
+        # Skip for multi-tab dialogs — the parent will do a single bulk refresh
         is_multi_tab = data.get('dialog') and hasattr(data['dialog'], '_tab_data')
-        if not is_multi_tab and data.get('_auto_refresh_on_open', False):
+        if not is_multi_tab:
             animated_refresh()
 
     def _refresh_all_tabs(self, tab_data_list):
@@ -5997,8 +5310,12 @@ class RetranslationMixin:
             
             # Clean up missing files and merged children before display unless disabled
             if not data.get('skip_cleanup', False) and not _progress_has_active_entries(data['prog']):
+                from TransateKRtoEN import ProgressManager
                 before_cleanup = copy.deepcopy(data['prog'])
-                data['prog'] = self._cleanup_missing_progress_files(data['prog'], data['output_dir'])
+                temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
+                temp_progress.prog = data['prog']
+                temp_progress.cleanup_missing_files(data['output_dir'])
+                data['prog'] = temp_progress.prog
                 
                 # Save only if cleanup really changed the file. During active translation
                 # refresh should be a reader, not another progress writer.
@@ -7125,12 +6442,6 @@ class RetranslationMixin:
             return
             
         listbox = data['listbox']
-        cancel_row_stream = data.get('_cancel_row_stream')
-        if callable(cancel_row_stream):
-            try:
-                cancel_row_stream()
-            except Exception:
-                pass
         
         # Clear existing items
         listbox.clear()
@@ -7696,23 +7007,20 @@ class RetranslationMixin:
                 self._multi_file_retranslation_dialog and 
                 hasattr(self, '_multi_file_selection_key') and 
                 self._multi_file_selection_key == selection_key):
-                # Reuse existing dialog immediately, then refresh after Qt has
-                # had a chance to paint it.
+                # Reuse existing dialog - refresh all tabs before showing
                 cached_dialog = self._multi_file_retranslation_dialog
+                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
+                    print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
+                    for _td in cached_dialog._tab_data:
+                        _rf = _td.get('refresh_func') if _td else None
+                        if callable(_rf):
+                            try:
+                                _rf()
+                            except Exception as _e:
+                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
                 cached_dialog.show()
                 cached_dialog.raise_()
                 cached_dialog.activateWindow()
-                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
-                    def _refresh_cached_tabs():
-                        print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
-                        for _td in cached_dialog._tab_data:
-                            _rf = _td.get('refresh_func') if _td else None
-                            if callable(_rf):
-                                try:
-                                    _rf()
-                                except Exception as _e:
-                                    print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-                    QTimer.singleShot(0, _refresh_cached_tabs)
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -7723,7 +7031,6 @@ class RetranslationMixin:
             
             # Create main dialog
             dialog = QDialog(self)
-            self._apply_progress_dialog_chrome(dialog, self if isinstance(self, QWidget) else None)
             dialog.setWindowTitle("Progress Manager - Multiple Files")
             # Parent-child windowing keeps this above the translator GUI
             dialog.setWindowModality(Qt.NonModal)
@@ -8023,9 +7330,17 @@ class RetranslationMixin:
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
             
-            # The tabs were just built from disk, so avoid immediately refreshing
-            # them again on the UI thread.
-            if not tab_data:
+            # Trigger animated refresh on every tab (same as clicking the Refresh button)
+            if tab_data:
+                print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
+                for _td in tab_data:
+                    _rf = _td.get('refresh_func') if _td else None
+                    if callable(_rf):
+                        try:
+                            _rf()
+                        except Exception as _e:
+                            print(f"[WARN] Auto-refresh failed for a tab: {_e}")
+            else:
                 print(f"[WARN] No tab data to refresh on dialog open")
             
             # Update dropdown nav state after all tabs are added
@@ -8033,7 +7348,7 @@ class RetranslationMixin:
                 dialog._dropdown_update_nav()
 
             # Show the dialog (non-modal to allow interaction with other windows)
-            self._show_progress_dialog_ready(dialog)
+            dialog.show()
             
         except Exception as e:
             print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
@@ -8480,7 +7795,6 @@ class RetranslationMixin:
         
         # Create dialog
         dialog = QDialog(self)
-        self._apply_progress_dialog_chrome(dialog, self if isinstance(self, QWidget) else None)
         dialog.setWindowTitle("Progress Manager - Images")
         # Parent-child windowing keeps this above the translator GUI
         dialog.setWindowModality(Qt.NonModal)
@@ -9003,4 +8317,4 @@ class RetranslationMixin:
         QTimer.singleShot(0, btn_refresh.click)
 
         # Show the dialog (non-modal to allow interaction with other windows)
-        self._show_progress_dialog_ready(dialog)
+        dialog.show()
