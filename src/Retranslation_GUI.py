@@ -397,6 +397,135 @@ class RetranslationMixin:
         except Exception as e:
             print(f"⚠️ Could not flash PM button: {e}")
 
+    def _create_retranslation_shell_dialog(self, title="Progress Manager", width_ratio=0.38, height_ratio=0.4):
+        from PySide6.QtWidgets import QApplication
+        if not QApplication.instance():
+            QApplication(sys.argv)
+
+        parent_widget = self if isinstance(self, QWidget) else None
+        dialog = QDialog(parent_widget)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.NonModal)
+        width, height = self._get_dialog_size(width_ratio, height_ratio)
+        dialog.resize(width, height)
+        dialog.setMinimumSize(width, height)
+
+        try:
+            if parent_widget is not None:
+                ss = parent_widget.styleSheet()
+                if ss:
+                    dialog.setStyleSheet(ss)
+        except Exception:
+            pass
+
+        ico_path = None
+        try:
+            if hasattr(self, 'base_dir'):
+                base_dir = self.base_dir
+            else:
+                base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if os.path.isfile(ico_path):
+                dialog.setWindowIcon(QIcon(ico_path))
+        except Exception as e:
+            print(f"Failed to load icon: {e}")
+
+        dialog_layout = QVBoxLayout(dialog)
+        loading_widget = QWidget(dialog)
+        loading_layout = QVBoxLayout(loading_widget)
+        loading_layout.setContentsMargins(0, 0, 0, 0)
+        loading_layout.setSpacing(10)
+        loading_layout.addStretch(1)
+
+        loading_icon = QLabel()
+        loading_icon.setAlignment(Qt.AlignCenter)
+        if ico_path and os.path.isfile(ico_path):
+            base_pixmap = QIcon(ico_path).pixmap(QSize(52, 52))
+            if not base_pixmap.isNull():
+                loading_icon.setPixmap(base_pixmap)
+                angle = {'value': 0}
+                timer = QTimer(dialog)
+
+                def _spin_loading_icon():
+                    try:
+                        angle['value'] = (angle['value'] + 18) % 360
+                        rotated = base_pixmap.transformed(
+                            QTransform().rotate(angle['value']),
+                            Qt.SmoothTransformation,
+                        )
+                        loading_icon.setPixmap(rotated)
+                    except RuntimeError:
+                        timer.stop()
+
+                timer.timeout.connect(_spin_loading_icon)
+                timer.start(40)
+                dialog._loading_icon_timer = timer
+        loading_layout.addWidget(loading_icon)
+
+        loading_label = QLabel("Loading progress...")
+        loading_label.setAlignment(Qt.AlignCenter)
+        loading_label.setStyleSheet("color: #94a3b8; font-size: 12pt; font-weight: bold; padding: 24px;")
+        loading_layout.addWidget(loading_label)
+        loading_layout.addStretch(1)
+        dialog_layout.addWidget(loading_widget)
+        return dialog, dialog_layout, loading_widget, loading_label
+
+    def _show_retranslation_shell_then_build(self, file_path, show_special_files_state=False):
+        dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog("Progress Manager")
+        file_key = os.path.abspath(file_path)
+
+        def closeEvent(event):
+            event.ignore()
+            dialog.hide()
+
+        dialog.closeEvent = closeEvent
+        dialog.show()
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents(QEventLoop.AllEvents, 50)
+        except Exception:
+            pass
+
+        def _build_dialog_contents():
+            try:
+                content = QWidget(dialog)
+                content_layout = QVBoxLayout(content)
+                content_layout.setContentsMargins(0, 0, 0, 0)
+
+                result = self._force_retranslation_epub_or_text(
+                    file_path,
+                    parent_dialog=dialog,
+                    tab_frame=content,
+                    show_special_files_state=show_special_files_state,
+                )
+                if not result:
+                    dialog.hide()
+                    return
+
+                timer = getattr(dialog, '_loading_icon_timer', None)
+                if timer:
+                    timer.stop()
+                loading_widget.hide()
+                loading_widget.deleteLater()
+                dialog_layout.addWidget(content)
+
+                dialog.setWindowTitle("Progress Manager - OPF Based" if result.get('spine_chapters') else "Progress Manager")
+                if not hasattr(self, '_retranslation_dialog_cache'):
+                    self._retranslation_dialog_cache = {}
+                self._retranslation_dialog_cache[file_key] = result
+                QTimer.singleShot(50, lambda: self._populate_progress_listbox_streamed(result))
+            except Exception as e:
+                print(f"Failed to build progress manager contents: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    loading_label.setText(f"Failed to load progress:\n{e}")
+                    loading_label.show()
+                except Exception:
+                    pass
+
+        QTimer.singleShot(50, _build_dialog_contents)
+
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
         
@@ -494,18 +623,23 @@ class RetranslationMixin:
                         del self._retranslation_dialog_cache[file_key]
                     else:
                         dialog = cached_data['dialog']
-                        # Trigger animated refresh (same as clicking the Refresh button)
-                        _rf = cached_data.get('refresh_func')
-                        if callable(_rf):
-                            try:
-                                _rf()
-                            except Exception:
-                                self._refresh_retranslation_data(cached_data)
-                        else:
-                            self._refresh_retranslation_data(cached_data)
                         dialog.show()
                         dialog.raise_()
                         dialog.activateWindow()
+
+                        # Trigger refresh after the dialog is visible so reopening
+                        # a large progress file does not block the first paint.
+                        def _refresh_cached_single_dialog():
+                            _rf = cached_data.get('refresh_func')
+                            if callable(_rf):
+                                try:
+                                    _rf()
+                                except Exception:
+                                    self._refresh_retranslation_data(cached_data)
+                            else:
+                                self._refresh_retranslation_data(cached_data)
+
+                        QTimer.singleShot(50, _refresh_cached_single_dialog)
                         return
         
         # For EPUB/text files, use the shared logic
@@ -519,7 +653,7 @@ class RetranslationMixin:
             if cached_data:
                 show_special = cached_data.get('show_special_files_state', show_special)
         
-        self._force_retranslation_epub_or_text(input_path, show_special_files_state=show_special)
+        self._show_retranslation_shell_then_build(input_path, show_special_files_state=show_special)
 
 
     def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False):
@@ -3710,7 +3844,6 @@ class RetranslationMixin:
             'show_model_info_cb': show_model_info_cb
         }
         show_model_info_cb._progress_data_ref = result
-        self._populate_progress_listbox_streamed(result)
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
@@ -3732,6 +3865,7 @@ class RetranslationMixin:
             
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
+            QTimer.singleShot(50, lambda: self._populate_progress_listbox_streamed(result))
         elif not parent_dialog or tab_frame:
             # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)
@@ -4373,7 +4507,7 @@ class RetranslationMixin:
                                     old_dlg.deleteLater()
                                 except Exception:
                                     pass
-                            self._force_retranslation_epub_or_text(file_path, show_special_files_state=show_special)
+                            self._show_retranslation_shell_then_build(file_path, show_special_files_state=show_special)
                         except Exception as e:
                             print(f"Error during rebuild: {e}")
 
@@ -7019,7 +7153,7 @@ class RetranslationMixin:
                             except Exception as _e:
                                 print(f"[WARN] Auto-refresh failed for a tab: {_e}")
 
-                QTimer.singleShot(0, _refresh_cached_tabs)
+                QTimer.singleShot(50, _refresh_cached_tabs)
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -7190,6 +7324,14 @@ class RetranslationMixin:
             
             # Store tab_data reference on the dialog for cross-tab operations
             dialog._tab_data = tab_data
+
+            # Paint the full-size multi-file shell before scanning/building every EPUB tab.
+            dialog.show()
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents(QEventLoop.AllEvents, 50)
+            except Exception:
+                pass
             
             # Get the global show_special state from the first file that has it cached
             # Default to True if any text files are present, False otherwise
@@ -7336,6 +7478,14 @@ class RetranslationMixin:
             # Show the dialog (non-modal to allow interaction with other windows)
             dialog.show()
 
+            def _populate_tabs_after_show():
+                for _idx, _td in enumerate(tab_data):
+                    if _td:
+                        QTimer.singleShot(
+                            _idx * 10,
+                            lambda td=_td: self._populate_progress_listbox_streamed(td),
+                        )
+
             # Trigger refresh after the dialog has painted so large tabs do not block opening.
             def _refresh_tabs_after_show():
                 if tab_data:
@@ -7350,7 +7500,8 @@ class RetranslationMixin:
                 else:
                     print(f"[WARN] No tab data to refresh on dialog open")
 
-            QTimer.singleShot(0, _refresh_tabs_after_show)
+            QTimer.singleShot(50, _populate_tabs_after_show)
+            QTimer.singleShot(150, _refresh_tabs_after_show)
             
         except Exception as e:
             print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
