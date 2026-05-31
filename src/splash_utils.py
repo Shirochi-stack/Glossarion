@@ -582,7 +582,7 @@ class SplashManager(QObject):
             self._manual_progress_auto_boost = 1.0
         elif "QA scanner loaded" in message:
             self._manual_progress_auto_cap = 95
-            self._manual_progress_auto_boost = 2.0
+            self._manual_progress_auto_boost = 1.0
         elif (
             "Finalizing module initialization" in message
             or "Creating main window" in message
@@ -932,6 +932,15 @@ class SplashManager(QObject):
         self._settle_startup_progress_before_finalizing()
         if manga_available and results.get("manga") is None:
             results["manga_available"] = False
+
+        # Pre-cache QA Scanner optional dependency checks (instant find_spec,
+        # no actual imports) so the settings dialog never has to probe at all.
+        try:
+            from QA_Scanner_GUI import _probe_truncation_deps_fast
+            _probe_truncation_deps_fast()
+        except Exception:
+            pass
+
         return results
 
     def validate_all_scripts(self, base_dir=None):

@@ -20,6 +20,57 @@ import traceback
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
+# ── Dependency availability cache ──────────────────────────────────────
+# Uses importlib.util.find_spec() to check if optional heavy packages are
+# installed WITHOUT actually importing them (find_spec is instant).
+# The result is cached on first call; the splash screen can also pre-cache
+# by calling _probe_truncation_deps_fast() during startup.
+import importlib.util as _importlib_util
+
+_truncation_deps_probe_result = None  # will be a list of missing dep names
+
+def _probe_truncation_deps_fast():
+    """Check for heavy optional deps using find_spec (instant, no imports)."""
+    global _truncation_deps_probe_result
+    if _truncation_deps_probe_result is not None:
+        return _truncation_deps_probe_result
+    missing = []
+    if _importlib_util.find_spec("sentence_transformers") is None:
+        missing.append("sentence-transformers")
+    if _importlib_util.find_spec("deep_translator") is None:
+        missing.append("deep-translator")
+    if _importlib_util.find_spec("sklearn") is None:
+        missing.append("scikit-learn")
+    _truncation_deps_probe_result = missing
+    return missing
+
+def _get_truncation_deps_missing():
+    """Return list of missing truncation deps (instant, cached)."""
+    return list(_probe_truncation_deps_fast())
+
+# ── Cached module-level helpers ────────────────────────────────────────
+_cached_cpu_count = None
+
+def _get_cpu_count():
+    """Return os.cpu_count() with lazy caching (avoids re-importing multiprocessing)."""
+    global _cached_cpu_count
+    if _cached_cpu_count is None:
+        import multiprocessing
+        _cached_cpu_count = multiprocessing.cpu_count()
+    return _cached_cpu_count
+
+_cached_model_options = None
+
+def _get_model_options_cached():
+    """Return model option list with lazy caching."""
+    global _cached_model_options
+    if _cached_model_options is None:
+        try:
+            from model_options import get_model_options
+            _cached_model_options = get_model_options()
+        except Exception:
+            _cached_model_options = ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-5-mini", "gpt-5-nano"]
+    return _cached_model_options
 
 
 def _prewarm_dialog_offscreen(dialog):
@@ -2491,7 +2542,7 @@ class QAScannerMixin:
                     pass
                 return
             if schedule_next:
-                QTimer.singleShot(45, _run_settings_stream_step)
+                QTimer.singleShot(8, _run_settings_stream_step)
 
         def _build_settings_dialog_stream():
             # Helper function to disable mousewheel on spinboxes and comboboxes
@@ -3264,20 +3315,8 @@ class QAScannerMixin:
             check_truncation_checkbox = self._create_styled_checkbox("Silent truncation detection (compares tail paragraphs via back-translation + embeddings)")
             additional_layout.addWidget(check_truncation_checkbox)
 
-            # Check if required dependencies are installed
-            _truncation_deps_missing = []
-            try:
-                import sentence_transformers
-            except ImportError:
-                _truncation_deps_missing.append("sentence-transformers")
-            try:
-                import deep_translator
-            except ImportError:
-                _truncation_deps_missing.append("deep-translator")
-            try:
-                import sklearn
-            except ImportError:
-                _truncation_deps_missing.append("scikit-learn")
+            # Check if required dependencies are installed (probed in background thread at module load)
+            _truncation_deps_missing = _get_truncation_deps_missing()
 
             if _truncation_deps_missing:
                 # Dependencies missing — disable and grey out
@@ -3758,11 +3797,7 @@ class QAScannerMixin:
             ai_model_combo.setEditable(True)
             ai_model_combo.setInsertPolicy(QComboBox.NoInsert)
             # Load model catalog
-            try:
-                from model_options import get_model_options
-                _ai_model_list = get_model_options()
-            except Exception:
-                _ai_model_list = ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-5-mini", "gpt-5-nano"]
+            _ai_model_list = _get_model_options_cached()
             ai_model_combo.addItems(_ai_model_list)
             # Set completer for search
             from PySide6.QtWidgets import QCompleter
@@ -4361,8 +4396,7 @@ class QAScannerMixin:
             workers_layout.addWidget(ai_hunter_workers_spinbox)
 
             # CPU count display
-            import multiprocessing
-            cpu_count = multiprocessing.cpu_count()
+            cpu_count = _get_cpu_count()
             cpu_hint = QLabel(f"(0 = use all {cpu_count} cores)")
             cpu_hint.setFont(QFont('Arial', 9))
             cpu_hint.setStyleSheet("color: gray;")
@@ -4968,8 +5002,12 @@ class QAScannerMixin:
         if show:
             QTimer.singleShot(25, _run_settings_stream_step)
         else:
+            _prewarm_app = QApplication.instance()
             while getattr(dialog, '_qa_settings_stream_builder', None) is not None:
                 _run_settings_stream_step(schedule_next=False)
+                # Pump event loop between steps so the main GUI stays responsive
+                if _prewarm_app is not None:
+                    _prewarm_app.processEvents(QEventLoop.ExcludeUserInputEvents)
         return dialog
 def show_custom_detection_dialog(parent=None):
     """
