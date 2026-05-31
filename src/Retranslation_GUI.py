@@ -418,6 +418,7 @@ class RetranslationMixin:
         except Exception:
             pass
 
+        base_dir = None
         ico_path = None
         try:
             if hasattr(self, 'base_dir'):
@@ -437,30 +438,26 @@ class RetranslationMixin:
         loading_layout.setSpacing(10)
         loading_layout.addStretch(1)
 
-        loading_icon = QLabel()
-        loading_icon.setAlignment(Qt.AlignCenter)
-        if ico_path and os.path.isfile(ico_path):
-            base_pixmap = QIcon(ico_path).pixmap(QSize(52, 52))
-            if not base_pixmap.isNull():
-                loading_icon.setPixmap(base_pixmap)
-                angle = {'value': 0}
-                timer = QTimer(dialog)
+        try:
+            from spinning import animate_icon, create_icon_label
+            loading_icon = create_icon_label(52, base_dir)
+            loading_icon.setFixedSize(52, 52)
+            loading_layout.addWidget(loading_icon, 0, Qt.AlignCenter)
 
-                def _spin_loading_icon():
-                    try:
-                        angle['value'] = (angle['value'] + 18) % 360
-                        rotated = base_pixmap.transformed(
-                            QTransform().rotate(angle['value']),
-                            Qt.SmoothTransformation,
-                        )
-                        loading_icon.setPixmap(rotated)
-                    except RuntimeError:
-                        timer.stop()
+            spin_timer = QTimer(dialog)
 
-                timer.timeout.connect(_spin_loading_icon)
-                timer.start(40)
-                dialog._loading_icon_timer = timer
-        loading_layout.addWidget(loading_icon)
+            def _spin_loading_icon():
+                try:
+                    animate_icon(loading_icon)
+                except RuntimeError:
+                    spin_timer.stop()
+
+            spin_timer.timeout.connect(_spin_loading_icon)
+            spin_timer.start(540)
+            QTimer.singleShot(0, _spin_loading_icon)
+            dialog._loading_icon_timer = spin_timer
+        except Exception:
+            pass
 
         loading_label = QLabel("Loading progress...")
         loading_label.setAlignment(Qt.AlignCenter)
@@ -6609,7 +6606,6 @@ class RetranslationMixin:
             return
 
         self._progress_list_sync_model_toggle(data)
-        show_special_files = self._progress_list_show_special(data)
         infos = list(data.get('chapter_display_info') or [])
         max_original_len, max_output_len = self._progress_list_column_widths(infos, data)
 
@@ -6669,6 +6665,7 @@ class RetranslationMixin:
                 return
             try:
                 listbox.setUpdatesEnabled(False)
+                show_special_files = self._progress_list_show_special(data)
                 end_idx = min(state['idx'] + chunk_size, len(infos))
                 for idx in range(state['idx'], end_idx):
                     info = infos[idx]
@@ -6682,6 +6679,7 @@ class RetranslationMixin:
                     self._apply_progress_list_item_visuals(item, status)
                     self._set_progress_list_item_metadata(item, info, status, show_special_files)
                     self._add_compact_inline_list_item(listbox, item)
+                    self._set_progress_list_item_metadata(item, info, status, show_special_files)
                     if selected_keys and self._progress_list_item_key(info) in selected_keys:
                         item.setSelected(True)
                 state['idx'] = end_idx
