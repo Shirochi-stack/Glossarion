@@ -480,6 +480,7 @@ class RetranslationMixin:
                             print(f"📁 Created output folder: {output_dir}")
                             # Flash the PM button green to signal folder creation
                             self._flash_pm_button_green(output_dir)
+                            self._ui_yield(20)
                         except Exception as e:
                             self._show_message('error', "Error", f"Could not create output folder: {e}")
                             del self._retranslation_dialog_cache[file_key]
@@ -494,18 +495,21 @@ class RetranslationMixin:
                         del self._retranslation_dialog_cache[file_key]
                     else:
                         dialog = cached_data['dialog']
-                        # Trigger animated refresh (same as clicking the Refresh button)
-                        _rf = cached_data.get('refresh_func')
-                        if callable(_rf):
-                            try:
-                                _rf()
-                            except Exception:
-                                self._refresh_retranslation_data(cached_data)
-                        else:
-                            self._refresh_retranslation_data(cached_data)
                         dialog.show()
                         dialog.raise_()
                         dialog.activateWindow()
+
+                        # Trigger animated refresh (same as clicking the Refresh button)
+                        _rf = cached_data.get('refresh_func')
+                        def _refresh_cached_dialog():
+                            if callable(_rf):
+                                try:
+                                    _rf()
+                                    return
+                                except Exception:
+                                    pass
+                            self._refresh_retranslation_data(cached_data)
+                        QTimer.singleShot(0, _refresh_cached_dialog)
                         return
         
         # For EPUB/text files, use the shared logic
@@ -565,6 +569,7 @@ class RetranslationMixin:
                 print(f"📁 Created output folder: {output_dir}")
                 # Flash the PM button green to signal folder creation
                 self._flash_pm_button_green(output_dir)
+                self._ui_yield(20)
             except Exception as e:
                 if not parent_dialog:
                     self._show_message('error', "Error", f"Could not create output folder: {e}")
@@ -5037,10 +5042,11 @@ class RetranslationMixin:
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
-        # Automatically refresh once when dialog is opened
-        # Skip for multi-tab dialogs — the parent will do a single bulk refresh
+        # Do not refresh immediately after a fresh build. This method already
+        # read progress, reconciled output files, and populated the list; doing
+        # it again here repeats that UI-thread work and makes opening feel stuck.
         is_multi_tab = data.get('dialog') and hasattr(data['dialog'], '_tab_data')
-        if not is_multi_tab:
+        if not is_multi_tab and data.get('_auto_refresh_on_open', False):
             animated_refresh()
 
     def _refresh_all_tabs(self, tab_data_list):
@@ -7007,20 +7013,23 @@ class RetranslationMixin:
                 self._multi_file_retranslation_dialog and 
                 hasattr(self, '_multi_file_selection_key') and 
                 self._multi_file_selection_key == selection_key):
-                # Reuse existing dialog - refresh all tabs before showing
+                # Reuse existing dialog immediately, then refresh after Qt has
+                # had a chance to paint it.
                 cached_dialog = self._multi_file_retranslation_dialog
-                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
-                    print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
-                    for _td in cached_dialog._tab_data:
-                        _rf = _td.get('refresh_func') if _td else None
-                        if callable(_rf):
-                            try:
-                                _rf()
-                            except Exception as _e:
-                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
                 cached_dialog.show()
                 cached_dialog.raise_()
                 cached_dialog.activateWindow()
+                if hasattr(cached_dialog, '_tab_data') and cached_dialog._tab_data:
+                    def _refresh_cached_tabs():
+                        print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
+                        for _td in cached_dialog._tab_data:
+                            _rf = _td.get('refresh_func') if _td else None
+                            if callable(_rf):
+                                try:
+                                    _rf()
+                                except Exception as _e:
+                                    print(f"[WARN] Auto-refresh failed for a tab: {_e}")
+                    QTimer.singleShot(0, _refresh_cached_tabs)
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -7330,17 +7339,9 @@ class RetranslationMixin:
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
             
-            # Trigger animated refresh on every tab (same as clicking the Refresh button)
-            if tab_data:
-                print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
-                for _td in tab_data:
-                    _rf = _td.get('refresh_func') if _td else None
-                    if callable(_rf):
-                        try:
-                            _rf()
-                        except Exception as _e:
-                            print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-            else:
+            # The tabs were just built from disk, so avoid immediately refreshing
+            # them again on the UI thread.
+            if not tab_data:
                 print(f"[WARN] No tab data to refresh on dialog open")
             
             # Update dropdown nav state after all tabs are added

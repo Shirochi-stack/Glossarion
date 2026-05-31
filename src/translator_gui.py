@@ -10976,10 +10976,90 @@ Recent translations to summarize:
         # ── Multiple files — show picker dialog ──────────────────────
         self._show_output_folder_picker(files, override_dir)
 
+    def _open_path_in_file_manager(self, path, show_error=True):
+        """Open a folder/file in the OS file manager with Linux fallbacks."""
+        import subprocess
+
+        if not path:
+            return False
+
+        system_name = platform.system()
+        try:
+            if system_name == 'Windows':
+                os.startfile(path)
+                return True
+            if system_name == 'Darwin':
+                subprocess.Popen(['open', path])
+                return True
+
+            # Linux / BSD desktop environments vary. Try portal/desktop openers
+            # first, then fall back to common file managers.
+            import shutil
+            opener_commands = [
+                ('xdg-open', ['xdg-open', path], True),
+                ('gio', ['gio', 'open', path], True),
+                ('kde-open', ['kde-open', path], True),
+                ('kde-open5', ['kde-open5', path], True),
+                ('gnome-open', ['gnome-open', path], True),
+                ('gvfs-open', ['gvfs-open', path], True),
+                ('exo-open', ['exo-open', path], True),
+                ('nautilus', ['nautilus', path], False),
+                ('dolphin', ['dolphin', path], False),
+                ('thunar', ['thunar', path], False),
+                ('nemo', ['nemo', path], False),
+                ('caja', ['caja', path], False),
+                ('pcmanfm', ['pcmanfm', path], False),
+            ]
+            for executable, command, wait_for_result in opener_commands:
+                if not shutil.which(executable):
+                    continue
+                try:
+                    if wait_for_result:
+                        result = subprocess.run(
+                            command,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
+                        if result.returncode == 0:
+                            return True
+                    else:
+                        subprocess.Popen(
+                            command,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return True
+                except subprocess.TimeoutExpired:
+                    return True
+                except Exception:
+                    continue
+        except Exception as e:
+            if show_error:
+                QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
+            return False
+
+        if show_error:
+            try:
+                clipboard = QApplication.clipboard()
+                if clipboard:
+                    clipboard.setText(path)
+                QMessageBox.information(
+                    self,
+                    "Open Output Folder",
+                    "No supported Linux file-manager opener was found.\n\n"
+                    f"The output folder path has been copied to the clipboard:\n{path}"
+                )
+            except Exception:
+                QMessageBox.information(
+                    self,
+                    "Open Output Folder",
+                    f"No supported Linux file-manager opener was found.\n\nOutput folder:\n{path}"
+                )
+        return False
+
     def _open_single_output_folder(self, output_path):
         """Open a single output folder, with fallback to parent if it doesn't exist."""
-        import subprocess
-        
         if not os.path.exists(output_path):
             reply = QMessageBox.question(self, "Folder Not Found", 
                                   f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
@@ -10991,20 +11071,10 @@ Recent translations to summarize:
             else:
                 return
         
-        try:
-            if platform.system() == 'Windows':
-                os.startfile(output_path)
-            elif platform.system() == 'Darwin':
-                subprocess.call(['open', output_path])
-            else:
-                subprocess.call(['xdg-open', output_path])
-        except Exception as e:
-             QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
+        self._open_path_in_file_manager(output_path)
 
     def _show_output_folder_picker(self, files, override_dir):
         """Show a dropdown menu to pick which output folder to open."""
-        import subprocess
-        
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -11059,15 +11129,7 @@ Recent translations to summarize:
             
             def open_all():
                 for p in existing_paths:
-                    try:
-                        if platform.system() == 'Windows':
-                            os.startfile(p)
-                        elif platform.system() == 'Darwin':
-                            subprocess.call(['open', p])
-                        else:
-                            subprocess.call(['xdg-open', p])
-                    except Exception:
-                        pass
+                    self._open_path_in_file_manager(p, show_error=False)
             
             open_all_action.triggered.connect(open_all)
         
@@ -13908,7 +13970,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         try:
                             dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                             dlg.show(); dlg.raise_(); dlg.activateWindow()
-                            _refresh_dialog(dlg)
+                            QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
                             return True
                         except Exception:
                             pass
@@ -13931,7 +13993,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     try:
                         dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                         dlg.show(); dlg.raise_(); dlg.activateWindow()
-                        _refresh_dialog(dlg)
+                        QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
                         return True
                     except Exception:
                         pass
@@ -13945,7 +14007,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     try:
                         dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                         dlg.show(); dlg.raise_(); dlg.activateWindow()
-                        _refresh_dialog(dlg)
+                        QTimer.singleShot(0, lambda dlg=dlg: _refresh_dialog(dlg))
                         return True
                     except Exception:
                         pass
