@@ -3497,7 +3497,7 @@ def _create_response_handling_section(self, parent):
         spin.setSingleStep(1)
         spin.setDecimals(0)
         spin.setValue(current_value)
-        spin.setFixedSize(72, 26)
+        spin.setFixedSize(90, 26)
         spin.setFocusPolicy(Qt.StrongFocus)
         value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
         spin.setAlignment(value_alignment)
