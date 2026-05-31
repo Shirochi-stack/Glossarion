@@ -7138,6 +7138,8 @@ class RetranslationMixin:
                 cached_dialog.show()
                 cached_dialog.raise_()
                 cached_dialog.activateWindow()
+                if getattr(cached_dialog, '_multi_file_tabs_building', False):
+                    return
 
                 def _refresh_cached_tabs():
                     if not hasattr(cached_dialog, '_tab_data') or not cached_dialog._tab_data:
@@ -7350,6 +7352,169 @@ class RetranslationMixin:
                     override_dir = self.config.get('output_directory')
                 except Exception:
                     override_dir = None
+
+            # Stream tab creation: add lightweight tab shells immediately, then build
+            # each EPUB/text tab on its own event-loop turn.
+            self._add_multi_file_buttons(dialog, notebook, tab_data)
+
+            def closeEvent(event):
+                event.ignore()
+                dialog.hide()
+
+            dialog.closeEvent = closeEvent
+            self._multi_file_retranslation_dialog = dialog
+            self._multi_file_selection_key = selection_key
+
+            def _update_dropdown_nav_safe():
+                if hasattr(dialog, '_dropdown_update_nav'):
+                    try:
+                        dialog._dropdown_update_nav()
+                    except RuntimeError:
+                        pass
+
+            build_tasks = []
+            for file_path in epub_files + text_files:
+                file_base = os.path.splitext(os.path.basename(file_path))[0]
+                print(f"[DEBUG] Queueing EPUB/text tab: {file_base}")
+
+                output_dir = os.path.join(override_dir, file_base) if override_dir else file_base
+                if not os.path.exists(output_dir):
+                    print(f"[DEBUG] Output folder missing for {file_base}; will create via tab builder: {output_dir}")
+
+                tab_frame = QWidget()
+                tab_layout = QVBoxLayout(tab_frame)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                loading_label = QLabel(f"Loading {file_base}...")
+                loading_label.setAlignment(Qt.AlignCenter)
+                loading_label.setStyleSheet("color: #94a3b8; font-size: 10pt; font-weight: bold; padding: 18px;")
+                tab_layout.addWidget(loading_label)
+
+                tab_name = file_base if use_dropdown else (file_base[:20] + "..." if len(file_base) > 20 else file_base)
+                notebook.addTab(tab_frame, tab_name)
+                _update_dropdown_nav_safe()
+                build_tasks.append(('epub_text', file_path, file_base, tab_frame))
+
+            for folder_path in folders:
+                build_tasks.append(('folder', folder_path, os.path.basename(folder_path) or folder_path, None))
+
+            build_state = {'idx': 0, 'tabs_created': False}
+            dialog._multi_file_tabs_building = True
+
+            def _refresh_tabs_streamed(idx=0):
+                if idx >= len(tab_data):
+                    return
+                _td = tab_data[idx]
+                _rf = _td.get('refresh_func') if _td else None
+                if callable(_rf):
+                    try:
+                        _rf()
+                    except Exception as _e:
+                        print(f"[WARN] Auto-refresh failed for a tab: {_e}")
+                QTimer.singleShot(25, lambda: _refresh_tabs_streamed(idx + 1))
+
+            def _finish_streamed_tabs():
+                dialog._multi_file_tabs_building = False
+
+                if image_files and not build_state['tabs_created']:
+                    image_tab_result = self._create_individual_images_tab(
+                        image_files,
+                        notebook,
+                        dialog
+                    )
+                    if image_tab_result:
+                        tab_data.append(image_tab_result)
+                        build_state['tabs_created'] = True
+                        _update_dropdown_nav_safe()
+
+                if not build_state['tabs_created'] and folders:
+                    scanned_images = []
+                    for folder_path in folders:
+                        if os.path.isdir(folder_path):
+                            try:
+                                for file in os.listdir(folder_path):
+                                    file_path = os.path.join(folder_path, file)
+                                    if os.path.isfile(file_path) and file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                                        scanned_images.append(file_path)
+                            except Exception:
+                                pass
+
+                    if scanned_images:
+                        image_tab_result = self._create_individual_images_tab(
+                            scanned_images,
+                            notebook,
+                            dialog
+                        )
+                        if image_tab_result:
+                            tab_data.append(image_tab_result)
+                            build_state['tabs_created'] = True
+                            _update_dropdown_nav_safe()
+
+                if not build_state['tabs_created']:
+                    self._styled_msgbox(QMessageBox.Information, self, "Info",
+                        "No translation output found for any of the selected files.\n\n"
+                        "Make sure the output folders exist in your script directory.")
+                    dialog.hide()
+                    return
+
+                _update_dropdown_nav_safe()
+                if tab_data:
+                    print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
+                    QTimer.singleShot(100, lambda: _refresh_tabs_streamed(0))
+                else:
+                    print(f"[WARN] No tab data to refresh on dialog open")
+
+            def _build_next_tab():
+                if build_state['idx'] >= len(build_tasks):
+                    _finish_streamed_tabs()
+                    return
+
+                kind, path, label, tab_frame = build_tasks[build_state['idx']]
+                build_state['idx'] += 1
+
+                if kind == 'epub_text':
+                    print(f"[DEBUG] Creating streamed tab for {label}")
+                    try:
+                        if tab_frame.layout():
+                            self._clear_layout(tab_frame.layout())
+                        tab_result = self._force_retranslation_epub_or_text(
+                            path,
+                            parent_dialog=dialog,
+                            tab_frame=tab_frame,
+                            show_special_files_state=global_show_special
+                        )
+                        if tab_result:
+                            cdi = tab_result.get('chapter_display_info', [])
+                            completed = sum(1 for info in cdi if info.get('status') == 'completed')
+                            in_progress = sum(1 for info in cdi if info.get('status') == 'in_progress')
+                            tab_data.append(tab_result)
+                            build_state['tabs_created'] = True
+                            QTimer.singleShot(25, lambda td=tab_result: self._populate_progress_listbox_streamed(td))
+                            print(f"[DEBUG] Successfully created tab for {label} (progress: {completed} done, {in_progress} in-progress)")
+                        else:
+                            if tab_frame.layout():
+                                self._clear_layout(tab_frame.layout())
+                                failed_label = QLabel(f"Failed to load {label}")
+                                failed_label.setAlignment(Qt.AlignCenter)
+                                failed_label.setStyleSheet("color: #e74c3c; font-size: 10pt; font-weight: bold; padding: 18px;")
+                                tab_frame.layout().addWidget(failed_label)
+                            print(f"[DEBUG] Failed to create content for {label}")
+                    except Exception as _e:
+                        print(f"[WARN] Failed to create streamed tab for {label}: {_e}")
+                elif kind == 'folder':
+                    folder_result = self._create_image_folder_tab(
+                        path,
+                        notebook,
+                        dialog
+                    )
+                    if folder_result:
+                        tab_data.append(folder_result)
+                        build_state['tabs_created'] = True
+                        _update_dropdown_nav_safe()
+
+                QTimer.singleShot(0, _build_next_tab)
+
+            QTimer.singleShot(50, _build_next_tab)
+            return
 
             # Create tabs for EPUB/text files using shared logic
             pending_tabs = []  # Collect before sorting
