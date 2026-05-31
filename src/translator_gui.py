@@ -4510,6 +4510,11 @@ Recent translations to summarize:
         
         # Create browse menu
         self.browse_menu = QMenu(self)
+        self.browse_menu.setStyleSheet("""
+            QMenu::item {
+                padding: 6px 24px 6px 12px;
+            }
+        """)
         self.browse_menu.addAction("📄 Select Files", self.browse_files)
         self.browse_menu.addAction("📁 Select Folder", self.browse_folder)
         self.browse_menu.addSeparator()
