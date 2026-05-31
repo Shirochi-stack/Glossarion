@@ -11817,7 +11817,19 @@ Recent translations to summarize:
                         last_context = latest_ctx or last_context
                         last_model = latest_model or last_model
                     if combined_entries:
-                        entries = combined_entries
+                        # BUG FIX: MERGE external entries with in-process entries
+                        # instead of replacing.  Previous code did `entries = combined_entries`
+                        # which silently dropped all in-process watchdog entries whenever
+                        # any external file had non-empty entries (e.g. stale subprocess data).
+                        seen_rids = {e.get("request_id") for e in entries if isinstance(e, dict) and e.get("request_id")}
+                        for ext_entry in combined_entries:
+                            if isinstance(ext_entry, dict):
+                                ext_rid = ext_entry.get("request_id")
+                                if ext_rid and ext_rid in seen_rids:
+                                    continue  # skip duplicates
+                                entries.append(ext_entry)
+                                if ext_rid:
+                                    seen_rids.add(ext_rid)
         except Exception:
             pass
 

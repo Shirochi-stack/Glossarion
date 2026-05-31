@@ -658,8 +658,19 @@ def _api_watchdog_record_retry(request_id: str, attempt: int, reason: str = None
 
 def get_api_watchdog_state() -> Dict[str, Any]:
     """Return current API watchdog state for GUI polling."""
+    global _api_watchdog_in_flight
     try:
         with _api_watchdog_lock:
+            # Self-healing: re-derive counter from entries if it drifted.
+            # This catches race conditions between _clear_chapter and _finished
+            # during cancellation/timeouts that can cause double-decrements.
+            _actual_in_flight = sum(
+                1 for e in _api_watchdog_entries.values()
+                if isinstance(e, dict) and e.get("status") == "in_flight"
+            )
+            if _api_watchdog_in_flight != _actual_in_flight:
+                _api_watchdog_in_flight = _actual_in_flight
+
             entries = []
             try:
                 entries = list(_api_watchdog_entries.values())
