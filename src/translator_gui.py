@@ -10656,6 +10656,62 @@ Recent translations to summarize:
             return relative_output
         return helper_output
 
+    def _resolve_open_output_folder_for_file(self, file_path: str) -> str:
+        """Return the output folder path used by the Open Output Folder button."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.exe':
+            return os.path.join(os.path.dirname(os.path.abspath(file_path)), 'GTool_Translation')
+        return self._resolve_translation_output_dir(file_path)
+
+    def _open_folder_in_file_manager(self, folder_path: str):
+        """Open an existing folder in the platform file manager."""
+        import subprocess
+
+        if not folder_path:
+            raise ValueError("No folder path was provided.")
+
+        folder_path = os.path.abspath(folder_path)
+        system_name = platform.system()
+        if system_name == 'Windows':
+            os.startfile(folder_path)
+            return
+        if system_name == 'Darwin':
+            subprocess.Popen(['open', folder_path])
+            return
+
+        desktop_openers = [
+            ('xdg-open', folder_path),
+            ('gio', 'open', folder_path),
+            ('kioclient6', 'exec', folder_path),
+            ('kioclient5', 'exec', folder_path),
+            ('kioclient', 'exec', folder_path),
+        ]
+        last_error = None
+        for command in desktop_openers:
+            if not shutil.which(command[0]):
+                continue
+            try:
+                completed = subprocess.run(
+                    list(command),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                if completed.returncode == 0:
+                    return
+                last_error = completed.stderr.strip() or f"{command[0]} exited with {completed.returncode}"
+            except Exception as exc:
+                last_error = str(exc)
+
+        for manager in ('dolphin', 'thunar', 'nemo', 'nautilus', 'pcmanfm', 'caja'):
+            if not shutil.which(manager):
+                continue
+            subprocess.Popen([manager, folder_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+
+        raise RuntimeError(last_error or "No Linux file manager opener was found. Install xdg-utils or a file manager.")
+
     def _flatten_translation_qa_issue_text(self, value) -> str:
         if value is None:
             return ""
@@ -10895,8 +10951,6 @@ Recent translations to summarize:
 
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
-        import subprocess
-
         if not hasattr(self, 'selected_files') or not self.selected_files:
              # Try to use self.file_path if set (single file legacy/other mode)
              if hasattr(self, 'file_path') and self.file_path:
@@ -10932,21 +10986,8 @@ Recent translations to summarize:
         
         if len(files) == 1:
             file_path = files[0]
-            ext = os.path.splitext(file_path)[1].lower()
-            
-            # RPG Maker .exe — output is GTool_Translation in the game directory
-            if ext == '.exe':
-                output_path = os.path.join(os.path.dirname(os.path.abspath(file_path)), 'GTool_Translation')
-                self._open_single_output_folder(output_path)
-                return
-            
             # Single file — open directly
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            if override_dir:
-                output_path = os.path.join(override_dir, base_name)
-            else:
-                base_dir = self._get_output_base_dir(file_path)
-                output_path = os.path.join(base_dir, base_name)
+            output_path = self._resolve_open_output_folder_for_file(file_path)
             self._open_single_output_folder(output_path)
             return
         
@@ -10955,33 +10996,27 @@ Recent translations to summarize:
 
     def _open_single_output_folder(self, output_path):
         """Open a single output folder, with fallback to parent if it doesn't exist."""
-        import subprocess
-
+        expected_path = os.path.abspath(output_path)
         if not os.path.exists(output_path):
             reply = QMessageBox.question(self, "Folder Not Found", 
                                   f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
-                                  f"Expected path: {output_path}\n"
+                                  f"Expected path: {expected_path}\n"
                                   "Do you want to open the parent directory instead?",
                                   QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                output_path = os.path.dirname(output_path)
+                output_path = os.path.dirname(expected_path)
             else:
                 return
+        else:
+            output_path = expected_path
         
         try:
-            if platform.system() == 'Windows':
-                os.startfile(output_path)
-            elif platform.system() == 'Darwin':
-                subprocess.call(['open', output_path])
-            else:
-                subprocess.call(['xdg-open', output_path])
+            self._open_folder_in_file_manager(output_path)
         except Exception as e:
              QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
 
     def _show_output_folder_picker(self, files, override_dir):
         """Show a dropdown menu to pick which output folder to open."""
-        import subprocess
-
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -11011,11 +11046,7 @@ Recent translations to summarize:
         
         for file_path in files:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            if override_dir:
-                output_path = os.path.join(override_dir, base_name)
-            else:
-                base_dir = self._get_output_base_dir(file_path)
-                output_path = os.path.join(base_dir, base_name)
+            output_path = self._resolve_open_output_folder_for_file(file_path)
             
             exists = os.path.exists(output_path)
             icon = "📂" if exists else "📁"
@@ -11037,12 +11068,7 @@ Recent translations to summarize:
             def open_all():
                 for p in existing_paths:
                     try:
-                        if platform.system() == 'Windows':
-                            os.startfile(p)
-                        elif platform.system() == 'Darwin':
-                            subprocess.call(['open', p])
-                        else:
-                            subprocess.call(['xdg-open', p])
+                        self._open_folder_in_file_manager(p)
                     except Exception:
                         pass
             
