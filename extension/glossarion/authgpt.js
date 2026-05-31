@@ -9,7 +9,7 @@ const TOKEN_REFRESH_MARGIN_SECONDS = 300;
 
 const loginPromises = new Map();
 
-export async function sendAuthgptChatCompletion({ route, messages, settings }) {
+export async function sendAuthgptChatCompletion({ route, messages, settings, onStreamItems = null }) {
   const modelForAccount = route.rawModel || settings.model || "authgpt/gpt-5.5";
   const actualModel = normalizeAuthgptModel(stripAuthgptPrefix(route.model || modelForAccount) || "gpt-5.5");
   const tokenParamCandidates = ["max_tokens", ""];
@@ -50,7 +50,7 @@ export async function sendAuthgptChatCompletion({ route, messages, settings }) {
           throw new Error(`AuthGPT HTTP ${response.status}: ${detail}`);
         }
 
-        const result = await readAuthgptStream(response);
+        const result = await readAuthgptStream(response, { onStreamItems });
         if (result.error_details) {
           throw new Error(`AuthGPT failed: ${formatErrorDetail(result.error_details)}`);
         }
@@ -405,7 +405,7 @@ function contentToResponsesParts(content, role) {
   return parts.length ? parts : [{ type: textType, text: "" }];
 }
 
-async function readAuthgptStream(response) {
+async function readAuthgptStream(response, { onStreamItems = null } = {}) {
   if (!response.body) {
     return parseSseText(await response.text());
   }
@@ -424,7 +424,7 @@ async function readAuthgptStream(response) {
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() || "";
     for (const line of lines) {
-      if (processSseLine(line, state)) {
+      if (processSseLine(line, state, onStreamItems)) {
         try {
           await reader.cancel();
         } catch {
@@ -438,7 +438,7 @@ async function readAuthgptStream(response) {
   buffer += decoder.decode();
   if (buffer) {
     for (const line of buffer.split(/\r?\n/)) {
-      processSseLine(line, state);
+      processSseLine(line, state, onStreamItems);
     }
   }
   return finalizeSseState(state);
@@ -451,11 +451,12 @@ function newStreamState() {
     completedResult: null,
     failedResult: null,
     contentParts: [],
+    emittedItemIds: new Set(),
     done: false
   };
 }
 
-function processSseLine(rawLine, state) {
+function processSseLine(rawLine, state, onStreamItems = null) {
   const line = String(rawLine || "").trim();
   if (!line) {
     return false;
@@ -486,11 +487,13 @@ function processSseLine(rawLine, state) {
 
   if (eventType === "response.output_text.delta") {
     state.contentParts.push(String(data.delta || ""));
+    emitCompletedStreamItems(state, onStreamItems);
     return false;
   }
 
   if (eventType === "response.output_text.done" && !state.contentParts.length && typeof data.text === "string") {
     state.contentParts.push(data.text);
+    emitCompletedStreamItems(state, onStreamItems);
     return false;
   }
 
@@ -518,6 +521,96 @@ function processSseLine(rawLine, state) {
   }
 
   return false;
+}
+
+function emitCompletedStreamItems(state, onStreamItems) {
+  if (typeof onStreamItems !== "function") {
+    return;
+  }
+  const content = state.contentParts.join("");
+  const items = collectCompleteJsonItems(content, state.emittedItemIds);
+  if (items.length) {
+    onStreamItems(items);
+  }
+}
+
+function collectCompleteJsonItems(content, emittedItemIds) {
+  const text = String(content || "");
+  const arrayStart = findItemsArrayStart(text);
+  if (arrayStart < 0) {
+    return [];
+  }
+
+  const items = [];
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let objectStart = -1;
+
+  for (let i = arrayStart + 1; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (char === "\\") {
+        escape = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        objectStart = i;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      if (depth > 0) {
+        depth -= 1;
+      }
+      if (depth === 0 && objectStart >= 0) {
+        const rawObject = text.slice(objectStart, i + 1);
+        objectStart = -1;
+        try {
+          const parsed = JSON.parse(rawObject);
+          const id = String(parsed?.id || "");
+          const translated = String(parsed?.text ?? "");
+          if (id && translated && !emittedItemIds.has(id)) {
+            emittedItemIds.add(id);
+            items.push({ id, text: translated });
+          }
+        } catch {
+          // The object may not be complete JSON yet; wait for more stream data.
+        }
+      }
+    }
+  }
+
+  return items;
+}
+
+function findItemsArrayStart(text) {
+  const source = String(text || "");
+  const itemsMatch = source.match(/"items"\s*:/);
+  if (itemsMatch?.index >= 0) {
+    return source.indexOf("[", itemsMatch.index + itemsMatch[0].length);
+  }
+
+  const trimmedStart = source.search(/\S/);
+  if (trimmedStart >= 0 && source[trimmedStart] === "[") {
+    return trimmedStart;
+  }
+
+  return -1;
 }
 
 function finalizeSseState(state) {

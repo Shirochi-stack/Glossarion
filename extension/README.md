@@ -8,7 +8,8 @@ Standalone Chrome Manifest V3 extension for translating the visible text of the 
 - Uses the Halgakos icon from `src/Halgakos.ico` for the extension and popup.
 - Defaults to `authgpt/gpt-5.5` in the model field.
 - Defaults to a 16,384 output-token limit; the popup exposes this as "Output tokens".
-- Auto-saves completed page translation snapshots in Chrome extension storage, keeping the latest 30 pages.
+- Packs intact webpage text nodes into each request using the configurable chunk-compression factor, with "Node cap" as a safety ceiling. The default factor is 3.0.
+- Auto-saves page translation snapshots incrementally in Chrome extension storage, keeps the latest 30 pages, and reapplies a saved translation when the same URL reloads.
 - Models with `auth` in the name do not require an API key in the popup.
 - Uses the exported Glossarion model catalog from `src/model_options.py`.
 - Uses the Universal prompt as the default page translation system prompt.
@@ -27,6 +28,7 @@ Standalone Chrome Manifest V3 extension for translating the visible text of the 
   - DeepSeek, xAI/Grok, NanoGPT, and Z.AI prefixes
 - Supports Glossarion-style custom prefix routes.
 - Supports the browser-backed AuthGPT route (`authgpt/*`) with a Chrome-tab PKCE login, token refresh, and the ChatGPT Codex Responses endpoint ported from `src/authgpt_auth.py`.
+- AuthGPT streams through browser `fetch()`/`ReadableStream`; complete JSON items are applied to the page as they arrive.
 - Supports the browser-backed AuthND route (`authnd/*`) by opening a temporary NVIDIA Build helper tab to mint the hCaptcha token, matching the flow from `src/authnd_auth.py`.
 - Supports native Gemini `generateContent`, native Anthropic `/v1/messages`, Cohere chat, AI21 completions, DeepL, Google Translate, and Google Translate free routes.
 - Uses `max_completion_tokens` instead of `max_tokens` for o-series and GPT-5-style OpenAI-compatible models.

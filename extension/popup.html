@@ -51,14 +51,19 @@
 
       <div class="grid">
         <label>
-          Batch
-          <input id="batchSize" type="number" min="1" max="80">
+          Node cap
+          <input id="batchSize" type="number" min="1" max="5000">
         </label>
         <label>
           Output tokens
           <input id="maxTokens" type="number" min="256" max="200000" step="256">
         </label>
       </div>
+
+      <label>
+        Chunk compression
+        <input id="chunkCompressionFactor" type="number" min="1" max="20" step="0.1">
+      </label>
 
       <label class="toggle">
         <input id="thinkingEnabled" type="checkbox">

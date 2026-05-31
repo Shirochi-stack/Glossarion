@@ -21,7 +21,7 @@ export async function sendAuthndChatCompletion({ messages, settings }) {
     model: payloadModel,
     stream: false,
     temperature: Number(settings.temperature ?? 0.2),
-    max_tokens: Number(settings.maxTokens ?? 4096)
+    max_tokens: Number(settings.maxTokens ?? 16384)
   };
   applyReasoningPayload(payload, modelInfo.modelPath, settings);
 

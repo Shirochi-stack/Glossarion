@@ -21,7 +21,8 @@ const DEFAULT_SETTINGS = {
   targetLanguage: "English",
   temperature: 0.2,
   maxTokens: 16384,
-  batchSize: 20,
+  batchSize: 1000,
+  chunkCompressionFactor: 3.0,
   thinkingEnabled: false,
   thinkingEffort: "medium",
   useCustomOpenAIEndpoint: false,
@@ -40,7 +41,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GLOSSARION_TRANSLATE_BATCH") {
-    translateBatch(message.items || [])
+    translateBatch(message.items || [], {
+      sender,
+      jobId: String(message.jobId || "")
+    })
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
@@ -62,6 +66,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GLOSSARION_SAVE_TRANSLATION") {
     saveCompletedTranslation(message, sender)
       .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message.type === "GLOSSARION_GET_SAVED_TRANSLATION") {
+    getSavedTranslation(message.url || sender?.tab?.url || "")
+      .then((record) => sendResponse({ ok: true, record }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
   }
@@ -223,8 +234,10 @@ async function saveCompletedTranslation(message, sender) {
     jobId: String(message.jobId || ""),
     tabId,
     url: String(message.page?.url || sender?.tab?.url || ""),
+    normalizedUrl: normalizeTranslationUrl(message.page?.url || sender?.tab?.url || ""),
     title: String(message.page?.title || sender?.tab?.title || ""),
     savedAt: new Date().toISOString(),
+    status: String(message.status || "complete"),
     model: settings.model,
     sourceLanguage: settings.sourceLanguage,
     targetLanguage: settings.targetLanguage,
@@ -232,6 +245,7 @@ async function saveCompletedTranslation(message, sender) {
     total: Number(message.total || entries.length),
     entries: entries.map((entry) => ({
       id: String(entry.id || ""),
+      index: Number.isFinite(Number(entry.index)) ? Number(entry.index) : null,
       original: String(entry.original || ""),
       text: String(entry.text || "")
     })).filter((entry) => entry.id && entry.text)
@@ -239,7 +253,10 @@ async function saveCompletedTranslation(message, sender) {
 
   const stored = await chrome.storage.local.get({ [SAVED_TRANSLATIONS_KEY]: [] });
   const existing = Array.isArray(stored[SAVED_TRANSLATIONS_KEY]) ? stored[SAVED_TRANSLATIONS_KEY] : [];
-  const next = [record, ...existing.filter((item) => item?.url !== record.url)].slice(0, MAX_SAVED_TRANSLATIONS);
+  const next = [
+    record,
+    ...existing.filter((item) => normalizeTranslationUrl(item?.url || item?.normalizedUrl || "") !== record.normalizedUrl)
+  ].slice(0, MAX_SAVED_TRANSLATIONS);
   await chrome.storage.local.set({ [SAVED_TRANSLATIONS_KEY]: next });
 
   const job = translationJobs.get(tabId);
@@ -248,6 +265,26 @@ async function saveCompletedTranslation(message, sender) {
   }
 
   return { saved: true, recordId: record.id };
+}
+
+async function getSavedTranslation(url) {
+  const target = normalizeTranslationUrl(url);
+  if (!target) {
+    return null;
+  }
+  const stored = await chrome.storage.local.get({ [SAVED_TRANSLATIONS_KEY]: [] });
+  const records = Array.isArray(stored[SAVED_TRANSLATIONS_KEY]) ? stored[SAVED_TRANSLATIONS_KEY] : [];
+  return records.find((record) => normalizeTranslationUrl(record?.url || record?.normalizedUrl || "") === target) || null;
+}
+
+function normalizeTranslationUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(url || "").split("#")[0];
+  }
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -264,7 +301,7 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
-async function translateBatch(items) {
+async function translateBatch(items, context = {}) {
   if (!Array.isArray(items) || items.length === 0) {
     return { items: [] };
   }
@@ -285,13 +322,18 @@ async function translateBatch(items) {
     targetLanguage: settings.targetLanguage
   });
 
-  const content = await sendChatCompletion({ route, messages, settings });
+  const content = await sendChatCompletion({ route, messages, settings, context });
   return { items: parseTranslatedItems(content, items) };
 }
 
-async function sendChatCompletion({ route, messages, settings }) {
+async function sendChatCompletion({ route, messages, settings, context = {} }) {
   if (route.provider === "authgpt") {
-    return sendAuthgptChatCompletion({ route, messages, settings });
+    return sendAuthgptChatCompletion({
+      route,
+      messages,
+      settings,
+      onStreamItems: buildStreamItemsForwarder(context)
+    });
   }
   if (route.provider === "authnd") {
     return sendAuthndChatCompletion({ messages, settings });
@@ -316,6 +358,26 @@ async function sendChatCompletion({ route, messages, settings }) {
   }
 
   return sendOpenAICompatible({ route, messages, settings });
+}
+
+function buildStreamItemsForwarder(context = {}) {
+  const tabId = Number(context.sender?.tab?.id || 0);
+  const jobId = String(context.jobId || "");
+  if (!tabId || !jobId) {
+    return null;
+  }
+  return (items) => {
+    if (!Array.isArray(items) || !items.length) {
+      return;
+    }
+    chrome.tabs.sendMessage(tabId, {
+      type: "GLOSSARION_STREAM_TRANSLATIONS",
+      jobId,
+      items
+    }).catch(() => {
+      // Streaming updates are opportunistic; final batch response still applies.
+    });
+  };
 }
 
 async function sendOpenAICompatible({ route, messages, settings }) {

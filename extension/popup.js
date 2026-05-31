@@ -7,16 +7,18 @@ const DEFAULT_SETTINGS = {
   targetLanguage: "English",
   temperature: 0.2,
   maxTokens: 16384,
-  batchSize: 20,
+  batchSize: 1000,
+  chunkCompressionFactor: 3.0,
   thinkingEnabled: false,
   thinkingEffort: "medium",
   useCustomOpenAIEndpoint: false,
   customOpenAIBaseUrl: "",
   customPrefixRoutes: ""
 };
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 const LEGACY_MAX_TOKENS_DEFAULT = 4096;
 const TYPO_MAX_TOKENS_DEFAULT = 16378;
+const LEGACY_BATCH_SIZE_DEFAULT = 20;
 
 const fields = {
   model: document.querySelector("#model"),
@@ -25,6 +27,7 @@ const fields = {
   targetLanguage: document.querySelector("#targetLanguage"),
   batchSize: document.querySelector("#batchSize"),
   maxTokens: document.querySelector("#maxTokens"),
+  chunkCompressionFactor: document.querySelector("#chunkCompressionFactor"),
   thinkingEnabled: document.querySelector("#thinkingEnabled"),
   thinkingEffort: document.querySelector("#thinkingEffort"),
   useCustomOpenAIEndpoint: document.querySelector("#useCustomOpenAIEndpoint"),
@@ -58,11 +61,15 @@ async function loadSettings() {
     ...DEFAULT_SETTINGS,
     settingsVersion: 0
   });
-  if (!stored.settingsVersion) {
+  if (Number(stored.settingsVersion || 0) < SETTINGS_VERSION) {
     const updates = { settingsVersion: SETTINGS_VERSION };
     if ([LEGACY_MAX_TOKENS_DEFAULT, TYPO_MAX_TOKENS_DEFAULT].includes(Number(stored.maxTokens))) {
       updates.maxTokens = DEFAULT_SETTINGS.maxTokens;
       stored.maxTokens = DEFAULT_SETTINGS.maxTokens;
+    }
+    if (Number(stored.batchSize) === LEGACY_BATCH_SIZE_DEFAULT) {
+      updates.batchSize = DEFAULT_SETTINGS.batchSize;
+      stored.batchSize = DEFAULT_SETTINGS.batchSize;
     }
     await chrome.storage.local.set(updates);
   }
@@ -100,6 +107,7 @@ function applySettings(settings) {
   fields.targetLanguage.value = settings.targetLanguage;
   fields.batchSize.value = settings.batchSize;
   fields.maxTokens.value = settings.maxTokens;
+  fields.chunkCompressionFactor.value = settings.chunkCompressionFactor;
   fields.thinkingEnabled.checked = Boolean(settings.thinkingEnabled);
   fields.thinkingEffort.value = settings.thinkingEffort;
   fields.useCustomOpenAIEndpoint.checked = Boolean(settings.useCustomOpenAIEndpoint);
@@ -115,8 +123,9 @@ function readSettings() {
     apiKey: fields.apiKey.value.trim(),
     sourceLanguage: fields.sourceLanguage.value.trim() || "Auto",
     targetLanguage: fields.targetLanguage.value.trim() || "English",
-    batchSize: clampNumber(fields.batchSize.value, 1, 80, 20),
+    batchSize: clampNumber(fields.batchSize.value, 1, 5000, 1000),
     maxTokens: clampNumber(fields.maxTokens.value, 256, 200000, 16384),
+    chunkCompressionFactor: clampNumber(fields.chunkCompressionFactor.value, 1, 20, 3.0, false),
     thinkingEnabled: fields.thinkingEnabled.checked,
     thinkingEffort: fields.thinkingEffort.value,
     useCustomOpenAIEndpoint: fields.useCustomOpenAIEndpoint.checked,
@@ -318,12 +327,13 @@ function setStatus(message, isError = false) {
   statusEl.style.color = isError ? "#a43d2f" : "";
 }
 
-function clampNumber(value, min, max, fallback) {
+function clampNumber(value, min, max, fallback, round = true) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
-  return Math.max(min, Math.min(max, Math.round(parsed)));
+  const clamped = Math.max(min, Math.min(max, parsed));
+  return round ? Math.round(clamped) : Number(clamped.toFixed(2));
 }
 
 window.addEventListener("unload", () => {
