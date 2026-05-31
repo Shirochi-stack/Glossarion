@@ -694,10 +694,11 @@ class TranslationConfig:
             "Return only the refined HTML.\n\n"
             "The QA issue(s) below identify leftover source-language text in these HTML fragments. "
             "Translate that leftover text into {target_lang} while preserving the surrounding HTML. "
-            "Each request is wrapped in a placeholder HTML tag; retain every placeholder opening/closing tag "
-            "and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
-            "Example placeholder to preserve exactly: "
-            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
+            "Each request is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
+            "Retain every <glossarion> opening/closing tag and its id exactly. "
+            "Only refine or translate the content inside each <glossarion> tag. "
+            "Example placeholder to preserve exactly, including the id value: "
+            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
             "{QA_Issues}"
         )
         default_refinement_partial_b2_system_prompt = (
@@ -706,13 +707,14 @@ class TranslationConfig:
             "Retain the original meaning of the translation, while retaining the original translation style. "
             "Convert any foreign onomatopoeia to romaji. "
             "Return only valid JSON using the same structure as the input.\n\n"
-            "The JSON object contains all affected requests for this refinement run. Each request identifies leftover "
+            "The JSON object contains a batch of affected requests from this refinement run. Each request identifies leftover "
             "source-language text in an HTML fragment. Translate that leftover text into {target_lang} while preserving "
-            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, "
-            "and html field. Each html value is wrapped in a placeholder HTML tag; retain every placeholder opening/closing "
-            "tag and its attributes exactly. Only refine or translate the content inside each placeholder tag. "
-            "Example html value to preserve exactly around the refined content: "
-            "<glossarion-partial data-glossarion-id=\"partial-0001\">...HTML fragment...</glossarion-partial>\n"
+            "the surrounding HTML. Preserve every request id, qa_issue_prompt field, and html field. "
+            "Each html value is wrapped in a custom <glossarion> placeholder tag with an id attribute. "
+            "Retain every <glossarion> opening/closing tag and its id exactly, and keep the <glossarion id> value "
+            "identical to the JSON request id. Only refine or translate the content inside each <glossarion> tag. "
+            "Example html value to preserve exactly around the refined content, with the same value as the request id: "
+            "<glossarion id=\"spine-00012-0001\">...HTML fragment...</glossarion>\n"
             "{QA_Issues}"
         )
         if not self.REFINEMENT_SYSTEM_PROMPT:
@@ -5234,10 +5236,13 @@ class TranslationProcessor:
                 return False
                 
             return False
-        
+
+        def _stop_finish_reason():
+            return "graceful_stop" if os.environ.get('GRACEFUL_STOP') == '1' else "cancelled"
+
         while True:
             if local_stop_cb():
-                return None, None, None
+                return None, _stop_finish_reason(), None
             
             try:
                 current_max_tokens = self.config.MAX_OUTPUT_TOKENS
@@ -5529,7 +5534,7 @@ class TranslationProcessor:
                         chapter_num=actual_num,
                         chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
                     )
-                    return None, None, None
+                    return None, _stop_finish_reason(), None
                 
                 # Treat cancelled errors (from client being closed) as timeout
                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
@@ -5541,7 +5546,7 @@ class TranslationProcessor:
                             chapter_num=actual_num,
                             chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
                         )
-                        return None, None, None
+                        return None, _stop_finish_reason(), None
                     
                     # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -5589,7 +5594,7 @@ class TranslationProcessor:
                             chapter_num=actual_num,
                             chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
                         )
-                        return None, None, None
+                        return None, _stop_finish_reason(), None
                     
                     # During graceful stop, don't retry - skip this chunk
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -5620,7 +5625,7 @@ class TranslationProcessor:
                             chapter_num=actual_num,
                             chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
                         )
-                        return None, None, None
+                        return None, _stop_finish_reason(), None
                     
                     # During graceful stop, don't retry - skip
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -5653,7 +5658,7 @@ class TranslationProcessor:
                                 chapter_num=actual_num,
                                 chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
                             )
-                            return None, None, None
+                            return None, _stop_finish_reason(), None
                         time.sleep(1)
                     continue
                 
@@ -13452,8 +13457,8 @@ _PARTIAL_REFINEMENT_SKIP_TAGS = {
     "html", "head", "body", "script", "style", "meta", "link", "title", "svg",
     "math", "noscript", "template",
 }
-_PARTIAL_REFINEMENT_PLACEHOLDER_TAG = "glossarion-partial"
-_PARTIAL_REFINEMENT_PLACEHOLDER_ID_ATTR = "data-glossarion-id"
+_PARTIAL_REFINEMENT_PLACEHOLDER_TAG = "glossarion"
+_PARTIAL_REFINEMENT_PLACEHOLDER_ID_ATTR = "id"
 
 try:
     from html_tag_entities import VALID_ENTITY_TAGS as _PARTIAL_VALID_HTML_TAGS
@@ -13834,8 +13839,76 @@ def _partial_refinement_target_count(targets):
     return total
 
 
-def _partial_refinement_request_id(target_index):
-    return f"partial-{int(target_index):04d}"
+def _partial_refinement_spine_request_id(chapter, output_dir, output_file, fallback_index, target_index):
+    def _positive_int(value):
+        if value is None:
+            return None
+        try:
+            num = int(float(value))
+            return num if num > 0 else None
+        except (TypeError, ValueError):
+            digits = re.search(r"\d+", str(value or ""))
+            if digits:
+                try:
+                    num = int(digits.group(0))
+                    return num if num > 0 else None
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    spine_pos = None
+    if isinstance(chapter, dict):
+        spine_pos = chapter.get("spine_order")
+        if spine_pos is None:
+            spine_pos = chapter.get("opf_spine_position")
+        if spine_pos is None:
+            chapter_file = _single_pass_progress_chapter_file(chapter, output_file)
+            _spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_file)
+
+    spine_num = _positive_int(spine_pos)
+    if spine_num is None:
+        try:
+            fallback_pos = int(fallback_index) + 1
+        except (TypeError, ValueError):
+            fallback_pos = None
+        spine_num = _positive_int(fallback_pos)
+    if spine_num is None and isinstance(chapter, dict):
+        for key in ("actual_chapter_num", "raw_chapter_num", "num", "chapter_num"):
+            spine_num = _positive_int(chapter.get(key))
+            if spine_num is not None:
+                break
+    if spine_num is None:
+        spine_num = _positive_int(output_file)
+    if spine_num is None:
+        spine_num = 1
+
+    return f"spine-{spine_num:05d}-{int(target_index):04d}"
+
+
+def _partial_b2_entries_per_request(config):
+    try:
+        max_output_tokens = int(config.get_effective_output_limit())
+    except Exception:
+        try:
+            max_output_tokens = int(getattr(config, "MAX_OUTPUT_TOKENS", 8192) or 8192)
+        except Exception:
+            max_output_tokens = 8192
+    if max_output_tokens <= 0:
+        max_output_tokens = 8192
+
+    try:
+        compression_factor = float(config.get_effective_compression_factor())
+    except Exception:
+        try:
+            compression_factor = float(getattr(config, "COMPRESSION_FACTOR", 3.0) or 3.0)
+        except Exception:
+            compression_factor = 3.0
+    if compression_factor <= 0:
+        compression_factor = 3.0
+
+    available_tokens = int(max_output_tokens / compression_factor)
+    entries_per_request = max(10, available_tokens // 50)
+    return max(1, int(entries_per_request)), max_output_tokens, compression_factor, available_tokens
 
 
 def _partial_refinement_qa_prompt_text(qa_entry) -> str:
@@ -14437,7 +14510,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 "fragment_html": fragment_html,
                                 "qa_entry": fragment_qa_entry,
                                 "qa_issue_prompt": _partial_refinement_qa_prompt_text(fragment_qa_entry),
-                                "request_id": _partial_refinement_request_id(target_index),
+                                "request_id": _partial_refinement_spine_request_id(
+                                    chapter,
+                                    out,
+                                    output_file,
+                                    idx,
+                                    target_index,
+                                ),
                             })
 
                         batch_payload = "\n".join(
@@ -14858,7 +14937,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     fragment_html,
                     qa_settings,
                 )
-                request_id = f"chapter-{idx + 1:04d}-partial-{target_index:04d}"
+                request_id = _partial_refinement_spine_request_id(
+                    chapter,
+                    out,
+                    output_file,
+                    idx,
+                    target_index,
+                )
                 item_requests.append({
                     "request_id": request_id,
                     "chapter": actual_num,
@@ -14897,25 +14982,56 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if not all_requests:
             return
 
-        payload = json.dumps(
-            {
-                "requests": [
-                    {
-                        "id": request["request_id"],
-                        "chapter": str(request["chapter"]),
-                        "output_file": request["output_file"],
-                        "qa_issue_prompt": request["qa_issue_prompt"],
-                        "html": _wrap_partial_refinement_placeholder(
-                            request["fragment_html"],
-                            request["request_id"],
-                        ),
-                    }
-                    for request in all_requests
-                ]
-            },
-            ensure_ascii=False,
-            indent=2,
+        request_ids = [request["request_id"] for request in all_requests]
+        duplicate_request_ids = sorted(
+            request_id
+            for request_id, count in Counter(request_ids).items()
+            if count > 1
         )
+        if duplicate_request_ids:
+            raise RuntimeError(
+                "Partial.b2 generated duplicate request id(s): "
+                + ", ".join(duplicate_request_ids)
+            )
+
+        entries_per_request, max_output_tokens, compression_factor, available_tokens = _partial_b2_entries_per_request(config)
+        request_batches = [
+            all_requests[start:start + entries_per_request]
+            for start in range(0, len(all_requests), entries_per_request)
+        ]
+        if len(request_batches) > 1:
+            print(
+                f"Partial.b2 batching {len(all_requests)} request(s) into {len(request_batches)} JSON call(s) "
+                f"of up to {entries_per_request} entries "
+                f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
+                f"{available_tokens:,} available tokens, ~50 tok/entry)"
+            )
+        else:
+            print(
+                f"Partial.b2 batching {len(all_requests)} request(s) into 1 JSON call "
+                f"(cap {entries_per_request} entries; {max_output_tokens:,} output / "
+                f"{compression_factor:.1f}x compression)"
+            )
+
+        def _partial_b2_payload(batch_requests):
+            return json.dumps(
+                {
+                    "requests": [
+                        {
+                            "id": request["request_id"],
+                            "output_file": request["output_file"],
+                            "qa_issue_prompt": request["qa_issue_prompt"],
+                            "html": _wrap_partial_refinement_placeholder(
+                                request["fragment_html"],
+                                request["request_id"],
+                            ),
+                        }
+                        for request in batch_requests
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
         def _mark_partial_b2_progress_on_send():
             with progress_lock:
@@ -14939,33 +15055,46 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 progress_manager.save()
 
         try:
-            messages = _build_refinement_messages(
-                payload,
-                partial=True,
-                partial_kind="json",
-                qa_entry=None,
-                partial_mode="partial.b2",
-            )
-            refined_batch, finish_reason, _raw_obj = send_with_interrupt(
-                messages,
-                client,
-                config.TEMP,
-                config.MAX_OUTPUT_TOKENS,
-                check_stop,
-                chunk_timeout=None,
-                context="refinement",
-                chapter_context={"chapter": "all", "chunk": 1, "total_chunks": 1},
-                bypass_graceful_stop=True,
-                before_send_callback=_mark_partial_b2_progress_on_send,
-            )
-            if (
-                not refined_batch
-                or not str(refined_batch).strip()
-                or finish_reason in ("content_filter", "prohibited_content", "error")
-            ):
-                raise RuntimeError(f"Partial.b2 refinement returned no usable JSON (finish_reason={finish_reason})")
+            refined_by_id = {}
+            for batch_index, batch_requests in enumerate(request_batches, start=1):
+                if _force_stop_requested():
+                    raise RuntimeError("Partial.b2 refinement stopped before all JSON batches completed")
+                messages = _build_refinement_messages(
+                    _partial_b2_payload(batch_requests),
+                    partial=True,
+                    partial_kind="json",
+                    qa_entry=None,
+                    partial_mode="partial.b2",
+                )
+                refined_batch, finish_reason, _raw_obj = send_with_interrupt(
+                    messages,
+                    client,
+                    config.TEMP,
+                    config.MAX_OUTPUT_TOKENS,
+                    check_stop,
+                    chunk_timeout=None,
+                    context="refinement",
+                    chapter_context={"chapter": "all", "chunk": batch_index, "total_chunks": len(request_batches)},
+                    bypass_graceful_stop=True,
+                    before_send_callback=_mark_partial_b2_progress_on_send,
+                )
+                if (
+                    not refined_batch
+                    or not str(refined_batch).strip()
+                    or finish_reason in ("content_filter", "prohibited_content", "error")
+                ):
+                    raise RuntimeError(
+                        f"Partial.b2 refinement returned no usable JSON for batch "
+                        f"{batch_index}/{len(request_batches)} (finish_reason={finish_reason})"
+                    )
+                refined_by_id.update(_partial_refinement_json_response_map(refined_batch, batch_requests))
 
-            refined_by_id = _partial_refinement_json_response_map(refined_batch, all_requests)
+            missing_refined_ids = [request_id for request_id in request_ids if request_id not in refined_by_id]
+            if missing_refined_ids:
+                raise RuntimeError(
+                    "Partial.b2 refinement missing parsed request id(s): "
+                    + ", ".join(missing_refined_ids)
+                )
             for item in collected:
                 if _force_stop_requested():
                     _record_result(("skipped", f"Refinement stopped before applying Partial.b2 Chapter {item['actual_num']}"))
@@ -15010,7 +15139,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 _record_result((
                     "processed",
                     f"Partial.b2 refined Chapter {item['actual_num']}: {item['output_file']} "
-                    f"(1 shared JSON request, {len(item['requests'])} target(s))",
+                    f"({len(request_batches)} shared JSON request(s), {len(item['requests'])} target(s))",
                 ))
         except Exception as exc:
             for item in collected:
@@ -21990,6 +22119,42 @@ def main(log_callback=None, stop_callback=None):
                 merge_group_len = len(merge_info['group']) if merge_info else None
                 merged_chapters = merge_info['expected_chapters'] if merge_info else None
 
+                def _sequential_hard_stop_active():
+                    return (
+                        os.environ.get('TRANSLATION_CANCELLED') == '1'
+                        or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1')
+                    )
+
+                def _restore_current_sequential_progress():
+                    if merge_info is not None:
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                            g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                            progress_manager.restore_in_progress(
+                                g_actual_num,
+                                g_fname,
+                                chapter_obj=g_chapter,
+                                content_hash=g_content_hash,
+                            )
+                            _restore_single_pass_glossary_in_progress(
+                                out,
+                                chapter_num=g_actual_num,
+                                chapter_file=_single_pass_progress_chapter_file(g_chapter, g_fname),
+                            )
+                    else:
+                        current_fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        progress_manager.restore_in_progress(
+                            actual_num,
+                            current_fname,
+                            chapter_obj=c,
+                            content_hash=content_hash,
+                        )
+                        _restore_single_pass_glossary_in_progress(
+                            out,
+                            chapter_num=actual_num,
+                            chapter_file=_single_pass_progress_chapter_file(c, current_fname),
+                        )
+                    progress_manager.save()
+
                 def _mark_sequential_progress_on_send():
                     if merge_info:
                         for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
@@ -22005,6 +22170,14 @@ def main(log_callback=None, stop_callback=None):
                     merged_chapters=merged_chapters,
                     before_send_callback=_mark_sequential_progress_on_send,
                 )
+                if finish_reason == "cancelled" or (
+                    result is None
+                    and finish_reason is None
+                    and _sequential_hard_stop_active()
+                ):
+                    print(f"âŒ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                    _restore_current_sequential_progress()
+                    return
                 if finish_reason in ("length", "max_tokens"):
                     chapter_truncated = True
 
@@ -22219,6 +22392,14 @@ def main(log_callback=None, stop_callback=None):
                                     merged_chapters=merged_chapters,
                                     before_send_callback=_mark_sequential_progress_on_send,
                                 )
+                                if finish_reason_retry == "cancelled" or (
+                                    result_retry is None
+                                    and finish_reason_retry is None
+                                    and _sequential_hard_stop_active()
+                                ):
+                                    print(f"âŒ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                                    _restore_current_sequential_progress()
+                                    return
                                 
                                 # Clear retry flags and restore original token limit
                                 c.pop('__in_truncation_retry', None)
