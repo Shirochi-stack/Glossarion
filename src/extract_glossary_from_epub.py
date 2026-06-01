@@ -5646,6 +5646,55 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
     return chapters
 
 
+def _extract_sdlxliff_chapters_for_glossary(sdlxliff_path, check_stop=None):
+    """Extract eligible SDLXLIFF source segment text for glossary generation."""
+    use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
+    if not use_async:
+        from sdlxliff_extractor import extract_sdlxliff_texts
+        chapters = extract_sdlxliff_texts(sdlxliff_path)
+        print(f"SDLXLIFF source extracted: {len(chapters)} segment(s)")
+        return chapters
+
+    tmp_dir = tempfile.mkdtemp(prefix="glossarion_sdlxliff_glossary_")
+    try:
+        from sdlxliff_extraction_manager import SdlxliffExtractionManager
+
+        manager = SdlxliffExtractionManager(log_callback=print)
+        state = {"done": False, "result": None}
+
+        def _complete(result):
+            state["result"] = result
+            state["done"] = True
+
+        manager.extract_async(
+            sdlxliff_path,
+            tmp_dir,
+            progress_callback=lambda message: print(f"SDLXLIFF extraction: {message}"),
+            completion_callback=_complete,
+        )
+        while not state["done"]:
+            if check_stop and check_stop():
+                manager.stop_extraction()
+                return []
+            time.sleep(0.2)
+
+        result = state["result"] or {}
+        if not result.get("success"):
+            raise RuntimeError(result.get("error", "SDLXLIFF extraction failed"))
+        chapters_path = result.get("chapters_path") or os.path.join(tmp_dir, "chapters_full.json")
+        with open(chapters_path, "r", encoding="utf-8") as f:
+            chapters_data = json.load(f)
+        chapters = [
+            str(chapter.get("body", "")).strip()
+            for chapter in chapters_data
+            if str(chapter.get("body", "")).strip()
+        ]
+        print(f"SDLXLIFF source extracted: {len(chapters)} segment(s)")
+        return chapters
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
@@ -5678,8 +5727,8 @@ def main(log_callback=None, stop_callback=None):
     # Handle both command line and GUI calls
     if '--epub' in sys.argv:
         # Command line mode
-        parser = argparse.ArgumentParser(description='Extract glossary from EPUB/TXT')
-        parser.add_argument('--epub', required=True, help='Path to EPUB/TXT file')
+        parser = argparse.ArgumentParser(description='Extract glossary from EPUB/TXT/SDLXLIFF')
+        parser.add_argument('--epub', required=True, help='Path to EPUB/TXT/SDLXLIFF file')
         parser.add_argument('--output', required=True, help='Output glossary path')
         parser.add_argument('--config', help='Config file path')
         
@@ -5700,8 +5749,13 @@ def main(log_callback=None, stop_callback=None):
 
     is_text_file = epub_path.lower().endswith('.txt')
     is_pdf_file = epub_path.lower().endswith('.pdf')
+    is_sdlxliff_file = epub_path.lower().endswith('.sdlxliff')
     
-    if is_text_file:
+    if is_sdlxliff_file:
+        chapters = _extract_sdlxliff_chapters_for_glossary(epub_path, check_stop)
+        _chapter_filenames = {}
+        file_base = os.path.splitext(os.path.basename(epub_path))[0]
+    elif is_text_file:
         # Import text processor
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(epub_path)
@@ -5727,7 +5781,7 @@ def main(log_callback=None, stop_callback=None):
     _chapter_positions = {}  # idx → chapter number for range filtering
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
 
-    if _chapter_filenames and not is_text_file and not is_pdf_file:
+    if _chapter_filenames and not is_text_file and not is_pdf_file and not is_sdlxliff_file:
         if use_spine_order:
             # ── Spine order mode: build OPF offset positions from within the EPUB ──
             # Same logic as TransateKRtoEN.py's _spine_pos_by_idx
@@ -6204,7 +6258,10 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Using default extraction prompt")
 
-    if is_text_file:
+    if is_sdlxliff_file:
+        chapters = _extract_sdlxliff_chapters_for_glossary(args.epub, check_stop)
+        _chapter_filenames = {}
+    elif is_text_file:
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(args.epub)
         _chapter_filenames = {}
@@ -6219,7 +6276,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Rebuild chapter positions from the final chapter list
     # (this is the definitive load used for processing)
-    if _chapter_filenames and not is_text_file and not is_pdf_file:
+    if _chapter_filenames and not is_text_file and not is_pdf_file and not is_sdlxliff_file:
         _chapter_positions = {}
         if use_spine_order:
             # Spine order positions were already built from OPF above

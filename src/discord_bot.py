@@ -481,6 +481,7 @@ DEFAULT_PROMPT_PROFILES = [
     "nano banna",
     "test",
     "refinement",
+    "SDLXLIFF Editing",
 ]
 
 # Bot setup

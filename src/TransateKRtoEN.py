@@ -17172,7 +17172,8 @@ def main(log_callback=None, stop_callback=None):
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
+    is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md')) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
 
     if not is_pdf_file:
@@ -17219,7 +17220,7 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is OFF - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].lower().endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
@@ -17230,7 +17231,8 @@ def main(log_callback=None, stop_callback=None):
     if input_path:
         os.environ["EPUB_PATH"] = input_path
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
+    is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md')) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
@@ -17660,6 +17662,58 @@ def main(log_callback=None, stop_callback=None):
             if log_callback:
                 log_callback(f"❌ Error processing PDF file: {e}")
             return
+    elif is_sdlxliff_file:
+        print("ðŸ“„ Processing SDLXLIFF file...")
+        try:
+            extraction_result = None
+            use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
+            if use_async:
+                from sdlxliff_extraction_manager import SdlxliffExtractionManager
+
+                manager = SdlxliffExtractionManager(log_callback=log_callback)
+                state = {"done": False, "result": None}
+
+                def _sdlxliff_complete(result):
+                    state["result"] = result
+                    state["done"] = True
+
+                manager.extract_async(
+                    input_path,
+                    out,
+                    progress_callback=lambda message: print(f"SDLXLIFF extraction: {message}"),
+                    completion_callback=_sdlxliff_complete,
+                )
+                while not state["done"]:
+                    if check_stop():
+                        manager.stop_extraction()
+                        return
+                    time.sleep(0.2)
+                extraction_result = state["result"]
+                if not extraction_result or not extraction_result.get("success"):
+                    error = extraction_result.get("error", "Unknown error") if extraction_result else "No result"
+                    raise RuntimeError(f"SDLXLIFF extraction failed: {error}")
+            else:
+                from sdlxliff_extractor import extract_sdlxliff_to_chapters
+                extraction_result = extract_sdlxliff_to_chapters(input_path, out)
+
+            chapters_path = extraction_result.get("chapters_path") or os.path.join(out, "chapters_full.json")
+            with open(chapters_path, 'r', encoding='utf-8') as f:
+                chapters = json.load(f)
+            metadata = extraction_result.get("metadata") or {
+                "title": os.path.splitext(os.path.basename(input_path))[0],
+                "type": "sdlxliff",
+                "chapter_count": len(chapters),
+            }
+        except ImportError as e:
+            print(f"âŒ Error: SDLXLIFF processor not available: {e}")
+            if log_callback:
+                log_callback(f"âŒ Error: SDLXLIFF processor not available: {e}")
+            return
+        except Exception as e:
+            print(f"âŒ Error processing SDLXLIFF file: {e}")
+            if log_callback:
+                log_callback(f"âŒ Error processing SDLXLIFF file: {e}")
+            return
     elif is_text_file:
         print("📄 Processing text file...")
         try:
@@ -17942,7 +17996,7 @@ def main(log_callback=None, stop_callback=None):
         print("⏭️ Skipping title/metadata translation (image output mode)")
     elif "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         # Skip title translation for non-book file types
-        _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md'))
+        _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md', '.sdlxliff'))
         is_txt = input_path.lower().endswith(('.txt',))
         skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
         if _non_book_ext:
@@ -23437,6 +23491,31 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
             except Exception:
                 pass
+
+    if is_sdlxliff_file:
+        try:
+            from sdlxliff_converter import convert_sdlxliff
+            result = convert_sdlxliff(out)
+            output_path = result.get("output_path")
+            print(f"âœ… SDLXLIFF round-trip complete: {output_path}")
+            print(
+                f"ðŸ“Š SDLXLIFF segments updated: {result.get('updated', 0)}, "
+                f"skipped: {result.get('skipped', 0)}, missing: {result.get('missing', 0)}"
+            )
+            total_time = time.time() - translation_start_time
+            hours = int(total_time // 3600)
+            minutes = int((total_time % 3600) // 60)
+            seconds = int(total_time % 60)
+            print(f"\nâ±ï¸ Total translation time: {hours}h {minutes}m {seconds}s")
+            print(f"ðŸ“Š Segments completed: {chapters_completed}")
+            if log_callback:
+                log_callback(f"âœ… SDLXLIFF translation complete! Created {output_path}")
+        except Exception as e:
+            print(f"âŒ Error creating translated SDLXLIFF: {e}")
+            if log_callback:
+                log_callback(f"âŒ Error creating translated SDLXLIFF: {e}")
+        print("TRANSLATION_COMPLETE_SIGNAL")
+        return
 
     # Check if PDF should output as PDF or EPUB
     pdf_output_format = os.getenv('PDF_OUTPUT_FORMAT', 'pdf').lower()

@@ -115,6 +115,14 @@ DEFAULT_PROMPTS = {
         "- Preserve any HTML image tags (<img>, <svg>, <picture>, <figure>) and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
         "{split_marker_instruction}\n"
     ),
+    "SDLXLIFF Editing": (
+        "You are editing one SDLXLIFF segment at a time. Translate only the visible source text to {target_lang}.\n"
+        "- Output only the translated segment text.\n"
+        "- Do not output XML wrappers, XLIFF tags, comments, notes, explanations, or markdown fences.\n"
+        "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
+        "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
+        "- Do not add or remove placeholder tokens. Do not translate placeholder token text.\n"
+    ),
 }
 
 

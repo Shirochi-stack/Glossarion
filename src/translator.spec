@@ -141,6 +141,10 @@ app_files = [
     ('extract_glossary_from_txt.py', '.'),
     ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
     ('chapter_extraction_worker.py', '.'),  # Chapter extraction subprocess worker
+    ('sdlxliff_extraction_worker.py', '.'),
+    ('sdlxliff_extraction_manager.py', '.'),
+    ('sdlxliff_extractor.py', '.'),
+    ('sdlxliff_converter.py', '.'),
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
     ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
     ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
@@ -240,6 +244,10 @@ app_modules = [
     'extract_glossary_from_txt',
     'glossary_process_worker',  # Glossary subprocess worker
     'chapter_extraction_worker',  # Chapter extraction subprocess worker
+    'sdlxliff_extraction_worker',
+    'sdlxliff_extraction_manager',
+    'sdlxliff_extractor',
+    'sdlxliff_converter',
     '_compress_worker',  # Lightweight image compression worker
     '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
     '_pdf_worker',  # PDF generation subprocess worker

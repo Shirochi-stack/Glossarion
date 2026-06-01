@@ -534,6 +534,26 @@ if '--run-chapter-extraction' in sys.argv:
         # Make sure we exit without initializing the GUI when in worker mode
         sys.exit(0)
 
+if '--run-sdlxliff-extraction' in sys.argv:
+    try:
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        try:
+            sys.argv = [sys.argv[0]] + [
+                _a for _a in sys.argv[1:]
+                if _a != '--run-sdlxliff-extraction'
+            ]
+        except Exception:
+            pass
+        from sdlxliff_extraction_worker import main as _sdlxliff_main
+        _sdlxliff_main()
+    except Exception as _e:
+        try:
+            print(f"[ERROR] SDLXLIFF worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        sys.exit(0)
+
 # Support worker-mode dispatch for image compression subprocess workers
 if '--run-compress-worker' in sys.argv:
     try:
@@ -1444,6 +1464,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
             "NanoBanana_Image",
+            "SDLXLIFF Editing",
         }
         return protected
 
@@ -1994,6 +2015,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self._original_profile_content = {}
         # Track the currently active profile to prevent cross-profile saves
         self._active_profile_for_autosave = None
+        self._profile_user_selected_this_run = False
         
         # System prompt to user message toggle
         self.system_prompt_to_user_var = self.config.get('system_prompt_to_user', False)
@@ -2642,7 +2664,15 @@ Text to analyze:
                 "Do NOT return plain text or OCR — you MUST return the generated edited image. "
                 "If the image has no translatable text, reply exactly: No\n"
             ),
-            "Original": "Return everything exactly as seen on the source."
+            "Original": "Return everything exactly as seen on the source.",
+            "SDLXLIFF Editing": (
+                "You are editing one SDLXLIFF segment at a time. Translate only the visible source text to {target_lang}.\n"
+                "- Output only the translated segment text.\n"
+                "- Do not output XML wrappers, XLIFF tags, comments, notes, explanations, or markdown fences.\n"
+                "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
+                "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
+                "- Do not add or remove placeholder tokens. Do not translate placeholder token text.\n"
+            )
         }
 
         self._init_variables()
@@ -4087,6 +4117,7 @@ Recent translations to summarize:
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
             "NanoBanana_Image",
+            "SDLXLIFF Editing",
         ]
         
         # Add missing required profiles while preserving existing profile positions
@@ -4494,7 +4525,7 @@ Recent translations to summarize:
             if not urls:
                 return
             paths = []
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json',
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff',
                                     '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
                                     '.bmp', '.webp', '.mp4'}
             for url in urls:
@@ -7392,7 +7423,11 @@ Recent translations to summarize:
         
         # Connect signals for profile selection
         self.profile_menu.currentIndexChanged.connect(lambda: self.on_profile_select())
-        self.profile_menu.lineEdit().returnPressed.connect(lambda: self.on_profile_select())
+        self.profile_menu.activated.connect(lambda *_: setattr(self, '_profile_user_selected_this_run', True))
+        def _manual_profile_entry_select():
+            self._profile_user_selected_this_run = True
+            self.on_profile_select()
+        self.profile_menu.lineEdit().returnPressed.connect(_manual_profile_entry_select)
         
         # Create a horizontal layout for profile buttons to keep them close together
         profile_buttons_widget = QWidget()
@@ -14769,6 +14804,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 self.selected_files = [file_path]
                 self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
+                self._maybe_select_sdlxliff_profile()
                 file_path = self.selected_files[0]
             
             # Auto-clear glossary if file doesn't match (works for both manual and auto-loaded)
@@ -14792,6 +14828,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.auto_loaded_glossary_for_file = None
         else:
             self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
+            self._maybe_select_sdlxliff_profile()
         
         # Record every selected raw input in the Library's raw-inputs
         # registry so the library dialog can find it later (even if the
@@ -15156,13 +15193,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Check if any files are images
                     image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
                     image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in image_extensions]
+                    sdlxliff_files = [f for f in self.selected_files if f.lower().endswith('.sdlxliff')]
                     
                     if csv_json_files:
                         self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
                     elif image_files:
                         self.append_log("🖼️ Skipping post-translation scanning for image files")
+                    if sdlxliff_files:
+                        self.append_log("SDLXLIFF: skipping post-translation scanner")
                     current_run_output_mode = self._active_translation_output_mode()
-                    if csv_json_files or image_files:
+                    if csv_json_files or image_files or sdlxliff_files:
                         pass
                     elif current_run_output_mode == 'refinement':
                         self.append_log("✨ Skipping post-translation scanning for refinement mode")
@@ -15585,8 +15625,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md'}:
-                        # Process as EPUB/TXT/CSV/JSON/PDF/MD
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff'}:
+                        # Process as EPUB/TXT/CSV/JSON/PDF/MD/SDLXLIFF
                         result = self._process_text_file(file_path)
                         if result:
                             successful += 1
@@ -17232,7 +17272,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return False
 
     def _process_text_file(self, file_path):
-        """Process EPUB or TXT file (existing translation logic)"""
+        """Process EPUB, text-like, PDF, or SDLXLIFF files."""
         try:
             if translation_main is None:
                 self.append_log("❌ Translation module is not available")
@@ -17350,7 +17390,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf')):
+                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff')):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 
@@ -17360,8 +17400,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 env_vars['MULTIPASS_MODE'] = '1' if multipass_enabled else '0'
                 env_vars['MULTIPASS_REFINEMENT_MODE'] = multipass_refinement_mode
                 
-                # Enable async chapter extraction for EPUBs and PDFs to prevent GUI freezing
-                if file_path.lower().endswith(('.epub', '.pdf')):
+                # Enable async chapter extraction for EPUBs, PDFs, and SDLXLIFF to prevent GUI freezing
+                if file_path.lower().endswith(('.epub', '.pdf', '.sdlxliff')):
                     env_vars['USE_ASYNC_CHAPTER_EXTRACTION'] = '1'
                     self.append_log("🚀 Using async chapter extraction (subprocess mode)")
                 
@@ -18359,7 +18399,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in image_extensions:
                     image_files.append(file_path)
-                elif ext in {'.epub', '.txt', '.pdf'}:
+                elif ext in {'.epub', '.txt', '.pdf', '.sdlxliff'}:
                     text_files.append(file_path)
                 else:
                     self.append_log(f"⚠️ Skipping unsupported file type: {ext}")
@@ -22402,13 +22442,14 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
             "Text files (*.txt *.json *.csv *.md);;"
+            "SDLXLIFF files (*.sdlxliff);;"
             "CSV files (*.csv);;"
             "Markdown files (*.md);;"
             "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
@@ -22439,7 +22480,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -22463,7 +22504,7 @@ Important rules:
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 
     def clear_file_selection(self):
         """Clear all selected files"""
@@ -22544,6 +22585,44 @@ Important rules:
         self.append_log("🗑️ Cleared file selection")
 
 
+    def _maybe_select_sdlxliff_profile(self):
+        """Auto-apply the SDLXLIFF-safe prompt unless the user chose a profile."""
+        try:
+            if not any(str(path).lower().endswith('.sdlxliff') for path in getattr(self, 'selected_files', []) or []):
+                return
+            profile_name = "SDLXLIFF Editing"
+            if profile_name not in getattr(self, 'prompt_profiles', {}):
+                return
+            if getattr(self, '_profile_user_selected_this_run', False):
+                if hasattr(self, 'append_log'):
+                    self.append_log("SDLXLIFF selected. Recommended prompt profile: SDLXLIFF Editing")
+                return
+            if getattr(self, 'profile_var', None) == profile_name:
+                return
+
+            self.profile_var = profile_name
+            self.config['active_profile'] = profile_name
+            if hasattr(self, 'profile_menu'):
+                previous_block = self.profile_menu.blockSignals(True)
+                try:
+                    self.profile_menu.setCurrentText(profile_name)
+                finally:
+                    self.profile_menu.blockSignals(previous_block)
+            if hasattr(self, 'prompt_text'):
+                prompt = self.prompt_profiles.get(profile_name, "")
+                self.prompt_text.setPlainText(prompt)
+                self._active_profile_for_autosave = profile_name
+                if not hasattr(self, '_original_profile_content'):
+                    self._original_profile_content = {}
+                self._original_profile_content[profile_name] = prompt
+            if hasattr(self, 'append_log'):
+                self.append_log("SDLXLIFF detected. Auto-selected SDLXLIFF Editing prompt profile.")
+        except Exception as exc:
+            try:
+                self.append_log(f"Could not auto-select SDLXLIFF profile: {exc}")
+            except Exception:
+                pass
+
     def _handle_file_selection(self, paths):
         """Common handler for file selection"""
         if not paths:
@@ -22614,6 +22693,7 @@ Important rules:
         # Store the list of selected files (using processed paths)
         self.selected_files = processed_paths
         self.current_file_index = 0
+        self._maybe_select_sdlxliff_profile()
 
         # Clear stale EPUB tracking — the EPUB branch re-sets it below if needed
         if hasattr(self, 'selected_epub_files'):
@@ -23439,7 +23519,7 @@ Important rules:
                 pass
             try:
                 self.config['last_input_files'] = normalized
-                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md'))]
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff'))]
                 if source_files:
                     self.config['last_epub_path'] = source_files[0]
                 self.save_config(show_message=False)

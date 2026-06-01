@@ -462,7 +462,15 @@ class GlossarionWeb:
                 "- Keep original Chinese quotation marks (「」, 『』) as-is without converting to English quotes.\n\n"
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
-            "Original": "Return everything exactly as seen on the source."
+            "Original": "Return everything exactly as seen on the source.",
+            "SDLXLIFF Editing": (
+                "You are editing one SDLXLIFF segment at a time. Translate only the visible source text to {target_lang}.\n"
+                "- Output only the translated segment text.\n"
+                "- Do not output XML wrappers, XLIFF tags, comments, notes, explanations, or markdown fences.\n"
+                "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
+                "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
+                "- Do not add or remove placeholder tokens. Do not translate placeholder token text.\n"
+            )
         }
         
         # Load profiles from config and merge with defaults
