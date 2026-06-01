@@ -3709,6 +3709,21 @@ Recent translations to summarize:
             mode = 'text'
         if mode == 'refine':
             mode = 'refinement'
+        # Older config fields are still saved for compatibility. If they ever
+        # become inconsistent, prefer explicit output-mode toggles over the
+        # generic image-translation flag, which is also true for Image mode.
+        if mode == 'vision':
+            try:
+                if bool(getattr(self, 'enable_image_output_mode_var', False) or self.config.get('enable_image_output_mode', False)):
+                    return 'image'
+                if bool(getattr(self, 'enable_video_output_mode_var', False) or self.config.get('enable_video_output_mode', False)):
+                    return 'video'
+                if bool(getattr(self, 'enable_audio_output_mode_var', False) or self.config.get('enable_audio_output_mode', False)):
+                    return 'audio'
+                if bool(getattr(self, 'enable_refinement_output_mode_var', False) or self.config.get('enable_refinement_output_mode', False)):
+                    return 'refinement'
+            except Exception:
+                pass
         return mode if mode in ('text', 'vision', 'image', 'video', 'audio', 'refinement') else 'text'
 
     def _get_allowed_image_output_mode(self):
@@ -11296,8 +11311,8 @@ Recent translations to summarize:
         # Disable mouse wheel to prevent accidental changes
         self._output_mode_combo.wheelEvent = lambda event: event.ignore()
 
-        # Set initial value from config
-        _init_mode = self.config.get('output_mode', 'text')
+        # Set initial value from normalized config/UI state
+        _init_mode = self._get_output_mode()
         if _init_mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
             if self.config.get('enable_image_output_mode', False):
                 _init_mode = 'image'

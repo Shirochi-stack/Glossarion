@@ -10159,7 +10159,7 @@ def _create_image_translation_section(self, parent):
     if not hasattr(self, 'enable_video_output_mode_var'):
         self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
 
-    _init_mode = self.config.get('output_mode', None)
+    _init_mode = self._get_output_mode() if hasattr(self, '_get_output_mode') else self.config.get('output_mode', None)
     if _init_mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
         if bool(getattr(self, 'enable_image_output_mode_var', False)):
             _init_mode = 'image'
@@ -10374,7 +10374,7 @@ def _create_image_translation_section(self, parent):
     vid_sub_v.addWidget(vid_res_desc)
     left_v.addWidget(vid_sub)
 
-    # Vision sub-settings container (visible when Vision mode selected)
+    # Vision request sub-settings container (visible for Vision and Image modes)
     vision_sub = QWidget()
     vision_sub_v = QVBoxLayout(vision_sub)
     vision_sub_v.setContentsMargins(10, 0, 0, 0)
@@ -10428,7 +10428,7 @@ def _create_image_translation_section(self, parent):
     vision_batch_h = QHBoxLayout(vision_batch_row)
     vision_batch_h.setContentsMargins(0, 0, 0, 0)
     vision_batch_h.setSpacing(8)
-    vision_batch_cb = self._create_styled_checkbox("Batch Vision OCR chunk requests")
+    vision_batch_cb = self._create_styled_checkbox("Batch Vision API requests")
     try:
         vision_batch_cb.setChecked(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
     except Exception:
@@ -10467,7 +10467,7 @@ def _create_image_translation_section(self, parent):
     vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
     vision_sub_v.addWidget(vision_batch_row)
 
-    vision_batch_desc = QLabel("Only the OCR pass is batched. The combined OCR text is still translated in one final request.")
+    vision_batch_desc = QLabel("Controls parallel Vision API request slots. In Vision mode this batches OCR chunks; in Image mode this batches EPUB/PDF image-output calls.")
     vision_batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     vision_batch_desc.setWordWrap(True)
     vision_sub_v.addWidget(vision_batch_desc)
@@ -10494,6 +10494,15 @@ def _create_image_translation_section(self, parent):
     vision_sub_v.addWidget(keep_ocr_image_desc)
     left_v.addWidget(vision_sub)
 
+    vision_only_widgets = (
+        vision_prompt_row,
+        vision_ocr_desc,
+        skip_translation_cb,
+        skip_translation_desc,
+        keep_ocr_image_cb,
+        keep_ocr_image_desc,
+    )
+
     # ── Show/hide sub-settings based on mode ──
     def _update_output_mode_sub_settings(mode=None):
         if mode is None:
@@ -10507,7 +10516,11 @@ def _create_image_translation_section(self, parent):
                 mode = 'text'
         img_sub.setVisible(mode == 'image')
         vid_sub.setVisible(mode == 'video')
-        vision_sub.setVisible(mode == 'vision')
+        vision_sub.setVisible(mode in ('vision', 'image'))
+        for widget in vision_only_widgets:
+            widget.setVisible(mode == 'vision')
+        vision_batch_row.setVisible(mode in ('vision', 'image'))
+        vision_batch_desc.setVisible(mode in ('vision', 'image'))
     self._update_output_mode_sub_settings = _update_output_mode_sub_settings
 
     def _on_mode_radio_toggled(btn):
