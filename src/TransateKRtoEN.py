@@ -19539,7 +19539,8 @@ def main(log_callback=None, stop_callback=None):
             if not raw_markup or not _image_mode_rename_map:
                 return raw_markup
             try:
-                soup = BeautifulSoup(raw_markup, 'html.parser')
+                from bs4 import BeautifulSoup as _BeautifulSoup
+                soup = _BeautifulSoup(raw_markup, 'html.parser')
                 if Chapter_Extractor._update_image_refs_in_soup(soup, _image_mode_rename_map):
                     return str(soup)
             except Exception as _ime:
