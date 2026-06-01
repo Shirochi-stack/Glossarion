@@ -19855,6 +19855,10 @@ def main(log_callback=None, stop_callback=None):
                             print(f"    ⏭️ [{img_idx}/{len(image_files)}] {img_name}: Nothing to translate — keeping original")
                             return (img_idx, img_name, 'skipped', result)
 
+                        if _image_generation_stop_requested():
+                            _mark_image_generation_cancelled(log=False)
+                            return (img_idx, img_name, 'cancelled', None)
+
                         # Check if an actual image was generated
                         if '[GENERATED_IMAGE:' in result:
                             print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Generated successfully")
@@ -19866,6 +19870,10 @@ def main(log_callback=None, stop_callback=None):
                         if "[Image Translation Error:" in result:
                             print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation failed or returned error")
                             return (img_idx, img_name, 'fail', result)
+
+                        if _image_generation_stop_requested():
+                            _mark_image_generation_cancelled(log=False)
+                            return (img_idx, img_name, 'cancelled', None)
 
                         print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Translated (text only, no image edit)")
                         return (img_idx, img_name, 'success', result)
@@ -19879,6 +19887,10 @@ def main(log_callback=None, stop_callback=None):
                 def _handle_gen_result(img_idx, img_name, status, result):
                     """Process the generated image: archive + replace original."""
                     nonlocal gen_success, gen_fail, gen_skipped
+                    if status != 'cancelled' and _image_generation_stop_requested():
+                        _mark_image_generation_cancelled(log=False)
+                        _igen_progress_image(img_idx, img_name, 'cancelled')
+                        return
                     if status == 'cached_success':
                         gen_success += 1
                         _igen_progress_image(img_idx, img_name, 'completed')

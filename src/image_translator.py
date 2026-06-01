@@ -187,6 +187,10 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     while True:
         try:
             result = result_queue.get(timeout=check_interval)
+            if _stop_new_vision_work_requested(stop_check_fn):
+                if _force_stop_requested(stop_check_fn):
+                    _force_cancel()
+                raise UnifiedClientError("Image translation stopped by user", error_type="cancelled")
             if isinstance(result, Exception):
                 raise result
             if isinstance(result, tuple):
@@ -1238,6 +1242,10 @@ class ImageTranslator:
                     while True:
                         try:
                             result = result_queue.get(timeout=check_interval)
+                            if _stop_new_vision_work_requested(check_stop_fn):
+                                if _force_stop_requested(check_stop_fn):
+                                    _force_cancel_active_requests(self.client)
+                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
                             if isinstance(result, Exception):
                                 raise result
                             if isinstance(result, tuple):
@@ -1254,7 +1262,8 @@ class ImageTranslator:
                         
                 except UnifiedClientError as e:
                     if "stopped by user" in str(e).lower() or getattr(e, "error_type", None) == "cancelled":
-                        print("   ❌ Translation stopped by user during API call")
+                        if not self._stop_flag_active_for_log(check_stop_fn):
+                            print("   ❌ Translation stopped by user during API call")
                         return None
                     elif "timed out" in str(e).lower():
                         print("   ⏱️ API call timed out: " + str(e))
@@ -1272,6 +1281,10 @@ class ImageTranslator:
                     except (ValueError, TypeError):
                         elapsed = time.time() - start_time
                 
+                if _stop_new_vision_work_requested(check_stop_fn):
+                    self._mark_image_call_cancelled()
+                    return None
+
                 # Success!
                 print("   📡 API response received in " + "{:.1f}".format(elapsed) + "s")
                 
@@ -1920,12 +1933,20 @@ class ImageTranslator:
                 
                 if not translated_text:
                     return None
+
+                if _stop_new_vision_work_requested(check_stop_fn):
+                    self._mark_image_call_cancelled()
+                    return None
             
             # Store the result for caching (use original path as key)
             self.processed_images[image_path] = translated_text
             
             # Save translation for debugging
             self._save_translation_debug(image_path, translated_text)
+
+            if _stop_new_vision_work_requested(check_stop_fn):
+                self._mark_image_call_cancelled()
+                return None
             
             # Create HTML output - use processed_path for the image reference
             # Handle cross-drive paths on Windows
@@ -1961,6 +1982,10 @@ class ImageTranslator:
                 
                 # Update processed_path for cleanup logic
                 processed_path = dest_path
+
+            if _stop_new_vision_work_requested(check_stop_fn):
+                self._mark_image_call_cancelled()
+                return None
             
             html_output = self._create_html_output(img_rel_path, translated_text, is_long_text, 
                                                  hide_label, _stop_new_vision_work_requested(check_stop_fn))
@@ -2135,6 +2160,10 @@ class ImageTranslator:
         
         # Call API
         translation = self._call_vision_api(image_bytes, context, check_stop_fn)
+
+        if _stop_new_vision_work_requested(check_stop_fn):
+            self._mark_image_call_cancelled()
+            return None
         
         if translation:
             if self.remove_ai_artifacts != "off":
@@ -4866,6 +4895,10 @@ class ImageTranslator:
                     api_context,
                     chapter_context=chapter_context,
                 )
+
+                if _stop_new_vision_work_requested(check_stop_fn):
+                    self._mark_image_call_cancelled()
+                    return None
                 
                 print(f"   📡 API response received, finish_reason: {trans_finish}")
                 
