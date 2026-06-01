@@ -417,6 +417,8 @@ class ImageTranslator:
         self.image_translations = {}
         self._image_api_context_tls = threading.local()
         self._image_call_status_tls = threading.local()
+        self._image_stop_log_lock = threading.Lock()
+        self._image_stop_log_emitted = False
         
         # Configuration from environment
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
@@ -925,7 +927,8 @@ class ImageTranslator:
             
             # Check for stop at the very beginning
             if _stop_new_vision_work_requested(check_stop_fn):
-                print("   ❌ Image translation stopped by user")
+                self._mark_image_call_cancelled()
+                self._log_image_stop_once("   ❌ Image translation stopped by user", check_stop_fn)
                 return None
             
             # Load progress for resumability
@@ -1262,8 +1265,7 @@ class ImageTranslator:
                         
                 except UnifiedClientError as e:
                     if "stopped by user" in str(e).lower() or getattr(e, "error_type", None) == "cancelled":
-                        if not self._stop_flag_active_for_log(check_stop_fn):
-                            print("   ❌ Translation stopped by user during API call")
+                        self._log_image_stop_once("   ❌ Translation stopped by user during API call", check_stop_fn)
                         return None
                     elif "timed out" in str(e).lower():
                         print("   ⏱️ API call timed out: " + str(e))
@@ -1368,7 +1370,8 @@ class ImageTranslator:
                 
                 # Check for stop
                 if "stopped by user" in error_msg or _stop_new_vision_work_requested(check_stop_fn):
-                    print("   ❌ Translation stopped by user")
+                    self._mark_image_call_cancelled()
+                    self._log_image_stop_once("   ❌ Translation stopped by user", check_stop_fn)
                     return None
                 
                 # For any API error at this point, fall back to sequential
@@ -2000,8 +2003,7 @@ class ImageTranslator:
                 is_cancelled = False
             if is_cancelled or "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
                 self._mark_image_call_cancelled()
-                if not self._stop_flag_active_for_log(check_stop_fn):
-                    print(f"   ⏹️ Image translation cancelled: {e}")
+                self._log_image_stop_once(f"   ⏹️ Image translation cancelled: {e}", check_stop_fn)
                 return None
 
             logger.error(f"Error translating image {image_path}: {e}")
@@ -4309,6 +4311,18 @@ class ImageTranslator:
             or _force_stop_requested(check_stop_fn)
         )
 
+    def _log_image_stop_once(self, message: str, check_stop_fn=None) -> None:
+        if self._stop_flag_active_for_log(check_stop_fn):
+            return
+        try:
+            with self._image_stop_log_lock:
+                if self._image_stop_log_emitted:
+                    return
+                self._image_stop_log_emitted = True
+        except Exception:
+            return
+        print(message)
+
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks with contextual support"""
         if self._use_ocr_first_pipeline():
@@ -4930,8 +4944,7 @@ class ImageTranslator:
                 )
                 if is_cancel:
                     self._mark_image_call_cancelled()
-                    if not self._stop_flag_active_for_log(check_stop_fn):
-                        print(f"   ⏹️ Image translation stopped: {error_msg}")
+                    self._log_image_stop_once(f"   ⏹️ Image translation stopped: {error_msg}", check_stop_fn)
                     return None
                 print(f"\n🔍 DEBUG: Image Translation Failed")
                 print(f"   Error: {error_msg}")
