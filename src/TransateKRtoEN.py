@@ -9274,6 +9274,10 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         output_dir: Directory containing translated HTML output files
         source_dir: Directory containing the image_rename_map.json (defaults to output_dir)
     """
+    if os.environ.get("IMAGE_MODE_EPUB_PASSTHROUGH", "0") == "1":
+        print("ℹ️ Skipping image reference repair in image EPUB passthrough mode")
+        return
+
     if source_dir is None:
         source_dir = output_dir
     
@@ -17862,9 +17866,10 @@ def main(log_callback=None, stop_callback=None):
     progress_manager.migrate_to_content_hash(chapters)
     progress_manager.save()
 
-    # Retroactively update image references in existing translated files
-    # This ensures old translations use the new chapter-based image naming format
-    if not is_text_file and not is_pdf_file:
+    # Retroactively update image references in translated EPUB files.
+    # Image output mode copies raw EPUB HTML and generates replacement images,
+    # so this repair pass must not rewrite those refs back to original names.
+    if not is_text_file and not is_pdf_file and config.OUTPUT_MODE != "image":
         retroactive_update_image_references(out)
 
     if check_stop():
@@ -19690,8 +19695,14 @@ def main(log_callback=None, stop_callback=None):
                 _igen_progress_init()
 
                 # ── Parallel-aware image generation ──────────────────────────
-                _img_batch_enabled = config.BATCH_TRANSLATION and config.BATCH_SIZE > 1
-                _img_batch_size = min(len(image_files), config.BATCH_SIZE) if _img_batch_enabled else 1
+                def _image_output_worker_count():
+                    try:
+                        return max(1, int(os.getenv("EXTRACTION_WORKERS", "1") or "1"))
+                    except Exception:
+                        return 1
+
+                _img_batch_size = min(len(image_files), _image_output_worker_count())
+                _img_batch_enabled = _img_batch_size > 1
 
                 import re as _re_gen
                 import shutil as _shutil_gen

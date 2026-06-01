@@ -10434,9 +10434,9 @@ def _create_image_translation_section(self, parent):
     except Exception:
         pass
     vision_batch_h.addWidget(vision_batch_cb)
-    vision_batch_h.addWidget(QLabel("Workers:"))
     vision_batch_size_entry = QLineEdit()
     vision_batch_size_entry.setFixedWidth(55)
+    vision_batch_size_entry.setToolTip("Parallel OCR chunk API requests. This does not control EPUB image-output workers.")
     try:
         vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))))
     except Exception:

@@ -1838,14 +1838,14 @@ class ImageTranslator:
         
         try:
             self.current_image_path = image_path
-            print(f"   🔍 translate_image called for: {image_path}")
-            
-            self._preserve_current_image = False
-
             # Check for stop at the beginning
             if _stop_new_vision_work_requested(check_stop_fn):
                 print("   ❌ Image translation stopped by user")
                 return None
+
+            print(f"   🔍 translate_image called for: {image_path}")
+
+            self._preserve_current_image = False
             
             if not os.path.exists(image_path):
                 logger.warning(f"Image not found: {image_path}")
@@ -2091,16 +2091,12 @@ class ImageTranslator:
         # Clear any previous context
         self.image_chunk_context = []
         
-        print(f"   👍 Image height OK ({img.height}px), processing as single image...")
-        
         # Check for stop before processing
         if _stop_new_vision_work_requested(check_stop_fn):
             print("   ❌ Image translation stopped by user")
             return None
-        
-        if _stop_new_vision_work_requested(check_stop_fn):
-            print("   ❌ Image translation stopped by user")
-            return None
+
+        print(f"   👍 Image height OK ({img.height}px), processing as single image...")
 
         # Convert image to bytes using compression settings
         image_bytes = self._image_to_bytes_with_compression(img)
