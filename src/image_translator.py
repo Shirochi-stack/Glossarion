@@ -34,6 +34,33 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 
 logger = logging.getLogger(__name__)
 
+_FORCE_CANCEL_LOCK = threading.Lock()
+_FORCE_CANCEL_LAST_TS = 0.0
+
+
+def _force_cancel_active_requests(client=None):
+    """Best-effort immediate cancellation without letting many workers stampede."""
+    global _FORCE_CANCEL_LAST_TS
+    try:
+        if client is not None and hasattr(client, 'cancel_current_operation'):
+            client.cancel_current_operation()
+    except Exception:
+        pass
+
+    now = time.time()
+    try:
+        with _FORCE_CANCEL_LOCK:
+            if now - _FORCE_CANCEL_LAST_TS < 0.75:
+                return
+            _FORCE_CANCEL_LAST_TS = now
+    except Exception:
+        pass
+
+    try:
+        UnifiedClient.hard_cancel_all()
+    except Exception:
+        pass
+
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
     "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
@@ -147,16 +174,7 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     elapsed = 0
 
     def _force_cancel():
-        try:
-            if hasattr(client, 'cancel_current_operation'):
-                client.cancel_current_operation()
-        except Exception:
-            pass
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient.hard_cancel_all()
-        except Exception:
-            pass
+        _force_cancel_active_requests(client)
 
     def _should_interrupt_wait():
         # Graceful stop lets in-flight API calls finish; immediate stop sets
@@ -279,15 +297,7 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
     elapsed = 0
 
     def _force_cancel():
-        try:
-            if hasattr(client, 'cancel_current_operation'):
-                client.cancel_current_operation()
-        except Exception:
-            pass
-        try:
-            UnifiedClient.hard_cancel_all()
-        except Exception:
-            pass
+        _force_cancel_active_requests(client)
 
     def _should_interrupt_wait():
         if _force_stop_requested(stop_check_fn):
@@ -908,7 +918,7 @@ class ImageTranslator:
             #print("   ⏳ Estimated time: 30-90 seconds total")
             
             # Check for stop at the very beginning
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 print("   ❌ Image translation stopped by user")
                 return None
             
@@ -981,7 +991,7 @@ class ImageTranslator:
                 
                 for i, (start_y, end_y) in enumerate(chunk_ranges):
                     # Check for stop during preparation
-                    if check_stop_fn and check_stop_fn():
+                    if _stop_new_vision_work_requested(check_stop_fn):
                         print("   ❌ Stopped while preparing chunk " + str(i+1) + "/" + str(num_chunks))
                         # Restore environment
                         if old_env_format:
@@ -992,6 +1002,14 @@ class ImageTranslator:
                         
                     # Crop the chunk
                     chunk = img.crop((0, start_y, width, end_y))
+
+                    if _stop_new_vision_work_requested(check_stop_fn):
+                        print("   ❌ Stopped while preparing chunk " + str(i+1) + "/" + str(num_chunks))
+                        if old_env_format:
+                            os.environ["ORIGINAL_IMAGE_FORMAT"] = old_env_format
+                        elif "ORIGINAL_IMAGE_FORMAT" in os.environ:
+                            del os.environ["ORIGINAL_IMAGE_FORMAT"]
+                        return None
                     
                     # Save uncompressed debug chunk if enabled
                     if save_cleaned:
@@ -1076,6 +1094,14 @@ class ImageTranslator:
                     
                     # Convert to base64
                     chunk_base64 = base64.b64encode(chunk_bytes).decode('utf-8')
+
+                    if _stop_new_vision_work_requested(check_stop_fn):
+                        print("   ❌ Stopped while preparing chunk " + str(i+1) + "/" + str(num_chunks))
+                        if old_env_format:
+                            os.environ["ORIGINAL_IMAGE_FORMAT"] = old_env_format
+                        elif "ORIGINAL_IMAGE_FORMAT" in os.environ:
+                            del os.environ["ORIGINAL_IMAGE_FORMAT"]
+                        return None
                     
                     # Add image to content with appropriate format
                     content_parts.append({
@@ -1167,7 +1193,7 @@ class ImageTranslator:
                     print("   🗜️ Using compressed chunks for efficient API usage")
                 
                 # Final stop check before API call
-                if check_stop_fn and check_stop_fn():
+                if _stop_new_vision_work_requested(check_stop_fn):
                     print("   ❌ Stopped before API call")
                     return None
                 
@@ -1216,14 +1242,15 @@ class ImageTranslator:
                                 elapsed = elapsed_time
                                 break
                         except queue.Empty:
-                            if check_stop_fn and check_stop_fn():
-                                raise UnifiedClientError("Translation stopped by user")
+                            if _stop_new_vision_work_requested(check_stop_fn):
+                                _force_cancel_active_requests(self.client)
+                                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
                             elapsed_check += check_interval
                             if timeout is not None and elapsed_check >= timeout:
                                 raise UnifiedClientError("API call timed out after " + str(timeout) + " seconds")
                         
                 except UnifiedClientError as e:
-                    if "stopped by user" in str(e).lower():
+                    if "stopped by user" in str(e).lower() or getattr(e, "error_type", None) == "cancelled":
                         print("   ❌ Translation stopped by user during API call")
                         return None
                     elif "timed out" in str(e).lower():
@@ -1324,7 +1351,7 @@ class ImageTranslator:
                 traceback.print_exc()
                 
                 # Check for stop
-                if "stopped by user" in error_msg or (check_stop_fn and check_stop_fn()):
+                if "stopped by user" in error_msg or _stop_new_vision_work_requested(check_stop_fn):
                     print("   ❌ Translation stopped by user")
                     return None
                 
@@ -1816,7 +1843,7 @@ class ImageTranslator:
             self._preserve_current_image = False
 
             # Check for stop at the beginning
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 print("   ❌ Image translation stopped by user")
                 return None
             
@@ -1835,9 +1862,17 @@ class ImageTranslator:
                 # If compression produced a different file, use it
                 if compressed_path != image_path:
                     print(f"   🗜️ Using compressed image for translation")
+
+            if _stop_new_vision_work_requested(check_stop_fn):
+                print("   ❌ Image translation stopped by user")
+                return None
             
             # Apply watermark preprocessing (on compressed image if applicable)
             processed_path = self.preprocess_image_for_watermarks(compressed_path)
+
+            if _stop_new_vision_work_requested(check_stop_fn):
+                print("   ❌ Image translation stopped by user")
+                return None
             
             # Open and process the image (now using processed_path)
             with Image.open(processed_path) as img:
@@ -2063,8 +2098,16 @@ class ImageTranslator:
             print("   ❌ Image translation stopped by user")
             return None
         
+        if _stop_new_vision_work_requested(check_stop_fn):
+            print("   ❌ Image translation stopped by user")
+            return None
+
         # Convert image to bytes using compression settings
         image_bytes = self._image_to_bytes_with_compression(img)
+
+        if _stop_new_vision_work_requested(check_stop_fn):
+            print("   ❌ Image translation stopped by user")
+            return None
         
         # Call API
         translation = self._call_vision_api(image_bytes, context, check_stop_fn)
@@ -2076,7 +2119,8 @@ class ImageTranslator:
             translation = self._sanitize_unicode_characters(translation)
             return translation
         else:
-            print(f"   ❌ Translation returned empty result")
+            if not _stop_new_vision_work_requested(check_stop_fn):
+                print(f"   ❌ Translation returned empty result")
             return None
 
     def _use_ocr_first_pipeline(self) -> bool:
@@ -4252,7 +4296,7 @@ class ImageTranslator:
                     continue
             
             # Check for stop before processing each chunk
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 print(f"   ❌ Stopped at chunk {i+1}/{num_chunks}")
                 was_stopped = True
                 break
@@ -4274,6 +4318,11 @@ class ImageTranslator:
             
             # Convert chunk to bytes with compression
             chunk_bytes = self._image_to_bytes_with_compression(chunk)
+
+            if _stop_new_vision_work_requested(check_stop_fn):
+                print(f"   ❌ Stopped before API call")
+                was_stopped = True
+                break
             
             # Save debug chunks if enabled
             if save_debug_chunks or save_compressed_chunks:
@@ -4378,12 +4427,13 @@ class ImageTranslator:
                 
                 print(f"   ✅ Chunk {i+1} translated and saved ({len(chunk_text)} chars)")
             else:
-                print(f"   ⚠️ Chunk {i+1} returned no text")
+                if not _stop_new_vision_work_requested(check_stop_fn):
+                    print(f"   ⚠️ Chunk {i+1} returned no text")
             
             # Delay between chunks if not the last one
             if i < num_chunks - 1 and not was_stopped:
                 self._api_delay_with_stop_check(check_stop_fn)
-                if check_stop_fn and check_stop_fn():
+                if _stop_new_vision_work_requested(check_stop_fn):
                     was_stopped = True
                     break
         
@@ -4715,6 +4765,10 @@ class ImageTranslator:
         
         while True:
             try:
+                if _stop_new_vision_work_requested(check_stop_fn):
+                    print("   ❌ Stopped before API call")
+                    return None
+
                 current_max_tokens = self.image_max_tokens
                 current_temp = self.temperature
                 
@@ -4724,11 +4778,6 @@ class ImageTranslator:
                 
                 if chunk_timeout:
                     print(f"   ⏱️ Timeout enabled: {chunk_timeout} seconds")
-                
-                # Final stop check before API call
-                if _stop_new_vision_work_requested(check_stop_fn):
-                    print("   ❌ Stopped before API call")
-                    return None
                 
                 chapter_context = None
                 chapter_num_for_context = getattr(self, 'current_chapter_num', None)
@@ -4766,9 +4815,6 @@ class ImageTranslator:
             except Exception as e:
                 from unified_api_client import UnifiedClientError
                 error_msg = str(e)
-                print(f"\n🔍 DEBUG: Image Translation Failed")
-                print(f"   Error: {error_msg}")
-                print(f"   Error Type: {type(e).__name__}")
                 
                 # Handle user stop / graceful stop / cancellation
                 error_lower = error_msg.lower()
@@ -4782,6 +4828,9 @@ class ImageTranslator:
                 if is_cancel:
                     print(f"   ⏹️ Image translation stopped: {error_msg}")
                     return None
+                print(f"\n🔍 DEBUG: Image Translation Failed")
+                print(f"   Error: {error_msg}")
+                print(f"   Error Type: {type(e).__name__}")
                 # Handle timeout specifically
                 if "took" in error_msg and "timeout:" in error_msg:
                     if timeout_retry_count < max_timeout_retries:

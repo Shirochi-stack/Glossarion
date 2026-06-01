@@ -14711,8 +14711,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if _was_graceful and (_time_mod.time() - _last_stop_ts) < 2.0:
             self.append_log("⚡ Double-click detected after graceful stop — forcing hard cancel!")
             self._last_stop_was_graceful = False
+            self.stop_requested = True
             self.graceful_stop_active = False
             os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
             os.environ['TRANSLATION_CANCELLED'] = '1'
             os.environ['WAIT_FOR_CHUNKS'] = '0'
             try:
@@ -20472,11 +20474,23 @@ Important rules:
         # Force stop on double-click (within 1s) regardless of current mode
         force_stop = len(self._stop_click_times) >= 2
         if force_stop:
-            self.append_log("⚡ Double-click detected — forcing immediate stop!")
-            graceful_stop = False  # Override to force immediate stop
-            # Ensure WAIT_FOR_CHUNKS is disabled when forcing stop
+            graceful_stop = False
+            self.graceful_stop_active = False
+            self._last_stop_was_graceful = False
+            os.environ['TRANSLATION_CANCELLED'] = '1'
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
             os.environ['WAIT_FOR_CHUNKS'] = '0'
-            self._stop_click_times = []  # Reset click counter
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+            except Exception:
+                pass
+            self._stop_click_times = []
+            self.append_log("⚡ Double-click detected — forcing immediate stop!")
 
         # Only on FULL stop (non-graceful): clear watchdog state/files so the bar can't stick "busy".
         # For graceful stop we keep watchdog files intact so the UI can continue tracking in-flight calls.
@@ -20530,6 +20544,8 @@ Important rules:
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+        if not graceful_stop:
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
         
         # Set wait for chunks mode - only applies when graceful stop is also enabled
         wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
@@ -21825,6 +21841,37 @@ Important rules:
     def append_log_direct(self, message):
         """Direct append - MUST be called from main thread only"""
         try:
+            try:
+                msg_low = str(message).lower()
+                stopping_now = (
+                    bool(getattr(self, 'stop_requested', False))
+                    or os.environ.get('TRANSLATION_CANCELLED') == '1'
+                    or os.environ.get('GRACEFUL_STOP') == '1'
+                )
+                noisy_stop_keys = (
+                    'stopped before api call',
+                    'translation returned empty result',
+                    'image chunk size',
+                    'calling vision api',
+                    'using temperature:',
+                    'output token limit:',
+                    'graceful stop active - not starting new api call',
+                    'skipped (graceful stop)',
+                    'failed to get vision key from pool',
+                    'image translation stopped:',
+                    'image translation stopped by user',
+                    'generation returned empty',
+                    'stopped while preparing chunk',
+                    'stopped at chunk',
+                    'queued request (image_translation)',
+                    'reserved slot:',
+                    'subsequent threads:',
+                )
+                if stopping_now and any(k in msg_low for k in noisy_stop_keys):
+                    return
+            except Exception:
+                pass
+
             if not hasattr(self, 'log_text') or not self.log_text:
                 return
             
@@ -21871,6 +21918,39 @@ Important rules:
                        return
                except Exception:
                    msg_low_global = None
+
+               stopping_now = False
+               try:
+                   stopping_now = (
+                       bool(getattr(self, 'stop_requested', False))
+                       or os.environ.get('TRANSLATION_CANCELLED') == '1'
+                       or os.environ.get('GRACEFUL_STOP') == '1'
+                   )
+                   if stopping_now:
+                       msg_low_for_stop = msg_low_global or str(message).lower()
+                       noisy_stop_keys = (
+                           'stopped before api call',
+                           'translation returned empty result',
+                           'image chunk size',
+                           'calling vision api',
+                           'using temperature:',
+                           'output token limit:',
+                           'graceful stop active - not starting new api call',
+                           'skipped (graceful stop)',
+                           'failed to get vision key from pool',
+                           'image translation stopped:',
+                           'image translation stopped by user',
+                           'generation returned empty',
+                           'stopped while preparing chunk',
+                           'stopped at chunk',
+                           'queued request (image_translation)',
+                           'reserved slot:',
+                           'subsequent threads:',
+                       )
+                       if any(k in msg_low_for_stop for k in noisy_stop_keys):
+                           return
+               except Exception:
+                   stopping_now = False
 
                # Stop-notice suppression: if user has requested stop, allow only one concise notice
                try:
@@ -21951,9 +22031,8 @@ Important rules:
                            scrollbar.setValue(scrollbar.maximum())
                            # Use single delayed timer instead of 8 timers to prevent handle exhaustion
                            QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if self._should_log_autoscroll() else None)
-                   # Force immediate update of the widget
-                   self.log_text.update()
-                   self.log_text.repaint()
+                   if not stopping_now:
+                       self.log_text.update()
                except Exception:
                    pass
            except Exception as e:

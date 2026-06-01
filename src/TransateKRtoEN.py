@@ -19743,6 +19743,8 @@ def main(log_callback=None, stop_callback=None):
 
                 def _gen_one_image(img_idx, img_name):
                     """Worker: generate a single image. Returns (idx, name, status, result)."""
+                    if check_stop():
+                        return (img_idx, img_name, 'cancelled', None)
                     # Cache hit: already generated
                     if img_name.lower() in _already_generated:
                         print(f"    ⏩ [{img_idx}/{len(image_files)}] {img_name}: Already generated (cached)")
@@ -19756,6 +19758,8 @@ def main(log_callback=None, stop_callback=None):
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
                         result = gen_image_translator.translate_image(img_path, context, check_stop)
+                        if check_stop():
+                            return (img_idx, img_name, 'cancelled', None)
                         if not result:
                             print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation returned empty")
                             return (img_idx, img_name, 'fail', result)
@@ -19801,6 +19805,9 @@ def main(log_callback=None, stop_callback=None):
                     if status == 'cached_skip':
                         gen_skipped += 1
                         _igen_progress_image(img_idx, img_name, 'skipped')
+                        return
+                    if status == 'cancelled':
+                        _igen_progress_image(img_idx, img_name, 'cancelled')
                         return
                     if status == 'skipped':
                         gen_skipped += 1
@@ -19917,20 +19924,39 @@ def main(log_callback=None, stop_callback=None):
                             batch = image_files[batch_start:batch_start + group_size]
                             workers = min(_img_batch_size, len(batch))
                             executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ImgGen")
+                            force_cancelled = False
                             try:
                                 futures = {}
                                 for i, _name in enumerate(batch, batch_start + 1):
+                                    if check_stop():
+                                        force_cancelled = True
+                                        break
                                     futures[executor.submit(_gen_one_image, i, _name)] = (i, _name)
-                                for future in as_completed(futures):
-                                    idx, name = futures[future]
-                                    try:
-                                        r_idx, r_name, r_status, r_result = future.result()
-                                        _handle_gen_result(r_idx, r_name, r_status, r_result)
-                                    except Exception as e:
-                                        gen_fail += 1
-                                        print(f"    ❌ [{idx}] {name}: Unexpected error: {e}")
+                                pending = set(futures)
+                                while pending:
+                                    if check_stop():
+                                        force_cancelled = True
+                                        print("⏹️ Image generation stopped by user")
+                                        for future in pending:
+                                            future.cancel()
+                                        break
+                                    done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                                    if not done:
+                                        continue
+                                    for future in done:
+                                        if future.cancelled():
+                                            continue
+                                        idx, name = futures[future]
+                                        try:
+                                            r_idx, r_name, r_status, r_result = future.result()
+                                            _handle_gen_result(r_idx, r_name, r_status, r_result)
+                                        except Exception as e:
+                                            gen_fail += 1
+                                            print(f"    ❌ [{idx}] {name}: Unexpected error: {e}")
+                                if force_cancelled:
+                                    break
                             finally:
-                                executor.shutdown(wait=True)
+                                executor.shutdown(wait=not force_cancelled, cancel_futures=True)
                 else:
                     # ── Sequential mode ──────────────────────────────────────
                     for img_idx, img_name in enumerate(image_files, 1):
@@ -19940,10 +19966,17 @@ def main(log_callback=None, stop_callback=None):
                         print(f"  [{img_idx}/{len(image_files)}] Generating: {img_name}")
                         r_idx, r_name, r_status, r_result = _gen_one_image(img_idx, img_name)
                         _handle_gen_result(r_idx, r_name, r_status, r_result)
+                        if check_stop():
+                            print("⏹️ Image generation stopped by user")
+                            break
                         # Delay between API calls
                         if img_idx < len(image_files):
                             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
-                            time.sleep(delay)
+                            delay_until = time.time() + max(0.0, delay)
+                            while time.time() < delay_until:
+                                if check_stop():
+                                    break
+                                time.sleep(min(0.2, delay_until - time.time()))
 
                 _final_status = 'completed' if gen_fail == 0 else 'failed'
                 if check_stop():
