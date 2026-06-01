@@ -19646,8 +19646,29 @@ def main(log_callback=None, stop_callback=None):
                 gen_success = 0
                 gen_fail = 0
                 gen_skipped = 0
+                image_gen_cancelled = False
+                image_gen_stop_logged = False
                 images_generated_dir = os.path.join(out, "images_generated")
                 os.makedirs(images_generated_dir, exist_ok=True)
+
+                def _image_generation_stop_requested():
+                    if (
+                        os.environ.get('TRANSLATION_CANCELLED') == '1'
+                        or os.environ.get('GRACEFUL_STOP') == '1'
+                        or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                    ):
+                        return True
+                    try:
+                        return bool(check_stop())
+                    except Exception:
+                        return False
+
+                def _mark_image_generation_cancelled(log=True):
+                    nonlocal image_gen_cancelled, image_gen_stop_logged
+                    image_gen_cancelled = True
+                    if log and not image_gen_stop_logged:
+                        print("⏹️ Image generation stopped by user")
+                        image_gen_stop_logged = True
 
                 # ── Image generation progress tracking (mirrors pdf_ocr pattern) ──
                 import threading as _img_threading
@@ -19796,7 +19817,8 @@ def main(log_callback=None, stop_callback=None):
 
                 def _gen_one_image(img_idx, img_name):
                     """Worker: generate a single image. Returns (idx, name, status, result)."""
-                    if check_stop():
+                    if _image_generation_stop_requested():
+                        _mark_image_generation_cancelled(log=False)
                         return (img_idx, img_name, 'cancelled', None)
                     # Cache hit: already generated
                     if img_name.lower() in _already_generated:
@@ -19816,7 +19838,11 @@ def main(log_callback=None, stop_callback=None):
                             check_stop,
                             api_context=_image_output_api_context,
                         )
-                        if check_stop():
+                        if _image_generation_stop_requested() or (
+                            hasattr(gen_image_translator, "last_image_call_was_cancelled")
+                            and gen_image_translator.last_image_call_was_cancelled()
+                        ):
+                            _mark_image_generation_cancelled(log=False)
                             return (img_idx, img_name, 'cancelled', None)
                         if not result:
                             print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation returned empty")
@@ -19844,6 +19870,9 @@ def main(log_callback=None, stop_callback=None):
                         print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Translated (text only, no image edit)")
                         return (img_idx, img_name, 'success', result)
                     except Exception as e:
+                        if _image_generation_stop_requested() or "cancel" in str(e).lower() or "stopped by user" in str(e).lower():
+                            _mark_image_generation_cancelled(log=False)
+                            return (img_idx, img_name, 'cancelled', None)
                         print(f"    ❌ [{img_idx}/{len(image_files)}] {img_name}: Error: {e}")
                         return (img_idx, img_name, 'fail', None)
 
@@ -19931,7 +19960,7 @@ def main(log_callback=None, stop_callback=None):
 
                             def _submit_next_img():
                                 nonlocal next_job_idx
-                                if check_stop():
+                                if _image_generation_stop_requested():
                                     return False
                                 if next_job_idx >= len(image_files):
                                     return False
@@ -19946,9 +19975,9 @@ def main(log_callback=None, stop_callback=None):
                                 pass
 
                             while active_futures:
-                                if check_stop():
+                                if _image_generation_stop_requested():
                                     force_cancelled = True
-                                    print("⏹️ Image generation stopped by user")
+                                    _mark_image_generation_cancelled()
                                     for future in active_futures:
                                         future.cancel()
                                     break
@@ -19976,8 +20005,8 @@ def main(log_callback=None, stop_callback=None):
                             group_size = _img_batch_size
 
                         for batch_start in range(0, len(image_files), group_size):
-                            if check_stop():
-                                print("⏹️ Image generation stopped by user")
+                            if _image_generation_stop_requested():
+                                _mark_image_generation_cancelled()
                                 break
                             batch = image_files[batch_start:batch_start + group_size]
                             workers = min(_img_batch_size, len(batch))
@@ -19986,15 +20015,15 @@ def main(log_callback=None, stop_callback=None):
                             try:
                                 futures = {}
                                 for i, _name in enumerate(batch, batch_start + 1):
-                                    if check_stop():
+                                    if _image_generation_stop_requested():
                                         force_cancelled = True
                                         break
                                     futures[executor.submit(_gen_one_image, i, _name)] = (i, _name)
                                 pending = set(futures)
                                 while pending:
-                                    if check_stop():
+                                    if _image_generation_stop_requested():
                                         force_cancelled = True
-                                        print("⏹️ Image generation stopped by user")
+                                        _mark_image_generation_cancelled()
                                         for future in pending:
                                             future.cancel()
                                         break
@@ -20018,29 +20047,32 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     # ── Sequential mode ──────────────────────────────────────
                     for img_idx, img_name in enumerate(image_files, 1):
-                        if check_stop():
-                            print("⏹️ Image generation stopped by user")
+                        if _image_generation_stop_requested():
+                            _mark_image_generation_cancelled()
                             break
                         print(f"  [{img_idx}/{len(image_files)}] Generating: {img_name}")
                         r_idx, r_name, r_status, r_result = _gen_one_image(img_idx, img_name)
                         _handle_gen_result(r_idx, r_name, r_status, r_result)
-                        if check_stop():
-                            print("⏹️ Image generation stopped by user")
+                        if _image_generation_stop_requested():
+                            _mark_image_generation_cancelled()
                             break
                         # Delay between API calls
                         if img_idx < len(image_files):
                             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
                             delay_until = time.time() + max(0.0, delay)
                             while time.time() < delay_until:
-                                if check_stop():
+                                if _image_generation_stop_requested():
                                     break
                                 time.sleep(min(0.2, delay_until - time.time()))
 
                 _final_status = 'completed' if gen_fail == 0 else 'failed'
-                if check_stop():
+                if image_gen_cancelled or _image_generation_stop_requested():
                     _final_status = 'cancelled'
                 _igen_progress_finish(_final_status)
-                print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
+                if _final_status == 'cancelled':
+                    print(f"\n🎨 Image generation cancelled: {gen_success} success before stop, {gen_skipped} skipped (no text), {gen_fail} failed")
+                else:
+                    print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
 
                 # Restore OCR preprocessing env vars
                 if _saved_compression is not None:

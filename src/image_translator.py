@@ -412,6 +412,7 @@ class ImageTranslator:
         self.processed_images = {}
         self.image_translations = {}
         self._image_api_context_tls = threading.local()
+        self._image_call_status_tls = threading.local()
         
         # Configuration from environment
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
@@ -1841,6 +1842,11 @@ class ImageTranslator:
         had_previous_api_context = False
         
         try:
+            try:
+                self._image_call_status_tls.status = None
+            except Exception:
+                pass
+
             if api_context:
                 try:
                     previous_api_context = getattr(self._image_api_context_tls, "context")
@@ -1852,7 +1858,7 @@ class ImageTranslator:
             self.current_image_path = image_path
             # Check for stop at the beginning
             if _stop_new_vision_work_requested(check_stop_fn):
-                print("   ❌ Image translation stopped by user")
+                self._mark_image_call_cancelled()
                 return None
 
             print(f"   🔍 translate_image called for: {image_path}")
@@ -1876,14 +1882,14 @@ class ImageTranslator:
                     print(f"   🗜️ Using compressed image for translation")
 
             if _stop_new_vision_work_requested(check_stop_fn):
-                print("   ❌ Image translation stopped by user")
+                self._mark_image_call_cancelled()
                 return None
             
             # Apply watermark preprocessing (on compressed image if applicable)
             processed_path = self.preprocess_image_for_watermarks(compressed_path)
 
             if _stop_new_vision_work_requested(check_stop_fn):
-                print("   ❌ Image translation stopped by user")
+                self._mark_image_call_cancelled()
                 return None
             
             # Open and process the image (now using processed_path)
@@ -1968,7 +1974,9 @@ class ImageTranslator:
             except Exception:
                 is_cancelled = False
             if is_cancelled or "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
-                print(f"   ⏹️ Image translation cancelled: {e}")
+                self._mark_image_call_cancelled()
+                if not self._stop_flag_active_for_log(check_stop_fn):
+                    print(f"   ⏹️ Image translation cancelled: {e}")
                 return None
 
             logger.error(f"Error translating image {image_path}: {e}")
@@ -2113,7 +2121,7 @@ class ImageTranslator:
         
         # Check for stop before processing
         if _stop_new_vision_work_requested(check_stop_fn):
-            print("   ❌ Image translation stopped by user")
+            self._mark_image_call_cancelled()
             return None
 
         print(f"   👍 Image height OK ({img.height}px), processing as single image...")
@@ -2122,7 +2130,7 @@ class ImageTranslator:
         image_bytes = self._image_to_bytes_with_compression(img)
 
         if _stop_new_vision_work_requested(check_stop_fn):
-            print("   ❌ Image translation stopped by user")
+            self._mark_image_call_cancelled()
             return None
         
         # Call API
@@ -2135,7 +2143,7 @@ class ImageTranslator:
             translation = self._sanitize_unicode_characters(translation)
             return translation
         else:
-            if not _stop_new_vision_work_requested(check_stop_fn):
+            if not _stop_new_vision_work_requested(check_stop_fn) and not self.last_image_call_was_cancelled():
                 print(f"   ❌ Translation returned empty result")
             return None
 
@@ -4251,6 +4259,27 @@ class ImageTranslator:
             pass
         return "image_translation"
 
+    def _mark_image_call_cancelled(self):
+        try:
+            self._image_call_status_tls.status = "cancelled"
+        except Exception:
+            pass
+        self.last_vision_translation_finish_reason = "cancelled"
+
+    def last_image_call_was_cancelled(self) -> bool:
+        try:
+            return getattr(self._image_call_status_tls, "status", None) == "cancelled"
+        except Exception:
+            return False
+
+    def _stop_flag_active_for_log(self, check_stop_fn=None) -> bool:
+        return (
+            os.environ.get("TRANSLATION_CANCELLED") == "1"
+            or os.environ.get("GRACEFUL_STOP") == "1"
+            or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+            or _force_stop_requested(check_stop_fn)
+        )
+
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks with contextual support"""
         if self._use_ocr_first_pipeline():
@@ -4464,7 +4493,7 @@ class ImageTranslator:
                 
                 print(f"   ✅ Chunk {i+1} translated and saved ({len(chunk_text)} chars)")
             else:
-                if not _stop_new_vision_work_requested(check_stop_fn):
+                if not _stop_new_vision_work_requested(check_stop_fn) and not self.last_image_call_was_cancelled():
                     print(f"   ⚠️ Chunk {i+1} returned no text")
             
             # Delay between chunks if not the last one
@@ -4482,7 +4511,8 @@ class ImageTranslator:
             print(f"   ✅ Combined {len(all_translations)} chunks into final translation")
             return translated_text
         else:
-            print(f"   ❌ No successful translations from any chunks")
+            if not _stop_new_vision_work_requested(check_stop_fn) and not self.last_image_call_was_cancelled():
+                print(f"   ❌ No successful translations from any chunks")
             return None
 
     def set_current_chapter(self, chapter_num):
@@ -4803,7 +4833,7 @@ class ImageTranslator:
         while True:
             try:
                 if _stop_new_vision_work_requested(check_stop_fn):
-                    print("   ❌ Stopped before API call")
+                    self._mark_image_call_cancelled()
                     return None
 
                 api_context = self._current_image_api_context()
@@ -4866,7 +4896,9 @@ class ImageTranslator:
                     or (isinstance(e, UnifiedClientError) and getattr(e, 'error_type', None) == 'cancelled')
                 )
                 if is_cancel:
-                    print(f"   ⏹️ Image translation stopped: {error_msg}")
+                    self._mark_image_call_cancelled()
+                    if not self._stop_flag_active_for_log(check_stop_fn):
+                        print(f"   ⏹️ Image translation stopped: {error_msg}")
                     return None
                 print(f"\n🔍 DEBUG: Image Translation Failed")
                 print(f"   Error: {error_msg}")
