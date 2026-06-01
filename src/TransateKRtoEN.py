@@ -19695,13 +19695,16 @@ def main(log_callback=None, stop_callback=None):
                 _igen_progress_init()
 
                 # ── Parallel-aware image generation ──────────────────────────
-                def _image_output_worker_count():
+                def _image_output_request_count():
+                    enabled = os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
+                    if not enabled:
+                        return 1
                     try:
-                        return max(1, int(os.getenv("EXTRACTION_WORKERS", "1") or "1"))
+                        return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", "10") or "10"))
                     except Exception:
                         return 1
 
-                _img_batch_size = min(len(image_files), _image_output_worker_count())
+                _img_batch_size = min(len(image_files), _image_output_request_count())
                 _img_batch_enabled = _img_batch_size > 1
 
                 import re as _re_gen
@@ -19872,7 +19875,7 @@ def main(log_callback=None, stop_callback=None):
                     batching_mode = getattr(config, 'BATCHING_MODE', 'aggressive')
                     if batching_mode not in ('aggressive', 'direct', 'conservative'):
                         batching_mode = 'aggressive'
-                    print(f"⚡ Image generation batch mode: {_img_batch_size} parallel workers ({batching_mode})")
+                    print(f"⚡ Image generation vision request batch mode: {_img_batch_size} parallel request slot(s) ({batching_mode})")
 
                     if batching_mode == 'aggressive':
                         # "No batching" — keep slots full, submit new work as slots open
