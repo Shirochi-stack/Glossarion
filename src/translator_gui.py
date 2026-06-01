@@ -14808,8 +14808,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.stop_requested = False
         self._glossary_stop_was_requested = False  # Reset glossary stop flag from previous run
         self.graceful_stop_active = False  # Reset graceful stop state
+        os.environ.pop('TRANSLATION_CANCELLED', None)  # Clear hard-stop state from previous run
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
+        os.environ['WAIT_FOR_CHUNKS'] = '0'  # Reset graceful batch-stop mode
+        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
 
         # Assign a new run id so transport logs (httpx) can be suppressed for stale previous runs
         try:

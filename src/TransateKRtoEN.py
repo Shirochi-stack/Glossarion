@@ -17138,6 +17138,11 @@ def main(log_callback=None, stop_callback=None):
     global STOP_LOGGED, _stop_requested
     STOP_LOGGED = False
     _stop_requested = False  # Reset stop flag for new translation instance
+    os.environ.pop('TRANSLATION_CANCELLED', None)
+    os.environ['GRACEFUL_STOP'] = '0'
+    os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+    os.environ['WAIT_FOR_CHUNKS'] = '0'
+    os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
     
     # Also reset unified_api_client global flags
     try:
@@ -19519,6 +19524,28 @@ def main(log_callback=None, stop_callback=None):
             except Exception as _ze:
                 print(f"  ⚠️ Could not open source EPUB for raw copy: {_ze}")
 
+        _image_mode_rename_map = {}
+        _rename_map_path = os.path.join(out, "image_rename_map.json")
+        if os.path.isfile(_rename_map_path):
+            try:
+                with open(_rename_map_path, 'r', encoding='utf-8') as _rmf:
+                    loaded_map = json.load(_rmf)
+                if isinstance(loaded_map, dict):
+                    _image_mode_rename_map = loaded_map
+            except Exception as _rme:
+                print(f"  ⚠️ Could not load image rename map for passthrough HTML: {_rme}")
+
+        def _apply_image_mode_rename_map(raw_markup):
+            if not raw_markup or not _image_mode_rename_map:
+                return raw_markup
+            try:
+                soup = BeautifulSoup(raw_markup, 'html.parser')
+                if Chapter_Extractor._update_image_refs_in_soup(soup, _image_mode_rename_map):
+                    return str(soup)
+            except Exception as _ime:
+                print(f"  ⚠️ Could not apply image rename map to passthrough HTML: {_ime}")
+            return raw_markup
+
         copied_count = 0
         for c in chapters:
             if check_stop():
@@ -19553,6 +19580,8 @@ def main(log_callback=None, stop_callback=None):
                     or ""
                 )
 
+            raw_markup = _apply_image_mode_rename_map(raw_markup)
+
             fname = FileUtilities.create_chapter_filename(c, actual_num)
             output_path = os.path.join(out, fname)
             with open(output_path, 'w', encoding='utf-8') as f:
@@ -19566,7 +19595,10 @@ def main(log_callback=None, stop_callback=None):
         if _epub_zip:
             _epub_zip.close()
         progress_manager.save()
-        print(f"✅ Copied {copied_count} HTML files as-is from source EPUB (no translation)")
+        if _image_mode_rename_map:
+            print(f"✅ Copied {copied_count} HTML files from source EPUB with renamed image refs (no translation)")
+        else:
+            print(f"✅ Copied {copied_count} HTML files as-is from source EPUB (no translation)")
 
         # 2) Copy CSS from source epub to css subfolder (already extracted by Chapter_Extractor)
         css_dir = os.path.join(out, "css")
