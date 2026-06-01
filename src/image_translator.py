@@ -411,6 +411,7 @@ class ImageTranslator:
         # Track processed images to avoid duplicates
         self.processed_images = {}
         self.image_translations = {}
+        self._image_api_context_tls = threading.local()
         
         # Configuration from environment
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
@@ -1216,7 +1217,8 @@ class ImageTranslator:
                             result = self.client.send(
                                 messages=messages,
                                 temperature=self.temperature,
-                                max_tokens=self.image_max_tokens
+                                max_tokens=self.image_max_tokens,
+                                context=self._current_image_api_context(),
                             )
                             elapsed_time = time.time() - start
                             result_queue.put((result, elapsed_time))
@@ -1829,14 +1831,24 @@ class ImageTranslator:
             logger.warning(f"Text region enhancement failed: {e}")
             return img_array
     
-    def translate_image(self, image_path: str, context: str = "", check_stop_fn=None) -> Optional[str]:
+    def translate_image(self, image_path: str, context: str = "", check_stop_fn=None, api_context: Optional[str] = None) -> Optional[str]:
         """
         Translate text in an image using vision API - with chunking for tall images and stop support
         """
         processed_path = None
         compressed_path = None
+        previous_api_context = None
+        had_previous_api_context = False
         
         try:
+            if api_context:
+                try:
+                    previous_api_context = getattr(self._image_api_context_tls, "context")
+                    had_previous_api_context = True
+                except AttributeError:
+                    had_previous_api_context = False
+                self._image_api_context_tls.context = str(api_context).strip()
+
             self.current_image_path = image_path
             # Check for stop at the beginning
             if _stop_new_vision_work_requested(check_stop_fn):
@@ -1986,6 +1998,14 @@ class ImageTranslator:
                             print(f"   🧹 Cleaned up temp processed file")
                     except Exception as e:
                         logger.warning(f"Could not delete temp processed file: {e}")
+            if api_context:
+                try:
+                    if had_previous_api_context:
+                        self._image_api_context_tls.context = previous_api_context
+                    else:
+                        delattr(self._image_api_context_tls, "context")
+                except Exception:
+                    pass
 
     def ocr_image(self, image_path: str, context: str = "", check_stop_fn=None, image_idx=None, chapter_num=None, image_basename=None) -> Optional[str]:
         """OCR an image and save/reuse OCR text without running the translation phase."""
@@ -4222,6 +4242,15 @@ class ImageTranslator:
                 translated += "\n\n[TRANSLATION STOPPED BY USER]"
         return translated
 
+    def _current_image_api_context(self) -> str:
+        try:
+            context = str(getattr(self._image_api_context_tls, "context", "") or "").strip()
+            if context:
+                return context
+        except Exception:
+            pass
+        return "image_translation"
+
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks with contextual support"""
         if self._use_ocr_first_pipeline():
@@ -4777,10 +4806,13 @@ class ImageTranslator:
                     print("   ❌ Stopped before API call")
                     return None
 
+                api_context = self._current_image_api_context()
                 current_max_tokens = self.image_max_tokens
                 current_temp = self.temperature
                 
                 print(f"   🔄 Calling vision API...")
+                if api_context != "image_translation":
+                    print(f"   📡 Image API context: {api_context}")
                 print(f"   📊 Using temperature: {current_temp}")
                 print(f"   📊 Output Token Limit: {current_max_tokens}")
                 
@@ -4801,7 +4833,7 @@ class ImageTranslator:
                     current_max_tokens,
                     check_stop_fn,
                     chunk_timeout,
-                    'image_translation',
+                    api_context,
                     chapter_context=chapter_context,
                 )
                 

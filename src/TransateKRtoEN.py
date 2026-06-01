@@ -19634,6 +19634,13 @@ def main(log_callback=None, stop_callback=None):
                 )
                 gen_image_translator.base_system_prompt = gen_system
                 gen_image_translator.manual_glossary_path = glossary_path if 'glossary_path' in dir() else None
+                _image_output_api_context = (
+                    "image_edit"
+                    if str(input_path or "").lower().endswith((".epub", ".pdf"))
+                    else None
+                )
+                if _image_output_api_context:
+                    print("🖼️ EPUB/PDF image output API context: image_edit")
 
                 gen_success = 0
                 gen_fail = 0
@@ -19802,7 +19809,12 @@ def main(log_callback=None, stop_callback=None):
                     img_path = os.path.join(images_dir, img_name)
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
-                        result = gen_image_translator.translate_image(img_path, context, check_stop)
+                        result = gen_image_translator.translate_image(
+                            img_path,
+                            context,
+                            check_stop,
+                            api_context=_image_output_api_context,
+                        )
                         if check_stop():
                             return (img_idx, img_name, 'cancelled', None)
                         if not result:
