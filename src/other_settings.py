@@ -10436,11 +10436,11 @@ def _create_image_translation_section(self, parent):
     vision_batch_h.addWidget(vision_batch_cb)
     vision_batch_size_entry = QLineEdit()
     vision_batch_size_entry.setFixedWidth(55)
-    vision_batch_size_entry.setToolTip("Parallel Vision API requests for OCR chunks and EPUB/PDF image output.")
+    vision_batch_size_entry.setToolTip("Parallel Vision API requests for OCR chunks and EPUB/PDF image output. Use -1 or 0 to inherit Batch Translation and Batch Size.")
     try:
-        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))))
+        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '-1'))))
     except Exception:
-        vision_batch_size_entry.setText("10")
+        vision_batch_size_entry.setText("-1")
     vision_batch_h.addWidget(vision_batch_size_entry)
     vision_batch_h.addStretch()
 
@@ -10455,7 +10455,9 @@ def _create_image_translation_section(self, parent):
 
     def _on_vision_ocr_batch_size_changed(text):
         try:
-            value = max(1, int(str(text).strip() or "1"))
+            value = int(str(text).strip() or "-1")
+            if value < -1:
+                value = -1
             self.vision_ocr_batch_size_var = str(value)
             self.config['vision_ocr_batch_size'] = value
             os.environ['VISION_OCR_BATCH_SIZE'] = str(value)
@@ -10467,7 +10469,7 @@ def _create_image_translation_section(self, parent):
     vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
     vision_sub_v.addWidget(vision_batch_row)
 
-    vision_batch_desc = QLabel("Controls parallel Vision API request slots. In Vision mode this batches OCR chunks; in Image mode this batches EPUB/PDF image-output calls.")
+    vision_batch_desc = QLabel("Controls parallel Vision API request slots. Use -1 or 0 to inherit the main Batch Translation toggle and Batch Size.")
     vision_batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     vision_batch_desc.setWordWrap(True)
     vision_sub_v.addWidget(vision_batch_desc)

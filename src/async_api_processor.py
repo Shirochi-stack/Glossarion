@@ -3385,7 +3385,7 @@ class AsyncProcessingDialog:
         env_vars['IMAGE_CHUNK_MIN_OVERLAP_PIXELS'] = _val(getattr(self.gui, 'image_chunk_min_overlap_pixels_var', None), 80)
         env_vars['IMAGE_SMART_CHUNKING'] = "1" if _val(getattr(self.gui, 'image_smart_chunking_var', None), True) else "0"
         env_vars['VISION_OCR_BATCH_TRANSLATION'] = "1" if _bool_val(getattr(self.gui, 'vision_ocr_batch_translation_var', None), self.gui.config.get('vision_ocr_batch_translation', True)) else "0"
-        env_vars['VISION_OCR_BATCH_SIZE'] = str(_val(getattr(self.gui, 'vision_ocr_batch_size_var', None), self.gui.config.get('vision_ocr_batch_size', '10')))
+        env_vars['VISION_OCR_BATCH_SIZE'] = str(_val(getattr(self.gui, 'vision_ocr_batch_size_var', None), self.gui.config.get('vision_ocr_batch_size', '-1')))
         env_vars['VISION_OCR_FUZZY_CHUNK_DEDUPE'] = "1" if _val(getattr(self.gui, 'vision_ocr_fuzzy_chunk_dedupe_var', None), False) else "0"
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         output_mode = self.gui._get_output_mode() if hasattr(self.gui, '_get_output_mode') else _val(getattr(self.gui, 'output_mode_var', 'text'), 'text')

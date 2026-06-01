@@ -1849,7 +1849,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             pass
         self.single_api_image_chunks_var = False
         self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', True)
-        self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '10'))
+        self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '-1'))
         self.vision_ocr_skip_translation_var = self.config.get('vision_ocr_skip_translation', False)
         self.vision_ocr_source_prepass_var = str(self.config.get('vision_ocr_source_prepass', 'auto'))
         os.environ['VISION_OCR_SKIP_TRANSLATION'] = '1' if self.vision_ocr_skip_translation_var else '0'
@@ -4031,7 +4031,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '1800'),
             ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
             ('batch_size_var', 'batch_size', '5'),
-            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '10'),
+            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '-1'),
             ('batch_mode_var', 'batching_mode', 'aggressive'),
             ('batch_group_size_var', 'batch_group_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
@@ -17874,7 +17874,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
             'VISION_OCR_TRANSLATION_USER_PROMPT': str(getattr(self, 'vision_ocr_translation_user_prompt', self.config.get('vision_ocr_translation_user_prompt', ''))),
             'VISION_OCR_BATCH_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_batch_translation_var', None), self.config.get('vision_ocr_batch_translation', True)) else '0',
-            'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
+            'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '-1'))),
             'VISION_OCR_SKIP_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_skip_translation_var', None), self.config.get('vision_ocr_skip_translation', False)) else '0',
             'VISION_OCR_KEEP_IMAGES': '1' if _bool_setting(getattr(self, 'vision_ocr_keep_images_var', None), self.config.get('vision_ocr_keep_images', False)) else '0',
             'VISION_OCR_SOURCE_PREPASS': str(getattr(self, 'vision_ocr_source_prepass_var', self.config.get('vision_ocr_source_prepass', 'auto')) or 'auto'),
@@ -26243,7 +26243,7 @@ Important rules:
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
                 ('multipass_mode', ['multipass_checkbox', 'multipass_mode_var'], False, bool),
                 ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: str(v).strip().lower() if str(v).strip().lower() in MULTIPASS_REFINEMENT_MODES else 'full'),
-                ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
+                ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], -1, lambda v: max(-1, safe_int(v, -1))),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
@@ -26902,7 +26902,7 @@ Important rules:
             'VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD': 'Fuzzy OCR chunk dedupe threshold',
             'VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH': 'Fuzzy OCR chunk dedupe minimum length',
             'VISION_OCR_BATCH_TRANSLATION': 'Batch Vision OCR chunk requests',
-            'VISION_OCR_BATCH_SIZE': 'Vision OCR batch worker count',
+            'VISION_OCR_BATCH_SIZE': 'Vision API request slot override',
             'VISION_OCR_SOURCE_PREPASS': 'Vision OCR source prepass mode (auto/on/off)',
             
             # Metadata and Headers
@@ -27401,7 +27401,7 @@ Important rules:
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
                 ('VISION_OCR_USER_PROMPT', str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', '')))),
                 ('VISION_OCR_BATCH_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_batch_translation_var', True)) else '0'),
-                ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
+                ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '-1'))),
                 ('VISION_OCR_SKIP_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_skip_translation_var', False)) else '0'),
                 ('VISION_OCR_KEEP_IMAGES', '1' if _bool_value(getattr(self, 'vision_ocr_keep_images_var', False)) else '0'),
                 ('VISION_OCR_SOURCE_PREPASS', str(getattr(self, 'vision_ocr_source_prepass_var', self.config.get('vision_ocr_source_prepass', 'auto')) or 'auto')),

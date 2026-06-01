@@ -3328,10 +3328,22 @@ class ImageTranslator:
         return os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
 
     def _vision_ocr_batch_size(self) -> int:
+        def _batch_translation_size() -> int:
+            batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+            if not batch_enabled:
+                return 1
+            try:
+                return max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
+            except Exception:
+                return 1
+
         try:
-            return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", "10")))
+            requested = int(str(os.getenv("VISION_OCR_BATCH_SIZE", "-1")).strip() or "-1")
         except Exception:
-            return 1
+            return _batch_translation_size()
+        if requested <= 0:
+            return _batch_translation_size()
+        return max(1, requested)
 
     def _image_chunk_overlap_pixels(self) -> int:
         try:

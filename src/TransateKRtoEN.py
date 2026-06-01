@@ -11759,9 +11759,9 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         else:
             jobs.append((idx, image_path))
 
-    vision_batch_enabled = os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
+    vision_batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
     try:
-        requested_workers = int(os.getenv("VISION_OCR_BATCH_SIZE", "10") or "10")
+        requested_workers = int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())
     except Exception:
         requested_workers = 1
     remaining_jobs = len(jobs)
@@ -19728,11 +19728,10 @@ def main(log_callback=None, stop_callback=None):
 
                 # ── Parallel-aware image generation ──────────────────────────
                 def _image_output_request_count():
-                    enabled = os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
-                    if not enabled:
+                    if not bool(getattr(gen_image_translator, "_vision_ocr_batch_enabled", lambda: False)()):
                         return 1
                     try:
-                        return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", "10") or "10"))
+                        return max(1, int(getattr(gen_image_translator, "_vision_ocr_batch_size", lambda: 1)()))
                     except Exception:
                         return 1
 
