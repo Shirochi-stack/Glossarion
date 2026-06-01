@@ -304,7 +304,7 @@ class GlossarionWeb:
                 "- You MUST output ONLY in {target_lang}. No other languages are permitted.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, etc.\n"
                 "{split_marker_instruction}\n"
-                "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
+                "- Preserve any Markdown formatting if present (e.g., headings '#', '##', '###', bold '**text**', italic '*text*', lists '- item'/'1. item', blockquotes '> quote', links '[text](url)', images '![alt](url)', inline code '`code`').\n"
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
                 "- Maintain the original meaning, tone, and style.\n"
                 "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
