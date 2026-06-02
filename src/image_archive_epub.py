@@ -175,6 +175,8 @@ def needs_image_archive_group_rebuild(path: str) -> bool:
                     chapter_text = zf.read(chapter_name).decode("utf-8", errors="ignore")
                     if re.search(r"<h[1-6]\b|<header\b", chapter_text, flags=re.IGNORECASE):
                         return True
+                    if re.search(r"<title>\s*Chapter\s+\d+", chapter_text, flags=re.IGNORECASE):
+                        return True
             except Exception:
                 pass
             return any(
@@ -719,7 +721,6 @@ def generated_image_epub_chapter_count(path: str) -> int:
 
 
 def _chapter_xhtml(title: str, image_hrefs: list[str], chapter_num: int) -> bytes:
-    title_xml = _safe_xml_text(title)
     image_tags = []
     for idx, image_href in enumerate(image_hrefs, 1):
         image_href_xml = _safe_xml_text(image_href)
@@ -730,7 +731,7 @@ def _chapter_xhtml(title: str, image_hrefs: list[str], chapter_num: int) -> byte
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<!DOCTYPE html>\n'
         '<html xmlns="http://www.w3.org/1999/xhtml" lang="und" xml:lang="und">\n'
-        f"<head><title>{title_xml}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"../styles.css\"/></head>\n"
+        '<head><title></title><link rel="stylesheet" type="text/css" href="../styles.css"/></head>\n'
         '<body>\n'
         f'  <section class="image-page" id="chapter-{chapter_num:04d}">\n'
         + "".join(image_tags) +
