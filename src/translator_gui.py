@@ -18242,6 +18242,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Reset stop flags
         self.stop_requested = False
         self.graceful_stop_active = False  # Reset graceful stop state
+        self._zip_inputs_resolved_for_current_run = False
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
@@ -18395,6 +18396,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(getattr(self, 'lightweight_thinking_level_var', 1))
             except Exception:
                 pass
+
+            if (
+                any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or [])
+                and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
+            ):
+                self.append_log("📦 Preparing ZIP input(s) for glossary extraction...")
+                self._resolve_zip_inputs_for_translation()
+                if self.stop_requested:
+                    self.append_log("⏹️ Glossary extraction cancelled during ZIP conversion")
+                    return
 
             # Create Glossary folder
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
@@ -22687,6 +22698,8 @@ Important rules:
             from image_archive_epub import (
                 convert_image_archive_to_epub,
                 ImageArchiveConversionCancelled,
+                expected_image_archive_chapter_count,
+                generated_image_epub_chapter_count,
                 is_epub_zip,
                 needs_image_archive_group_rebuild,
                 scan_image_archive,
@@ -22717,10 +22730,31 @@ Important rules:
             scan = scan_image_archive(path, should_stop=should_stop)
             nested_image_bundle = bool(scan.image_count and scan.nested_archive_count)
             if scan.is_image_archive or nested_image_bundle:
+                chapter_count_mismatch = False
+                if os.path.exists(epub_path) and is_epub_zip(epub_path):
+                    try:
+                        expected_chapters = expected_image_archive_chapter_count(
+                            path,
+                            should_stop=should_stop,
+                        )
+                        actual_chapters = generated_image_epub_chapter_count(epub_path)
+                        chapter_count_mismatch = bool(
+                            expected_chapters
+                            and actual_chapters
+                            and expected_chapters != actual_chapters
+                        )
+                        if chapter_count_mismatch:
+                            self.append_log(
+                                f"📦 Rebuilding image EPUB chapter layout: "
+                                f"{actual_chapters} → {expected_chapters} chapter file(s)"
+                            )
+                    except Exception:
+                        chapter_count_mismatch = False
                 needs_rebuild = (
                     not os.path.exists(epub_path)
                     or not is_epub_zip(epub_path)
                     or needs_image_archive_group_rebuild(epub_path)
+                    or chapter_count_mismatch
                     or os.path.getmtime(epub_path) < os.path.getmtime(path)
                 )
                 if needs_rebuild:
@@ -22855,7 +22889,7 @@ Important rules:
                 # be expensive and is resolved inside the translation worker.
                 processed_paths.append(path)
                 self.append_log(
-                    f"📦 ZIP selected; conversion will run in the background when translation starts: "
+                    f"📦 ZIP selected; conversion will run in the background when translation or glossary extraction starts: "
                     f"{os.path.basename(path)}"
                 )
             elif lower.endswith('.cbz'):
