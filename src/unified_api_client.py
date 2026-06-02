@@ -3705,10 +3705,10 @@ class UnifiedClient:
         try:
             raw_delay = os.getenv("THREAD_SUBMISSION_DELAY_SECONDS")
             if raw_delay in (None, ""):
-                raw_delay = os.getenv("THREAD_SUBMISSION_DELAY", "0.5")
+                raw_delay = os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")
             thread_delay = float(raw_delay)
         except Exception:
-            thread_delay = 0.5
+            thread_delay = 0.0001
         
         if thread_delay <= 0:
             return
@@ -3721,6 +3721,16 @@ class UnifiedClient:
             # Initialize on first call
             if not hasattr(self, '_next_allowed_send_ts'):
                 self._next_allowed_send_ts = 0.0
+            try:
+                previous_thread_delay = getattr(self, '_thread_submission_delay_value', None)
+                if previous_thread_delay is None or abs(float(previous_thread_delay) - float(thread_delay)) > 1e-9:
+                    self._next_allowed_send_ts = 0.0
+                    self._thread_submission_count = 0
+                    self._thread_submission_delay_value = float(thread_delay)
+            except Exception:
+                self._next_allowed_send_ts = 0.0
+                self._thread_submission_count = 0
+                self._thread_submission_delay_value = float(thread_delay)
             
             next_allowed = self._next_allowed_send_ts
             wait = max(0.0, next_allowed - now)

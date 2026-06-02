@@ -679,7 +679,9 @@ class GlossarionWeb:
         os.environ['TRANSLATION_HISTORY_ROLLING'] = '1'
         os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', False) else '0'
         os.environ['BATCH_SIZE'] = str(config('batch_size', 10))
-        os.environ['THREAD_SUBMISSION_DELAY'] = str(config('thread_submission_delay', 0.1))
+        _thread_submission_delay = str(config('thread_submission_delay', 0.0001))
+        os.environ['THREAD_SUBMISSION_DELAY'] = _thread_submission_delay
+        os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = _thread_submission_delay
         # AuthGPT streaming logs — always show streamed text deltas in the UI
         os.environ['LOG_STREAM_CHUNKS'] = '1'
         os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1'
@@ -5998,6 +6000,7 @@ CRITICAL EXTRACTION RULES:
                             # CRITICAL: Update environment variables immediately
                             os.environ['SEND_INTERVAL_SECONDS'] = str(api_delay_val)
                             os.environ['THREAD_SUBMISSION_DELAY'] = str(thread_delay_val)
+                            os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(thread_delay_val)
                             print(f"✅ Updated SEND_INTERVAL_SECONDS = {api_delay_val}s")
                             print(f"✅ Updated THREAD_SUBMISSION_DELAY = {thread_delay_val}s")
                             

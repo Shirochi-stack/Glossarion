@@ -5787,7 +5787,7 @@ class BatchTranslationProcessor:
                 print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         # APPLY INTERRUPTIBLE THREADING DELAY AFTER determining chapter number
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
         if thread_delay > 0:
             # Check if we need to wait (same logic as unified_api_client)
             if hasattr(self.client, '_thread_submission_lock') and hasattr(self.client, '_last_thread_submission_time'):
@@ -6762,7 +6762,7 @@ class BatchTranslationProcessor:
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit chunks with staggered delay to prevent simultaneous starts
-                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
                 future_to_chunk = {}
                 
                 for chunk_submit_idx, chunk_data in enumerate(chunks):
@@ -15651,9 +15651,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     # Pre-send submission spacing to align staggered logs with actual delay
     try:
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.1")))
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
     except Exception:
-        thread_delay = 0.1
+        thread_delay = 0.0001
     try:
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     except Exception:
@@ -22206,7 +22206,7 @@ def main(log_callback=None, stop_callback=None):
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
                 if total_chunks > 1:
-                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
                     if thread_delay > 0:
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
                         

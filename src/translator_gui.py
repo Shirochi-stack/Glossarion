@@ -17165,6 +17165,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Set API call delay from GUI (same as image mode + main pipeline)
             os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
             os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = self.thread_delay_entry.text().strip() or '0.0001'
+            os.environ['THREAD_SUBMISSION_DELAY'] = self.thread_delay_entry.text().strip() or '0.0001'
 
             # Determine parallelism from batch settings
             use_batch = getattr(self, 'batch_translation_var', True)
@@ -17838,6 +17839,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
             'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
+            'THREAD_SUBMISSION_DELAY': self.thread_delay_entry.text().strip() or '0.0001',
             'MAX_OUTPUT_TOKENS': str(current_max_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -19503,6 +19505,7 @@ Important rules:
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
                     'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
+                    'THREAD_SUBMISSION_DELAY': self.thread_delay_entry.text().strip() or '0.0001',
                     'CONTEXTUAL': self._glossary_contextual_env_value(),
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
