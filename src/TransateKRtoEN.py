@@ -22339,7 +22339,7 @@ def main(log_callback=None, stop_callback=None):
                     and finish_reason is None
                     and _sequential_hard_stop_active()
                 ):
-                    print(f"âŒ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                    print(f"❌ Translation stopped during Chapter {actual_num}; restoring previous progress state")
                     _restore_current_sequential_progress()
                     return
                 if finish_reason in ("length", "max_tokens"):
@@ -22561,7 +22561,7 @@ def main(log_callback=None, stop_callback=None):
                                     and finish_reason_retry is None
                                     and _sequential_hard_stop_active()
                                 ):
-                                    print(f"âŒ Translation stopped during Chapter {actual_num}; restoring previous progress state")
+                                    print(f"❌ Translation stopped during Chapter {actual_num}; restoring previous progress state")
                                     _restore_current_sequential_progress()
                                     return
                                 

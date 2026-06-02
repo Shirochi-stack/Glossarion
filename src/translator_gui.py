@@ -14804,7 +14804,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 self.selected_files = [file_path]
                 self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
-                self._maybe_select_sdlxliff_profile()
                 file_path = self.selected_files[0]
             
             # Auto-clear glossary if file doesn't match (works for both manual and auto-loaded)
@@ -14828,7 +14827,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.auto_loaded_glossary_for_file = None
         else:
             self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
-            self._maybe_select_sdlxliff_profile()
         
         # Record every selected raw input in the Library's raw-inputs
         # registry so the library dialog can find it later (even if the
@@ -22584,45 +22582,6 @@ Important rules:
             pass
         self.append_log("🗑️ Cleared file selection")
 
-
-    def _maybe_select_sdlxliff_profile(self):
-        """Auto-apply the SDLXLIFF-safe prompt unless the user chose a profile."""
-        try:
-            if not any(str(path).lower().endswith('.sdlxliff') for path in getattr(self, 'selected_files', []) or []):
-                return
-            profile_name = "SDLXLIFF Editing"
-            if profile_name not in getattr(self, 'prompt_profiles', {}):
-                return
-            if getattr(self, '_profile_user_selected_this_run', False):
-                if hasattr(self, 'append_log'):
-                    self.append_log("SDLXLIFF selected. Recommended prompt profile: SDLXLIFF Editing")
-                return
-            if getattr(self, 'profile_var', None) == profile_name:
-                return
-
-            self.profile_var = profile_name
-            self.config['active_profile'] = profile_name
-            if hasattr(self, 'profile_menu'):
-                previous_block = self.profile_menu.blockSignals(True)
-                try:
-                    self.profile_menu.setCurrentText(profile_name)
-                finally:
-                    self.profile_menu.blockSignals(previous_block)
-            if hasattr(self, 'prompt_text'):
-                prompt = self.prompt_profiles.get(profile_name, "")
-                self.prompt_text.setPlainText(prompt)
-                self._active_profile_for_autosave = profile_name
-                if not hasattr(self, '_original_profile_content'):
-                    self._original_profile_content = {}
-                self._original_profile_content[profile_name] = prompt
-            if hasattr(self, 'append_log'):
-                self.append_log("SDLXLIFF detected. Auto-selected SDLXLIFF Editing prompt profile.")
-        except Exception as exc:
-            try:
-                self.append_log(f"Could not auto-select SDLXLIFF profile: {exc}")
-            except Exception:
-                pass
-
     def _handle_file_selection(self, paths):
         """Common handler for file selection"""
         if not paths:
@@ -22693,7 +22652,6 @@ Important rules:
         # Store the list of selected files (using processed paths)
         self.selected_files = processed_paths
         self.current_file_index = 0
-        self._maybe_select_sdlxliff_profile()
 
         # Clear stale EPUB tracking — the EPUB branch re-sets it below if needed
         if hasattr(self, 'selected_epub_files'):
