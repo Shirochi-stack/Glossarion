@@ -3215,6 +3215,17 @@ class AsyncProcessingDialog:
             env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.get())
         else:
             env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')
+
+        thread_delay_widget = getattr(self.gui, 'thread_delay_entry', None)
+        if thread_delay_widget is not None and hasattr(thread_delay_widget, 'get'):
+            thread_delay_value = thread_delay_widget.get()
+        elif thread_delay_widget is not None and hasattr(thread_delay_widget, 'text'):
+            thread_delay_value = thread_delay_widget.text()
+        else:
+            thread_delay_value = self.gui.config.get('thread_submission_delay', '0.0001')
+        thread_delay_value = str(thread_delay_value).strip() or '0.0001'
+        env_vars['THREAD_SUBMISSION_DELAY_SECONDS'] = thread_delay_value
+        env_vars['THREAD_SUBMISSION_DELAY'] = thread_delay_value
             
         # Token limit resolution order:
         # 0) if token_limit_disabled -> unlimited (0)

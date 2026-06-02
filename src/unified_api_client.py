@@ -3703,7 +3703,10 @@ class UnifiedClient:
         Uses a 'next allowed send time' that advances atomically to prevent bursts.
         """
         try:
-            thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+            raw_delay = os.getenv("THREAD_SUBMISSION_DELAY_SECONDS")
+            if raw_delay in (None, ""):
+                raw_delay = os.getenv("THREAD_SUBMISSION_DELAY", "0.5")
+            thread_delay = float(raw_delay)
         except Exception:
             thread_delay = 0.5
         
@@ -6451,8 +6454,7 @@ class UnifiedClient:
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
             self._log_pre_stagger(messages, watchdog_context)
-            if not _vision_parallel_request:
-                self._apply_thread_submission_delay()
+            self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
             # Capture chapter/chunk context for watchdog tooltip
             chapter = None

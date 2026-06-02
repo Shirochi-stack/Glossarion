@@ -1624,7 +1624,8 @@ class ImageTranslator:
             # Check if advanced watermark removal is enabled AND cv2 is available
             if os.getenv("ADVANCED_WATERMARK_REMOVAL", "0") == "1":
                 if CV2_AVAILABLE:
-                    print(f"   🔬 Using advanced watermark removal...")
+                    if not getattr(self, "_suppress_image_detail_logs", False):
+                        print(f"   🔬 Using advanced watermark removal...")
                     
                     # Convert to numpy array for advanced processing
                     img_array = np.array(img)
@@ -1632,7 +1633,8 @@ class ImageTranslator:
                     # These will safely return defaults if cv2 is not available
                     has_pattern, pattern_mask = self._detect_watermark_pattern(img_array)
                     if has_pattern:
-                        print(f"   🔍 Detected watermark pattern in image")
+                        if not getattr(self, "_suppress_image_detail_logs", False):
+                            print(f"   🔍 Detected watermark pattern in image")
                         img_array = self._remove_periodic_watermark(img_array, pattern_mask)
                     
                     img_array = self._adaptive_histogram_equalization(img_array)
@@ -1642,7 +1644,8 @@ class ImageTranslator:
                     # Convert back to PIL Image
                     img = Image.fromarray(img_array)
                 else:
-                    print(f"   ⚠️ Advanced watermark removal requested but OpenCV not available")
+                    if not getattr(self, "_suppress_image_detail_logs", False):
+                        print(f"   ⚠️ Advanced watermark removal requested but OpenCV not available")
             
             # Apply basic PIL enhancements (always works)
             enhancer = ImageEnhance.Contrast(img)
@@ -1666,7 +1669,8 @@ class ImageTranslator:
                 cleaned_path = os.path.join(cleaned_dir, f"{name}_cleaned{ext}")
                 
                 img.save(cleaned_path, optimize=True)
-                print(f"   💾 Saved cleaned image: {cleaned_path}")
+                if not getattr(self, "_suppress_image_detail_logs", False):
+                    print(f"   💾 Saved cleaned image: {cleaned_path}")
                 
                 return cleaned_path  # Return path to cleaned image
             else:
@@ -1675,7 +1679,10 @@ class ImageTranslator:
                 _, ext = os.path.splitext(image_path)
                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                     img.save(tmp.name, optimize=False)
-                    if not getattr(self, "_suppress_image_detail_logs", False):
+                    if (
+                        os.getenv("IMAGE_DETAIL_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
+                        and not getattr(self, "_suppress_image_detail_logs", False)
+                    ):
                         print(f"   📝 Created temp cleaned image")
                     return tmp.name  # Return temp path
             
@@ -1877,7 +1884,8 @@ class ImageTranslator:
                 self._mark_image_call_cancelled()
                 return None
 
-            print(f"   🔍 translate_image called for: {image_path}")
+            if not getattr(self, "_suppress_image_detail_logs", False):
+                print(f"   🔍 translate_image called for: {image_path}")
 
             self._preserve_current_image = False
             
@@ -1895,7 +1903,8 @@ class ImageTranslator:
                 compressed_path = self.compress_image(image_path)
                 # If compression produced a different file, use it
                 if compressed_path != image_path:
-                    print(f"   🗜️ Using compressed image for translation")
+                    if not getattr(self, "_suppress_image_detail_logs", False):
+                        print(f"   🗜️ Using compressed image for translation")
 
             if _stop_new_vision_work_requested(check_stop_fn):
                 self._mark_image_call_cancelled()
@@ -1912,7 +1921,8 @@ class ImageTranslator:
             with Image.open(processed_path) as img:
                 width, height = img.size
                 aspect_ratio = width / height if height > 0 else 1
-                print(f"   📐 Image dimensions: {width}x{height}, aspect ratio: {aspect_ratio:.2f}")
+                if not getattr(self, "_suppress_image_detail_logs", False):
+                    print(f"   📐 Image dimensions: {width}x{height}, aspect ratio: {aspect_ratio:.2f}")
                 
                 # Convert to RGB if necessary
                 if img.mode not in ('RGB', 'RGBA'):
@@ -1925,7 +1935,8 @@ class ImageTranslator:
                 if height > self.chunk_height:
                     # Check if single API mode is enabled
                     if self._use_ocr_first_pipeline():
-                        print("   🔎 Vision OCR-first mode enabled; OCRing tall-image chunks, then translating combined OCR once")
+                        if not getattr(self, "_suppress_image_detail_logs", False):
+                            print("   🔎 Vision OCR-first mode enabled; OCRing tall-image chunks, then translating combined OCR once")
                         translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
                     elif os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
                         translated_text = self._process_image_chunks_single_api(img, width, height, context, check_stop_fn)
@@ -3387,22 +3398,33 @@ class ImageTranslator:
         return os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
 
     def _vision_ocr_batch_size(self) -> int:
-        def _batch_translation_size() -> int:
-            batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
-            if not batch_enabled:
-                return 1
+        def _main_batch_size() -> int:
             try:
                 return max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
             except Exception:
                 return 1
 
+        def _instance_effective_size():
+            try:
+                value = int(getattr(self, "_vision_ocr_effective_batch_size", 0) or 0)
+            except Exception:
+                value = 0
+            return max(1, value) if value > 0 else None
+
         try:
             requested = int(str(os.getenv("VISION_OCR_BATCH_SIZE", "-1")).strip() or "-1")
         except Exception:
-            return _batch_translation_size()
-        if requested <= 0:
-            return _batch_translation_size()
-        return max(1, requested)
+            requested = -1
+
+        if getattr(threading.current_thread(), "_vision_ocr_parent_scheduler_active", False):
+            return 1
+
+        configured_size = max(1, requested) if requested > 0 else _main_batch_size()
+        effective_size = _instance_effective_size()
+        if effective_size is not None:
+            return max(1, min(effective_size, configured_size))
+
+        return configured_size
 
     def _image_chunk_overlap_pixels(self) -> int:
         try:
