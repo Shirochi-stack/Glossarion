@@ -162,10 +162,19 @@ def needs_image_archive_group_rebuild(path: str) -> bool:
                 pass
             try:
                 nav_text = zf.read("OEBPS/nav.xhtml").decode("utf-8", errors="ignore")
+                if re.search(r"<h[1-6]\b", nav_text, flags=re.IGNORECASE):
+                    return True
                 if re.search(r"\b\d{1,5}\s*[-–—]\s*\d{1,5}\b", nav_text):
                     return True
                 if ">Page " in nav_text or "<text>Page " in nav_text:
                     return True
+            except Exception:
+                pass
+            try:
+                for chapter_name in chapter_names[:10]:
+                    chapter_text = zf.read(chapter_name).decode("utf-8", errors="ignore")
+                    if re.search(r"<h[1-6]\b|<header\b", chapter_text, flags=re.IGNORECASE):
+                        return True
             except Exception:
                 pass
             return any(
@@ -781,8 +790,7 @@ def _nav_xhtml(book_title: str, chapter_items: list[tuple[str, str, str]]) -> by
         '<!DOCTYPE html>\n'
         '<html xmlns="http://www.w3.org/1999/xhtml" lang="und" xml:lang="und">\n'
         f"<head><title>{title_xml}</title></head>\n"
-        "<body><nav epub:type=\"toc\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><h1>"
-        f"{title_xml}</h1><ol>"
+        "<body><nav epub:type=\"toc\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><ol>"
         + "".join(links)
         + "</ol></nav></body>\n"
         "</html>\n"
