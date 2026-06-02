@@ -17832,7 +17832,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return str(value if value is not None else '')
             return str(getattr(self, default_attr, '') or '')
 
-        return {
+        env_vars = {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
@@ -18216,8 +18216,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_MAX_OUTPUT_TOKENS': str(current_max_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
             'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', self.trans_temp.text())),
        }
+
+        # When VISION_OCR_BATCH_SIZE is explicitly set (> 0) in vision mode,
+        # override BATCH_SIZE to 1 so chapters process sequentially.
+        # This prevents the multiplication bug where chapter-level batch workers
+        # and per-chapter vision OCR workers both create parallel API requests
+        # (e.g. BATCH_SIZE=3 × VISION_OCR_BATCH_SIZE=3 = 9 requests instead of 3).
+        # The vision OCR batch size becomes the sole parallelism controller.
+        try:
+            vision_batch_raw = int(str(env_vars.get('VISION_OCR_BATCH_SIZE', '-1')).strip() or '-1')
+        except (ValueError, TypeError):
+            vision_batch_raw = -1
+        if vision_batch_raw > 0 and env_vars.get('OUTPUT_MODE', '').strip().lower() == 'vision':
+            env_vars['BATCH_SIZE'] = '1'
+
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
-        
+        return env_vars
+
     def run_glossary_extraction_thread(self):
         """Start glossary extraction in a background worker (ThreadPoolExecutor)"""
         if ((hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()) or
