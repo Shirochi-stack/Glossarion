@@ -11,6 +11,7 @@ import os
 import posixpath
 import re
 import time
+from typing import Callable
 import zipfile
 
 
@@ -47,6 +48,15 @@ class ImageArchiveEpubResult:
     nested_archive_count: int
     ignored_entry_count: int = 0
     chapter_count: int = 0
+
+
+class ImageArchiveConversionCancelled(Exception):
+    """Raised when the caller requests cancellation during archive conversion."""
+
+
+def _check_cancelled(should_stop: Callable[[], bool] | None = None) -> None:
+    if should_stop and should_stop():
+        raise ImageArchiveConversionCancelled("Image ZIP conversion cancelled.")
 
 
 def _natural_sort_key(value: str):
@@ -139,7 +149,9 @@ def _collect_from_zip(
     unsupported: list[str],
     nested_count: list[int],
     member_chain: tuple[str, ...] = (),
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[ArchiveImage]:
+    _check_cancelled(should_stop)
     images: list[ArchiveImage] = []
     infos = [
         info for info in zf.infolist()
@@ -148,6 +160,7 @@ def _collect_from_zip(
     infos.sort(key=lambda info: _natural_sort_key(info.filename))
 
     for info in infos:
+        _check_cancelled(should_stop)
         clean_name = _zip_name(info.filename)
         display_name = f"{prefix}/{clean_name}" if prefix else clean_name
         ext = os.path.splitext(clean_name)[1].lower()
@@ -168,8 +181,10 @@ def _collect_from_zip(
                 unsupported.append(display_name)
                 continue
             try:
+                _check_cancelled(should_stop)
                 nested_count[0] += 1
                 nested_bytes = zf.read(info)
+                _check_cancelled(should_stop)
                 with zipfile.ZipFile(io.BytesIO(nested_bytes), "r") as nested_zf:
                     images.extend(
                         _collect_from_zip(
@@ -180,8 +195,11 @@ def _collect_from_zip(
                             unsupported=unsupported,
                             nested_count=nested_count,
                             member_chain=(*member_chain, info.filename),
+                            should_stop=should_stop,
                         )
                     )
+            except ImageArchiveConversionCancelled:
+                raise
             except Exception:
                 unsupported.append(display_name)
             continue
@@ -191,7 +209,11 @@ def _collect_from_zip(
     return images
 
 
-def collect_image_archive_entries(path: str, max_depth: int = 4) -> tuple[list[ArchiveImage], tuple[str, ...], int]:
+def collect_image_archive_entries(
+    path: str,
+    max_depth: int = 4,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[list[ArchiveImage], tuple[str, ...], int]:
     """Collect image references from an archive, expanding nested ZIP/CBZ files.
 
     Direct image bytes are not loaded during this scan. Nested archive bytes
@@ -200,6 +222,7 @@ def collect_image_archive_entries(path: str, max_depth: int = 4) -> tuple[list[A
     unsupported: list[str] = []
     nested_count = [0]
     try:
+        _check_cancelled(should_stop)
         with zipfile.ZipFile(path, "r") as zf:
             images = _collect_from_zip(
                 zf,
@@ -208,6 +231,7 @@ def collect_image_archive_entries(path: str, max_depth: int = 4) -> tuple[list[A
                 max_depth=max_depth,
                 unsupported=unsupported,
                 nested_count=nested_count,
+                should_stop=should_stop,
             )
     except (OSError, zipfile.BadZipFile) as exc:
         return [], (str(exc),), 0
@@ -219,25 +243,38 @@ def _write_image_members(
     source_zf: zipfile.ZipFile,
     output_zf: zipfile.ZipFile,
     pending: list[tuple[tuple[str, ...], str]],
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
+    _check_cancelled(should_stop)
     nested_groups: dict[str, list[tuple[tuple[str, ...], str]]] = {}
 
     for chain, target_path in pending:
+        _check_cancelled(should_stop)
         if not chain:
             continue
         if len(chain) == 1:
-            output_zf.writestr(target_path, source_zf.read(chain[0]), compress_type=zipfile.ZIP_DEFLATED)
+            output_zf.writestr(target_path, source_zf.read(chain[0]), compress_type=zipfile.ZIP_STORED)
         else:
             nested_groups.setdefault(chain[0], []).append((chain[1:], target_path))
 
     for nested_name, group in nested_groups.items():
+        _check_cancelled(should_stop)
         nested_bytes = source_zf.read(nested_name)
+        _check_cancelled(should_stop)
         with zipfile.ZipFile(io.BytesIO(nested_bytes), "r") as nested_zf:
-            _write_image_members(nested_zf, output_zf, group)
+            _write_image_members(nested_zf, output_zf, group, should_stop=should_stop)
 
 
-def scan_image_archive(path: str, max_depth: int = 4) -> ImageArchiveScan:
-    images, unsupported, nested_count = collect_image_archive_entries(path, max_depth=max_depth)
+def scan_image_archive(
+    path: str,
+    max_depth: int = 4,
+    should_stop: Callable[[], bool] | None = None,
+) -> ImageArchiveScan:
+    images, unsupported, nested_count = collect_image_archive_entries(
+        path,
+        max_depth=max_depth,
+        should_stop=should_stop,
+    )
     return ImageArchiveScan(
         is_image_archive=bool(images) and not unsupported,
         image_count=len(images),
@@ -381,12 +418,18 @@ def convert_image_archive_to_epub(
     title: str | None = None,
     max_depth: int = 4,
     allow_unsupported: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ImageArchiveEpubResult:
     """Convert an image-only ZIP/CBZ archive into a valid EPUB package."""
     if not archive_path or not os.path.isfile(archive_path):
         raise FileNotFoundError(archive_path)
 
-    images, unsupported, nested_count = collect_image_archive_entries(archive_path, max_depth=max_depth)
+    _check_cancelled(should_stop)
+    images, unsupported, nested_count = collect_image_archive_entries(
+        archive_path,
+        max_depth=max_depth,
+        should_stop=should_stop,
+    )
     if not images:
         raise ValueError("Archive does not contain any supported images.")
     if unsupported and not allow_unsupported:
@@ -406,11 +449,13 @@ def convert_image_archive_to_epub(
     image_idx = 0
 
     for chapter_idx, (group_title, group_images) in enumerate(groups, 1):
+        _check_cancelled(should_stop)
         chapter_href = f"chapters/chapter_{chapter_idx:04d}.xhtml"
         chapter_items.append((f"chapter_{chapter_idx:04d}", chapter_href))
         chapter_image_hrefs: list[str] = []
 
         for image_in_chapter_idx, image in enumerate(group_images, 1):
+            _check_cancelled(should_stop)
             image_idx += 1
             ext = image.extension if image.extension in IMAGE_EXTS else ".jpg"
             stem = _safe_internal_stem(image.source_name, f"image_{image_in_chapter_idx:04d}")
@@ -428,39 +473,50 @@ def convert_image_archive_to_epub(
         )
 
     tmp_path = f"{epub_path}.tmp"
-    with zipfile.ZipFile(tmp_path, "w") as zf:
-        zf.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-        zf.writestr(
-            "META-INF/container.xml",
-            (
-                '<?xml version="1.0" encoding="UTF-8"?>\n'
-                '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
-                '  <rootfiles><rootfile full-path="OEBPS/content.opf" '
-                'media-type="application/oebps-package+xml"/></rootfiles>\n'
-                "</container>\n"
-            ),
-            compress_type=zipfile.ZIP_DEFLATED,
-        )
-        zf.writestr(
-            "OEBPS/styles.css",
-            (
-                "html, body { margin: 0; padding: 0; }\n"
-                "body { background: #fff; }\n"
-                ".image-page { margin: 0; padding: 0; text-align: center; page-break-after: always; }\n"
-                ".image-page img { max-width: 100%; height: auto; display: block; margin: 0 auto; }\n"
-            ),
-            compress_type=zipfile.ZIP_DEFLATED,
-        )
-        zf.writestr("OEBPS/content.opf", _content_opf(book_title, image_items, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
-        zf.writestr("OEBPS/nav.xhtml", _nav_xhtml(book_title, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
-        zf.writestr("OEBPS/toc.ncx", _toc_ncx(book_title, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
+    try:
+        with zipfile.ZipFile(tmp_path, "w") as zf:
+            _check_cancelled(should_stop)
+            zf.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            zf.writestr(
+                "META-INF/container.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+                    '  <rootfiles><rootfile full-path="OEBPS/content.opf" '
+                    'media-type="application/oebps-package+xml"/></rootfiles>\n'
+                    "</container>\n"
+                ),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+            zf.writestr(
+                "OEBPS/styles.css",
+                (
+                    "html, body { margin: 0; padding: 0; }\n"
+                    "body { background: #fff; }\n"
+                    ".image-page { margin: 0; padding: 0; text-align: center; page-break-after: always; }\n"
+                    ".image-page img { max-width: 100%; height: auto; display: block; margin: 0 auto; }\n"
+                ),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+            zf.writestr("OEBPS/content.opf", _content_opf(book_title, image_items, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/nav.xhtml", _nav_xhtml(book_title, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/toc.ncx", _toc_ncx(book_title, chapter_items), compress_type=zipfile.ZIP_DEFLATED)
 
-        with zipfile.ZipFile(archive_path, "r") as source_zf:
-            _write_image_members(source_zf, zf, image_payloads)
-        for name, data in chapter_payloads:
-            zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            with zipfile.ZipFile(archive_path, "r") as source_zf:
+                _write_image_members(source_zf, zf, image_payloads, should_stop=should_stop)
+            for name, data in chapter_payloads:
+                _check_cancelled(should_stop)
+                zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
 
-    os.replace(tmp_path, epub_path)
+        _check_cancelled(should_stop)
+        os.replace(tmp_path, epub_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
     return ImageArchiveEpubResult(
         epub_path=epub_path,
         image_count=len(images),

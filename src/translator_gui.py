@@ -1258,6 +1258,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     refresh_preview_signal = Signal()
     # Qt Signal to request Progress Manager open on main thread
     open_progress_manager_signal = Signal()
+    # Qt Signal for refreshing the visible input path after worker-side file resolution
+    input_files_updated_signal = Signal(list)
     _CUSTOM_PREFIX_ENDPOINT_TYPES = (
         "/chat/completions",
         "/images/generations",
@@ -1534,6 +1536,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.refresh_preview_signal.connect(self._refresh_image_preview_on_main_thread)
         # Progress Manager open request
         self.open_progress_manager_signal.connect(self._open_progress_manager_on_main_thread)
+        # Input path refresh request
+        self.input_files_updated_signal.connect(self._apply_selected_files_to_input_field)
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -14843,6 +14847,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.stop_requested = False
         self._glossary_stop_was_requested = False  # Reset glossary stop flag from previous run
         self.graceful_stop_active = False  # Reset graceful stop state
+        self._zip_inputs_resolved_for_current_run = False
         os.environ.pop('TRANSLATION_CANCELLED', None)  # Clear hard-stop state from previous run
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
@@ -14983,6 +14988,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("❌ Failed to load modules")
                         return
                     self.append_log("✅ Modules loaded")
+
+                if any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or []):
+                    self.append_log("📦 Preparing ZIP input(s) in translation worker...")
+                    self._resolve_zip_inputs_for_translation()
+                    if self.stop_requested:
+                        return
                 
                 # Check for large EPUBs and set optimization parameters
                 epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
@@ -15495,6 +15506,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"ℹ️ No glossary loaded")
 
             # ========== NEW: APPLY OPF-BASED SORTING ==========
+            if (
+                any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or [])
+                and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
+            ):
+                self.append_log("📦 Preparing ZIP input(s) before file processing...")
+                self._resolve_zip_inputs_for_translation()
+                if self.stop_requested:
+                    return False
+
             # Sort files based on OPF order if available
             original_file_count = len(self.selected_files)
             self.selected_files = self._get_opf_file_order(self.selected_files)
@@ -15601,6 +15621,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     progress_percent = ((i + 1) / total_files) * 100
                     self.append_log(f"📊 Overall progress: {progress_percent:.1f}%")
                     self.append_log(f"{'='*60}")
+
+                if (
+                    str(file_path).lower().endswith('.zip')
+                    and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
+                ):
+                    old_file_path = file_path
+                    file_path = self._convert_zip_input_to_epub_if_needed(file_path)
+                    self.selected_files[i] = file_path
+                    if file_path != old_file_path:
+                        try:
+                            self.input_files_updated_signal.emit(list(self.selected_files))
+                        except Exception:
+                            pass
                 
                 if not os.path.exists(file_path):
                     self.append_log(f"❌ File not found: {file_path}")
@@ -20506,6 +20539,9 @@ Important rules:
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.text() if hasattr(self, 'entry_epub') else None
+        self.stop_requested = True
+        if getattr(self, '_zip_conversion_active', False):
+            self.append_log("⏹️ Stop requested — cancelling ZIP preparation...")
         
         # Check if graceful stop is enabled
         graceful_stop = getattr(self, 'graceful_stop_var', False)
@@ -20826,9 +20862,66 @@ Important rules:
     def preserve_file_path(self, file_path):
        """Helper to ensure file path stays in the entry field"""
        if hasattr(self, 'entry_epub') and file_path:
+           try:
+               selected = list(getattr(self, 'selected_files', []) or [])
+               if len(selected) == 1 and selected[0] != file_path:
+                   file_path = selected[0]
+               elif len(selected) > 1 and file_path not in selected:
+                   return
+           except Exception:
+               pass
            current = self.entry_epub.text()
            if not current or current != file_path:
                self.entry_epub.setText(file_path)
+
+    @Slot(list)
+    def _apply_selected_files_to_input_field(self, paths):
+       """Refresh the visible input field after worker-side path changes."""
+       try:
+           files = [str(p) for p in (paths or []) if p]
+           if not files or not hasattr(self, 'entry_epub'):
+               return
+
+           self.selected_files = files
+           self.file_path = files[0]
+
+           if len(files) == 1:
+               self.entry_epub.setText(files[0])
+           else:
+               image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+               images = [p for p in files if os.path.splitext(p)[1].lower() in image_extensions]
+               epubs = [p for p in files if p.lower().endswith('.epub')]
+               zips = [p for p in files if p.lower().endswith('.zip')]
+               pdfs = [p for p in files if p.lower().endswith('.pdf')]
+               txts = [p for p in files if p.lower().endswith('.txt')]
+               jsons = [p for p in files if p.lower().endswith('.json')]
+               csvs = [p for p in files if p.lower().endswith('.csv')]
+               sdlxliffs = [p for p in files if p.lower().endswith('.sdlxliff')]
+
+               summary_parts = []
+               if epubs:
+                   summary_parts.append(f"{len(epubs)} EPUB")
+               if zips:
+                   summary_parts.append(f"{len(zips)} ZIP")
+               if pdfs:
+                   summary_parts.append(f"{len(pdfs)} PDF")
+               if txts:
+                   summary_parts.append(f"{len(txts)} TXT")
+               if jsons:
+                   summary_parts.append(f"{len(jsons)} JSON")
+               if csvs:
+                   summary_parts.append(f"{len(csvs)} CSV")
+               if sdlxliffs:
+                   summary_parts.append(f"{len(sdlxliffs)} SDLXLIFF")
+               if images:
+                   summary_parts.append(f"{len(images)} images")
+
+               summary = ', '.join(summary_parts) if summary_parts else 'mixed files'
+               self.entry_epub.setText(f"{len(files)} files selected ({summary})")
+
+           self._update_entry_epub_tooltip()
+       except Exception:
+           pass
     
     def _trigger_qa_scan_on_main_thread(self):
         """Handler called on main thread to trigger QA scan"""
@@ -22582,6 +22675,161 @@ Important rules:
             pass
         self.append_log("🗑️ Cleared file selection")
 
+    def _convert_zip_input_to_epub_if_needed(self, path):
+        """Resolve a selected .zip input to an EPUB path in a worker-safe way."""
+        if not path or not str(path).lower().endswith('.zip'):
+            return path
+
+        epub_path = os.path.splitext(path)[0] + '.epub'
+        should_stop = lambda: bool(getattr(self, 'stop_requested', False))
+        try:
+            import shutil
+            from image_archive_epub import (
+                convert_image_archive_to_epub,
+                ImageArchiveConversionCancelled,
+                is_epub_zip,
+                needs_image_archive_group_rebuild,
+                scan_image_archive,
+            )
+
+            self._zip_conversion_active = True
+            if is_epub_zip(path):
+                if should_stop():
+                    raise ImageArchiveConversionCancelled()
+                needs_copy = (
+                    not os.path.exists(epub_path)
+                    or not is_epub_zip(epub_path)
+                    or os.path.getmtime(epub_path) < os.path.getmtime(path)
+                )
+                if needs_copy:
+                    self.append_log(f"📦 Preparing EPUB ZIP in background: {os.path.basename(path)}")
+                    if should_stop():
+                        raise ImageArchiveConversionCancelled()
+                    shutil.copy2(path, epub_path)
+                    self.append_log(
+                        f"📦 Converted EPUB ZIP {os.path.basename(path)} → {os.path.basename(epub_path)}"
+                    )
+                else:
+                    self.append_log(f"✅ Using existing {os.path.basename(epub_path)}")
+                return epub_path
+
+            self.append_log(f"📦 Inspecting ZIP input in background: {os.path.basename(path)}")
+            scan = scan_image_archive(path, should_stop=should_stop)
+            nested_image_bundle = bool(scan.image_count and scan.nested_archive_count)
+            if scan.is_image_archive or nested_image_bundle:
+                needs_rebuild = (
+                    not os.path.exists(epub_path)
+                    or not is_epub_zip(epub_path)
+                    or needs_image_archive_group_rebuild(epub_path)
+                    or os.path.getmtime(epub_path) < os.path.getmtime(path)
+                )
+                if needs_rebuild:
+                    self.append_log(f"📦 Converting image ZIP in background: {os.path.basename(path)}")
+                    result = convert_image_archive_to_epub(
+                        path,
+                        epub_path,
+                        allow_unsupported=nested_image_bundle,
+                        should_stop=should_stop,
+                    )
+                    nested_note = (
+                        f", {result.nested_archive_count} nested archive(s)"
+                        if result.nested_archive_count else ""
+                    )
+                    ignored_note = (
+                        f", ignored {result.ignored_entry_count} non-image sidecar(s)"
+                        if result.ignored_entry_count else ""
+                    )
+                    self.append_log(
+                        f"📦 Converted image ZIP {os.path.basename(path)} → "
+                        f"{os.path.basename(result.epub_path)} "
+                        f"({result.image_count} image(s), "
+                        f"{result.chapter_count} grouped chapter(s){nested_note}{ignored_note})"
+                    )
+                else:
+                    self.append_log(f"✅ Using existing image EPUB {os.path.basename(epub_path)}")
+                return epub_path
+
+            self.append_log(
+                f"⚠️ ZIP is not an EPUB or image-only archive: {os.path.basename(path)}"
+            )
+        except Exception as e:
+            cancel_cls = locals().get('ImageArchiveConversionCancelled')
+            if cancel_cls is not None and isinstance(e, cancel_cls):
+                self.append_log(f"⏹️ ZIP conversion cancelled: {os.path.basename(path)}")
+            else:
+                self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
+        finally:
+            self._zip_conversion_active = False
+
+        return path
+
+    def _resolve_zip_inputs_for_translation(self):
+        """Convert selected ZIP inputs to EPUBs before glossary/translation work."""
+        files = list(getattr(self, 'selected_files', []) or [])
+        if not files:
+            self._zip_inputs_resolved_for_current_run = True
+            return files
+
+        resolved = []
+        changed = False
+        for path in files:
+            if getattr(self, 'stop_requested', False):
+                resolved.append(path)
+                continue
+
+            new_path = self._convert_zip_input_to_epub_if_needed(path)
+            resolved.append(new_path)
+            changed = changed or (new_path != path)
+
+        if changed:
+            old_files = files
+            self.selected_files = resolved
+            self.file_path = resolved[0] if resolved else None
+
+            try:
+                manual_map = getattr(self, 'manual_glossary_map', None)
+                if isinstance(manual_map, dict) and manual_map:
+                    updated_map = dict(manual_map)
+                    for old_path, new_path in zip(old_files, resolved):
+                        if old_path == new_path:
+                            continue
+                        old_keys = {
+                            old_path,
+                            os.path.normpath(old_path),
+                            os.path.normpath(os.path.abspath(old_path)),
+                        }
+                        glossary_path = next(
+                            (updated_map[key] for key in old_keys if key in updated_map and updated_map[key]),
+                            None,
+                        )
+                        if glossary_path:
+                            updated_map[new_path] = glossary_path
+                            updated_map[os.path.normpath(os.path.abspath(new_path))] = glossary_path
+                    self.manual_glossary_map = updated_map
+                    self.config['manual_glossary_map'] = updated_map
+            except Exception:
+                pass
+
+            try:
+                self.config['last_input_files'] = resolved
+                epub_files = [p for p in resolved if str(p).lower().endswith('.epub')]
+                if epub_files:
+                    self.selected_epub_path = epub_files[0]
+                    self.selected_epub_files = epub_files
+                    self.config['last_epub_path'] = epub_files[0]
+                    os.environ['EPUB_PATH'] = epub_files[0]
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+
+            try:
+                self.input_files_updated_signal.emit(resolved)
+            except Exception:
+                pass
+
+        self._zip_inputs_resolved_for_current_run = True
+        return resolved
+
     def _handle_file_selection(self, paths):
         """Common handler for file selection"""
         if not paths:
@@ -22603,76 +22851,13 @@ Important rules:
                 # Direct PDF processing
                 processed_paths.append(path)
             elif lower.endswith('.zip'):
-                # Convert .zip to .epub for backwards compatibility. Plain
-                # image ZIPs/CBZ-style archives need a real EPUB wrapper; a
-                # blind copy produces an invalid EPUB that only contains images.
-                epub_path = path[:-4] + '.epub'  # Replace .zip with .epub
-                try:
-                    import shutil
-                    from image_archive_epub import (
-                        convert_image_archive_to_epub,
-                        is_epub_zip,
-                        needs_image_archive_group_rebuild,
-                        scan_image_archive,
-                    )
-
-                    scan = scan_image_archive(path)
-                    nested_image_bundle = bool(scan.image_count and scan.nested_archive_count)
-                    if scan.is_image_archive or nested_image_bundle:
-                        needs_rebuild = (
-                            not os.path.exists(epub_path)
-                            or not is_epub_zip(epub_path)
-                            or needs_image_archive_group_rebuild(epub_path)
-                            or os.path.getmtime(epub_path) < os.path.getmtime(path)
-                        )
-                        if needs_rebuild:
-                            result = convert_image_archive_to_epub(
-                                path,
-                                epub_path,
-                                allow_unsupported=nested_image_bundle,
-                            )
-                            nested_note = (
-                                f", {result.nested_archive_count} nested archive(s)"
-                                if result.nested_archive_count else ""
-                            )
-                            ignored_note = (
-                                f", ignored {result.ignored_entry_count} non-image sidecar(s)"
-                                if result.ignored_entry_count else ""
-                            )
-                            self.append_log(
-                                f"📦 Converted image ZIP {os.path.basename(path)} → "
-                                f"{os.path.basename(result.epub_path)} "
-                                f"({result.image_count} image(s), "
-                                f"{result.chapter_count} grouped chapter(s){nested_note}{ignored_note})"
-                            )
-                        else:
-                            self.append_log(f"✅ Using existing image EPUB {os.path.basename(epub_path)}")
-                        processed_paths.append(epub_path)
-                        continue
-
-                    if is_epub_zip(path):
-                        needs_copy = (
-                            not os.path.exists(epub_path)
-                            or not is_epub_zip(epub_path)
-                            or os.path.getmtime(epub_path) < os.path.getmtime(path)
-                        )
-                        if needs_copy:
-                            shutil.copy2(path, epub_path)  # Copy instead of rename to preserve original
-                            self.append_log(
-                                f"📦 Converted EPUB ZIP {os.path.basename(path)} → {os.path.basename(epub_path)}"
-                            )
-                        else:
-                            self.append_log(f"✅ Using existing {os.path.basename(epub_path)}")
-                        processed_paths.append(epub_path)
-                        continue
-
-                    self.append_log(
-                        f"⚠️ ZIP is not an EPUB or image-only archive: {os.path.basename(path)}"
-                    )
-                    processed_paths.append(path)
-                except Exception as e:
-                    self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
-                    processed_paths.append(path)  # Use original if conversion fails
+                # Keep ZIP selection lightweight; image/archive inspection can
+                # be expensive and is resolved inside the translation worker.
+                processed_paths.append(path)
+                self.append_log(
+                    f"📦 ZIP selected; conversion will run in the background when translation starts: "
+                    f"{os.path.basename(path)}"
+                )
             elif lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
@@ -22759,6 +22944,7 @@ Important rules:
             # Group by type (count original types, not processed)
             images = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
             epubs = [p for p in processed_paths if p.lower().endswith('.epub')]
+            zips = [p for p in processed_paths if p.lower().endswith('.zip')]
             txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions and p not in self.pdf_conversions]
             jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
             pdfs = [p for p in processed_paths if p.lower().endswith('.pdf')]  # Count PDF files
@@ -22766,6 +22952,8 @@ Important rules:
             summary_parts = []
             if epubs:
                 summary_parts.append(f"{len(epubs)} EPUB")
+            if zips:
+                summary_parts.append(f"{len(zips)} ZIP")
             if pdfs:
                 summary_parts.append(f"{len(pdfs)} PDF")
             if txts:
