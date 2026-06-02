@@ -156,6 +156,13 @@ def _protect_inline_xml(segment_elem: etree._Element, segment_num: int) -> Tuple
     return "".join(parts).strip(), tag_map
 
 
+def is_placeholder_only_text(text: str) -> bool:
+    text = str(text or "").strip()
+    if not text or not PLACEHOLDER_RE.search(text):
+        return False
+    return not PLACEHOLDER_RE.sub("", text).strip()
+
+
 def parse_sdlxliff(path: str) -> etree._ElementTree:
     parser = etree.XMLParser(remove_blank_text=False, recover=False, huge_tree=True)
     return etree.parse(path, parser)
@@ -216,6 +223,7 @@ def _chapter_from_segment(segment: Dict[str, Any], source_path: str) -> Dict[str
         "image_count": 0,
         "is_chunk": False,
         "sdlxliff_segment": True,
+        "sdlxliff_placeholder_only": is_placeholder_only_text(body),
     }
 
 

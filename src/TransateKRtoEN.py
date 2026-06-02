@@ -63,6 +63,23 @@ import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 MULTIPASS_REFINEMENT_MODES = ("full", "failed", "partial", "partial.b", "partial.b2")
+SDLXLIFF_PLACEHOLDER_RE = re.compile(r"\[\[XLIFF_TAG_\d{6}_\d{4}\]\]")
+
+
+def _is_sdlxliff_placeholder_only_text(text):
+    text = str(text or "").strip()
+    if not text or not SDLXLIFF_PLACEHOLDER_RE.search(text):
+        return False
+    return not SDLXLIFF_PLACEHOLDER_RE.sub("", text).strip()
+
+
+def _is_sdlxliff_placeholder_only_chapter(chapter):
+    if not isinstance(chapter, dict) or not chapter.get("sdlxliff_segment"):
+        return False
+    return (
+        bool(chapter.get("sdlxliff_placeholder_only"))
+        or _is_sdlxliff_placeholder_only_text(chapter.get("body"))
+    )
 
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
@@ -14320,7 +14337,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         "reason": "already refined in this pass",
                     }
                 if normalized_output_path in refined_output_paths:
-                    return "skipped", f"âœ¨ Chapter {actual_num}: output already refined in this pass ({output_file})"
+                    return "skipped", f"✨ Chapter {actual_num}: output already refined in this pass ({output_file})"
                 refined_output_paths.add(normalized_output_path)
 
         with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -14535,7 +14552,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         )
                         for request in batch_requests:
                             if _force_stop_requested():
-                                return "skipped", f"â¹ï¸ Refinement stopped before applying Chapter {actual_num} partial batch"
+                                return "skipped", f"⏹️ Refinement stopped before applying Chapter {actual_num} partial batch"
                             _apply_partial_refinement_response(
                                 partial_document,
                                 request["target"],
@@ -17663,7 +17680,7 @@ def main(log_callback=None, stop_callback=None):
                 log_callback(f"❌ Error processing PDF file: {e}")
             return
     elif is_sdlxliff_file:
-        print("ðŸ“„ Processing SDLXLIFF file...")
+        print("📄 Processing SDLXLIFF file...")
         try:
             extraction_result = None
             use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
@@ -17705,14 +17722,14 @@ def main(log_callback=None, stop_callback=None):
                 "chapter_count": len(chapters),
             }
         except ImportError as e:
-            print(f"âŒ Error: SDLXLIFF processor not available: {e}")
+            print(f"❌ Error: SDLXLIFF processor not available: {e}")
             if log_callback:
-                log_callback(f"âŒ Error: SDLXLIFF processor not available: {e}")
+                log_callback(f"❌ Error: SDLXLIFF processor not available: {e}")
             return
         except Exception as e:
-            print(f"âŒ Error processing SDLXLIFF file: {e}")
+            print(f"❌ Error processing SDLXLIFF file: {e}")
             if log_callback:
-                log_callback(f"âŒ Error processing SDLXLIFF file: {e}")
+                log_callback(f"❌ Error processing SDLXLIFF file: {e}")
             return
     elif is_text_file:
         print("📄 Processing text file...")
@@ -19418,6 +19435,11 @@ def main(log_callback=None, stop_callback=None):
                 range_already_translated_chapters.append(range_display_value if range_display_value is not None else actual_num)
             chunks_per_chapter[idx] = 0
             continue
+
+        if _is_sdlxliff_placeholder_only_chapter(c):
+            chapters_to_process += 1
+            chunks_per_chapter[idx] = 0
+            continue
         
         chapters_to_process += 1
         
@@ -20392,6 +20414,16 @@ def main(log_callback=None, stop_callback=None):
                 terminology = "Section" if is_text_source else "Chapter"
                 config._batch_skipped_chapters.append((actual_num, terminology, skip_reason))
                 chapters_completed += 1
+                continue
+
+            if _is_sdlxliff_placeholder_only_chapter(c):
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(c.get("body") or "")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
+                print(f"⏭️ SDLXLIFF segment {actual_num}: placeholder-only; preserved without API request")
                 continue
             
             # Check for empty or image-only chapters
@@ -21423,6 +21455,16 @@ def main(log_callback=None, stop_callback=None):
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                 terminology = "Section" if is_text_source else "Chapter"
                 config._sequential_skipped_chapters.append((actual_num, terminology, skip_reason))
+                continue
+
+            if _is_sdlxliff_placeholder_only_chapter(c):
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(c.get("body") or "")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
+                print(f"⏭️ SDLXLIFF segment {actual_num}: placeholder-only; preserved without API request")
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
@@ -23497,23 +23539,23 @@ def main(log_callback=None, stop_callback=None):
             from sdlxliff_converter import convert_sdlxliff
             result = convert_sdlxliff(out)
             output_path = result.get("output_path")
-            print(f"âœ… SDLXLIFF round-trip complete: {output_path}")
+            print(f"✅ SDLXLIFF round-trip complete: {output_path}")
             print(
-                f"ðŸ“Š SDLXLIFF segments updated: {result.get('updated', 0)}, "
+                f"📊 SDLXLIFF segments updated: {result.get('updated', 0)}, "
                 f"skipped: {result.get('skipped', 0)}, missing: {result.get('missing', 0)}"
             )
             total_time = time.time() - translation_start_time
             hours = int(total_time // 3600)
             minutes = int((total_time % 3600) // 60)
             seconds = int(total_time % 60)
-            print(f"\nâ±ï¸ Total translation time: {hours}h {minutes}m {seconds}s")
-            print(f"ðŸ“Š Segments completed: {chapters_completed}")
+            print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
+            print(f"📊 Segments completed: {chapters_completed}")
             if log_callback:
-                log_callback(f"âœ… SDLXLIFF translation complete! Created {output_path}")
+                log_callback(f"✅ SDLXLIFF translation complete! Created {output_path}")
         except Exception as e:
-            print(f"âŒ Error creating translated SDLXLIFF: {e}")
+            print(f"❌ Error creating translated SDLXLIFF: {e}")
             if log_callback:
-                log_callback(f"âŒ Error creating translated SDLXLIFF: {e}")
+                log_callback(f"❌ Error creating translated SDLXLIFF: {e}")
         print("TRANSLATION_COMPLETE_SIGNAL")
         return
 
