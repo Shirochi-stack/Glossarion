@@ -5787,7 +5787,7 @@ class BatchTranslationProcessor:
                 print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         # APPLY INTERRUPTIBLE THREADING DELAY AFTER determining chapter number
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
         if thread_delay > 0:
             # Check if we need to wait (same logic as unified_api_client)
             if hasattr(self.client, '_thread_submission_lock') and hasattr(self.client, '_last_thread_submission_time'):
@@ -6762,7 +6762,7 @@ class BatchTranslationProcessor:
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit chunks with staggered delay to prevent simultaneous starts
-                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
+                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                 future_to_chunk = {}
                 
                 for chunk_submit_idx, chunk_data in enumerate(chunks):
@@ -9694,20 +9694,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             return combined_html, combined_translations
         return chapter_html, {}
 
-    previous_suppress_image_detail_logs = getattr(image_translator, "_suppress_image_detail_logs", False)
-    summarize_image_detail_logs = False
-    try:
-        detail_summary_threshold = int(os.getenv("IMAGE_DETAIL_LOG_SUMMARY_THRESHOLD", "5"))
-    except (TypeError, ValueError):
-        detail_summary_threshold = 5
-    if detail_summary_threshold >= 0 and len(images) > detail_summary_threshold:
-        summarize_image_detail_logs = True
-        image_translator._suppress_image_detail_logs = True
-        print(
-            f"   Image detail logs summarized for {len(images)} images "
-            "(watermark preprocessing and per-image internals hidden)"
-        )
-
     for idx, img_info in enumerate(images, 1):
         if check_stop_fn and check_stop_fn():
             print("❌ Image translation stopped by user")
@@ -9755,8 +9741,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             for path in possible_paths:
                 if os.path.exists(path):
                     img_path = path
-                    if not summarize_image_detail_logs:
-                        print(f"   ✅ Found image at: {path}")
+                    print(f"   ✅ Found image at: {path}")
                     break
             
             if not img_path:
@@ -9786,8 +9771,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 print(f"   📁 Files in images dir: {files[:5]}...")
             continue
         
-        if not summarize_image_detail_logs:
-            print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
+        print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
         
         context = ""
         if img_info.get('alt'):
@@ -9800,9 +9784,8 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         image_translator.current_image_index = idx
         translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
         
-        if not summarize_image_detail_logs:
-            print(f"\n🔍 DEBUG: Image {idx}/{len(images)}")
-            print(f"   Translation result: {'Success' if translation_result and '[Image Translation Error:' not in translation_result else 'Failed'}")
+        print(f"\n🔍 DEBUG: Image {idx}/{len(images)}")
+        print(f"   Translation result: {'Success' if translation_result and '[Image Translation Error:' not in translation_result else 'Failed'}")
         if translation_result and "[Image Translation Error:" in translation_result:
             print(f"   Error message: {translation_result}")
 
@@ -9811,8 +9794,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         )
         if vision_qa_issues:
             print(f"   ⚠️ Image translation marked chapter QA failed: {', '.join(vision_qa_issues)}")
-            if summarize_image_detail_logs:
-                image_translator._suppress_image_detail_logs = previous_suppress_image_detail_logs
             return str(soup), image_translations
         
         if translation_result:
@@ -9825,14 +9806,12 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             if img_tag:
                 hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
                 
-                if not summarize_image_detail_logs:
-                    print(f"   🔍 DEBUG: Integration Phase")
-                    print(f"   🏷️ Hide label mode: {hide_label}")
+                print(f"   🔍 DEBUG: Integration Phase")
+                print(f"   🏷️ Hide label mode: {hide_label}")
                 src_display = img_tag.get('src', '')
                 if src_display.startswith('data:image'):
                     src_display = src_display[:80] + '...'
-                if not summarize_image_detail_logs:
-                    print(f"   📍 Found img tag: {src_display}")
+                print(f"   📍 Found img tag: {src_display}")
                 
                 # Store the translation result in the dictionary FIRST
                 image_translations[img_path] = translation_result
@@ -9848,8 +9827,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                         # Clone the container to avoid issues
                         new_container = BeautifulSoup(str(full_container), 'html.parser').find('div')
                         img_tag.replace_with(new_container)
-                        if not summarize_image_detail_logs:
-                            print(f"   ✅ Replaced image with full translation container")
+                        print(f"   ✅ Replaced image with full translation container")
                     else:
                         # Fallback: manually build the structure
                         trans_div = trans_soup.find('div', class_='image-translation')
@@ -9873,8 +9851,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                                     new_trans_div.append(str(child))
                             
                             container.append(new_trans_div)
-                            if not summarize_image_detail_logs:
-                                print(f"   ✅ Built container with translation div")
+                            print(f"   ✅ Built container with translation div")
                         else:
                             print(f"   ⚠️ No translation div found in result")
                             continue
@@ -9902,8 +9879,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                     trans_p.string = translation_result
                     translation_div.append(trans_p)
                     container.append(translation_div)
-                    if not summarize_image_detail_logs:
-                        print(f"   ✅ Created plain text translation structure")
+                    print(f"   ✅ Created plain text translation structure")
                 
                 translated_count += 1
                 
@@ -9936,8 +9912,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
 </body>
 </html>""")
                 
-                if not summarize_image_detail_logs:
-                    print(f"   ✅ Saved translation to: {trans_filename}")
+                print(f"   ✅ Saved translation to: {trans_filename}")
             else:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
     
@@ -9965,16 +9940,11 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 print(f"   🧹 Cleaned up progress for {len(completed_images)} completed images")
         
         image_translator.save_translation_log(actual_num, image_translations)
-        if summarize_image_detail_logs:
-            image_translator._suppress_image_detail_logs = previous_suppress_image_detail_logs
         
         return str(soup), image_translations
     else:
         print(f"   ℹ️ No images were successfully translated")
         
-    if summarize_image_detail_logs:
-        image_translator._suppress_image_detail_logs = previous_suppress_image_detail_logs
-
     return chapter_html, {}
 
 
@@ -10367,31 +10337,19 @@ def _process_chapter_images_vision_ocr_combined(
                     img = img.convert('RGB')
 
                 if height > image_translator.chunk_height:
-                    current_thread = threading.current_thread()
-                    previous_parent_scheduler = getattr(current_thread, "_vision_ocr_parent_scheduler_active", False)
-                    if batch_enabled and batch_size > 1:
-                        current_thread._vision_ocr_parent_scheduler_active = True
-                    try:
-                        ocr_text = image_translator._process_image_chunks_ocr_first_combined(
-                            img,
-                            width,
-                            height,
-                            context,
-                            check_stop_fn,
-                            translate_after=False,
-                            image_basename=os.path.basename(img_path),
-                            image_idx=idx,
-                            chapter_num=actual_num,
-                            image_path=img_path,
-                        )
-                    finally:
-                        if previous_parent_scheduler:
-                            current_thread._vision_ocr_parent_scheduler_active = previous_parent_scheduler
-                        else:
-                            try:
-                                delattr(current_thread, "_vision_ocr_parent_scheduler_active")
-                            except Exception:
-                                pass
+                    # Tall single images already have their own internal OCR batching/chunk cache.
+                    ocr_text = image_translator._process_image_chunks_ocr_first_combined(
+                        img,
+                        width,
+                        height,
+                        context,
+                        check_stop_fn,
+                        translate_after=False,
+                        image_basename=os.path.basename(img_path),
+                        image_idx=idx,
+                        chapter_num=actual_num,
+                        image_path=img_path,
+                    )
                 else:
                     image_bytes = image_translator._image_to_bytes_with_compression(img)
                     ocr_text = image_translator._call_vision_ocr_api(
@@ -10896,19 +10854,6 @@ def ocr_chapter_images_for_vision_glossary(
     chapter_ocr_parts = []
     if log_start:
         print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in chapter {actual_num}")
-    previous_suppress_image_detail_logs = getattr(image_translator, "_suppress_image_detail_logs", False)
-    summarize_image_detail_logs = False
-    try:
-        detail_summary_threshold = int(os.getenv("IMAGE_DETAIL_LOG_SUMMARY_THRESHOLD", "5"))
-    except (TypeError, ValueError):
-        detail_summary_threshold = 5
-    if detail_summary_threshold >= 0 and len(images) > detail_summary_threshold:
-        summarize_image_detail_logs = True
-        image_translator._suppress_image_detail_logs = True
-        print(
-            f"   Vision glossary image detail logs summarized for {len(images)} images "
-            "(watermark preprocessing and temp-cleaned-image internals hidden)"
-        )
     image_translator.set_current_chapter(actual_num)
     image_translator.begin_vision_ocr_progress(
         actual_num,
@@ -11024,8 +10969,6 @@ def ocr_chapter_images_for_vision_glossary(
         )
     if not (check_stop_fn and check_stop_fn()):
         image_translator.finish_vision_ocr_progress_success()
-    if summarize_image_detail_logs:
-        image_translator._suppress_image_detail_logs = previous_suppress_image_detail_logs
     return chapter_ocr
 
 
@@ -11119,12 +11062,6 @@ def _chapter_image_translator_for_processing(parent, chapter, chapter_idx, actua
     if not parent:
         return None
     image_translator = _clone_image_translator_for_vision_ocr(parent) if _vision_ocr_mode_enabled() else parent
-    try:
-        effective_vision_batch_size = int((chapter or {}).get("_vision_ocr_effective_batch_size") or 0)
-    except Exception:
-        effective_vision_batch_size = 0
-    if effective_vision_batch_size > 0:
-        image_translator._vision_ocr_effective_batch_size = effective_vision_batch_size
     _set_image_translator_chapter_progress_context(
         image_translator,
         chapter,
@@ -12278,8 +12215,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 f"{chapter_batch_size} parallel chapter worker(s) per merge group"
             )
 
-        per_chapter_vision_workers = max(1, requested_workers // max(1, chapter_batch_size)) if batch_enabled else 1
-
         def _ocr_merge_chapter_job(job):
             order, chapter_idx, chapter, actual_num, body, image_count, text_for_glossary, progress_ref = job
             worker = _clone_image_translator_for_vision_ocr(image_translator)
@@ -12295,7 +12230,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             worker._suppress_vision_ocr_summary_log = True
             chapter_ocr = ""
             if image_count > 0:
-                worker._vision_ocr_effective_batch_size = max(1, min(image_count, per_chapter_vision_workers))
                 chapter_ocr = ocr_chapter_images_for_vision_glossary(
                     body,
                     worker,
@@ -12440,12 +12374,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         nonmerge_batch_size = max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
     except Exception:
         nonmerge_batch_size = 1
-    try:
-        nonmerge_vision_limit = int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())
-    except Exception:
-        nonmerge_vision_limit = 1
-    if not bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)()):
-        nonmerge_vision_limit = 1
 
     if nonmerge_batch_enabled and nonmerge_batch_size > 1:
         chapter_jobs = []
@@ -12476,10 +12404,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             chapter_jobs.append((len(chapter_jobs), idx, chapter, actual_num, body, has_images, text_for_glossary, progress_ref))
 
         if chapter_jobs and not stopped:
-            has_image_jobs = any(job[5] for job in chapter_jobs)
-            worker_limit = min(nonmerge_batch_size, nonmerge_vision_limit) if has_image_jobs else nonmerge_batch_size
-            workers = min(max(1, worker_limit), len(chapter_jobs))
-            per_chapter_vision_workers = max(1, nonmerge_vision_limit // max(1, workers))
+            workers = min(nonmerge_batch_size, len(chapter_jobs))
             print(f"📑 Vision glossary full batch enabled: {workers} parallel chapter glossary worker(s)")
 
             def _run_nonmerge_glossary_job(job):
@@ -12499,7 +12424,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 worker.current_chapter_num = actual_num
                 chapter_ocr = ""
                 if has_images:
-                    worker._vision_ocr_effective_batch_size = per_chapter_vision_workers
                     chapter_ocr = ocr_chapter_images_for_vision_glossary(
                         body,
                         worker,
@@ -15651,9 +15575,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     # Pre-send submission spacing to align staggered logs with actual delay
     try:
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.1")))
     except Exception:
-        thread_delay = 0.0001
+        thread_delay = 0.1
     try:
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     except Exception:
@@ -20846,135 +20770,19 @@ def main(log_callback=None, stop_callback=None):
         else:
             units_to_process = [[ch] for ch in chapters_to_translate]  # Wrap each chapter as single-item group
             is_merged_mode = False
-
-        def _chapter_batch_api_weight(chapter):
-            if not (image_translator and getattr(config, "ENABLE_IMAGE_TRANSLATION", False)):
-                return 1
-
-            cached = chapter.get("_batch_api_weight")
-            if cached is not None:
-                try:
-                    return max(1, int(cached))
-                except Exception:
-                    pass
-
-            try:
-                image_count = int(chapter.get("image_count") or 0)
-            except Exception:
-                image_count = 0
-            if image_count > 0:
-                chapter["has_images"] = True
-
-            if image_count <= 0:
-                body = ContentProcessor.image_processing_html(chapter) or chapter.get("body", "") or ""
-                if isinstance(body, str) and "<img" in body.lower():
-                    try:
-                        from bs4 import BeautifulSoup
-                        image_count = len(BeautifulSoup(body, "html.parser").find_all("img"))
-                    except Exception:
-                        image_count = len(re.findall(r"<img\b", body, flags=re.IGNORECASE))
-                    if image_count > 0:
-                        chapter["image_count"] = max(int(chapter.get("image_count") or 0), image_count)
-                        chapter["has_images"] = True
-
-            weight = max(1, image_count)
-            chapter["_batch_api_weight"] = weight
-            return weight
-
-        def _unit_batch_api_weight(unit):
-            return max(1, sum(_chapter_batch_api_weight(chapter) for _idx, chapter in unit))
-
-        def _unit_has_batch_images(unit):
-            for _idx, chapter in unit:
-                try:
-                    if _chapter_batch_api_weight(chapter) > 1:
-                        return True
-                    if chapter.get("has_images"):
-                        return True
-                    if int(chapter.get("image_count") or 0) > 0:
-                        return True
-                except Exception:
-                    continue
-            return False
-
-        def _vision_batch_api_limit():
-            if not (image_translator and getattr(config, "ENABLE_IMAGE_TRANSLATION", False)):
-                return max(1, int(config.BATCH_SIZE or 1))
-            try:
-                if not bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)()):
-                    return 1
-            except Exception:
-                return 1
-            try:
-                requested = int(str(os.getenv("VISION_OCR_BATCH_SIZE", "-1")).strip() or "-1")
-            except Exception:
-                requested = -1
-            if requested > 0:
-                return max(1, requested)
-            return max(1, int(config.BATCH_SIZE or 1))
-
-        def _assign_unit_vision_batch_limits(unit):
-            vision_limit = _vision_batch_api_limit()
-            for _idx, chapter in unit:
-                try:
-                    weight = _chapter_batch_api_weight(chapter)
-                    limit = max(1, min(vision_limit, weight))
-                    if weight > 1:
-                        chapter["_vision_ocr_effective_batch_size"] = limit
-                    else:
-                        chapter.pop("_vision_ocr_effective_batch_size", None)
-                except Exception:
-                    continue
-
-        image_weighted_batching = any(_unit_has_batch_images(unit) for unit in units_to_process)
-        if image_weighted_batching:
-            batch_api_weight_limit = _vision_batch_api_limit()
-            print(
-                f"Image-aware batching enabled: Vision API request budget {batch_api_weight_limit} "
-                "counts embedded images inside XHTML chapters"
-            )
-        else:
-            batch_api_weight_limit = max(1, int(config.BATCH_SIZE or 1))
-
-        def _weighted_unit_batches(units, max_weight):
-            batches = []
-            current = []
-            current_weight = 0
-            max_weight = max(1, int(max_weight or 1))
-            for unit in units:
-                weight = _unit_batch_api_weight(unit)
-                if current and current_weight + weight > max_weight:
-                    batches.append(current)
-                    current = []
-                    current_weight = 0
-                current.append(unit)
-                current_weight += weight
-                if current_weight >= max_weight:
-                    batches.append(current)
-                    current = []
-                    current_weight = 0
-            if current:
-                batches.append(current)
-            return batches
         
-        executor_workers = max(max(1, int(config.BATCH_SIZE or 1)), batch_api_weight_limit if image_weighted_batching else 1)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=executor_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
             if batching_mode == 'aggressive':
                 import threading
                 batch_submit_lock = threading.Lock()
                 active_futures = {}
-                active_unit_weight = 0
                 next_unit_idx = 0
                 
                 def submit_next_unit():
-                    nonlocal next_unit_idx, active_unit_weight
+                    nonlocal next_unit_idx
                     if next_unit_idx >= len(units_to_process):
                         return False
                     unit = units_to_process[next_unit_idx]
-                    unit_weight = _unit_batch_api_weight(unit)
-                    if active_futures and active_unit_weight + unit_weight > batch_api_weight_limit:
-                        return False
-                    _assign_unit_vision_batch_limits(unit)
                     if config.USE_ROLLING_SUMMARY:
                         batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
                         time.sleep(0.000001)
@@ -20982,14 +20790,13 @@ def main(log_callback=None, stop_callback=None):
                         fut = executor.submit(batch_processor.process_merged_group, unit, progress_manager)
                     else:
                         fut = executor.submit(batch_processor.process_single_chapter, unit[0])
-                    active_futures[fut] = (unit, unit_weight)
-                    active_unit_weight += unit_weight
+                    active_futures[fut] = unit
                     next_unit_idx += 1
                     return True
                 
                 # Prime the executor
                 with batch_submit_lock:
-                    while active_unit_weight < batch_api_weight_limit and submit_next_unit():
+                    while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                         pass
                 
                 graceful_stop_message_shown = False  # Track if we've shown the message
@@ -21001,7 +20808,7 @@ def main(log_callback=None, stop_callback=None):
                     # Ensure we have work submitted (but not during graceful stop)
                     if not active_futures:
                         with batch_submit_lock:
-                            while active_unit_weight < batch_api_weight_limit and submit_next_unit():
+                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                 pass
                         if not active_futures:
                             break  # No more work to do
@@ -21009,7 +20816,7 @@ def main(log_callback=None, stop_callback=None):
                         # Auto-refill: submit new work to maintain BATCH_SIZE parallel calls
                         # But DON'T submit new work if graceful stop is active
                         with batch_submit_lock:
-                            while active_unit_weight < batch_api_weight_limit and submit_next_unit():
+                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                 pass
                     
                     # Use wait() with FIRST_COMPLETED to properly handle dynamic future sets
@@ -21031,15 +20838,13 @@ def main(log_callback=None, stop_callback=None):
                                 # Process only completed futures, skip cancelled ones
                                 # Clear all remaining futures and exit both loops
                                 active_futures.clear()
-                                active_unit_weight = 0
                                 should_exit_outer_loop = True
                                 break
                             else:
                                 # print("❌ Translation stopped")  # Redundant with "Translation stopped by user" from exception
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return
-                        unit, unit_weight = active_futures.pop(future)
-                        active_unit_weight = max(0, active_unit_weight - unit_weight)
+                        unit = active_futures.pop(future)
                         completed_in_batch = 0
                         failed_in_batch = 0
                         batch_history_map = {}
@@ -21123,7 +20928,7 @@ def main(log_callback=None, stop_callback=None):
                         # Refill slots aggressively (but not if stop requested)
                         if not check_stop():
                             with batch_submit_lock:
-                                while active_unit_weight < batch_api_weight_limit and submit_next_unit():
+                                while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
                                     pass
                     
                     # Exit outer loop if graceful stop was triggered
@@ -21140,25 +20945,20 @@ def main(log_callback=None, stop_callback=None):
             
             else:
                 # direct or conservative: keep legacy batch grouping behaviour
-                if image_weighted_batching:
-                    batches_to_process = _weighted_unit_batches(units_to_process, batch_api_weight_limit)
-                    effective_batch_size = batch_api_weight_limit
-                else:
-                    effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
-                    batches_to_process = [
-                        units_to_process[batch_start:batch_start + effective_batch_size]
-                        for batch_start in range(0, len(units_to_process), effective_batch_size)
-                    ]
-
-                for batch_number, current_batch_units in enumerate(batches_to_process, 1):
+                for batch_start in range(0, len(units_to_process), batch_group_size if not is_merged_mode else config.BATCH_SIZE):
                     if check_stop():
                         print("❌ Translation stopped during parallel processing")
                         executor.shutdown(wait=False)
                         return
                     
+                    effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
+                    batch_end = min(batch_start + effective_batch_size, len(units_to_process))
+                    current_batch_units = units_to_process[batch_start:batch_end]
+                    
                     # Count total chapters in this batch
                     chapters_in_batch = sum(len(unit) for unit in current_batch_units)
                     
+                    batch_number = (batch_start // effective_batch_size) + 1
                     if is_merged_mode:
                         print(f"\n📦 Submitting batch {batch_number}: {len(current_batch_units)} merged groups ({chapters_in_batch} chapters)")
                     else:
@@ -21167,9 +20967,6 @@ def main(log_callback=None, stop_callback=None):
                     if config.USE_ROLLING_SUMMARY:
                         batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
                         time.sleep(0.000001)
-
-                    for unit in current_batch_units:
-                        _assign_unit_vision_batch_limits(unit)
 
                     if is_merged_mode:
                         future_to_unit = {
@@ -22206,7 +22003,7 @@ def main(log_callback=None, stop_callback=None):
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
                 if total_chunks > 1:
-                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")))
+                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                     if thread_delay > 0:
                         print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
                         

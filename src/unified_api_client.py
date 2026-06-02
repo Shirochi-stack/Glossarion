@@ -3703,12 +3703,9 @@ class UnifiedClient:
         Uses a 'next allowed send time' that advances atomically to prevent bursts.
         """
         try:
-            raw_delay = os.getenv("THREAD_SUBMISSION_DELAY_SECONDS")
-            if raw_delay in (None, ""):
-                raw_delay = os.getenv("THREAD_SUBMISSION_DELAY", "0.0001")
-            thread_delay = float(raw_delay)
+            thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
         except Exception:
-            thread_delay = 0.0001
+            thread_delay = 0.5
         
         if thread_delay <= 0:
             return
@@ -3721,16 +3718,6 @@ class UnifiedClient:
             # Initialize on first call
             if not hasattr(self, '_next_allowed_send_ts'):
                 self._next_allowed_send_ts = 0.0
-            try:
-                previous_thread_delay = getattr(self, '_thread_submission_delay_value', None)
-                if previous_thread_delay is None or abs(float(previous_thread_delay) - float(thread_delay)) > 1e-9:
-                    self._next_allowed_send_ts = 0.0
-                    self._thread_submission_count = 0
-                    self._thread_submission_delay_value = float(thread_delay)
-            except Exception:
-                self._next_allowed_send_ts = 0.0
-                self._thread_submission_count = 0
-                self._thread_submission_delay_value = float(thread_delay)
             
             next_allowed = self._next_allowed_send_ts
             wait = max(0.0, next_allowed - now)
@@ -6464,7 +6451,8 @@ class UnifiedClient:
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
             self._log_pre_stagger(messages, watchdog_context)
-            self._apply_thread_submission_delay()
+            if not _vision_parallel_request:
+                self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
             # Capture chapter/chunk context for watchdog tooltip
             chapter = None
