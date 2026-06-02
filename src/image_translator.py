@@ -4174,8 +4174,7 @@ class ImageTranslator:
                         executor.shutdown(wait=not force_cancelled, cancel_futures=True)
                 else:
                     if batching_mode == "conservative":
-                        group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
-                        fixed_group_size = min(len(chunk_jobs), batch_size * group_multiplier)
+                        fixed_group_size = batch_size
                         print(f"   Vision OCR conservative batching: group size {fixed_group_size}, parallel {batch_size}")
                     else:
                         fixed_group_size = batch_size

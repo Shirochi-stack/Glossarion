@@ -10437,8 +10437,7 @@ def _process_chapter_images_vision_ocr_combined(
                     executor.shutdown(wait=not force_cancelled, cancel_futures=True)
             else:
                 if batching_mode == "conservative":
-                    group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
-                    fixed_group_size = min(len(jobs), batch_size * group_multiplier)
+                    fixed_group_size = batch_size
                     print(f"   Vision OCR page conservative batching: group size {fixed_group_size}, parallel {batch_size}")
                 else:
                     fixed_group_size = batch_size
@@ -20087,8 +20086,7 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         # Conservative / Direct: fixed-size groups
                         if batching_mode == 'conservative':
-                            group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
-                            group_size = min(len(image_files), _img_batch_size * group_multiplier)
+                            group_size = _img_batch_size
                         else:
                             group_size = _img_batch_size
 
