@@ -3909,6 +3909,13 @@ def split_single_pass_response(response_text: str) -> tuple:
 # process and stays consistent across all dedup calls within the same run.
 _DEDUP_DESCRIPTION_ACTIVE = None
 
+def _dedup_description_active_cached():
+    global _DEDUP_DESCRIPTION_ACTIVE
+    if _DEDUP_DESCRIPTION_ACTIVE is None:
+        _DEDUP_DESCRIPTION_ACTIVE = _glossary_description_active()
+    return bool(_DEDUP_DESCRIPTION_ACTIVE)
+
+
 def _dedup_field_count(entry):
     """Count non-empty, non-internal fields for dedup comparison.
 
@@ -3919,19 +3926,53 @@ def _dedup_field_count(entry):
       description from giving a newer entry an unfair field-count advantage
       over a manually-reviewed older entry.
     """
-    global _DEDUP_DESCRIPTION_ACTIVE
-    if _DEDUP_DESCRIPTION_ACTIVE is None:
-        _DEDUP_DESCRIPTION_ACTIVE = _glossary_description_active()
     count = 0
     for k, v in entry.items():
         k_str = str(k)
         if k_str.startswith("_"):
             continue
-        if not _DEDUP_DESCRIPTION_ACTIVE and k_str.strip().lower() == 'description':
+        if not _dedup_description_active_cached() and k_str.strip().lower() == 'description':
             continue
         if v and str(v).strip():
             count += 1
     return count
+
+
+def _dedup_preference_score(entry):
+    """Return the score used to decide whether a duplicate can replace an older row.
+
+    When the user opted into description, richer rows can contribute newer
+    description/custom-column data. Without description, dedup is intentionally
+    conservative: only useful gender information can make a newer duplicate
+    contribute data.
+    """
+    if _dedup_description_active_cached():
+        return _dedup_field_count(entry)
+    return 1 if _gender_is_trackable(_entry_gender(entry)) else 0
+
+
+def _dedup_preference_label():
+    return "fields" if _dedup_description_active_cached() else "gender score"
+
+
+def _dedup_preference_reason(current_score, existing_score):
+    if _dedup_description_active_cached():
+        return f"richer entry ({current_score} vs {existing_score} fields)"
+    return "adds gender to existing duplicate"
+
+
+def _dedup_replacement_entry(existing_entry, new_entry):
+    """Merge replacement data while preserving the oldest visible name columns.
+
+    Dedup may absorb newer description/custom-field or gender data, but the
+    first kept raw/translated names remain authoritative because they may have
+    been manually curated.
+    """
+    replacement = dict(new_entry)
+    for field in ("raw_name", "translated_name"):
+        if field in existing_entry:
+            replacement[field] = existing_entry.get(field, "")
+    return replacement
 
 
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
@@ -4146,7 +4187,7 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
     
     print(f"[Dedup] Completed {total_comparisons} comparisons (reduced from {len(processed) * (len(processed)-1) // 2})")
     
-    # Build deduplicated list with field count comparison
+    # Build deduplicated list with the same preference rules as the serial path.
     deduplicated = []
     raw_name_to_idx = {}
     skipped_count = 0
@@ -4157,17 +4198,20 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
             original_idx = duplicate_of[idx]
             original_raw = processed[original_idx][1]
             
-            # Check if we should replace the original with this one (more fields)
+            # Check whether the duplicate should replace the original.
             existing_idx = raw_name_to_idx.get(original_raw)
             if existing_idx is not None:
                 existing_entry = deduplicated[existing_idx]
-                current_field_count = _dedup_field_count(entry)
-                existing_field_count = _dedup_field_count(existing_entry)
+                current_score = _dedup_preference_score(entry)
+                existing_score = _dedup_preference_score(existing_entry)
                 
-                if current_field_count > existing_field_count:
-                    deduplicated[existing_idx] = entry
-                    raw_name_to_idx[raw_name] = existing_idx
-                    del raw_name_to_idx[original_raw]
+                if current_score > existing_score:
+                    replacement_entry = _dedup_replacement_entry(existing_entry, entry)
+                    replacement_raw = replacement_entry.get('raw_name', raw_name)
+                    deduplicated[existing_idx] = replacement_entry
+                    raw_name_to_idx[replacement_raw] = existing_idx
+                    if original_raw in raw_name_to_idx and original_raw != replacement_raw:
+                        del raw_name_to_idx[original_raw]
                     replaced_count += 1
                     
             skipped_count += 1
@@ -4623,17 +4667,17 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
 
             existing_index = same_gender_idx if same_gender_idx is not None else exact_indices[0]
             existing_entry = deduplicated[existing_index]
-            current_field_count = _dedup_field_count(entry)
-            existing_field_count = _dedup_field_count(existing_entry)
-            if current_field_count > existing_field_count:
-                deduplicated[existing_index] = entry
+            current_score = _dedup_preference_score(entry)
+            existing_score = _dedup_preference_score(existing_entry)
+            if current_score > existing_score:
+                deduplicated[existing_index] = _dedup_replacement_entry(existing_entry, entry)
                 skipped_count += 1
                 if dedup_log is not None:
                     dedup_log.append({
                         "pass": 1, "action": "replaced",
                         "kept": raw_name, "dropped": raw_name,
                         "score": 1.0,
-                        "reason": f"richer exact raw entry ({current_field_count} vs {existing_field_count} fields)"
+                        "reason": _dedup_preference_reason(current_score, existing_score)
                     })
             else:
                 skipped_count += 1
@@ -4686,32 +4730,37 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             
             if existing_index is not None:
                 existing_entry = deduplicated[existing_index]
-                # Count non-empty fields (excluding internal keys starting with _)
-                current_field_count = _dedup_field_count(entry)
-                existing_field_count = _dedup_field_count(existing_entry)
+                current_score = _dedup_preference_score(entry)
+                existing_score = _dedup_preference_score(existing_entry)
                 
-                # If current entry has more fields, replace the existing one
-                if current_field_count > existing_field_count:
+                # Replace only when the current entry is preferred by active dedup rules.
+                if current_score > existing_score:
                     # Replace existing entry in deduplicated list
-                    deduplicated[existing_index] = entry
-                    raw_name_to_indices[raw_name] = [existing_index]
-                    if best_match in raw_name_to_indices:
+                    replacement_entry = _dedup_replacement_entry(existing_entry, entry)
+                    replacement_raw = replacement_entry.get('raw_name', raw_name)
+                    replacement_cleaned = unicodedata.normalize('NFC', remove_honorifics(replacement_raw))
+                    deduplicated[existing_index] = replacement_entry
+                    if replacement_raw != best_match:
+                        raw_name_to_indices[replacement_raw] = [existing_index]
                         del raw_name_to_indices[best_match]
+                    elif replacement_raw not in raw_name_to_indices:
+                        raw_name_to_indices[replacement_raw] = [existing_index]
                     # FIX: Update seen_raw_names at the correct index so future
-                    # fuzzy comparisons use the new entry's cleaned name / raw name.
+                    # fuzzy comparisons use the kept entry's cleaned name / raw name.
                     seen_idx = dedup_idx_to_seen_idx.get(existing_index)
                     if seen_idx is not None:
-                        seen_raw_names[seen_idx] = (cleaned_name, raw_name, entry)
-                        seen_lower_names[seen_idx] = cleaned_name.lower()
+                        seen_raw_names[seen_idx] = (replacement_cleaned, replacement_raw, replacement_entry)
+                        seen_lower_names[seen_idx] = replacement_cleaned.lower()
                     skipped_count += 1
                     if skipped_count <= 10:
-                        print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
+                        unit = _dedup_preference_label()
+                        print(f"[Skip] Pass 1: Merging fields from {raw_name} ({current_score} {unit}) into {replacement_raw} ({existing_score} {unit}) - {best_score*100:.1f}% match, preserving original names")
                     if dedup_log is not None:
                         dedup_log.append({
                             "pass": 1, "action": "replaced",
-                            "kept": raw_name, "dropped": best_match,
+                            "kept": replacement_raw, "dropped": raw_name,
                             "score": round(best_score, 4),
-                            "reason": f"richer entry ({current_field_count} vs {existing_field_count} fields)"
+                            "reason": _dedup_preference_reason(current_score, existing_score)
                         })
                 else:
                     # Keep existing entry
@@ -4782,29 +4831,32 @@ def _skip_translated_name_duplicates(glossary, dedup_log=None):
                     })
                 continue
             
-            # Count fields in both entries (more fields = higher priority)
-            current_field_count = _dedup_field_count(entry)
-            existing_field_count = _dedup_field_count(existing_entry)
+            current_score = _dedup_preference_score(entry)
+            existing_score = _dedup_preference_score(existing_entry)
             
-            # If current entry has more fields, replace the existing one
-            if current_field_count > existing_field_count:
+            # Replace only when the current entry is preferred by active dedup rules.
+            if current_score > existing_score:
+                replacement_entry = _dedup_replacement_entry(existing_entry, entry)
+                replacement_raw = replacement_entry.get('raw_name', raw_name)
+                replacement_translated = replacement_entry.get('translated_name', translated_name)
                 # Replace in-place using the stored index (faster than list comprehension)
-                deduplicated[existing_idx] = entry
+                deduplicated[existing_idx] = replacement_entry
                 # Update tracking with new index
-                seen_translations[translated_lower] = (raw_name, entry, existing_idx)
+                seen_translations[translated_lower] = (replacement_raw, replacement_entry, existing_idx)
                 replaced_count += 1
                 skipped_count += 1
                 if skipped_count <= 10:
-                    print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields)")
+                    unit = _dedup_preference_label()
+                    print(f"[Skip] Pass 2: Merging fields from '{raw_name}' -> '{translated_name}' ({current_score} {unit}) into '{replacement_raw}' -> '{replacement_translated}' ({existing_score} {unit}), preserving original names")
                 if dedup_log is not None:
                     dedup_log.append({
                         "pass": 2, "action": "replaced",
-                        "kept": raw_name, "dropped": existing_raw,
-                        "translation": translated_name,
-                        "reason": f"richer entry ({current_field_count} vs {existing_field_count} fields)"
+                        "kept": replacement_raw, "dropped": raw_name,
+                        "translation": replacement_translated,
+                        "reason": _dedup_preference_reason(current_score, existing_score)
                     })
             else:
-                # Keep existing entry (has same or more fields)
+                # Keep existing entry when the duplicate does not add preferred data.
                 skipped_count += 1
                 if skipped_count <= 10:
                     print(f"[Skip] Pass 2: '{raw_name}' -> '{translated_name}' (duplicate of '{existing_raw}' -> '{existing_translated}')")
