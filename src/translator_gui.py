@@ -22612,6 +22612,7 @@ Important rules:
                     from image_archive_epub import (
                         convert_image_archive_to_epub,
                         is_epub_zip,
+                        needs_image_archive_group_rebuild,
                         scan_image_archive,
                     )
 
@@ -22621,6 +22622,7 @@ Important rules:
                         needs_rebuild = (
                             not os.path.exists(epub_path)
                             or not is_epub_zip(epub_path)
+                            or needs_image_archive_group_rebuild(epub_path)
                             or os.path.getmtime(epub_path) < os.path.getmtime(path)
                         )
                         if needs_rebuild:
@@ -22640,7 +22642,8 @@ Important rules:
                             self.append_log(
                                 f"📦 Converted image ZIP {os.path.basename(path)} → "
                                 f"{os.path.basename(result.epub_path)} "
-                                f"({result.image_count} image(s){nested_note}{ignored_note})"
+                                f"({result.image_count} image(s), "
+                                f"{result.chapter_count} grouped chapter(s){nested_note}{ignored_note})"
                             )
                         else:
                             self.append_log(f"✅ Using existing image EPUB {os.path.basename(epub_path)}")

@@ -46,6 +46,7 @@ class ImageArchiveEpubResult:
     image_count: int
     nested_archive_count: int
     ignored_entry_count: int = 0
+    chapter_count: int = 0
 
 
 def _natural_sort_key(value: str):
@@ -107,6 +108,27 @@ def is_epub_zip(path: str) -> bool:
     except (OSError, zipfile.BadZipFile):
         return False
     return False
+
+
+def needs_image_archive_group_rebuild(path: str) -> bool:
+    """Return True for older generated image EPUBs with one XHTML per image."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names = {_zip_name(name) for name in zf.namelist()}
+            if not any(name == "OEBPS/content.opf" for name in names):
+                return False
+            try:
+                opf = zf.read("OEBPS/content.opf").decode("utf-8", errors="ignore")
+            except Exception:
+                return False
+            if "urn:glossarion:image-archive:" not in opf:
+                return False
+            return any(
+                name.startswith("OEBPS/chapters/page_") and name.endswith((".xhtml", ".html"))
+                for name in names
+            )
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def _collect_from_zip(
@@ -224,17 +246,49 @@ def scan_image_archive(path: str, max_depth: int = 4) -> ImageArchiveScan:
     )
 
 
-def _chapter_xhtml(title: str, image_href: str, page_num: int) -> bytes:
+def _image_groups(images: list[ArchiveImage], nested_count: int) -> list[tuple[str, list[ArchiveImage]]]:
+    """Return chapter groups for the generated EPUB.
+
+    Nested ZIP bundles usually represent chapters/episodes/volumes. Grouping
+    every image from one inner ZIP into one XHTML file keeps Glossarion's
+    extractor from having to parse tens of thousands of one-image chapters,
+    while still letting the existing image rename pass assign
+    chapterNNNN_img_M names.
+    """
+    if not nested_count:
+        return [(f"Page {idx}", [image]) for idx, image in enumerate(images, 1)]
+
+    grouped: list[tuple[str, list[ArchiveImage]]] = []
+    group_index: dict[str, int] = {}
+    for image in images:
+        key = image.member_chain[0] if len(image.member_chain) > 1 else "__loose_images__"
+        if key not in group_index:
+            if key == "__loose_images__":
+                title = "Loose Images"
+            else:
+                title = os.path.splitext(os.path.basename(_zip_name(key)))[0] or _zip_name(key)
+            group_index[key] = len(grouped)
+            grouped.append((title, []))
+        grouped[group_index[key]][1].append(image)
+    return grouped
+
+
+def _chapter_xhtml(title: str, image_hrefs: list[str], chapter_num: int) -> bytes:
     title_xml = _safe_xml_text(title)
-    image_href_xml = _safe_xml_text(image_href)
+    image_tags = []
+    for idx, image_href in enumerate(image_hrefs, 1):
+        image_href_xml = _safe_xml_text(image_href)
+        image_tags.append(
+            f'    <img src="{image_href_xml}" alt="Image {idx}"/>\n'
+        )
     return (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<!DOCTYPE html>\n'
         '<html xmlns="http://www.w3.org/1999/xhtml" lang="und" xml:lang="und">\n'
         f"<head><title>{title_xml}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"../styles.css\"/></head>\n"
         '<body>\n'
-        f'  <section class="image-page" id="page-{page_num:04d}">\n'
-        f'    <img src="{image_href_xml}" alt="Page {page_num}"/>\n'
+        f'  <section class="image-page" id="chapter-{chapter_num:04d}">\n'
+        + "".join(image_tags) +
         "  </section>\n"
         "</body>\n"
         "</html>\n"
@@ -348,20 +402,28 @@ def convert_image_archive_to_epub(
     chapter_items: list[tuple[str, str]] = []
     image_payloads: list[tuple[tuple[str, ...], str]] = []
     chapter_payloads: list[tuple[str, bytes]] = []
+    groups = _image_groups(images, nested_count)
+    image_idx = 0
 
-    for idx, image in enumerate(images, 1):
-        ext = image.extension if image.extension in IMAGE_EXTS else ".jpg"
-        stem = _safe_internal_stem(image.source_name, f"page_{idx:04d}")
-        image_name = f"page_{idx:04d}_{stem}{ext}"
-        image_href = f"images/{image_name}"
-        chapter_href = f"chapters/page_{idx:04d}.xhtml"
-        image_items.append((f"img_{idx:04d}", image_href, image.media_type))
-        chapter_items.append((f"page_{idx:04d}", chapter_href))
-        image_payloads.append((image.member_chain, f"OEBPS/{image_href}"))
+    for chapter_idx, (group_title, group_images) in enumerate(groups, 1):
+        chapter_href = f"chapters/chapter_{chapter_idx:04d}.xhtml"
+        chapter_items.append((f"chapter_{chapter_idx:04d}", chapter_href))
+        chapter_image_hrefs: list[str] = []
+
+        for image_in_chapter_idx, image in enumerate(group_images, 1):
+            image_idx += 1
+            ext = image.extension if image.extension in IMAGE_EXTS else ".jpg"
+            stem = _safe_internal_stem(image.source_name, f"image_{image_in_chapter_idx:04d}")
+            image_name = f"chapter_{chapter_idx:04d}_src_{image_in_chapter_idx:04d}_{stem}{ext}"
+            image_href = f"images/{image_name}"
+            image_items.append((f"img_{image_idx:05d}", image_href, image.media_type))
+            image_payloads.append((image.member_chain, f"OEBPS/{image_href}"))
+            chapter_image_hrefs.append(f"../{image_href}")
+
         chapter_payloads.append(
             (
                 f"OEBPS/{chapter_href}",
-                _chapter_xhtml(f"Page {idx}", f"../{image_href}", idx),
+                _chapter_xhtml(group_title or f"Chapter {chapter_idx}", chapter_image_hrefs, chapter_idx),
             )
         )
 
@@ -404,4 +466,5 @@ def convert_image_archive_to_epub(
         image_count=len(images),
         nested_archive_count=nested_count,
         ignored_entry_count=len(unsupported) if allow_unsupported else 0,
+        chapter_count=len(groups),
     )
