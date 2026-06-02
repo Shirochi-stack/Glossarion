@@ -3392,7 +3392,15 @@ class ImageTranslator:
             if not batch_enabled:
                 return 1
             try:
-                return max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
+                batch_size = max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
+                # When batch translation is active, chapter-level parallelism
+                # already creates BATCH_SIZE workers. Returning BATCH_SIZE here
+                # would cause multiplication (3 chapters × 3 OCR = 9 requests).
+                # Return 1 so each chapter processes its vision OCR sequentially;
+                # total concurrency = BATCH_SIZE chapter workers × 1 = BATCH_SIZE.
+                if batch_size > 1:
+                    return 1
+                return batch_size
             except Exception:
                 return 1
 
@@ -3402,6 +3410,17 @@ class ImageTranslator:
             return _batch_translation_size()
         if requested <= 0:
             return _batch_translation_size()
+        # Explicit VISION_OCR_BATCH_SIZE: divide by BATCH_SIZE so total
+        # concurrency = requested (not requested × BATCH_SIZE).
+        # e.g. VISION_OCR_BATCH_SIZE=3, BATCH_SIZE=3 → 3//3=1 per chapter → 3×1=3 total.
+        batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+        if batch_enabled:
+            try:
+                chapter_workers = max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
+                if chapter_workers > 1:
+                    return max(1, requested // chapter_workers)
+            except Exception:
+                pass
         return max(1, requested)
 
     def _image_chunk_overlap_pixels(self) -> int:
