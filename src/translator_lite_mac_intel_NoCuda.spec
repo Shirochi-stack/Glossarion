@@ -90,6 +90,7 @@ app_files = [
     
     # File processors
     ('epub_converter.py', '.'),
+    ('image_archive_epub.py', '.'),
     ('html_tag_entities.py', '.'),
     ('qa_scan_runtime.py', '.'),
     ('txt_processor.py', '.'),
@@ -231,6 +232,7 @@ app_modules = [
     'Chapter_Extractor',
     'PatternManager',
     'epub_converter',
+    'image_archive_epub',
     'html_tag_entities',
     'qa_scan_runtime',
     'txt_processor',

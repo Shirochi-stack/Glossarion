@@ -22603,24 +22603,73 @@ Important rules:
                 # Direct PDF processing
                 processed_paths.append(path)
             elif lower.endswith('.zip'):
-                # Convert .zip to .epub extension for backwards compatibility
+                # Convert .zip to .epub for backwards compatibility. Plain
+                # image ZIPs/CBZ-style archives need a real EPUB wrapper; a
+                # blind copy produces an invalid EPUB that only contains images.
                 epub_path = path[:-4] + '.epub'  # Replace .zip with .epub
-                # Rename the file if it hasn't been renamed yet
-                if os.path.exists(path) and not os.path.exists(epub_path):
-                    try:
-                        import shutil
-                        shutil.copy2(path, epub_path)  # Copy instead of rename to preserve original
-                        self.append_log(f"📦 Converted {os.path.basename(path)} → {os.path.basename(epub_path)}")
+                try:
+                    import shutil
+                    from image_archive_epub import (
+                        convert_image_archive_to_epub,
+                        is_epub_zip,
+                        scan_image_archive,
+                    )
+
+                    scan = scan_image_archive(path)
+                    nested_image_bundle = bool(scan.image_count and scan.nested_archive_count)
+                    if scan.is_image_archive or nested_image_bundle:
+                        needs_rebuild = (
+                            not os.path.exists(epub_path)
+                            or not is_epub_zip(epub_path)
+                            or os.path.getmtime(epub_path) < os.path.getmtime(path)
+                        )
+                        if needs_rebuild:
+                            result = convert_image_archive_to_epub(
+                                path,
+                                epub_path,
+                                allow_unsupported=nested_image_bundle,
+                            )
+                            nested_note = (
+                                f", {result.nested_archive_count} nested archive(s)"
+                                if result.nested_archive_count else ""
+                            )
+                            ignored_note = (
+                                f", ignored {result.ignored_entry_count} non-image sidecar(s)"
+                                if result.ignored_entry_count else ""
+                            )
+                            self.append_log(
+                                f"📦 Converted image ZIP {os.path.basename(path)} → "
+                                f"{os.path.basename(result.epub_path)} "
+                                f"({result.image_count} image(s){nested_note}{ignored_note})"
+                            )
+                        else:
+                            self.append_log(f"✅ Using existing image EPUB {os.path.basename(epub_path)}")
                         processed_paths.append(epub_path)
-                    except Exception as e:
-                        self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
-                        processed_paths.append(path)  # Use original if conversion fails
-                elif os.path.exists(epub_path):
-                    # .epub version already exists, use it
-                    self.append_log(f"✅ Using existing {os.path.basename(epub_path)}")
-                    processed_paths.append(epub_path)
-                else:
+                        continue
+
+                    if is_epub_zip(path):
+                        needs_copy = (
+                            not os.path.exists(epub_path)
+                            or not is_epub_zip(epub_path)
+                            or os.path.getmtime(epub_path) < os.path.getmtime(path)
+                        )
+                        if needs_copy:
+                            shutil.copy2(path, epub_path)  # Copy instead of rename to preserve original
+                            self.append_log(
+                                f"📦 Converted EPUB ZIP {os.path.basename(path)} → {os.path.basename(epub_path)}"
+                            )
+                        else:
+                            self.append_log(f"✅ Using existing {os.path.basename(epub_path)}")
+                        processed_paths.append(epub_path)
+                        continue
+
+                    self.append_log(
+                        f"⚠️ ZIP is not an EPUB or image-only archive: {os.path.basename(path)}"
+                    )
                     processed_paths.append(path)
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
+                    processed_paths.append(path)  # Use original if conversion fails
             elif lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
