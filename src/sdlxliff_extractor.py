@@ -24,9 +24,40 @@ CONFIRMED_STATES = {
     "approvedsignoff",
     "approvedtranslation",
     "signedoff",
-    "translated",
     "translationapproved",
-    "confirmed",
+}
+LANGUAGE_NAME_TO_CODE = {
+    "arabic": "ar-SA",
+    "chinese": "zh-CN",
+    "chinese simplified": "zh-CN",
+    "chinese traditional": "zh-TW",
+    "czech": "cs-CZ",
+    "danish": "da-DK",
+    "dutch": "nl-NL",
+    "english": "en-US",
+    "filipino": "fil-PH",
+    "finnish": "fi-FI",
+    "french": "fr-FR",
+    "german": "de-DE",
+    "greek": "el-GR",
+    "hebrew": "he-IL",
+    "hindi": "hi-IN",
+    "hungarian": "hu-HU",
+    "indonesian": "id-ID",
+    "italian": "it-IT",
+    "japanese": "ja-JP",
+    "korean": "ko-KR",
+    "malay": "ms-MY",
+    "norwegian": "nb-NO",
+    "polish": "pl-PL",
+    "portuguese": "pt-PT",
+    "romanian": "ro-RO",
+    "russian": "ru-RU",
+    "spanish": "es-ES",
+    "swedish": "sv-SE",
+    "thai": "th-TH",
+    "turkish": "tr-TR",
+    "vietnamese": "vi-VN",
 }
 
 
@@ -205,6 +236,39 @@ def is_placeholder_only_text(text: str) -> bool:
 def parse_sdlxliff(path: str) -> etree._ElementTree:
     parser = etree.XMLParser(remove_blank_text=False, recover=False, huge_tree=True)
     return etree.parse(path, parser)
+
+
+def normalize_target_language_code(language: Any) -> Optional[str]:
+    value = str(language or "").strip()
+    if not value:
+        return None
+    value = re.sub(r"\s*\([^)]*\)\s*", " ", value).strip()
+    key = re.sub(r"[\s_-]+", " ", value).strip().lower()
+    if key in LANGUAGE_NAME_TO_CODE:
+        return LANGUAGE_NAME_TO_CODE[key]
+
+    candidate = value.replace("_", "-")
+    if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", candidate):
+        return None
+    parts = candidate.split("-")
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 2 and part.isalpha():
+            normalized.append(part.upper())
+        elif len(part) == 4 and part.isalpha():
+            normalized.append(part.title())
+        else:
+            normalized.append(part)
+    return "-".join(normalized)
+
+
+def _target_language_from_env() -> Tuple[str, Optional[str]]:
+    target_language = (
+        os.getenv("OUTPUT_LANGUAGE")
+        or os.getenv("GLOSSARY_TARGET_LANGUAGE")
+        or ""
+    ).strip()
+    return target_language, normalize_target_language_code(target_language)
 
 
 def iter_eligible_segments(path: str) -> List[Dict[str, Any]]:
@@ -414,6 +478,7 @@ def _manifest_segment(segment: Dict[str, Any], batch_num: Optional[int]) -> Dict
 def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     segments = iter_eligible_segments(path)
+    target_language, target_language_code = _target_language_from_env()
     source_hash = _segment_source_hash(segments)
     translatable_segments = [
         segment for segment in segments if not is_placeholder_only_text(segment.get("source_text") or "")
@@ -462,6 +527,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "source_file": os.path.abspath(path),
         "source_basename": os.path.basename(path),
         "source_hash": source_hash,
+        "target_language": target_language,
+        "target_language_code": target_language_code,
         "segment_count": len(segments),
         "translatable_segment_count": len(translatable_segments),
         "auto_insert_segment_count": len(auto_insert_segments),
@@ -481,6 +548,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "title": os.path.splitext(os.path.basename(path))[0],
         "type": "sdlxliff",
         "source_file": os.path.abspath(path),
+        "target_language": target_language,
+        "target_language_code": target_language_code,
         "chapter_count": len(chapters),
         "segment_count": len(segments),
         "translatable_segment_count": len(translatable_segments),

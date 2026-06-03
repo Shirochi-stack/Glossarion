@@ -9,7 +9,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from lxml import etree
 
-from sdlxliff_extractor import PLACEHOLDER_RE, _first_child_named, _iter_descendants_named
+from sdlxliff_extractor import (
+    PLACEHOLDER_RE,
+    _first_child_named,
+    _iter_descendants_named,
+    normalize_target_language_code,
+)
 
 
 def _local_name(tag) -> str:
@@ -32,6 +37,12 @@ def _qname_like(parent: etree._Element, local: str) -> str:
 def _iter_trans_units(root: etree._Element):
     for elem in root.iter():
         if _local_name(elem.tag) == "trans-unit":
+            yield elem
+
+
+def _iter_file_elements(root: etree._Element):
+    for elem in root.iter():
+        if _local_name(elem.tag) == "file":
             yield elem
 
 
@@ -245,6 +256,24 @@ def _apply_segment_translation(segment: Dict[str, Any], translation: str, trans_
     return True
 
 
+def _target_language_code(manifest: Dict[str, Any]) -> Optional[str]:
+    return (
+        normalize_target_language_code(manifest.get("target_language_code"))
+        or normalize_target_language_code(manifest.get("target_language"))
+        or normalize_target_language_code(os.getenv("OUTPUT_LANGUAGE"))
+        or normalize_target_language_code(os.getenv("GLOSSARY_TARGET_LANGUAGE"))
+    )
+
+
+def _apply_target_language(root: etree._Element, manifest: Dict[str, Any]) -> Optional[str]:
+    code = _target_language_code(manifest)
+    if not code:
+        return None
+    for file_elem in _iter_file_elements(root):
+        file_elem.set("target-language", code)
+    return code
+
+
 def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, output_path: Optional[str] = None) -> Dict:
     manifest_path = manifest_path or os.path.join(output_dir, "sdlxliff_manifest.json")
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -254,6 +283,7 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
     parser = etree.XMLParser(remove_blank_text=False, recover=False, huge_tree=True)
     tree = etree.parse(source_file, parser)
     root = tree.getroot()
+    target_language_code = _apply_target_language(root, manifest)
     trans_units = list(_iter_trans_units(root))
 
     segments_by_id = {str(segment.get("id")): segment for segment in manifest.get("segments", [])}
@@ -313,6 +343,7 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
         "skipped": skipped,
         "missing": missing,
         "invalid_batches": invalid_batches,
+        "target_language_code": target_language_code,
     }
 
 
