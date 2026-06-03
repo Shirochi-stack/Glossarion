@@ -1,12 +1,11 @@
-"""SDLXLIFF round-trip writer."""
+"""SDLXLIFF JSON batch round-trip writer."""
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from lxml import etree
 
@@ -71,70 +70,165 @@ def _ensure_target_segment(trans_unit: etree._Element, mid: Optional[str]) -> et
     return mrk
 
 
-def _translated_candidates(output_dir: str, segment_num: int, filename: str):
-    base = filename or f"section_{segment_num}.txt"
-    stem, ext = os.path.splitext(base)
-    candidates = [
-        base,
-        f"response_{base}",
-        f"{stem}{ext}",
-        f"response_{stem}{ext}",
-        f"section_{segment_num}.txt",
-        f"response_section_{segment_num}.txt",
-    ]
+def _batch_output_candidates(output_dir: str, filename: str) -> Iterable[str]:
+    base = filename or ""
+    candidates = [base]
+    if base and not os.path.basename(base).startswith("response_"):
+        candidates.append(f"response_{base}")
     seen = set()
     for candidate in candidates:
-        if candidate in seen:
+        if not candidate or candidate in seen:
             continue
         seen.add(candidate)
         yield os.path.join(output_dir, candidate)
 
 
-def _read_translation(output_dir: str, segment: Dict) -> Optional[str]:
-    for candidate in _translated_candidates(
-        output_dir,
-        int(segment.get("segment_num", 0) or 0),
-        str(segment.get("filename") or ""),
-    ):
-        if os.path.exists(candidate):
-            with open(candidate, "r", encoding="utf-8") as f:
-                return f.read().strip()
-    return None
+def _normalize_output_name(value: str) -> str:
+    return os.path.basename(str(value or "")).lower()
 
 
-def _validate_placeholders(text: str, tag_map: Dict[str, str]) -> bool:
-    expected = set(tag_map.keys())
-    found = set(PLACEHOLDER_RE.findall(text or ""))
-    return expected == found
+def _completed_outputs(output_dir: str) -> Optional[set]:
+    progress_path = os.path.join(output_dir, "translation_progress.json")
+    if not os.path.exists(progress_path):
+        return None
+    try:
+        with open(progress_path, "r", encoding="utf-8") as f:
+            progress = json.load(f)
+    except Exception:
+        return set()
+    completed = set()
+    for info in (progress.get("chapters") or {}).values():
+        if not isinstance(info, dict):
+            continue
+        if str(info.get("status") or "").lower() != "completed":
+            continue
+        output_file = info.get("output_file")
+        if output_file:
+            completed.add(_normalize_output_name(output_file))
+    return completed
 
 
-def _parse_fragment(xml_text: str) -> etree._Element:
-    parser = etree.XMLParser(remove_blank_text=False, recover=False, huge_tree=True)
-    return etree.fromstring(xml_text.encode("utf-8"), parser=parser)
+def _read_completed_batch(output_dir: str, batch: Dict[str, Any], completed_outputs: Optional[set]) -> Tuple[Optional[str], Optional[str]]:
+    found_uncompleted = False
+    for candidate in _batch_output_candidates(output_dir, str(batch.get("filename") or "")):
+        if not os.path.exists(candidate):
+            continue
+        if completed_outputs is not None and _normalize_output_name(candidate) not in completed_outputs:
+            found_uncompleted = True
+            continue
+        with open(candidate, "r", encoding="utf-8") as f:
+            return f.read(), None
+    return None, "invalid_status" if found_uncompleted else "missing"
 
 
-def _set_mixed_content(elem: etree._Element, text: str, tag_map: Dict[str, str]) -> None:
+def _validate_placeholders(text: str, segment: Dict[str, Any]) -> bool:
+    expected = list(segment.get("tag_sequence") or [])
+    found = PLACEHOLDER_RE.findall(text or "")
+    return found == expected
+
+
+def _nsmap_from_entries(entries: List[Dict[str, str]]) -> Dict[Optional[str], str]:
+    nsmap: Dict[Optional[str], str] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        if not uri:
+            continue
+        prefix = entry.get("prefix")
+        nsmap[None if prefix in (None, "") else str(prefix)] = str(uri)
+    return nsmap
+
+
+def _make_element(info: Dict[str, Any]) -> etree._Element:
+    tag = info.get("tag")
+    if not tag:
+        raise ValueError("Missing inline tag name")
+    nsmap = _nsmap_from_entries(info.get("nsmap") or [])
+    attrib = dict(info.get("attrib") or {})
+    return etree.Element(tag, attrib=attrib, nsmap=nsmap or None)
+
+
+def _set_mixed_content(elem: etree._Element, text: str, tag_map: Dict[str, Dict[str, Any]]) -> None:
     for child in list(elem):
         elem.remove(child)
     elem.text = None
-    parts = re.split(f"({PLACEHOLDER_RE.pattern})", text)
-    current_parent = elem
-    previous_child = None
-    for part in parts:
-        if not part:
-            continue
-        if part in tag_map:
-            child = _parse_fragment(tag_map[part])
-            child = copy.deepcopy(child)
-            child.tail = None
-            elem.append(child)
-            previous_child = child
-            current_parent = elem
-            continue
-        if previous_child is None:
-            elem.text = (elem.text or "") + part
+
+    stack = [{"elem": elem, "last_child": None}]
+
+    def append_text(value: str) -> None:
+        if not value:
+            return
+        context = stack[-1]
+        last_child = context["last_child"]
+        if last_child is None:
+            context["elem"].text = (context["elem"].text or "") + value
         else:
-            previous_child.tail = (previous_child.tail or "") + part
+            last_child.tail = (last_child.tail or "") + value
+
+    for part in re.split(f"({PLACEHOLDER_RE.pattern})", text or ""):
+        if part == "":
+            continue
+        info = tag_map.get(part)
+        if info is None:
+            append_text(part)
+            continue
+
+        kind = info.get("kind")
+        if kind == "empty":
+            child = _make_element(info)
+            stack[-1]["elem"].append(child)
+            stack[-1]["last_child"] = child
+        elif kind == "start":
+            child = _make_element(info)
+            stack[-1]["elem"].append(child)
+            stack[-1]["last_child"] = child
+            stack.append({"elem": child, "last_child": None})
+        elif kind == "end":
+            if len(stack) <= 1:
+                raise ValueError("Unexpected inline end placeholder")
+            stack.pop()
+        else:
+            raise ValueError(f"Unknown inline placeholder kind: {kind}")
+
+    if len(stack) != 1:
+        raise ValueError("Unclosed inline placeholder")
+
+
+def _parse_batch_translation(text: str, expected_ids: List[str]) -> Tuple[Dict[str, str], List[str], List[str]]:
+    try:
+        payload = json.loads(text)
+    except Exception as exc:
+        raise ValueError(f"Malformed JSON batch output: {exc}") from exc
+    if not isinstance(payload, list):
+        raise ValueError("SDLXLIFF batch output must be a JSON array")
+
+    expected_set = set(expected_ids)
+    seen = set()
+    translations: Dict[str, str] = {}
+    seen_order: List[str] = []
+
+    for item in payload:
+        if not isinstance(item, dict) or set(item.keys()) != {"id", "target"}:
+            raise ValueError("SDLXLIFF batch records must contain exactly id and target")
+        segment_id = str(item.get("id"))
+        if segment_id in seen:
+            raise ValueError(f"Duplicate SDLXLIFF batch id: {segment_id}")
+        seen.add(segment_id)
+        if segment_id not in expected_set:
+            raise ValueError(f"Extra SDLXLIFF batch id: {segment_id}")
+        target = item.get("target")
+        if not isinstance(target, str):
+            raise ValueError(f"SDLXLIFF batch target must be a string: {segment_id}")
+        translations[segment_id] = target
+        seen_order.append(segment_id)
+
+    missing = [segment_id for segment_id in expected_ids if segment_id not in translations]
+    if missing:
+        raise ValueError(f"Missing SDLXLIFF batch ids: {', '.join(missing)}")
+    if seen_order != expected_ids:
+        raise ValueError("SDLXLIFF batch ids are out of order")
+    return translations, [], []
 
 
 def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, output_path: Optional[str] = None) -> Dict:
@@ -148,29 +242,53 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
     root = tree.getroot()
     trans_units = list(_iter_trans_units(root))
 
+    segments_by_id = {str(segment.get("id")): segment for segment in manifest.get("segments", [])}
+    completed_outputs = _completed_outputs(output_dir)
     updated = 0
     skipped = 0
     missing = 0
-    for segment in manifest.get("segments", []):
-        translation = _read_translation(output_dir, segment)
-        if translation is None:
-            missing += 1
+    invalid_batches = 0
+
+    for batch in manifest.get("batches", []):
+        expected_ids = [str(segment_id) for segment_id in batch.get("segment_ids", [])]
+        batch_text, read_error = _read_completed_batch(output_dir, batch, completed_outputs)
+        if batch_text is None:
+            if read_error == "missing":
+                missing += len(expected_ids)
+            else:
+                skipped += len(expected_ids)
+            invalid_batches += 1
             continue
-        tag_map = segment.get("tag_map") or {}
-        if not _validate_placeholders(translation, tag_map):
-            skipped += 1
-            continue
-        unit_index = int(segment.get("unit_index", -1))
-        if unit_index < 0 or unit_index >= len(trans_units):
-            skipped += 1
-            continue
-        target_elem = _ensure_target_segment(trans_units[unit_index], segment.get("mid"))
+
         try:
-            _set_mixed_content(target_elem, translation, tag_map)
+            translations, skipped_ids, missing_ids = _parse_batch_translation(batch_text, expected_ids)
         except Exception:
-            skipped += 1
+            skipped += len(expected_ids)
+            invalid_batches += 1
             continue
-        updated += 1
+
+        skipped += len(skipped_ids)
+        missing += len(missing_ids)
+
+        for segment_id, translation in translations.items():
+            segment = segments_by_id.get(segment_id)
+            if not segment:
+                skipped += 1
+                continue
+            if not _validate_placeholders(translation, segment):
+                skipped += 1
+                continue
+            unit_index = int(segment.get("unit_index", -1))
+            if unit_index < 0 or unit_index >= len(trans_units):
+                skipped += 1
+                continue
+            target_elem = _ensure_target_segment(trans_units[unit_index], segment.get("mid"))
+            try:
+                _set_mixed_content(target_elem, translation, segment.get("tag_map") or {})
+            except Exception:
+                skipped += 1
+                continue
+            updated += 1
 
     if output_path is None:
         stem, ext = os.path.splitext(os.path.basename(source_file))
@@ -182,13 +300,14 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
         "updated": updated,
         "skipped": skipped,
         "missing": missing,
+        "invalid_batches": invalid_batches,
     }
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Write translated SDLXLIFF from Glossarion output files.")
+    parser = argparse.ArgumentParser(description="Write translated SDLXLIFF from Glossarion JSON batch output files.")
     parser.add_argument("output_dir")
     parser.add_argument("--manifest", default=None)
     parser.add_argument("--output", default=None)

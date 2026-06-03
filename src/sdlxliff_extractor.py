@@ -1,8 +1,8 @@
 """SDLXLIFF extraction helpers.
 
 This module treats SDLXLIFF as a round-trippable XML container. It extracts
-eligible source segments into Glossarion-style chapter dictionaries while
-protecting inline XML tags with placeholders that the converter can restore.
+eligible source segments into JSON batch chapters while protecting inline XML
+structure with placeholders that the converter can restore.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from lxml import etree
@@ -85,9 +84,8 @@ def _segment_conf_state(trans_unit: etree._Element, mid: Optional[str]) -> str:
 
 def _segment_locked(trans_unit: etree._Element, mid: Optional[str]) -> bool:
     truthy = {"1", "true", "yes", "on"}
-    for elem in (trans_unit,):
-        if str(elem.get("locked", "")).strip().lower() in truthy:
-            return True
+    if str(trans_unit.get("locked", "")).strip().lower() in truthy:
+        return True
     for seg in trans_unit.iter():
         if _local_name(seg.tag) != "seg" or _ns_uri(seg.tag) != SDL_NS:
             continue
@@ -142,18 +140,59 @@ def _source_segments(trans_unit: etree._Element) -> List[Tuple[Optional[str], et
     return segments
 
 
-def _protect_inline_xml(segment_elem: etree._Element, segment_num: int) -> Tuple[str, Dict[str, str]]:
+def _nsmap_entries(elem: etree._Element) -> List[Dict[str, str]]:
+    entries = []
+    for prefix, uri in (elem.nsmap or {}).items():
+        if uri:
+            entries.append({"prefix": "" if prefix is None else str(prefix), "uri": str(uri)})
+    return entries
+
+
+def _element_template(elem: etree._Element, kind: str) -> Dict[str, Any]:
+    return {
+        "kind": kind,
+        "tag": elem.tag,
+        "attrib": dict(elem.attrib),
+        "nsmap": _nsmap_entries(elem),
+    }
+
+
+def _protect_inline_xml(segment_elem: etree._Element, segment_num: int) -> Tuple[str, Dict[str, Dict[str, Any]], List[str]]:
     parts: List[str] = []
-    tag_map: Dict[str, str] = {}
-    if segment_elem.text:
-        parts.append(segment_elem.text)
-    for tag_idx, child in enumerate(segment_elem):
-        placeholder = f"[[XLIFF_TAG_{segment_num:06d}_{tag_idx:04d}]]"
-        tag_map[placeholder] = etree.tostring(child, encoding="unicode", with_tail=False)
-        parts.append(placeholder)
-        if child.tail:
-            parts.append(child.tail)
-    return "".join(parts).strip(), tag_map
+    tag_map: Dict[str, Dict[str, Any]] = {}
+    tag_sequence: List[str] = []
+    counter = 0
+
+    def next_placeholder() -> str:
+        nonlocal counter
+        placeholder = f"[[XLIFF_TAG_{segment_num:06d}_{counter:04d}]]"
+        counter += 1
+        tag_sequence.append(placeholder)
+        return placeholder
+
+    def walk(elem: etree._Element) -> None:
+        nonlocal counter
+        if elem.text:
+            parts.append(elem.text)
+        for child in elem:
+            has_content = bool(child.text) or len(child) > 0
+            if has_content:
+                start_placeholder = next_placeholder()
+                tag_map[start_placeholder] = _element_template(child, "start")
+                parts.append(start_placeholder)
+                walk(child)
+                end_placeholder = next_placeholder()
+                tag_map[end_placeholder] = {"kind": "end"}
+                parts.append(end_placeholder)
+            else:
+                placeholder = next_placeholder()
+                tag_map[placeholder] = _element_template(child, "empty")
+                parts.append(placeholder)
+            if child.tail:
+                parts.append(child.tail)
+
+    walk(segment_elem)
+    return "".join(parts), tag_map, tag_sequence
 
 
 def is_placeholder_only_text(text: str) -> bool:
@@ -189,11 +228,13 @@ def iter_eligible_segments(path: str) -> List[Dict[str, Any]]:
             if target_text and _is_confirmed_state(conf):
                 continue
             segment_num += 1
-            source_text, tag_map = _protect_inline_xml(src_elem, segment_num)
-            if not source_text:
+            source_text, tag_map, tag_sequence = _protect_inline_xml(src_elem, segment_num)
+            if not source_text.strip():
                 continue
+            segment_id = str(segment_num)
             eligible.append(
                 {
+                    "id": segment_id,
                     "segment_num": segment_num,
                     "unit_index": unit_index,
                     "unit_id": unit_id,
@@ -203,60 +244,206 @@ def iter_eligible_segments(path: str) -> List[Dict[str, Any]]:
                     "target_text": target_text,
                     "conf": conf,
                     "tag_map": tag_map,
+                    "tag_sequence": tag_sequence,
                 }
             )
     return eligible
 
 
-def _chapter_from_segment(segment: Dict[str, Any], source_path: str) -> Dict[str, Any]:
-    num = int(segment["segment_num"])
-    body = segment["source_text"]
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _available_tokens_from_env() -> int:
+    explicit = _safe_int(os.getenv("SDLXLIFF_AVAILABLE_TOKENS"), 0)
+    if explicit > 0:
+        return max(1000, explicit)
+    max_output_tokens = _safe_int(os.getenv("MAX_OUTPUT_TOKENS", "8192"), 8192)
+    compression_factor = _safe_float(os.getenv("COMPRESSION_FACTOR", "2.0"), 2.0)
+    if compression_factor <= 0:
+        compression_factor = 0.000000000001
+    return max(1000, int((max_output_tokens - 500) / compression_factor))
+
+
+def _segment_source_hash(segments: List[Dict[str, Any]]) -> str:
+    payload = [
+        {
+            "id": segment.get("id"),
+            "unit_index": segment.get("unit_index"),
+            "mid": segment.get("mid"),
+            "source": segment.get("source_text"),
+            "tag_sequence": segment.get("tag_sequence") or [],
+        }
+        for segment in segments
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _count_tokens(text: str) -> int:
+    try:
+        from chapter_splitter import ChapterSplitter
+
+        return ChapterSplitter(model_name=os.getenv("MODEL", "gpt-3.5-turbo")).count_tokens(text)
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _batch_body(segments: List[Dict[str, Any]]) -> str:
+    records = [{"id": str(segment["id"]), "source": segment["source_text"]} for segment in segments]
+    return json.dumps(records, ensure_ascii=False, indent=2)
+
+
+def _pack_segment_batches(segments: List[Dict[str, Any]], available_tokens: int) -> List[List[str]]:
+    batches: List[List[str]] = []
+    current: List[Dict[str, Any]] = []
+
+    for segment in segments:
+        candidate = current + [segment]
+        if current and _count_tokens(_batch_body(candidate)) > available_tokens:
+            batches.append([str(item["id"]) for item in current])
+            current = [segment]
+        else:
+            current = candidate
+
+    if current:
+        batches.append([str(item["id"]) for item in current])
+    return batches
+
+
+def _cache_path(output_dir: str) -> str:
+    cache_dir = os.path.join(output_dir, ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "sdlxliff_batches.cache")
+
+
+def _load_batch_cache(output_dir: str, source_hash: str, segment_ids: set) -> Optional[List[List[str]]]:
+    path = _cache_path(output_dir)
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        if cache.get("source_hash") != source_hash:
+            print("SDLXLIFF batch cache invalidated: source segments changed")
+            return None
+        batches = []
+        for batch in cache.get("batches", []):
+            ids = [str(item) for item in batch.get("segment_ids", [])]
+            if not ids or any(segment_id not in segment_ids for segment_id in ids):
+                return None
+            batches.append(ids)
+        return batches or None
+    except Exception as exc:
+        print(f"Could not load SDLXLIFF batch cache: {exc}")
+        return None
+
+
+def _save_batch_cache(output_dir: str, source_hash: str, source_file: str, batches: List[List[str]]) -> None:
+    path = _cache_path(output_dir)
+    cache = {
+        "version": 1,
+        "source_hash": source_hash,
+        "source_file": os.path.basename(source_file),
+        "batch_count": len(batches),
+        "batches": [
+            {
+                "num": idx + 1,
+                "filename": f"section_{idx + 1}.txt",
+                "segment_ids": ids,
+            }
+            for idx, ids in enumerate(batches)
+        ],
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        print(f"Saved SDLXLIFF batch cache ({len(batches)} batch(es))")
+    except Exception as exc:
+        print(f"Could not save SDLXLIFF batch cache: {exc}")
+
+
+def _chapter_from_batch(batch_num: int, batch_segments: List[Dict[str, Any]], source_path: str) -> Dict[str, Any]:
+    body = _batch_body(batch_segments)
+    segment_ids = [str(segment["id"]) for segment in batch_segments]
     return {
-        "num": num,
-        "title": f"SDLXLIFF Segment {num}",
+        "num": batch_num,
+        "title": f"SDLXLIFF Batch {batch_num}",
         "body": body,
-        "filename": f"section_{num}.txt",
+        "filename": f"section_{batch_num}.txt",
         "source_file": source_path,
         "content_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "file_size": len(body),
         "has_images": False,
         "image_count": 0,
         "is_chunk": False,
-        "sdlxliff_segment": True,
-        "sdlxliff_placeholder_only": is_placeholder_only_text(body),
+        "sdlxliff_batch": True,
+        "sdlxliff_segment_ids": segment_ids,
+        "sdlxliff_placeholder_only": all(is_placeholder_only_text(segment["source_text"]) for segment in batch_segments),
     }
 
 
-def _worker_count() -> int:
-    try:
-        workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
-    except Exception:
-        workers = 2
-    return max(1, workers)
+def _manifest_segment(segment: Dict[str, Any], batch_num: int) -> Dict[str, Any]:
+    segment_copy = dict(segment)
+    segment_copy.pop("source_text", None)
+    segment_copy["filename"] = f"section_{batch_num}.txt"
+    segment_copy["batch_num"] = batch_num
+    return segment_copy
 
 
 def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     segments = iter_eligible_segments(path)
-    workers = min(_worker_count(), max(1, len(segments)))
-    if workers > 1 and len(segments) > 1:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            chapters = list(pool.map(lambda seg: _chapter_from_segment(seg, path), segments))
-    else:
-        chapters = [_chapter_from_segment(seg, path) for seg in segments]
+    source_hash = _segment_source_hash(segments)
+    segment_by_id = {str(segment["id"]): segment for segment in segments}
+    segment_ids = set(segment_by_id.keys())
 
+    batches = _load_batch_cache(output_dir, source_hash, segment_ids)
+    if batches is not None:
+        print(f"Loaded SDLXLIFF batch cache ({len(batches)} batch(es))")
+    else:
+        available_tokens = _available_tokens_from_env()
+        print(f"SDLXLIFF JSON batch size: {available_tokens:,} tokens")
+        batches = _pack_segment_batches(segments, available_tokens)
+        _save_batch_cache(output_dir, source_hash, path, batches)
+
+    chapters = []
     manifest_segments = []
-    for segment in segments:
-        segment_copy = dict(segment)
-        segment_copy.pop("source_text", None)
-        segment_copy["filename"] = f"section_{segment['segment_num']}.txt"
-        manifest_segments.append(segment_copy)
+    manifest_batches = []
+    for batch_num, ids in enumerate(batches, start=1):
+        batch_segments = [segment_by_id[segment_id] for segment_id in ids if segment_id in segment_by_id]
+        if not batch_segments:
+            continue
+        chapters.append(_chapter_from_batch(batch_num, batch_segments, path))
+        manifest_batches.append(
+            {
+                "num": batch_num,
+                "filename": f"section_{batch_num}.txt",
+                "segment_ids": [str(segment["id"]) for segment in batch_segments],
+            }
+        )
+        for segment in batch_segments:
+            manifest_segments.append(_manifest_segment(segment, batch_num))
 
     manifest = {
-        "version": 1,
+        "version": 2,
+        "type": "sdlxliff_json_batches",
         "source_file": os.path.abspath(path),
         "source_basename": os.path.basename(path),
+        "source_hash": source_hash,
         "segment_count": len(segments),
+        "batch_count": len(chapters),
+        "batches": manifest_batches,
         "segments": manifest_segments,
     }
 
@@ -272,6 +459,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "type": "sdlxliff",
         "source_file": os.path.abspath(path),
         "chapter_count": len(chapters),
+        "segment_count": len(segments),
+        "batch_count": len(chapters),
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -280,6 +469,7 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "success": True,
         "chapters": len(chapters),
         "segments": len(segments),
+        "batches": len(chapters),
         "manifest_path": manifest_path,
         "chapters_path": chapters_path,
         "metadata": metadata,

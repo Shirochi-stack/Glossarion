@@ -74,12 +74,79 @@ def _is_sdlxliff_placeholder_only_text(text):
 
 
 def _is_sdlxliff_placeholder_only_chapter(chapter):
-    if not isinstance(chapter, dict) or not chapter.get("sdlxliff_segment"):
+    if not isinstance(chapter, dict) or not (chapter.get("sdlxliff_segment") or chapter.get("sdlxliff_batch")):
         return False
     return (
         bool(chapter.get("sdlxliff_placeholder_only"))
         or _is_sdlxliff_placeholder_only_text(chapter.get("body"))
     )
+
+
+def _sdlxliff_json_records(text):
+    try:
+        data = json.loads(str(text or ""))
+    except Exception:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _sdlxliff_preserved_batch_body(chapter):
+    records = _sdlxliff_json_records((chapter or {}).get("body"))
+    if records is None:
+        return (chapter or {}).get("body") or ""
+    preserved = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        preserved.append({
+            "id": str(item.get("id", "")),
+            "target": str(item.get("source", "")),
+        })
+    return json.dumps(preserved, ensure_ascii=False, indent=2)
+
+
+def _validate_sdlxliff_batch_output(chapter, text):
+    source_records = _sdlxliff_json_records((chapter or {}).get("body"))
+    target_records = _sdlxliff_json_records(text)
+    if source_records is None:
+        return False, "INVALID_SOURCE_JSON"
+    if target_records is None:
+        return False, "INVALID_TARGET_JSON"
+
+    expected = {}
+    expected_order = []
+    for item in source_records:
+        if not isinstance(item, dict) or "id" not in item or "source" not in item:
+            return False, "INVALID_SOURCE_FIELDS"
+        segment_id = str(item.get("id"))
+        if segment_id in expected:
+            return False, "DUPLICATE_SOURCE_ID"
+        expected[segment_id] = SDLXLIFF_PLACEHOLDER_RE.findall(str(item.get("source", "")))
+        expected_order.append(segment_id)
+
+    seen = {}
+    seen_order = []
+    for item in target_records:
+        if not isinstance(item, dict) or set(item.keys()) != {"id", "target"}:
+            return False, "INVALID_TARGET_FIELDS"
+        segment_id = str(item.get("id"))
+        if segment_id in seen:
+            return False, "DUPLICATE_TARGET_ID"
+        if segment_id not in expected:
+            return False, "EXTRA_TARGET_ID"
+        target = item.get("target")
+        if not isinstance(target, str):
+            return False, "INVALID_TARGET_TEXT"
+        if SDLXLIFF_PLACEHOLDER_RE.findall(target) != expected[segment_id]:
+            return False, "PLACEHOLDER_MISMATCH"
+        seen[segment_id] = True
+        seen_order.append(segment_id)
+
+    if set(seen.keys()) != set(expected.keys()):
+        return False, "MISSING_TARGET_ID"
+    if seen_order != expected_order:
+        return False, "ID_ORDER_MISMATCH"
+    return True, None
 
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
@@ -7021,6 +7088,60 @@ class BatchTranslationProcessor:
             
             if not result:
                 raise Exception("No translation result produced")
+
+            if chapter.get("sdlxliff_batch"):
+                cleaned = str(result or "").strip()
+                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
+                    qa_issue = ["TRUNCATED"] if (chapter_truncated or chapter_truncated_event.is_set()) else ["PARTIAL"]
+                    qa_label = "truncated" if (chapter_truncated or chapter_truncated_event.is_set()) else "partial"
+                    print(f"⚠️ SDLXLIFF batch {actual_num}: {qa_label} output rejected")
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            chapter_progress_idx,
+                            actual_num,
+                            content_hash,
+                            fname,
+                            status="qa_failed",
+                            ai_features=ai_features,
+                            qa_issues_found=qa_issue,
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                    return False, actual_num, None, None, None
+
+                ok, issue = _validate_sdlxliff_batch_output(chapter, cleaned)
+                if not ok:
+                    print(f"❌ SDLXLIFF batch {actual_num}: invalid JSON output ({issue})")
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            chapter_progress_idx,
+                            actual_num,
+                            content_hash,
+                            fname,
+                            status="qa_failed",
+                            ai_features=ai_features,
+                            qa_issues_found=[issue or "INVALID_SDLXLIFF_JSON"],
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                    return False, actual_num, None, None, None
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                with self.progress_lock:
+                    self.update_progress_fn(
+                        chapter_progress_idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="completed",
+                        ai_features=ai_features,
+                        chapter_obj=chapter,
+                    )
+                    self.save_progress_fn()
+                    self.chapters_completed += 1
+                print(f"💾 Saved SDLXLIFF JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
 
             # Enhanced mode workflow (same as non-batch):
             # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
@@ -17682,6 +17803,13 @@ def main(log_callback=None, stop_callback=None):
     elif is_sdlxliff_file:
         print("📄 Processing SDLXLIFF file...")
         try:
+            try:
+                sdlxliff_max_output = config.get_effective_output_limit()
+                sdlxliff_compression = config.get_effective_compression_factor()
+                sdlxliff_available = max(1000, int((sdlxliff_max_output - 500) / sdlxliff_compression))
+                os.environ["SDLXLIFF_AVAILABLE_TOKENS"] = str(sdlxliff_available)
+            except Exception:
+                pass
             extraction_result = None
             use_async = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1" and log_callback
             if use_async:
@@ -20419,11 +20547,11 @@ def main(log_callback=None, stop_callback=None):
             if _is_sdlxliff_placeholder_only_chapter(c):
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c.get("body") or "")
+                    f.write(_sdlxliff_preserved_batch_body(c) if c.get("sdlxliff_batch") else (c.get("body") or ""))
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                print(f"⏭️ SDLXLIFF segment {actual_num}: placeholder-only; preserved without API request")
+                print(f"⏭️ SDLXLIFF batch {actual_num}: placeholder-only; preserved without API request")
                 continue
             
             # Check for empty or image-only chapters
@@ -21460,11 +21588,11 @@ def main(log_callback=None, stop_callback=None):
             if _is_sdlxliff_placeholder_only_chapter(c):
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c.get("body") or "")
+                    f.write(_sdlxliff_preserved_batch_body(c) if c.get("sdlxliff_batch") else (c.get("body") or ""))
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                print(f"⏭️ SDLXLIFF segment {actual_num}: placeholder-only; preserved without API request")
+                print(f"⏭️ SDLXLIFF batch {actual_num}: placeholder-only; preserved without API request")
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
@@ -22802,6 +22930,55 @@ def main(log_callback=None, stop_callback=None):
             client.set_output_filename(fname)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+
+            if c.get("sdlxliff_batch"):
+                cleaned = str(cleaned or "").strip()
+                sdlxliff_finish_reason = str(locals().get("finish_reason") or "").strip().lower()
+                sdlxliff_truncated = bool(locals().get("chapter_truncated", False)) or sdlxliff_finish_reason in [
+                    "length",
+                    "max_tokens",
+                    "max_length",
+                    "stop_sequence_limit",
+                    "truncated",
+                    "incomplete",
+                ]
+                if sdlxliff_truncated or is_partial_result:
+                    qa_issue = ["TRUNCATED"] if sdlxliff_truncated else ["PARTIAL"]
+                    qa_label = "truncated" if sdlxliff_truncated else "partial"
+                    print(f"⚠️ SDLXLIFF batch {actual_num}: {qa_label} output rejected")
+                    progress_manager.update(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="qa_failed",
+                        qa_issues_found=qa_issue,
+                        chapter_obj=c,
+                    )
+                    progress_manager.save()
+                    continue
+
+                ok, issue = _validate_sdlxliff_batch_output(c, cleaned)
+                if not ok:
+                    print(f"❌ SDLXLIFF batch {actual_num}: invalid JSON output ({issue})")
+                    progress_manager.update(
+                        idx,
+                        actual_num,
+                        content_hash,
+                        fname,
+                        status="qa_failed",
+                        qa_issues_found=[issue or "INVALID_SDLXLIFF_JSON"],
+                        chapter_obj=c,
+                    )
+                    progress_manager.save()
+                    continue
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
+                print(f"💾 Saved SDLXLIFF JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                continue
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
 

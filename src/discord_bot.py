@@ -481,8 +481,22 @@ DEFAULT_PROMPT_PROFILES = [
     "nano banna",
     "test",
     "refinement",
-    "SDLXLIFF Editing",
+    "SDLXLIFF Editing v2",
 ]
+
+DEFAULT_PROFILE_PROMPTS = {
+    "SDLXLIFF Editing v2": (
+        "You are editing SDLXLIFF JSON batch records. Translate each source value to the requested target language.\n"
+        "- Input is a JSON array of objects with id and source fields.\n"
+        "- Output only a valid JSON array. No markdown fences, explanations, XML wrappers, or extra fields.\n"
+        "- Each output object must have exactly these fields: id and target.\n"
+        "- Preserve every input id exactly once and in the same order.\n"
+        "- Translate only source into target; do not output XLIFF tags, comments, or notes.\n"
+        "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
+        "- Do not add, remove, duplicate, reorder, or translate placeholder tokens.\n"
+        "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
+    )
+}
 
 # Bot setup
 intents = discord.Intents.default()
@@ -1298,6 +1312,8 @@ async def translate(
             system_prompt = prompt_profiles.get(chosen_profile)
             if system_prompt is None and 'Universal' in prompt_profiles:
                 system_prompt = prompt_profiles['Universal']
+        if not system_prompt:
+            system_prompt = DEFAULT_PROFILE_PROMPTS.get(chosen_profile)
         if not system_prompt:
             # Fallback to basic prompt
             system_prompt = f"Translate to {target_language}. Preserve all formatting."

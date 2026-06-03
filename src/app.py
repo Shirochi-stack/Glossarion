@@ -463,13 +463,16 @@ class GlossarionWeb:
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ),
             "Original": "Return everything exactly as seen on the source.",
-            "SDLXLIFF Editing": (
-                "You are editing one SDLXLIFF segment at a time. Translate only the visible source text to {target_lang}.\n"
-                "- Output only the translated segment text.\n"
-                "- Do not output XML wrappers, XLIFF tags, comments, notes, explanations, or markdown fences.\n"
+            "SDLXLIFF Editing v2": (
+                "You are editing SDLXLIFF JSON batch records. Translate each source value to {target_lang}.\n"
+                "- Input is a JSON array of objects with id and source fields.\n"
+                "- Output only a valid JSON array. No markdown fences, explanations, XML wrappers, or extra fields.\n"
+                "- Each output object must have exactly these fields: id and target.\n"
+                "- Preserve every input id exactly once and in the same order.\n"
+                "- Translate only source into target; do not output XLIFF tags, comments, or notes.\n"
                 "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
+                "- Do not add, remove, duplicate, reorder, or translate placeholder tokens.\n"
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
-                "- Do not add or remove placeholder tokens. Do not translate placeholder token text.\n"
             )
         }
         
