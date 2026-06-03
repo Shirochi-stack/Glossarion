@@ -275,11 +275,17 @@ def _live_config_from_owner(owner):
             cfg["batch_size"] = int(_widget_text(getattr(owner, "batch_size_entry", None), "3") or 3)
         except Exception:
             pass
-    cfg.setdefault("api_key", api_key)
-    cfg.setdefault("model", model)
-    cfg.setdefault("use_qa_scan_keys", cfg.get("use_qa_scan_keys", False))
+    cfg["api_key"] = api_key or cfg.get("api_key", "")
+    cfg["model"] = model or cfg.get("model", "")
+    cfg["use_qa_scan_keys"] = _checked_value(
+        getattr(owner, "use_qa_scan_keys_var", None),
+        cfg.get("use_qa_scan_keys", False),
+    )
     cfg.setdefault("qa_scan_keys", cfg.get("qa_scan_keys", []))
-    cfg.setdefault("use_ai_truncation_detection_keys", cfg.get("use_ai_truncation_detection_keys", False))
+    cfg["use_ai_truncation_detection_keys"] = _checked_value(
+        getattr(owner, "use_ai_truncation_detection_keys_var", None),
+        cfg.get("use_ai_truncation_detection_keys", False),
+    )
     cfg.setdefault("ai_truncation_detection_keys", cfg.get("ai_truncation_detection_keys", []))
     cfg.setdefault("force_key_rotation", cfg.get("force_key_rotation", True))
     cfg.setdefault("rotation_frequency", cfg.get("rotation_frequency", 1))

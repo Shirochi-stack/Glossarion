@@ -27488,6 +27488,10 @@ Important rules:
                 ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
                 ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
                 ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                ('QA_CHECK_SILENT_TRUNCATION', '1' if qa_settings.get('check_silent_truncation', False) else '0'),
+                ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
+                ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
+                ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
                 ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', 1))),
             ]
             

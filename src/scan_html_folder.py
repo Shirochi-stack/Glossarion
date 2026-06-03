@@ -9066,13 +9066,38 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _dedicated_model = qa_settings.get('ai_truncation_model', '').strip()
             _dedicated_url = qa_settings.get('ai_truncation_endpoint_url', '').strip()
 
+            _ai_pool_enabled = bool(_ai_config.get('use_ai_truncation_detection_keys', False))
+            _ai_pool_keys = _ai_config.get('ai_truncation_detection_keys', [])
+            if not isinstance(_ai_pool_keys, list):
+                _ai_pool_keys = []
+            _ai_pool_usable_keys = [
+                key for key in _ai_pool_keys
+                if isinstance(key, dict)
+                and key.get('enabled', True)
+                and key.get('model')
+                and (key.get('api_key') or key.get('google_credentials') or key.get('use_individual_endpoint'))
+            ]
+            if _ai_pool_enabled:
+                if not _ai_pool_usable_keys:
+                    raise RuntimeError(
+                        "AI truncation detection key pool is enabled but has no usable enabled keys; refusing to use the main GUI key"
+                    )
+                log(
+                    f"   🔑 AI truncation detection key pool enabled "
+                    f"({len(_ai_pool_usable_keys)} usable key(s)); main GUI key will not be used"
+                )
+
             # Priority: dedicated key > live main key > config key > env
             _api_key = _dedicated_key or qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
             _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
+            if _ai_pool_enabled:
+                _seed_key = _ai_pool_usable_keys[0]
+                _api_key = _seed_key.get('api_key') or 'dummy-key-for-dedicated-endpoint'
+                _model = _seed_key.get('model') or _model
             _output_dir = folder_path
 
-            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if _ai_config.get('use_ai_truncation_detection_keys', False) else '0'
-            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(_ai_config.get('ai_truncation_detection_keys', []))
+            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if _ai_pool_enabled else '0'
+            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(_ai_pool_keys)
 
             # Apply QA scan key environment variables if enabled in config
             if _ai_config.get('use_qa_scan_keys', False):
@@ -9095,7 +9120,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 _ai_config['openai_base_url'] = _dedicated_url
                 log(f"   🔗 Using custom endpoint: {_dedicated_url}")
 
-            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
+            _client_config = dict(_ai_config)
+            if _ai_pool_enabled:
+                _client_config['use_multi_api_keys'] = False
+                _client_config['multi_api_keys'] = []
+
+            _ai_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
             _ai_client.context = 'qa_truncation'
             # Wire QA scanner's stop flag into the client so in-flight API
             # calls abort immediately when the user presses Stop.
@@ -9110,7 +9140,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     return _ai_client
                 worker_client = getattr(_ai_worker_clients, 'client', None)
                 if worker_client is None:
-                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
+                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
                     worker_client.context = 'qa_truncation'
                     worker_client._stop_callback = should_stop
                     _ai_worker_clients.client = worker_client

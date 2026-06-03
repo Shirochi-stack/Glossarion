@@ -630,6 +630,10 @@ def _load_qa_scanner_settings_from_env():
             "auto_save_report": _env_bool("QA_AUTO_SAVE_REPORT", True),
             "cache_enabled": _env_bool("QA_CACHE_ENABLED", True),
             "paragraph_threshold": _env_float("QA_PARAGRAPH_THRESHOLD", 0.3),
+            "check_silent_truncation": _env_bool("QA_CHECK_SILENT_TRUNCATION", False),
+            "check_potential_truncation": _env_bool("QA_CHECK_POTENTIAL_TRUNCATION", False),
+            "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),
+            "check_word_count_ratio": _env_bool("QA_CHECK_WORD_COUNT_RATIO", True),
         }
 
     try:

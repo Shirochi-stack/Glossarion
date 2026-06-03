@@ -8040,6 +8040,10 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
                     or _key_identifier.startswith('VisionKey#')
                 )
+                _is_ai_truncation_detection_pool = (
+                    active_pool is getattr(self.__class__, '_ai_truncation_detection_key_pool', None)
+                    or _key_identifier.startswith('AITruncationDetectionKey#')
+                )
                 _is_inpainter_pool = (
                     active_pool is getattr(self.__class__, '_inpainter_key_pool', None)
                     or _key_identifier.startswith('ImageGenEditKey#')
@@ -8052,7 +8056,28 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_rolling_summary_key_pool', None)
                     or _key_identifier.startswith('RollingSummaryKey#')
                 )
-                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(image-gen/edit-key)" if _is_inpainter_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(ai-truncation-key)" if _is_ai_truncation_detection_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(image-gen/edit-key)" if _is_inpainter_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model} {_pool_label}")
+            elif str(getattr(self, 'key_identifier', '') or '').startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'Refinement Key#', 'RollingSummaryKey#', 'TruncationRetryKey#', 'ImageGenEditKey#')) and not self._is_stop_requested():
+                _key_identifier = str(getattr(self, 'key_identifier', '') or '')
+                if _key_identifier.startswith('AITruncationDetectionKey#'):
+                    _pool_label = "(ai-truncation-key)"
+                elif _key_identifier.startswith('VisionKey#'):
+                    _pool_label = "(vision-key)"
+                elif _key_identifier.startswith('MetadataKey#'):
+                    _pool_label = "(metadata-key)"
+                elif _key_identifier.startswith(('GlossaryRefinementKey#', 'Refinement Key#')):
+                    _pool_label = "(refinement-key)"
+                elif _key_identifier.startswith('GlossaryKey#'):
+                    _pool_label = "(glossary-key)"
+                elif _key_identifier.startswith('RollingSummaryKey#'):
+                    _pool_label = "(rolling-summary-key)"
+                elif _key_identifier.startswith('TruncationRetryKey#'):
+                    _pool_label = "(truncation-retry-key)"
+                elif _key_identifier.startswith('ImageGenEditKey#'):
+                    _pool_label = "(image-gen/edit-key)"
+                else:
+                    _pool_label = "(dedicated-key)"
                 defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model}")

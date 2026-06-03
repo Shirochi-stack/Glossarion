@@ -561,18 +561,21 @@ class QAScannerMixin:
             self.append_log(f"❌ Error initializing QA scanner: {e}")
             return
 
-        # Load and normalize QA scanner settings through the shared runtime so
-        # post-translation scans and worker-side Failed multipass scans use the
-        # same defaults, target-language handling, and word-count multipliers.
-        try:
-            from qa_scan_runtime import normalize_qa_scan_settings
-            main_lang = self.config.get('output_language') or os.getenv('OUTPUT_LANGUAGE', '')
-            qa_settings = normalize_qa_scan_settings(
-                self.config.get('qa_scanner_settings', {}),
-                target_language=main_lang,
-            )
-        except Exception:
-            qa_settings = dict(self.config.get('qa_scanner_settings', {}) or {})
+        def _load_current_qa_settings():
+            # Load and normalize QA scanner settings through the shared runtime so
+            # post-translation scans and worker-side Failed multipass scans use the
+            # same defaults, target-language handling, and word-count multipliers.
+            try:
+                from qa_scan_runtime import normalize_qa_scan_settings
+                main_lang = self.config.get('output_language') or os.getenv('OUTPUT_LANGUAGE', '')
+                return normalize_qa_scan_settings(
+                    self.config.get('qa_scanner_settings', {}),
+                    target_language=main_lang,
+                )
+            except Exception:
+                return dict(self.config.get('qa_scanner_settings', {}) or {})
+
+        qa_settings = _load_current_qa_settings()
 
         # Debug: Print current settings
         print(f"[DEBUG] QA Settings: {qa_settings}")
@@ -1705,6 +1708,16 @@ class QAScannerMixin:
             if not settings_saved:
                 self.append_log("⚠️ QA scan canceled - no custom settings were saved.")
                 return
+        refreshed_qa_settings = _load_current_qa_settings()
+        if selected_mode_value == "custom" and 'custom_mode_settings' in qa_settings:
+            refreshed_qa_settings['custom_mode_settings'] = qa_settings['custom_mode_settings']
+        qa_settings = refreshed_qa_settings
+        try:
+            if 'mode_dialog' in locals() and mode_dialog is not None:
+                mode_dialog._qa_settings_ref = qa_settings
+        except Exception:
+            pass
+
         # Check if word count cross-reference is enabled but no source file is selected
         check_word_count = qa_settings.get('check_word_count_ratio', False)
         epub_files_to_scan = []
@@ -2062,7 +2075,11 @@ class QAScannerMixin:
 
                     # Determine the correct EPUB path for this specific folder
                     current_epub_path = epub_path
-                    current_qa_settings = qa_settings.copy()
+                    latest_qa_settings = _load_current_qa_settings()
+                    if selected_mode_value == "custom" and 'custom_mode_settings' in qa_settings:
+                        latest_qa_settings['custom_mode_settings'] = qa_settings['custom_mode_settings']
+                    current_qa_settings = latest_qa_settings.copy()
+                    qa_settings.update(latest_qa_settings)
 
                     # Any EPUB-dependent check needs per-folder matching
                     _needs_epub = (
@@ -4749,6 +4766,10 @@ class QAScannerMixin:
                             # Counting mode: set env vars based on selection
                             ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
                             ('QA_EXACT_CHAR_COUNT', '1' if qa_settings.get('counting_mode') == 'exact' else '0'),
+                            ('QA_CHECK_SILENT_TRUNCATION', '1' if qa_settings.get('check_silent_truncation', False) else '0'),
+                            ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
+                            ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
+                            ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
                         ]
 
                         for env_key, env_value in qa_env_mappings:
