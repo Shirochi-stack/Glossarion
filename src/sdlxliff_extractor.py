@@ -334,6 +334,8 @@ def _load_batch_cache(output_dir: str, source_hash: str, segment_ids: set) -> Op
             return None
         with open(path, "r", encoding="utf-8") as f:
             cache = json.load(f)
+        if cache.get("version") != 2:
+            return None
         if cache.get("source_hash") != source_hash:
             print("SDLXLIFF batch cache invalidated: source segments changed")
             return None
@@ -352,7 +354,7 @@ def _load_batch_cache(output_dir: str, source_hash: str, segment_ids: set) -> Op
 def _save_batch_cache(output_dir: str, source_hash: str, source_file: str, batches: List[List[str]]) -> None:
     path = _cache_path(output_dir)
     cache = {
-        "version": 1,
+        "version": 2,
         "source_hash": source_hash,
         "source_file": os.path.basename(source_file),
         "batch_count": len(batches),
@@ -393,11 +395,19 @@ def _chapter_from_batch(batch_num: int, batch_segments: List[Dict[str, Any]], so
     }
 
 
-def _manifest_segment(segment: Dict[str, Any], batch_num: int) -> Dict[str, Any]:
+def _manifest_segment(segment: Dict[str, Any], batch_num: Optional[int]) -> Dict[str, Any]:
     segment_copy = dict(segment)
-    segment_copy.pop("source_text", None)
-    segment_copy["filename"] = f"section_{batch_num}.txt"
+    placeholder_only = is_placeholder_only_text(segment.get("source_text") or "")
+    if placeholder_only:
+        segment_copy["auto_insert"] = True
+        segment_copy["auto_target_text"] = segment.get("source_text") or ""
+        segment_copy["filename"] = None
+    else:
+        segment_copy.pop("source_text", None)
+        segment_copy["auto_insert"] = False
+        segment_copy["filename"] = f"section_{batch_num}.txt"
     segment_copy["batch_num"] = batch_num
+    segment_copy["placeholder_only"] = placeholder_only
     return segment_copy
 
 
@@ -405,23 +415,29 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     segments = iter_eligible_segments(path)
     source_hash = _segment_source_hash(segments)
-    segment_by_id = {str(segment["id"]): segment for segment in segments}
-    segment_ids = set(segment_by_id.keys())
+    translatable_segments = [
+        segment for segment in segments if not is_placeholder_only_text(segment.get("source_text") or "")
+    ]
+    auto_insert_segments = [
+        segment for segment in segments if is_placeholder_only_text(segment.get("source_text") or "")
+    ]
+    translatable_by_id = {str(segment["id"]): segment for segment in translatable_segments}
+    translatable_ids = set(translatable_by_id.keys())
 
-    batches = _load_batch_cache(output_dir, source_hash, segment_ids)
+    batches = _load_batch_cache(output_dir, source_hash, translatable_ids)
     if batches is not None:
         print(f"Loaded SDLXLIFF batch cache ({len(batches)} batch(es))")
     else:
         available_tokens = _available_tokens_from_env()
         print(f"SDLXLIFF JSON batch size: {available_tokens:,} tokens")
-        batches = _pack_segment_batches(segments, available_tokens)
+        batches = _pack_segment_batches(translatable_segments, available_tokens)
         _save_batch_cache(output_dir, source_hash, path, batches)
 
     chapters = []
-    manifest_segments = []
     manifest_batches = []
+    batch_assignments = {}
     for batch_num, ids in enumerate(batches, start=1):
-        batch_segments = [segment_by_id[segment_id] for segment_id in ids if segment_id in segment_by_id]
+        batch_segments = [translatable_by_id[segment_id] for segment_id in ids if segment_id in translatable_by_id]
         if not batch_segments:
             continue
         chapters.append(_chapter_from_batch(batch_num, batch_segments, path))
@@ -433,7 +449,12 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
             }
         )
         for segment in batch_segments:
-            manifest_segments.append(_manifest_segment(segment, batch_num))
+            batch_assignments[str(segment["id"])] = batch_num
+
+    manifest_segments = [
+        _manifest_segment(segment, batch_assignments.get(str(segment["id"])))
+        for segment in segments
+    ]
 
     manifest = {
         "version": 2,
@@ -442,6 +463,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "source_basename": os.path.basename(path),
         "source_hash": source_hash,
         "segment_count": len(segments),
+        "translatable_segment_count": len(translatable_segments),
+        "auto_insert_segment_count": len(auto_insert_segments),
         "batch_count": len(chapters),
         "batches": manifest_batches,
         "segments": manifest_segments,
@@ -460,6 +483,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "source_file": os.path.abspath(path),
         "chapter_count": len(chapters),
         "segment_count": len(segments),
+        "translatable_segment_count": len(translatable_segments),
+        "auto_insert_segment_count": len(auto_insert_segments),
         "batch_count": len(chapters),
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
@@ -469,6 +494,8 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "success": True,
         "chapters": len(chapters),
         "segments": len(segments),
+        "translatable_segments": len(translatable_segments),
+        "auto_insert_segments": len(auto_insert_segments),
         "batches": len(chapters),
         "manifest_path": manifest_path,
         "chapters_path": chapters_path,
@@ -477,7 +504,11 @@ def extract_sdlxliff_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
 
 
 def extract_sdlxliff_texts(path: str) -> List[str]:
-    return [segment["source_text"] for segment in iter_eligible_segments(path)]
+    return [
+        segment["source_text"]
+        for segment in iter_eligible_segments(path)
+        if not is_placeholder_only_text(segment.get("source_text") or "")
+    ]
 
 
 def copy_element_without_tail(elem: etree._Element) -> etree._Element:

@@ -231,6 +231,20 @@ def _parse_batch_translation(text: str, expected_ids: List[str]) -> Tuple[Dict[s
     return translations, [], []
 
 
+def _apply_segment_translation(segment: Dict[str, Any], translation: str, trans_units: List[etree._Element]) -> bool:
+    if not _validate_placeholders(translation, segment):
+        return False
+    unit_index = int(segment.get("unit_index", -1))
+    if unit_index < 0 or unit_index >= len(trans_units):
+        return False
+    target_elem = _ensure_target_segment(trans_units[unit_index], segment.get("mid"))
+    try:
+        _set_mixed_content(target_elem, translation, segment.get("tag_map") or {})
+    except Exception:
+        return False
+    return True
+
+
 def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, output_path: Optional[str] = None) -> Dict:
     manifest_path = manifest_path or os.path.join(output_dir, "sdlxliff_manifest.json")
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -248,6 +262,14 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
     skipped = 0
     missing = 0
     invalid_batches = 0
+
+    for segment in manifest.get("segments", []):
+        if not segment.get("auto_insert"):
+            continue
+        if _apply_segment_translation(segment, str(segment.get("auto_target_text") or ""), trans_units):
+            updated += 1
+        else:
+            skipped += 1
 
     for batch in manifest.get("batches", []):
         expected_ids = [str(segment_id) for segment_id in batch.get("segment_ids", [])]
@@ -275,20 +297,10 @@ def convert_sdlxliff(output_dir: str, manifest_path: Optional[str] = None, outpu
             if not segment:
                 skipped += 1
                 continue
-            if not _validate_placeholders(translation, segment):
+            if _apply_segment_translation(segment, translation, trans_units):
+                updated += 1
+            else:
                 skipped += 1
-                continue
-            unit_index = int(segment.get("unit_index", -1))
-            if unit_index < 0 or unit_index >= len(trans_units):
-                skipped += 1
-                continue
-            target_elem = _ensure_target_segment(trans_units[unit_index], segment.get("mid"))
-            try:
-                _set_mixed_content(target_elem, translation, segment.get("tag_map") or {})
-            except Exception:
-                skipped += 1
-                continue
-            updated += 1
 
     if output_path is None:
         stem, ext = os.path.splitext(os.path.basename(source_file))

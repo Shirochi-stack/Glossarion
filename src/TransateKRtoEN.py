@@ -20329,7 +20329,9 @@ def main(log_callback=None, stop_callback=None):
 
     # Check if no chapters will be processed and provide helpful error
     if chapters_to_process == 0:
-        if start is not None and end is not None:
+        if is_sdlxliff_file:
+            print("\nℹ️ SDLXLIFF has no segments requiring model translation; protected-only segments will be restored locally.")
+        elif start is not None and end is not None:
             # Check if chapters in the range exist but are already completed
             if chapters:
                 available_chapters = []
