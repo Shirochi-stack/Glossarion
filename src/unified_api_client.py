@@ -6397,7 +6397,8 @@ class UnifiedClient:
             context_norm in _vision_parallel_contexts
             and (os.getenv('USE_VISION_KEYS', '0') == '1' or os.getenv('USE_QA_SCAN_KEYS', '0') == '1')
         )
-        _serialize_send = (not batch_mode) and (not _vision_parallel_request)
+        _qa_truncation_parallel_request = context_norm == 'qa_truncation'
+        _serialize_send = (not batch_mode) and (not _vision_parallel_request) and (not _qa_truncation_parallel_request)
         watchdog_started = False
         watchdog_context = context or ('image_translation' if image_data else 'translation')
         # Initialize override flags BEFORE try block so the finally clause
@@ -6451,8 +6452,11 @@ class UnifiedClient:
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
             self._log_pre_stagger(messages, watchdog_context)
-            if not _vision_parallel_request:
+            if not _vision_parallel_request and not _qa_truncation_parallel_request:
                 self._apply_thread_submission_delay()
+            if self._should_abort_retry():
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             request_id = str(uuid.uuid4())[:8]
             # Capture chapter/chunk context for watchdog tooltip
             chapter = None
@@ -15088,6 +15092,7 @@ class UnifiedClient:
             'image_ocr',
             'image_scan',
             'image_translation',
+            'qa_truncation',
             'inpainter',
             'image_generation',
             'image_edit',
@@ -15139,6 +15144,7 @@ class UnifiedClient:
         
         thread_name = threading.current_thread().name
         stagger_scope = self._get_api_stagger_scope()
+        no_snap_scope = stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
         
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_api_stagger_lock'):
@@ -15178,7 +15184,7 @@ class UnifiedClient:
                         # Snap to next multiple of api_delay for clean log output
                         # e.g. 3.2→5, 8.1→10, 18.7→20 with api_delay=5
                         # Only for delays >= 1s; sub-second delays stay precise
-                        if api_delay >= 1.0:
+                        if api_delay >= 1.0 and not no_snap_scope:
                             import math
                             sleep_time = math.ceil(sleep_time / api_delay) * api_delay
                             # Update the reserved slot to match the snapped time

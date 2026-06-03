@@ -5769,6 +5769,11 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
                 result['details'] = f'ai_verdict=UNCLEAR (raw: {answer_text[:80]})'
 
     except Exception as e:
+        error_text = str(e)
+        if getattr(e, 'error_type', None) == 'cancelled' or 'cancelled' in error_text.lower() or 'operation cancelled' in error_text.lower():
+            result['cancelled'] = True
+            result['details'] = 'cancelled'
+            return result
         log(f"      ⚠️ AI truncation check error: {e}")
         result['details'] = f'error: {e}'
 
@@ -9249,6 +9254,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         api_call_delay=_ai_delay,
                     )
 
+                    if ai_result and ai_result.get('cancelled'):
+                        return None
+
                     # Log the verdict
                     verdict = ai_result.get('details', 'unknown') if ai_result else 'error'
                     if ai_result and ai_result.get('flagged'):
@@ -9283,32 +9291,45 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _orig_batch_env = os.environ.get('BATCH_TRANSLATION')
             if _batch_enabled:
                 os.environ['BATCH_TRANSLATION'] = '1'
+            _ai_pool = None
             try:
-                with _AIThreadPool(max_workers=_ai_max_workers) as _ai_pool:
-                    _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
-                    for _ai_future in _ai_as_completed(_ai_futures):
-                        if should_stop():
-                            break
-                        try:
-                            _ai_pair = _ai_future.result()
-                            if _ai_pair:
-                                _ai_r_obj, _ai_tr = _ai_pair
-                                _ai_checked += 1
-                                if _ai_tr['flagged']:
-                                    _ai_flagged += 1
-                                    _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
-                                    _ai_r_obj['score'] = len(_ai_r_obj['issues'])
-                                    log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
-                        except Exception:
-                            pass
+                _ai_pool = _AIThreadPool(max_workers=_ai_max_workers)
+                _ai_futures = {_ai_pool.submit(_ai_check_one, r): r for r in results}
+                for _ai_future in _ai_as_completed(_ai_futures):
+                    if should_stop():
+                        for _pending in _ai_futures:
+                            _pending.cancel()
+                        break
+                    try:
+                        _ai_pair = _ai_future.result()
+                        if _ai_pair:
+                            _ai_r_obj, _ai_tr = _ai_pair
+                            if _ai_tr.get('cancelled'):
+                                continue
+                            _ai_checked += 1
+                            if _ai_tr['flagged']:
+                                _ai_flagged += 1
+                                _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
+                                _ai_r_obj['score'] = len(_ai_r_obj['issues'])
+                                log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
+                    except Exception:
+                        pass
             finally:
+                if _ai_pool is not None:
+                    try:
+                        _ai_pool.shutdown(wait=not should_stop(), cancel_futures=True)
+                    except TypeError:
+                        _ai_pool.shutdown(wait=not should_stop())
                 # Restore original BATCH_TRANSLATION env var
                 if _orig_batch_env is not None:
                     os.environ['BATCH_TRANSLATION'] = _orig_batch_env
                 elif _batch_enabled:
                     os.environ.pop('BATCH_TRANSLATION', None)
 
-            log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
+            if should_stop():
+                log(f"   ⛔ AI truncation detection stopped: {_ai_checked} checked, {_ai_flagged} flagged")
+            else:
+                log(f"   ✅ AI truncation detection complete: {_ai_checked} checked, {_ai_flagged} flagged")
 
     # Clean up to save memory
     for result in results:
