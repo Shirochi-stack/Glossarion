@@ -93,5 +93,9 @@ src/wait_and_open.ps1
 
 # Ignore test folders and Warp markdown file
 tests/
+!tests/
+tests/**
+!tests/test_sdlxliff_support.py
+!tests/test_sdlxliff_json_batch.py
 junktests/
 warp.md

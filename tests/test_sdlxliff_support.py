@@ -1,0 +1,331 @@
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+
+from lxml import etree
+
+from sdlxliff_converter import convert_sdlxliff
+from sdlxliff_extractor import extract_sdlxliff_to_chapters
+
+
+SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2"
+       xmlns:sdl="http://sdl.com/FileTypes/SdlXliff/1.0"
+       version="1.2">
+  <file original="story.html" source-language="ja-JP" target-language="en-US">
+    <body>
+      <trans-unit id="u1">
+        <source>Alpha <x id="1"/> beta</source>
+        <seg-source><mrk mtype="seg" mid="1">Alpha <x id="1"/> beta</mrk></seg-source>
+        <target><mrk mtype="seg" mid="1"></mrk></target>
+        <sdl:seg-defs><sdl:seg id="1" conf="Draft"/></sdl:seg-defs>
+      </trans-unit>
+      <trans-unit id="u2" translate="no">
+        <source>Do not translate</source>
+        <seg-source><mrk mtype="seg" mid="1">Do not translate</mrk></seg-source>
+        <target><mrk mtype="seg" mid="1">Existing no-translate target</mrk></target>
+      </trans-unit>
+      <trans-unit id="u3">
+        <source>Locked segment</source>
+        <seg-source><mrk mtype="seg" mid="1">Locked segment</mrk></seg-source>
+        <target><mrk mtype="seg" mid="1"></mrk></target>
+        <sdl:seg-defs><sdl:seg id="1" conf="Draft" locked="true"/></sdl:seg-defs>
+      </trans-unit>
+      <trans-unit id="u4">
+        <source>Approved segment</source>
+        <seg-source><mrk mtype="seg" mid="1">Approved segment</mrk></seg-source>
+        <target><mrk mtype="seg" mid="1">Already approved</mrk></target>
+        <sdl:seg-defs><sdl:seg id="1" conf="ApprovedTranslation"/></sdl:seg-defs>
+      </trans-unit>
+      <trans-unit id="u5">
+        <source>No segmentation fallback</source>
+        <target></target>
+      </trans-unit>
+      <trans-unit id="u6">
+        <source>Missing target fallback</source>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+"""
+
+
+def _write_sample(tmp_path, content=SAMPLE_SDLXLIFF):
+    source = tmp_path / "sample.sdlxliff"
+    source.write_text(content, encoding="utf-8")
+    return source
+
+
+def _visible_text(elem):
+    return "".join(elem.itertext())
+
+
+def _records_from_first_batch(out):
+    chapters = json.loads((out / "chapters_full.json").read_text(encoding="utf-8"))
+    return chapters, json.loads(chapters[0]["body"])
+
+
+def _write_batch_response(out, records):
+    (out / "response_section_1.txt").write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_sdlxliff_extraction_filters_and_protects_inline_tags(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXTRACTION_WORKERS", "4")
+    monkeypatch.setenv("SDLXLIFF_AVAILABLE_TOKENS", "100000")
+    source = _write_sample(tmp_path)
+    out = tmp_path / "out"
+
+    result = extract_sdlxliff_to_chapters(str(source), str(out))
+
+    chapters = json.loads((out / "chapters_full.json").read_text(encoding="utf-8"))
+    records = json.loads(chapters[0]["body"])
+    manifest = json.loads((out / "sdlxliff_manifest.json").read_text(encoding="utf-8"))
+    metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+
+    assert result["success"] is True
+    assert len(chapters) == 1
+    assert manifest["segment_count"] == 3
+    assert manifest["batch_count"] == 1
+    assert manifest["type"] == "sdlxliff_json_batches"
+    assert metadata["type"] == "sdlxliff"
+    assert records[0] == {"id": "1", "source": "Alpha [[XLIFF_TAG_000001_0000]] beta"}
+    assert [record["id"] for record in records] == ["1", "2", "3"]
+    assert chapters[0]["sdlxliff_batch"] is True
+    assert chapters[0]["sdlxliff_placeholder_only"] is False
+    tag_info = manifest["segments"][0]["tag_map"]["[[XLIFF_TAG_000001_0000]]"]
+    assert tag_info["kind"] == "empty"
+    assert etree.QName(tag_info["tag"]).localname == "x"
+    assert tag_info["attrib"]["id"] == "1"
+    assert [segment["unit_id"] for segment in manifest["segments"]] == ["u1", "u5", "u6"]
+
+
+def test_sdlxliff_placeholder_only_segment_is_marked_and_round_trips(tmp_path):
+    source = _write_sample(
+        tmp_path,
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2"
+       xmlns:sdl="http://sdl.com/FileTypes/SdlXliff/1.0"
+       version="1.2">
+  <file original="story.html" source-language="ja-JP" target-language="en-US">
+    <body>
+      <trans-unit id="tag-only">
+        <source><x id="1"/></source>
+        <seg-source><mrk mtype="seg" mid="1"><x id="1"/></mrk></seg-source>
+        <target><mrk mtype="seg" mid="1"></mrk></target>
+        <sdl:seg-defs><sdl:seg id="1" conf="Draft"/></sdl:seg-defs>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+    )
+    out = tmp_path / "out"
+
+    extract_sdlxliff_to_chapters(str(source), str(out))
+    chapters = json.loads((out / "chapters_full.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "sdlxliff_manifest.json").read_text(encoding="utf-8"))
+
+    assert chapters == []
+    assert manifest["segment_count"] == 1
+    assert manifest["translatable_segment_count"] == 0
+    assert manifest["auto_insert_segment_count"] == 1
+    assert manifest["segments"][0]["auto_insert"] is True
+    assert manifest["segments"][0]["auto_target_text"] == "[[XLIFF_TAG_000001_0000]]"
+
+    result = convert_sdlxliff(str(out))
+
+    assert result["updated"] == 1
+    tree = etree.parse(result["output_path"])
+    target = tree.xpath("//*[local-name()='trans-unit'][@id='tag-only']/*[local-name()='target']/*[local-name()='mrk']")[0]
+    assert _visible_text(target) == ""
+    assert etree.QName(target[0]).localname == "x"
+    assert target[0].get("id") == "1"
+
+
+def test_sdlxliff_converter_updates_only_eligible_targets(tmp_path):
+    source = _write_sample(tmp_path)
+    out = tmp_path / "out"
+    extract_sdlxliff_to_chapters(str(source), str(out))
+
+    _, records = _records_from_first_batch(out)
+    placeholder = re.search(r"\[\[XLIFF_TAG_\d{6}_\d{4}\]\]", records[0]["source"]).group(0)
+    _write_batch_response(
+        out,
+        [
+            {"id": records[0]["id"], "target": f"First {placeholder} target"},
+            {"id": records[1]["id"], "target": "Fallback target"},
+            {"id": records[2]["id"], "target": "Created target"},
+        ],
+    )
+
+    result = convert_sdlxliff(str(out))
+
+    assert result["updated"] == 3
+    assert result["skipped"] == 0
+    assert result["missing"] == 0
+
+    tree = etree.parse(result["output_path"])
+    units = {unit.get("id"): unit for unit in tree.xpath("//*[local-name()='trans-unit']")}
+    u1_target = units["u1"].xpath("./*[local-name()='target']//*[local-name()='mrk'][@mid='1']")[0]
+    assert _visible_text(u1_target) == "First  target"
+    assert etree.QName(u1_target[0]).localname == "x"
+    assert u1_target[0].tail == " target"
+    assert _visible_text(units["u2"].xpath("./*[local-name()='target']")[0]) == "Existing no-translate target"
+    assert _visible_text(units["u3"].xpath("./*[local-name()='target']")[0]) == ""
+    assert _visible_text(units["u4"].xpath("./*[local-name()='target']")[0]) == "Already approved"
+    assert _visible_text(units["u5"].xpath("./*[local-name()='target']")[0]) == "Fallback target"
+    assert _visible_text(units["u6"].xpath("./*[local-name()='target']")[0]) == "Created target"
+
+
+def test_sdlxliff_converter_skips_placeholder_mismatch(tmp_path):
+    source = _write_sample(tmp_path)
+    out = tmp_path / "out"
+    extract_sdlxliff_to_chapters(str(source), str(out))
+
+    _, records = _records_from_first_batch(out)
+    _write_batch_response(
+        out,
+        [
+            {"id": records[0]["id"], "target": "Missing protected placeholder"},
+            {"id": records[1]["id"], "target": "Fallback target"},
+            {"id": records[2]["id"], "target": "Created target"},
+        ],
+    )
+
+    result = convert_sdlxliff(str(out))
+
+    assert result["updated"] == 2
+    assert result["skipped"] == 1
+    assert result["missing"] == 0
+    tree = etree.parse(result["output_path"])
+    u1_target = tree.xpath("//*[local-name()='trans-unit'][@id='u1']/*[local-name()='target']")[0]
+    assert _visible_text(u1_target) == ""
+
+
+def test_sdlxliff_converter_updates_target_language_from_output_language(tmp_path, monkeypatch):
+    monkeypatch.setenv("SDLXLIFF_AVAILABLE_TOKENS", "100000")
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "Japanese")
+    source = _write_sample(
+        tmp_path,
+        SAMPLE_SDLXLIFF.replace(
+            'source-language="ja-JP" target-language="en-US"',
+            'source-language="en-US" target-language="de-DE"',
+        ),
+    )
+    out = tmp_path / "out"
+    extract_sdlxliff_to_chapters(str(source), str(out))
+
+    _, records = _records_from_first_batch(out)
+    placeholder = re.search(r"\[\[XLIFF_TAG_\d{6}_\d{4}\]\]", records[0]["source"]).group(0)
+    _write_batch_response(
+        out,
+        [
+            {"id": records[0]["id"], "target": f"最初 {placeholder} 対象"},
+            {"id": records[1]["id"], "target": "フォールバック対象"},
+            {"id": records[2]["id"], "target": "作成された対象"},
+        ],
+    )
+
+    manifest = json.loads((out / "sdlxliff_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["target_language"] == "Japanese"
+    assert manifest["target_language_code"] == "ja-JP"
+
+    result = convert_sdlxliff(str(out))
+
+    assert result["target_language_code"] == "ja-JP"
+    tree = etree.parse(result["output_path"])
+    file_elem = tree.xpath("//*[local-name()='file']")[0]
+    assert file_elem.get("source-language") == "en-US"
+    assert file_elem.get("target-language") == "ja-JP"
+
+
+def test_sdlxliff_translated_existing_target_is_retranslated(tmp_path, monkeypatch):
+    monkeypatch.setenv("SDLXLIFF_AVAILABLE_TOKENS", "100000")
+    source = _write_sample(
+        tmp_path,
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2"
+       xmlns:sdl="http://sdl.com/FileTypes/SdlXliff/1.0"
+       version="1.2">
+  <file original="story.html" source-language="en-US" target-language="de-DE">
+    <body>
+      <trans-unit id="translated-stale">
+        <source>Getting Started</source>
+        <seg-source><mrk mtype="seg" mid="1">Getting Started</mrk></seg-source>
+        <target><mrk mtype="seg" mid="1">Erste Schritte</mrk></target>
+        <sdl:seg-defs><sdl:seg id="1" conf="Translated"/></sdl:seg-defs>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+    )
+    out = tmp_path / "out"
+
+    extract_sdlxliff_to_chapters(str(source), str(out))
+    chapters, records = _records_from_first_batch(out)
+
+    assert len(chapters) == 1
+    assert records == [{"id": "1", "source": "Getting Started"}]
+
+    _write_batch_response(out, [{"id": "1", "target": "はじめに"}])
+    result = convert_sdlxliff(str(out))
+
+    assert result["updated"] == 1
+    tree = etree.parse(result["output_path"])
+    target = tree.xpath("//*[local-name()='trans-unit'][@id='translated-stale']/*[local-name()='target']/*[local-name()='mrk']")[0]
+    assert _visible_text(target) == "はじめに"
+
+
+def test_sdlxliff_worker_smoke_writes_manifest_and_chapters(tmp_path):
+    source = _write_sample(tmp_path)
+    out = tmp_path / "worker_out"
+    worker = SRC / "sdlxliff_extraction_worker.py"
+
+    completed = subprocess.run(
+        [sys.executable, str(worker), str(source), str(out)],
+        text=True,
+        encoding="utf-8",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "[RESULT]" in completed.stdout
+    assert (out / "chapters_full.json").exists()
+    assert (out / "metadata.json").exists()
+    assert (out / "sdlxliff_manifest.json").exists()
+
+
+def test_sdlxliff_prompt_profile_is_bootstrapped_and_mirrored():
+    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    app_source = (SRC / "app.py").read_text(encoding="utf-8")
+    discord_source = (SRC / "discord_bot.py").read_text(encoding="utf-8")
+
+    assert '"SDLXLIFF Editing v2"' in gui_source
+    assert '"SDLXLIFF Editing":' not in gui_source
+    assert re.search(r"protected = \{[\s\S]*?SDLXLIFF Editing v2[\s\S]*?\}", gui_source)
+    assert re.search(r"always_include_profiles = \[[\s\S]*?SDLXLIFF Editing v2[\s\S]*?\]", gui_source)
+    assert 'prompt_profiles["SDLXLIFF Editing"]' not in gui_source
+    assert "You are editing SDLXLIFF JSON batch records" in gui_source
+    assert "No markdown fences" in gui_source
+    assert '"SDLXLIFF Editing v2"' in app_source
+    assert '"SDLXLIFF Editing":' not in app_source
+    assert 'profiles["SDLXLIFF Editing"]' not in app_source
+    assert "You are editing SDLXLIFF JSON batch records" in app_source
+    assert "No markdown fences" in app_source
+    assert '"SDLXLIFF Editing v2"' in discord_source
+    assert '"SDLXLIFF Editing":' not in discord_source
+    assert "You are editing SDLXLIFF JSON batch records" in discord_source
+    assert "No markdown fences" in discord_source
