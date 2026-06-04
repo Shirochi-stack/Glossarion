@@ -1859,6 +1859,13 @@ class GlossaryManagerMixin:
                     self.config['glossary_entry_type_filter_mode'] = mode
                     os.environ['GLOSSARY_ENTRY_TYPE_FILTER_MODE'] = mode
                 
+                # CJK script filter toggle
+                if hasattr(self, 'cjk_script_filter_checkbox'):
+                    cjk_filter = self.cjk_script_filter_checkbox.isChecked()
+                    self.config['glossary_cjk_script_filter'] = cjk_filter
+                    self.glossary_cjk_script_filter_var = cjk_filter
+                    os.environ['GLOSSARY_CJK_SCRIPT_FILTER'] = '1' if cjk_filter else '0'
+
                 # Save auto compression state
                 if hasattr(self, 'glossary_auto_compression_checkbox'):
                     self.config['glossary_auto_compression'] = self.glossary_auto_compression_checkbox.isChecked()
@@ -2179,6 +2186,19 @@ class GlossaryManagerMixin:
             "These typically indicate the AI returned the name unchanged (e.g. Amazon → Amazon)."
         )
         filter_combo_layout.addWidget(self.skip_identical_entries_checkbox)
+
+        # CJK script filter toggle (right of skip identical)
+        filter_combo_layout.addSpacing(15)
+        self.cjk_script_filter_checkbox = self._create_styled_checkbox("Filter CJK script entries")
+        self.cjk_script_filter_checkbox.setChecked(self.config.get('glossary_cjk_script_filter', False))
+        self.cjk_script_filter_checkbox.setToolTip(
+            "Auto-detect CJK source text and reject entries where:\n"
+            "• translated_name still contains CJK characters (untranslated)\n"
+            "• raw_name has no CJK characters (not actual source text)\n\n"
+            "Only activates when the output language is a known non-CJK language\n"
+            "(English, Spanish, etc.) and the source is auto-detected as CJK."
+        )
+        filter_combo_layout.addWidget(self.cjk_script_filter_checkbox)
         filter_combo_layout.addStretch()
 
         type_control_layout.addStretch()

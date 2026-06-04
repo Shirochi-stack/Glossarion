@@ -3221,7 +3221,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                         continue
 
                 # CJK/Latin script validation when output language is non-CJK
-                if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1' and _is_known_non_cjk_output_language():
+                if os.getenv('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1' and _is_known_non_cjk_output_language():
                     _raw = str(entry_map.get('raw_name', '')).strip()
                     _trans = str(entry_map.get('translated_name', '')).strip()
                     # Reject translated_name if it contains CJK characters (should be Latin/romaji)
@@ -3282,7 +3282,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
     # is auto-detected as CJK source and the output is a known non-CJK language.
     # Runs AFTER all entries are collected so we can detect the source script
     # from the raw_names themselves - no hardcoded config dependency.
-    if entries and _is_known_non_cjk_output_language():
+    if entries and os.getenv('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1' and _is_known_non_cjk_output_language():
         all_raw = [str(e.get('raw_name', '')) for e in entries]
         if _is_cjk_source_detected(all_raw):
             before = len(entries)
@@ -3424,7 +3424,7 @@ def validate_extracted_entry(entry):
             return False
     
     # CJK script validation: reject translated_name with CJK when output is non-CJK
-    if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1' and _is_known_non_cjk_output_language():
+    if os.getenv('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1' and _is_known_non_cjk_output_language():
         trans = str(entry.get('translated_name', '')).strip()
         if trans and _contains_cjk(trans):
             return False

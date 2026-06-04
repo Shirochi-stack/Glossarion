@@ -1963,6 +1963,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_include_all_characters_var = self.config.get('glossary_include_all_characters', False)
         # Skip identical entries toggle (translated_name == raw_name)
         self.glossary_skip_identical_entries_var = self.config.get('glossary_skip_identical_entries', True)
+        # CJK script filter (auto-rejects CJK in translated_name when output is non-CJK)
+        self.glossary_cjk_script_filter_var = self.config.get('glossary_cjk_script_filter', False)
         # Skip gender tracker sidecar generation/use
         self.glossary_skip_gender_tracking_var = self.config.get('glossary_skip_gender_tracking', False)
         self.glossary_gender_noise_threshold_var = self.config.get('glossary_gender_noise_threshold', 10)
@@ -19568,6 +19570,7 @@ Important rules:
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
+                    'GLOSSARY_CJK_SCRIPT_FILTER': '1' if getattr(self, 'glossary_cjk_script_filter_var', False) else '0',
                     'GLOSSARY_SKIP_GENDER_TRACKING': '1' if getattr(self, 'glossary_skip_gender_tracking_var', False) else '0',
                     'GLOSSARY_GENDER_NOISE_THRESHOLD': str(getattr(self, 'glossary_gender_noise_threshold_var', self.config.get('glossary_gender_noise_threshold', 10))),
                     'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, 'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', 'none'))),
@@ -26645,6 +26648,7 @@ Important rules:
                 ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_include_all_characters', ['glossary_include_all_characters_var'], False, bool),
                 ('glossary_skip_identical_entries', ['glossary_skip_identical_entries_var'], True, bool),
+                ('glossary_cjk_script_filter', ['glossary_cjk_script_filter_var'], False, bool),
                 ('glossary_skip_gender_tracking', ['skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'], False, bool),
                 ('glossary_gender_noise_threshold', ['glossary_gender_noise_threshold_var'], 10, lambda v: safe_int(v, 10)),
                 ('glossary_gender_tracking_bias', ['glossary_gender_tracking_bias_var'], 'none', str),
@@ -27018,6 +27022,7 @@ Important rules:
                     ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
                     ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
                     ('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1' if self.config.get('glossary_skip_identical_entries', True) else '0'),
+                    ('GLOSSARY_CJK_SCRIPT_FILTER', '1' if self.config.get('glossary_cjk_script_filter', False) else '0'),
                     ('GLOSSARY_SKIP_GENDER_TRACKING', '1' if self.config.get('glossary_skip_gender_tracking', False) else '0'),
                     ('GLOSSARY_GENDER_NOISE_THRESHOLD', str(self.config.get('glossary_gender_noise_threshold', 10))),
                     ('GLOSSARY_GENDER_TRACKING_BIAS', str(self.config.get('glossary_gender_tracking_bias', 'none'))),
