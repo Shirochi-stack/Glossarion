@@ -808,6 +808,49 @@ def _html_has_block_structure(value: str) -> bool:
     return bool(re.search(r"<(?:html|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|blockquote|br)\b|</(?:p|div|h[1-6]|li|tr|blockquote)>", str(value or ""), re.IGNORECASE))
 
 
+def _normalize_visible_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _html_visible_text(value: str) -> str:
+    raw = str(value or "")
+    if not raw:
+        return ""
+    try:
+        from bs4 import BeautifulSoup
+
+        return BeautifulSoup(raw, "html.parser").get_text(" ")
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", raw)
+
+
+def _answer_html_matches_text(answer_html: str, answer_text: str) -> bool:
+    if not _html_has_block_structure(answer_html):
+        return False
+    html_text = _normalize_visible_text(_html_visible_text(answer_html))
+    expected_text = _normalize_visible_text(answer_text)
+    if not html_text:
+        return False
+    ui_markers = (
+        "copy share public link",
+        "good response",
+        "bad response",
+        "thanks for letting us know",
+        "google may use account",
+        "ai can make mistakes",
+    )
+    html_text_l = html_text.lower()
+    if any(marker in html_text_l for marker in ui_markers):
+        return False
+    if expected_text:
+        expected_l = expected_text.lower()
+        if expected_l not in html_text_l and html_text_l not in expected_l:
+            return False
+        if len(html_text) > max(250, len(expected_text) * 3):
+            return False
+    return True
+
+
 def _clean_answer_html(answer_html: str) -> str:
     raw = str(answer_html or "").strip()
     if not raw:
@@ -843,8 +886,9 @@ def _extract_rendered_content(
             "Open Google in a regular browser/profile and clear the verification, or retry later."
         )
     if prefer_html:
+        answer_text = str(page_data.get("answerText") or "").strip()
         html_content = _clean_answer_html(str(page_data.get("answerHtml") or ""))
-        if _html_has_block_structure(html_content):
+        if _answer_html_matches_text(html_content, answer_text):
             failure_probe = html_content
             try:
                 from bs4 import BeautifulSoup
@@ -858,9 +902,13 @@ def _extract_rendered_content(
                     "Something went wrong and the content wasn't generated."
                 )
             return html_content
-        answer_text = str(page_data.get("answerText") or "").strip()
         if _html_has_block_structure(answer_text):
             return answer_text
+        if answer_text:
+            raise RuntimeError(
+                "Google Search AI Mode returned plain text for an HTML request; "
+                "refusing to accept a response that would destroy BeautifulSoup HTML structure."
+            )
 
     text = str(page_data.get("text") or "")
     lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
@@ -875,6 +923,11 @@ def _extract_rendered_content(
     if not content:
         title = str(page_data.get("title") or "").strip()
         raise RuntimeError(f"Google Search returned an empty rendered page. title={title!r}")
+    if prefer_html and not _html_has_block_structure(content):
+        raise RuntimeError(
+            "Google Search AI Mode returned plain text for an HTML request; "
+            "refusing to accept a response that would destroy BeautifulSoup HTML structure."
+        )
     return content
 
 
