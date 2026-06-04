@@ -37,6 +37,7 @@ DEFAULT_SEARCH_PARAMS = {
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 2400
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -273,6 +274,128 @@ def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
         else:
             parts.append(f"User:\n{text}")
     return "\n\n".join(parts).strip()
+
+
+def _generation_failure_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    return (
+        "generation failure" in text
+        or "content wasn't generated" in text
+        or "content was not generated" in text
+    )
+
+
+def _adaptive_split_enabled() -> bool:
+    return os.getenv("GEMINI_FREE_ADAPTIVE_SPLIT", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _subchunk_prompt_chars() -> int:
+    return max(1200, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+
+
+def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
+    raw = str(text or "")
+    if not raw:
+        return "", ""
+    html_match = re.search(r"<(?:!doctype|html|head|body|h[1-6]|p|div|img|ruby|br|ul|ol|li|table|span)\b", raw, re.IGNORECASE)
+    if html_match and html_match.start() > 0:
+        return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
+    double_newline = raw.find("\n\n")
+    if 0 <= double_newline <= 1200:
+        return raw[:double_newline].rstrip(), raw[double_newline + 2 :].lstrip()
+    first_newline = raw.find("\n")
+    if 0 <= first_newline <= 700 and raw[:first_newline].strip().startswith("["):
+        return raw[:first_newline].rstrip(), raw[first_newline + 1 :].lstrip()
+    return "", raw
+
+
+def _split_text_units(text: str) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    html_pattern = re.compile(
+        r".*?</(?:p|div|h[1-6]|li|tr|table|blockquote)>\s*|<img\b[^>]*>\s*|<br\s*/?>\s*|.+$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if re.search(r"</(?:p|div|h[1-6]|li|tr|table|blockquote)>|<img\b|<br\b", raw, re.IGNORECASE):
+        units = [match.group(0) for match in html_pattern.finditer(raw) if match.group(0)]
+    else:
+        units = re.findall(r".*?(?:\n\s*\n|$)", raw, flags=re.DOTALL)
+        units = [unit for unit in units if unit]
+    return units or [raw]
+
+
+def _split_large_unit(unit: str, max_chars: int) -> List[str]:
+    raw = str(unit or "")
+    if len(raw) <= max_chars:
+        return [raw]
+    pieces: List[str] = []
+    start = 0
+    while start < len(raw):
+        end = min(len(raw), start + max_chars)
+        if end < len(raw):
+            window = raw[start:end]
+            split_at = max(
+                window.rfind("\n"),
+                window.rfind(". "),
+                window.rfind("。"),
+                window.rfind("! "),
+                window.rfind("? "),
+                window.rfind("</"),
+            )
+            if split_at > max_chars * 0.45:
+                end = start + split_at + 1
+        pieces.append(raw[start:end])
+        start = end
+    return pieces
+
+
+def _split_messages_for_search_budget(messages: Iterable[Dict[str, Any]], max_prompt_chars: int) -> List[List[Dict[str, Any]]]:
+    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    if not source_messages:
+        return []
+    user_indices = [
+        idx for idx, message in enumerate(source_messages)
+        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
+    ]
+    if not user_indices:
+        return [source_messages]
+
+    split_idx = user_indices[-1]
+    original_user = source_messages[split_idx]
+    user_text = _content_to_text(original_user.get("content"))
+    prefix, body = _split_user_instruction_prefix(user_text)
+    if not body.strip():
+        return [source_messages]
+
+    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
+    def make_messages(chunk_text: str) -> List[Dict[str, Any]]:
+        content_parts = [part for part in (prefix, chunk_text.strip()) if part]
+        chunk_user = dict(original_user)
+        chunk_user["content"] = "\n".join(content_parts)
+        return fixed_messages + [chunk_user]
+
+    units: List[str] = []
+    rough_body_budget = max(400, max_prompt_chars - len(_messages_to_prompt(make_messages(""))) - 200)
+    for unit in _split_text_units(body):
+        units.extend(_split_large_unit(unit, rough_body_budget))
+
+    chunks: List[str] = []
+    current = ""
+    for unit in units:
+        candidate = current + unit
+        probe_messages = make_messages(candidate)
+        if current and len(_messages_to_prompt(probe_messages)) > max_prompt_chars:
+            chunks.append(current)
+            current = unit
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    if len(chunks) <= 1:
+        return [source_messages]
+    return [make_messages(chunk) for chunk in chunks]
 
 
 def _strip_search_prefix(model: str) -> str:
@@ -921,7 +1044,7 @@ def load_ai_mode_prompt_text(
             pass
 
 
-def _send_chat_completion_qt(
+def _send_chat_completion_qt_once(
     *,
     messages: Iterable[Dict[str, Any]],
     model: str = DEFAULT_MODEL,
@@ -978,6 +1101,124 @@ def _send_chat_completion_qt(
     }
 
 
+def _send_chat_completion_split(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_tokens: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    max_prompt_chars = _subchunk_prompt_chars()
+    chunks = _split_messages_for_search_budget(source_messages, max_prompt_chars)
+    if len(chunks) <= 1:
+        return _send_chat_completion_qt_once(
+            messages=source_messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+            user_agent=user_agent,
+        )
+
+    _log(
+        log_fn,
+        f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
+        f"(target prompt chars: {max_prompt_chars})"
+    )
+    contents: List[str] = []
+    raw_parts: List[Dict[str, Any]] = []
+    prompt_chars_total = 0
+    completion_chars_total = 0
+    for index, chunk_messages in enumerate(chunks, start=1):
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
+        prompt_chars_total += chunk_prompt_chars
+        _log(log_fn, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} ({chunk_prompt_chars:,} prompt chars)")
+        result = _send_chat_completion_qt_once(
+            messages=chunk_messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+            user_agent=user_agent,
+        )
+        content = str(result.get("content") or "")
+        contents.append(content)
+        completion_chars_total += len(content)
+        raw_response = dict(result.get("raw_response") or {})
+        raw_response.pop("content", None)
+        raw_parts.append({
+            "index": index,
+            "prompt_chars": chunk_prompt_chars,
+            "completion_chars": len(content),
+            "raw_response": raw_response,
+        })
+
+    combined = "\n".join(part for part in contents if part).strip()
+    return {
+        "content": combined,
+        "finish_reason": "stop",
+        "usage": {
+            "prompt_chars": len(_messages_to_prompt(source_messages)),
+            "subchunk_prompt_chars": prompt_chars_total,
+            "completion_chars": completion_chars_total,
+        },
+        "raw_response": {
+            "model": _strip_search_prefix(model),
+            "submit_mode": "adaptive_split",
+            "subchunk_count": len(chunks),
+            "subchunk_prompt_target_chars": max_prompt_chars,
+            "parts": raw_parts,
+        },
+    }
+
+
+def _send_chat_completion_qt(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_tokens: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    prompt_chars = len(_messages_to_prompt(source_messages))
+    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
+        return _send_chat_completion_split(
+            messages=source_messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+            user_agent=user_agent,
+        )
+    try:
+        return _send_chat_completion_qt_once(
+            messages=source_messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+            user_agent=user_agent,
+        )
+    except RuntimeError as exc:
+        if _adaptive_split_enabled() and _generation_failure_error(exc):
+            return _send_chat_completion_split(
+                messages=source_messages,
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                log_fn=log_fn,
+                user_agent=user_agent,
+            )
+        raise
+
+
 def _is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
@@ -1002,12 +1243,23 @@ def _run_search_subprocess(
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    helper_timeout = max(30, int(timeout))
+    message_list = list(messages or [])
+    prompt_chars = len(_messages_to_prompt(message_list))
+    estimated_subchunks = 1
+    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
+        target_chars = _subchunk_prompt_chars()
+        estimated_subchunks = max(1, (prompt_chars + target_chars - 1) // target_chars)
+        _log(
+            log_fn,
+            f"🧩 Gemini Free: large prompt will use adaptive browser subchunks "
+            f"(~{estimated_subchunks}, {prompt_chars:,} prompt chars)"
+        )
+    helper_timeout = max(30, int(timeout) * estimated_subchunks)
     temp_dir = tempfile.mkdtemp(prefix="glossarion_gemini_free_")
     prompt_path = os.path.join(temp_dir, "messages.json")
     try:
         with open(prompt_path, "w", encoding="utf-8") as handle:
-            json.dump({"messages": list(messages or [])}, handle, ensure_ascii=False)
+            json.dump({"messages": message_list}, handle, ensure_ascii=False)
 
         if _is_frozen_app():
             cmd = [
