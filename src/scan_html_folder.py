@@ -5739,6 +5739,16 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
         
         with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):
+            # Snapshot the QA-specific delay into the client's thread-local
+            # storage so _apply_api_call_stagger uses it directly instead of
+            # re-reading the process-wide SEND_INTERVAL_SECONDS env var
+            # (which other threads may have restored to the global default).
+            if api_call_delay >= 0:
+                try:
+                    _tls = client._get_thread_local_client()
+                    _tls.active_api_delay_override = float(api_call_delay)
+                except Exception:
+                    pass
             response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
 
         # Parse response

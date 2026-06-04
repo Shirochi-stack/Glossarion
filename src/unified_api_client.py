@@ -6127,8 +6127,22 @@ class UnifiedClient:
             tls = temp._get_thread_local_client()
             runtime_overrides = temp._apply_key_runtime_overrides(key_entry=key_entry, key_data=key_data, tls=tls)
             if not (runtime_overrides or {}).get('api_call_delay'):
+                # Snapshot the current SEND_INTERVAL_SECONDS into the TLS so
+                # _apply_api_call_stagger uses it directly.  The env var may be
+                # overridden by a thread-local context manager (e.g.
+                # _qa_api_overrides_env sets it to 0.1s for QA truncation) but
+                # another thread's finally block can restore the original value
+                # before we read it — classic race condition on a process-wide
+                # env var.  Capturing it here freezes the correct value.
+                _env_delay_str = os.getenv("SEND_INTERVAL_SECONDS")
+                if _env_delay_str is not None:
+                    try:
+                        tls.active_api_delay_override = float(_env_delay_str)
+                    except (ValueError, TypeError):
+                        tls.active_api_delay_override = None
+                else:
+                    tls.active_api_delay_override = None
                 tls.api_call_delay = 0.0
-                tls.active_api_delay_override = None
                 temp._per_key_api_delay = None
             tls.api_key = temp.api_key
             tls.model = temp.model
