@@ -3226,6 +3226,13 @@ class UnifiedClient:
                 cls._last_api_call_start_by_scope = {}
         except Exception:
             pass
+        # Also clear per-thread parallel-batch stagger tracking
+        try:
+            if hasattr(cls, '_parallel_batch_stagger_lock'):
+                with cls._parallel_batch_stagger_lock:
+                    cls._parallel_batch_last_call = {}
+        except Exception:
+            pass
 
     @classmethod
     def hard_cancel_all(cls):
@@ -15145,6 +15152,64 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         stagger_scope = self._get_api_stagger_scope()
         no_snap_scope = stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
+        
+        # Parallel-batch scopes (QA truncation, Vision, QA scan) should NOT
+        # reserve global sequential slots.  The class-level slot reservation
+        # causes Thread N to sleep (N-1)*api_delay when many batch workers
+        # call _apply_api_call_stagger simultaneously.  Instead, each worker
+        # thread independently paces its OWN consecutive API calls using a
+        # per-(thread, scope) timestamp — other worker threads are not blocked.
+        #
+        # NOTE: We use a class-level dict keyed by (thread_id, scope) rather
+        # than instance-level TLS because _send_with_isolated_dedicated_key
+        # creates ephemeral client copies with fresh thread-local storage;
+        # instance TLS would reset to 0 on every call, defeating the delay.
+        _parallel_batch_scopes = {
+            'context:qa_truncation',
+            'pool:AITruncationDetectionKey',
+            'pool:VisionKey',
+            'pool:QAScanKey',
+        }
+        if stagger_scope in _parallel_batch_scopes:
+            if not hasattr(self.__class__, '_parallel_batch_stagger_lock'):
+                self.__class__._parallel_batch_stagger_lock = threading.Lock()
+            if not hasattr(self.__class__, '_parallel_batch_last_call'):
+                self.__class__._parallel_batch_last_call = {}  # {(thread_id, scope): timestamp}
+
+            _pb_tid = threading.current_thread().ident
+            _pb_key = (_pb_tid, stagger_scope)
+            _pb_now = time.time()
+            _pb_wait = 0.0
+
+            with self.__class__._parallel_batch_stagger_lock:
+                _pb_last = self.__class__._parallel_batch_last_call.get(_pb_key, 0.0)
+                _pb_gap = _pb_now - _pb_last
+                if _pb_gap < api_delay and _pb_last > 0:
+                    _pb_wait = api_delay - _pb_gap
+                # Reserve this thread's next slot (doesn't affect other threads)
+                if _pb_wait > 0:
+                    self.__class__._parallel_batch_last_call[_pb_key] = _pb_last + api_delay
+                else:
+                    self.__class__._parallel_batch_last_call[_pb_key] = _pb_now
+
+            if _pb_wait > 0:
+                if self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
+                    try:
+                        _pb_tls = self._get_thread_local_client()
+                        _pb_label = getattr(_pb_tls, 'current_request_label', None) or 'request'
+                        _pb_fmt = f"{_pb_wait:.1f}" if _pb_wait >= 1.0 else f"{_pb_wait:.2f}"
+                        self._debug_log(f"📤 [{thread_name}] Queued {_pb_label} ({stagger_scope}) — Sending API call in {_pb_fmt}s")
+                    except Exception:
+                        pass
+                if not self._sleep_with_cancel(_pb_wait, 0.1):
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+            # Update actual send time after sleep
+            with self.__class__._parallel_batch_stagger_lock:
+                self.__class__._parallel_batch_last_call[_pb_key] = time.time()
+
+            flush_deferred_batch_logs()
+            return
         
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_api_stagger_lock'):
