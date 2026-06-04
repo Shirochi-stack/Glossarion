@@ -45,6 +45,7 @@ DEFAULT_SUBCHUNK_SAFETY_CHARS = 300
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
 DEFAULT_SUBCHUNK_PARALLELISM = 4
 DEFAULT_SUBCHUNK_STATUS_SECONDS = 15
+DEFAULT_SUBCHUNK_TIMEOUT = 90
 AUTHND_TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -455,6 +456,11 @@ def _subchunk_parallelism(chunk_count: int) -> int:
 
 def _subchunk_status_seconds() -> int:
     return max(0, _env_int("GEMINI_FREE_SUBCHUNK_STATUS_SECONDS", DEFAULT_SUBCHUNK_STATUS_SECONDS))
+
+
+def _subchunk_timeout_seconds(request_timeout: int) -> int:
+    configured = max(30, _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT))
+    return max(30, min(max(30, int(request_timeout or DEFAULT_TIMEOUT)), configured))
 
 
 def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
@@ -1864,12 +1870,13 @@ def _run_search_subprocess_parallel(
 ) -> Dict[str, Any]:
     worker_count, requested_workers, subprocess_cap, gemini_cap = _subchunk_parallelism_limits(len(chunks))
     max_prompt_chars = _subchunk_prompt_chars()
+    subchunk_timeout = _subchunk_timeout_seconds(timeout)
     _log(
         log_fn,
         f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
         f"({worker_count} parallel helpers, requested: {requested_workers}, "
         f"token subprocess cap: {subprocess_cap}, gemini cap: {gemini_cap}, "
-        f"target prompt chars: {max_prompt_chars}, "
+        f"subchunk timeout: {subchunk_timeout}s, target prompt chars: {max_prompt_chars}, "
         f"payload format: {split_metadata.get('payload_format')}, "
         f"splitter: {split_metadata.get('splitter')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
@@ -1881,6 +1888,8 @@ def _run_search_subprocess_parallel(
 
     log_queue: "queue.Queue[str]" = queue.Queue()
     wait_log_event = threading.Event()
+    chunk_start_times: Dict[int, float] = {}
+    chunk_start_lock = threading.Lock()
 
     def worker_log(message: str) -> None:
         if log_fn:
@@ -1890,11 +1899,13 @@ def _run_search_subprocess_parallel(
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
         chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
+        with chunk_start_lock:
+            chunk_start_times[index] = time.time()
         _log(worker_log, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} helper start ({chunk_prompt_chars:,} prompt chars)")
         result = _run_search_subprocess_once(
             messages=chunk_messages,
             model=model,
-            timeout=timeout,
+            timeout=subchunk_timeout,
             max_tokens=max_tokens,
             log_fn=worker_log,
             wait_log_event=wait_log_event,
@@ -1938,10 +1949,21 @@ def _run_search_subprocess_parallel(
                 pending_indices = sorted(futures[future] for future in pending)
                 completed_count = len(chunks) - len(pending_indices)
                 elapsed = time.time() - started_at
+                now = time.time()
+                with chunk_start_lock:
+                    running = {
+                        idx: int(now - start)
+                        for idx, start in chunk_start_times.items()
+                        if idx in pending_indices
+                    }
+                running_text = ", ".join(f"{idx}:{age}s" for idx, age in sorted(running.items())) or "none"
+                queued_indices = [idx for idx in pending_indices if idx not in running]
+                queued_text = f", queued: {queued_indices}" if queued_indices else ""
                 _log(
                     log_fn,
                     f"⏳ Gemini Free: waiting on subchunks {pending_indices} "
-                    f"({completed_count}/{len(chunks)} complete, {elapsed:.0f}s elapsed)"
+                    f"({completed_count}/{len(chunks)} complete, {elapsed:.0f}s elapsed, "
+                    f"running: {running_text}{queued_text})"
                 )
                 next_status_log = time.time() + status_seconds
             for future in done:
@@ -1991,6 +2013,7 @@ def _run_search_subprocess_parallel(
             "subchunk_parallel_requested_workers": requested_workers,
             "subchunk_parallel_token_subprocess_cap": subprocess_cap,
             "subchunk_parallel_gemini_cap": gemini_cap,
+            "subchunk_timeout_seconds": subchunk_timeout,
             "subchunk_prompt_target_chars": max_prompt_chars,
             "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
             "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
