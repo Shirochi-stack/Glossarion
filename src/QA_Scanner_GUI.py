@@ -501,6 +501,8 @@ class QAScannerMixin:
 
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
+        # Reset stop state machine for fresh scan
+        self._qa_stop_phase = 'idle'
         # Removed loading screen - initialize directly for smoother experience
         try:
             # Start a brief auto-scroll delay so first log lines are readable

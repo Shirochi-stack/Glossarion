@@ -9150,10 +9150,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _ai_worker_clients = _threading_ai.local()
 
             def _ai_client_for_worker():
+                # Check ALL stop flags before creating or returning a client
+                if should_stop():
+                    return None
+                import os as _os
+                if _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return None
+                if _os.environ.get('GRACEFUL_STOP') == '1':
+                    return None
                 if not _ai_uses_dedicated_qa_pool:
                     return _ai_client
                 worker_client = getattr(_ai_worker_clients, 'client', None)
                 if worker_client is None:
+                    # Re-check stop before expensive client creation
+                    if should_stop() or _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                        return None
                     worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _client_config)
                     worker_client.context = 'qa_truncation'
                     worker_client._stop_callback = should_stop
@@ -9172,7 +9183,14 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             def _ai_check_one(result_obj):
                 """Run AI truncation check for a single file."""
+                # Check ALL stop flags — not just should_stop() but also env vars
+                # that are set by the GUI's force/graceful stop mechanism
                 if should_stop():
+                    return None
+                import os as _os
+                if _os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return None
+                if _os.environ.get('GRACEFUL_STOP') == '1':
                     return None
                 try:
                     filename = result_obj['filename']
@@ -9209,6 +9227,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     _ai_safe_log(f"   🔍 Checking: {filename}")
 
                     worker_client = _ai_client_for_worker()
+                    if worker_client is None:
+                        return None  # Stop was requested
 
                     # Set request label so client logs show filename instead of internal counter
                     try:

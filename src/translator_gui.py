@@ -20387,9 +20387,10 @@ Important rules:
        # QA button
        if hasattr(self, 'qa_button'):
            # Don't reset the QA button if it's in a stopping/finishing state
-           # This preserves the double-click force stop functionality
-           _qa_stopping = False
-           if hasattr(self, 'qa_text_label'):
+           # This preserves the escalation from graceful → force stop
+           _qa_stop_phase = getattr(self, '_qa_stop_phase', 'idle')
+           _qa_stopping = _qa_stop_phase in ('graceful', 'force')
+           if not _qa_stopping and hasattr(self, 'qa_text_label'):
                _qa_btn_text = self.qa_text_label.text()
                _qa_stopping = _qa_btn_text in ("Stopping...", "Finishing...")
            
@@ -20401,7 +20402,8 @@ Important rules:
                except:
                    pass
                self.qa_button.clicked.connect(self.stop_qa_scan)
-               self.qa_button.setEnabled(True)  # Allow double-click for force stop
+               # Only enable in 'graceful' phase (for escalation), disable in 'force'
+               self.qa_button.setEnabled(_qa_stop_phase == 'graceful')
            elif qa_running:
                # Update text label instead of button text
                if hasattr(self, 'qa_text_label'):
@@ -21330,144 +21332,166 @@ Important rules:
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
     def stop_qa_scan(self):
-        # Check if graceful stop is enabled
-        graceful_stop = getattr(self, 'graceful_stop_var', False)
+        """Stop QA scan with escalation: first click = graceful, second click = force."""
+        # State machine: idle → graceful → force
+        current_phase = getattr(self, '_qa_stop_phase', 'idle')
+        graceful_stop_enabled = getattr(self, 'graceful_stop_var', False)
 
-        # Double-click detection for force stop during graceful stop
-        # Check if we're already in graceful stop mode by looking at button text
-        already_in_graceful_stop = False
-        if hasattr(self, 'qa_text_label'):
-            button_text = self.qa_text_label.text()
-            already_in_graceful_stop = (button_text == "Finishing...")
-
-        import time
-        current_time = time.time()
-        if not hasattr(self, '_qa_stop_click_times'):
-            self._qa_stop_click_times = []
-
-        # Add current click
-        self._qa_stop_click_times.append(current_time)
-        # Remove clicks older than 1 second
-        self._qa_stop_click_times = [t for t in self._qa_stop_click_times if current_time - t < 1.0]
-
-        # If 2+ clicks within 1 second AND we're in graceful stop mode, force immediate stop
-        if len(self._qa_stop_click_times) >= 2 and already_in_graceful_stop:
-            self.append_log("⚡ Double-click detected — forcing immediate stop!")
-            graceful_stop = False  # Override to force immediate stop
-            self._qa_stop_click_times = []  # Reset click counter
-
-        # During graceful stop, keep button enabled to allow double-click force stop
-        # Otherwise disable it immediately
-        if hasattr(self, 'qa_button'):
-            if graceful_stop:
-                self.qa_button.setEnabled(True)
+        if current_phase == 'idle':
+            # --- FIRST CLICK ---
+            if graceful_stop_enabled:
+                # Graceful stop: let in-flight API calls finish, prevent NEW ones
+                self._qa_stop_phase = 'graceful'
+                
+                # Set stop flags for scan loop
+                self.stop_requested = True
+                try:
+                    from scan_html_folder import stop_scan
+                    stop_scan()
+                except Exception:
+                    pass
+                
+                # GRACEFUL_STOP prevents new API calls in _apply_api_call_stagger
+                os.environ['GRACEFUL_STOP'] = '1'
+                # TRANSLATION_CANCELLED makes _should_abort_retry() return True,
+                # which aborts threads in stagger sleep (waiting 60s+ etc.)
+                os.environ['TRANSLATION_CANCELLED'] = '1'
+                
+                # Button: "Finishing..." (enabled, so user can click again for force stop)
+                if hasattr(self, 'qa_button'):
+                    if hasattr(self, 'qa_text_label'):
+                        self.qa_text_label.setText("Finishing...")
+                    self.qa_button.setStyleSheet("""
+                        QPushButton {
+                            background-color: #6c757d;
+                            color: white;
+                            border: 1px solid transparent;
+                            border-radius: 0px;
+                            padding: 6px;
+                        }
+                        QPushButton:hover {
+                            border-color: #ffc107;
+                            background-color: #7c858d;
+                        }
+                    """)
+                    self.qa_button.setEnabled(True)
+                
+                self.append_log("⏳ Graceful stop — waiting for in-flight QA scan API calls to complete...")
+                self.append_log("   💡 Click again to force immediate stop")
+                
+                # Start polling for completion
+                self._qa_stop_poll_count = 0
+                QTimer.singleShot(1000, self._check_qa_stop_done)
             else:
-                self.qa_button.setEnabled(False)
-            if hasattr(self, 'qa_text_label'):
-                if graceful_stop:
-                    self.qa_text_label.setText("Finishing...")
-                else:
-                    self.qa_text_label.setText("Stopping...")
-            self.qa_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #6c757d;
-                    color: white;
-                    border: 1px solid transparent;
-                    border-radius: 0px;
-                    padding: 6px;
-                }
-                QPushButton:hover {
-                    border-color: #7bb3e0;
-                    background-color: #6c757d;
-                }
-                QPushButton:disabled {
-                    background-color: #555555;
-                    color: #888888;
-                    border-color: #555555;
-                }
-            """)
+                # Graceful stop disabled — go straight to force
+                self._qa_stop_phase = 'force'
+                self._do_qa_force_stop()
+                
+        elif current_phase == 'graceful':
+            # --- SECOND CLICK (escalate to force) ---
+            self._qa_stop_phase = 'force'
+            self.append_log("⚡ Force stop — aborting all QA scan API calls immediately!")
+            self._do_qa_force_stop()
+            
+        # else: already in 'force' phase, ignore further clicks
 
-        # Set graceful stop mode in environment so API client knows
-        os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
-
+    def _do_qa_force_stop(self):
+        """Execute force stop: kill all in-flight and queued API calls."""
         self.stop_requested = True
-
-        # Always set the scan stop flag so the scan loop exits
+        
+        # Set ALL stop flags
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        
         try:
             from scan_html_folder import stop_scan
             stop_scan()
         except Exception:
             pass
-
-        # For graceful stop: DON'T abort in-flight API calls, let them finish
-        # For immediate stop: abort everything aggressively
-        if not graceful_stop:
-            # -- FAST PATH (main thread): set all boolean flags instantly --
+        
+        # -- FAST PATH (main thread): set boolean flags instantly --
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+        except Exception:
+            pass
+        
+        # Button: "Stopping..." (disabled)
+        if hasattr(self, 'qa_button'):
+            if hasattr(self, 'qa_text_label'):
+                self.qa_text_label.setText("Stopping...")
+            self.qa_button.setEnabled(False)
+            self.qa_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #555555;
+                    color: #888888;
+                    border: 1px solid transparent;
+                    border-radius: 0px;
+                    padding: 6px;
+                }
+            """)
+        
+        self.append_log("🛑 Force stop requested — aborting queued/in-flight QA scan API calls")
+        
+        # -- SLOW PATH (background thread): close HTTP connections --
+        def _stop_heavy_work():
             try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'set_stop_flag'):
-                    unified_api_client.set_stop_flag(True)
-                if hasattr(unified_api_client, 'UnifiedClient'):
-                    unified_api_client.UnifiedClient._global_cancelled = True
+                import unified_api_client as _uac
+                if hasattr(_uac, 'hard_cancel_all'):
+                    _uac.hard_cancel_all()
+            except Exception:
+                pass
+            try:
+                import unified_api_client as _uac
+                if hasattr(_uac, 'UnifiedClient'):
+                    _uac.UnifiedClient.reset_api_call_stagger()
             except Exception:
                 pass
 
-            os.environ['TRANSLATION_CANCELLED'] = '1'
+        import threading
+        threading.Thread(target=_stop_heavy_work, daemon=True, name="qa-scan-stop-cleanup").start()
+        
+        # Start polling for completion (reset button when thread finishes)
+        self._qa_stop_poll_count = 0
+        QTimer.singleShot(500, self._check_qa_stop_done)
 
-            # -- SLOW PATH (background thread): close connections --
-            def _stop_heavy_work():
-                # Hard cancel: close active HTTP sessions to abort in-flight requests
-                try:
-                    import unified_api_client as _uac
-                    if hasattr(_uac, 'hard_cancel_all'):
-                        _uac.hard_cancel_all()
-                except Exception:
-                    pass
-                # Reset stagger so queued threads don't sleep
-                try:
-                    import unified_api_client as _uac
-                    if hasattr(_uac, 'UnifiedClient'):
-                        _uac.UnifiedClient.reset_api_call_stagger()
-                except Exception:
-                    pass
-
-            import threading
-            threading.Thread(target=_stop_heavy_work, daemon=True, name="qa-scan-stop-cleanup").start()
-
-        # Log message depends on stop mode
-        if graceful_stop:
-            self.append_log("⏳ Graceful stop — waiting for in-flight QA scan API calls to complete...")
-            self.append_log("   💡 Click again to force immediate stop")
+    def _check_qa_stop_done(self):
+        """Poll until QA scan thread/future finishes, then reset button state."""
+        self._qa_stop_poll_count = getattr(self, '_qa_stop_poll_count', 0) + 1
+        
+        qa_still_running = (
+            (hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()) or
+            (hasattr(self, 'qa_future') and self.qa_future and not self.qa_future.done())
+        )
+        
+        current_phase = getattr(self, '_qa_stop_phase', 'idle')
+        
+        if qa_still_running:
+            # Still running — keep polling
+            QTimer.singleShot(500, self._check_qa_stop_done)
+        elif current_phase == 'graceful' and self._qa_stop_poll_count < 60:
+            # Graceful phase: scan thread is done but keep button as "Finishing..."
+            # so user can still click to force stop. Poll up to 30 seconds.
+            QTimer.singleShot(500, self._check_qa_stop_done)
         else:
-            self.append_log("🛑 Force stop requested — aborting queued/in-flight QA scan API calls")
-        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
-        
-        # Poll until the QA thread/future actually finishes, then reset button
-        def _check_qa_done():
-            qa_still_running = (
-                (hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()) or
-                (hasattr(self, 'qa_future') and self.qa_future and not self.qa_future.done())
-            )
-            if qa_still_running:
-                # Still running, check again in 500ms
-                QTimer.singleShot(500, _check_qa_done)
-            else:
-                # Finished — reset button and clean up flags
-                if hasattr(self, 'qa_text_label'):
-                    self.qa_text_label.setText("QA Scan")
-                os.environ['GRACEFUL_STOP'] = '0'
-                os.environ.pop('TRANSLATION_CANCELLED', None)
-                try:
-                    import unified_api_client
-                    if hasattr(unified_api_client, 'set_stop_flag'):
-                        unified_api_client.set_stop_flag(False)
-                    if hasattr(unified_api_client, 'UnifiedClient'):
-                        unified_api_client.UnifiedClient._global_cancelled = False
-                except Exception:
-                    pass
-                self.update_run_button()
-        
-        QTimer.singleShot(500, _check_qa_done)
+            # Done (or timeout) — reset everything
+            self._qa_stop_phase = 'idle'
+            if hasattr(self, 'qa_text_label'):
+                self.qa_text_label.setText("QA Scan")
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ.pop('TRANSLATION_CANCELLED', None)
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(False)
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = False
+            except Exception:
+                pass
+            self.update_run_button()
 
     def on_close(self):
         reply = QMessageBox.question(self, "Quit", "Are you sure you want to exit?",

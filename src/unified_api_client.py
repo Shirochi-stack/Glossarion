@@ -7379,6 +7379,12 @@ class UnifiedClient:
                 
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
+        # Abort immediately if stop has been requested — no point initializing
+        # new clients when the user already pressed Stop.
+        if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return
+        if (os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1') and not getattr(self, '_ignore_graceful_stop', False):
+            return
         # If this instance already applied an individual (per-key) endpoint, do NOT let
         # prefix-based detection override the client_type or base URL. This prevents
         # per-key Azure/custom endpoints from being reset when _setup_client is called
