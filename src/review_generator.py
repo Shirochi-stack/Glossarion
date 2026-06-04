@@ -693,7 +693,7 @@ def generate_review(
             os.environ['ENDPOINT'] = endpoint
         os.environ['MODEL'] = model
 
-        client = create_client_with_multi_key_support(api_key, model, output_dir, config)
+        client = create_client_with_multi_key_support(api_key, model, output_dir, config, context='review')
         client.context = 'review'  # Override 'glossary' default to avoid stale glossary stop flags
 
         # Show token/key info (model is logged by UnifiedClient after key selection)
@@ -1011,7 +1011,7 @@ def generate_chunked_review(
             os.environ['ENDPOINT'] = endpoint
         os.environ['MODEL'] = model
 
-        client = create_client_with_multi_key_support(api_key, model, output_dir, config)
+        client = create_client_with_multi_key_support(api_key, model, output_dir, config, context='review')
         client.context = 'review'  # Override 'glossary' default to avoid stale glossary stop flags
         return client
 

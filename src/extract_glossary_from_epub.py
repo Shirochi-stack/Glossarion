@@ -204,7 +204,7 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         return False
     return "graceful stop active - not starting new api call" in s
 
-def create_client_with_multi_key_support(api_key, model, output_dir, config):
+def create_client_with_multi_key_support(api_key, model, output_dir, config, context='glossary'):
     """Create a UnifiedClient with multi API key support if enabled.
     
     Priority order for key pool:
@@ -256,7 +256,8 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
     if use_glossary_keys and glossary_keys:
         # ── GLOSSARY KEYS MODE ──────────────────────────────────────────
         # Use glossary-specific keys for rotation, NOT the translation multi-keys
-        print("🔑 Glossary API Key mode enabled for glossary extraction")
+        if context == 'glossary':
+            print("🔑 Glossary API Key mode enabled for glossary extraction")
         
         os.environ['USE_MULTI_API_KEYS'] = '1'
         os.environ['USE_MULTI_KEYS'] = '1'
@@ -292,9 +293,10 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
             except Exception:
                 pass
         
-        print(f"   • Glossary keys configured: {len(glossary_keys)}")
-        print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
-        print(f"   • Rotation frequency: every {config.get('rotation_frequency', 1)} request(s)")
+        if context == 'glossary':
+            print(f"   • Glossary keys configured: {len(glossary_keys)}")
+            print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
+            print(f"   • Rotation frequency: every {config.get('rotation_frequency', 1)} request(s)")
     
     elif config.get('use_multi_api_keys', False) and config.get('multi_api_keys'):
         # ── MULTI-KEY MODE (no glossary keys) ────────────────────────────
