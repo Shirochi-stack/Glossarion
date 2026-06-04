@@ -42,6 +42,12 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+GENERATION_FAILURE_MARKERS = (
+    "something went wrong and the content wasn't generated",
+    "something went wrong and the content was not generated",
+    "content wasn't generated",
+    "content was not generated",
+)
 PAGE_SNAPSHOT_SCRIPT = """
 JSON.stringify({
   url: location.href,
@@ -315,6 +321,14 @@ def _google_blocked(page_data: Dict[str, Any]) -> bool:
     )
 
 
+def _contains_generation_failure(lines: Iterable[str]) -> bool:
+    for line in lines or []:
+        current = str(line or "").strip().lower()
+        if any(marker in current for marker in GENERATION_FAILURE_MARKERS):
+            return True
+    return False
+
+
 def _extract_rendered_content(
     page_data: Dict[str, Any],
     *,
@@ -329,6 +343,11 @@ def _extract_rendered_content(
     lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
     lines = [line for line in lines if line]
     content_lines = _extract_ai_answer_lines(lines, prompt)
+    if _contains_generation_failure(content_lines or lines):
+        raise RuntimeError(
+            "Google Search AI Mode returned a generation failure: "
+            "Something went wrong and the content wasn't generated."
+        )
     content = "\n".join(content_lines or lines).strip()
     if not content:
         title = str(page_data.get("title") or "").strip()
@@ -873,6 +892,8 @@ def load_ai_mode_prompt_text(
             text = str(result.get("text") or "")
             lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
             answer = "\n".join(_extract_ai_answer_lines(lines, prompt)).strip()
+            if _contains_generation_failure(answer.splitlines() or lines):
+                return result
             if answer and answer != last_answer:
                 last_answer = answer
                 last_change_at = time.time()

@@ -24871,6 +24871,15 @@ class UnifiedClient:
                         f"Gemini Free blocked by Google verification: {error_str}",
                         error_type="auth_error"
                     )
+                if (
+                    "generation failure" in error_str.lower()
+                    or "content wasn't generated" in error_str.lower()
+                    or "content was not generated" in error_str.lower()
+                ):
+                    raise UnifiedClientError(
+                        f"Gemini Free generation failed: {error_str}",
+                        error_type="api_error"
+                    )
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"Gemini Free error (attempt {attempt+1}/{max_retries}): {error_str}")
