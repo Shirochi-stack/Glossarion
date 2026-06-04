@@ -439,16 +439,17 @@ def _min_subchunk_body_chars() -> int:
     return max(1, _env_int("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", DEFAULT_MIN_SUBCHUNK_BODY_CHARS))
 
 
-def _subchunk_parallelism_limits(chunk_count: int) -> tuple[int, int, int]:
+def _subchunk_parallelism_limits(chunk_count: int) -> tuple[int, int, int, int]:
     count = max(1, int(chunk_count or 1))
     requested_workers = max(1, _env_int("GEMINI_FREE_SUBCHUNK_PARALLELISM", DEFAULT_SUBCHUNK_PARALLELISM))
     subprocess_cap = max(1, _env_int(AUTHND_TOKEN_SUBPROCESS_CONCURRENCY_ENV, requested_workers))
-    worker_count = max(1, min(count, requested_workers, subprocess_cap))
-    return worker_count, requested_workers, subprocess_cap
+    gemini_cap = max(1, (subprocess_cap + 1) // 2)
+    worker_count = max(1, min(count, requested_workers, gemini_cap))
+    return worker_count, requested_workers, subprocess_cap, gemini_cap
 
 
 def _subchunk_parallelism(chunk_count: int) -> int:
-    worker_count, _requested_workers, _subprocess_cap = _subchunk_parallelism_limits(chunk_count)
+    worker_count, _requested_workers, _subprocess_cap, _gemini_cap = _subchunk_parallelism_limits(chunk_count)
     return worker_count
 
 
@@ -1861,13 +1862,14 @@ def _run_search_subprocess_parallel(
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    worker_count, requested_workers, subprocess_cap = _subchunk_parallelism_limits(len(chunks))
+    worker_count, requested_workers, subprocess_cap, gemini_cap = _subchunk_parallelism_limits(len(chunks))
     max_prompt_chars = _subchunk_prompt_chars()
     _log(
         log_fn,
         f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
         f"({worker_count} parallel helpers, requested: {requested_workers}, "
-        f"token subprocess cap: {subprocess_cap}, target prompt chars: {max_prompt_chars}, "
+        f"token subprocess cap: {subprocess_cap}, gemini cap: {gemini_cap}, "
+        f"target prompt chars: {max_prompt_chars}, "
         f"payload format: {split_metadata.get('payload_format')}, "
         f"splitter: {split_metadata.get('splitter')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
@@ -1988,6 +1990,7 @@ def _run_search_subprocess_parallel(
             "subchunk_parallel_workers": worker_count,
             "subchunk_parallel_requested_workers": requested_workers,
             "subchunk_parallel_token_subprocess_cap": subprocess_cap,
+            "subchunk_parallel_gemini_cap": gemini_cap,
             "subchunk_prompt_target_chars": max_prompt_chars,
             "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
             "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
