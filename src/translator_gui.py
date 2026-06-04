@@ -20434,7 +20434,11 @@ Important rules:
                    }
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
-               self.qa_button.setEnabled(bool(scan_html_folder and not self._is_any_process_running()))
+               # Add delay to prevent accidental clicks after double-click stop
+               if not any_process_running:
+                   QTimer.singleShot(500, lambda: self.qa_button.setEnabled(True) if not self._is_any_process_running() else None)
+               else:
+                   self.qa_button.setEnabled(False)
                # Stop spinner
                if getattr(self, 'qa_spinner', None):
                    self.qa_spinner.stop()
