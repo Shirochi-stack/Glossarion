@@ -38,6 +38,7 @@ DEFAULT_SEARCH_PARAMS = {
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
+DEFAULT_SUBMIT_MODE = "url"
 DEFAULT_SUBCHUNK_PROMPT_CHARS = 1200
 DEFAULT_SUBCHUNK_URL_CHARS = 3500
 DEFAULT_SUBCHUNK_SAFETY_CHARS = 300
@@ -1501,7 +1502,7 @@ def _send_chat_completion_qt_once(
         raise RuntimeError("Gemini Free request has an empty prompt")
     prefer_html = _messages_expect_html_response(messages)
 
-    submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", "ui").strip().lower() or "ui"
+    submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", DEFAULT_SUBMIT_MODE).strip().lower() or DEFAULT_SUBMIT_MODE
     if submit_mode in ("url", "query", "q"):
         search_url = _build_search_url(prompt)
         _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=url)")
