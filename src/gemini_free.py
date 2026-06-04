@@ -42,6 +42,26 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+PAGE_SNAPSHOT_SCRIPT = """
+JSON.stringify({
+  url: location.href,
+  title: document.title || "",
+  ready: document.readyState || "",
+  text: document.body ? document.body.innerText || "" : "",
+  htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0,
+  busy: Array.from(document.querySelectorAll('button,[role="button"]')).some((button) => {
+    const style = window.getComputedStyle(button);
+    const rect = button.getBoundingClientRect();
+    const visible = style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    const label = [
+      button.getAttribute("aria-label") || "",
+      button.getAttribute("title") || "",
+      button.innerText || ""
+    ].join(" ").toLowerCase();
+    return visible && label.includes("stop") && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  })
+})
+"""
 
 _cancel_event = threading.Event()
 _active_helper_processes: set = set()
@@ -67,6 +87,27 @@ def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: b
 def _short_error(error: Any, limit: int = 1200) -> str:
     text = str(error or "").replace("\r", " ").replace("\n", " ").strip()
     text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _safe_url_for_log(url: Any, limit: int = 500) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlparse(text)
+        if parsed.query:
+            params = []
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+                if key == "q":
+                    params.append((key, f"<{len(value)} chars omitted>"))
+                else:
+                    params.append((key, value))
+            text = parsed._replace(query=urlencode(params)).geturl()
+    except Exception:
+        pass
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
@@ -238,14 +279,26 @@ def _strip_search_prefix(model: str) -> str:
     return raw.strip("/") or DEFAULT_MODEL
 
 
-def _build_search_url(prompt: str) -> str:
-    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+def _search_params() -> Dict[str, str]:
     params = dict(DEFAULT_SEARCH_PARAMS)
     extra = os.getenv("GEMINI_FREE_SEARCH_PARAMS", "").strip()
     if extra:
         for key, value in parse_qsl(extra.lstrip("?"), keep_blank_values=True):
             if key:
                 params[key] = value
+    return params
+
+
+def _build_search_base_url() -> str:
+    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+    params = _search_params()
+    params.pop("q", None)
+    return f"{base}?{urlencode(params)}"
+
+
+def _build_search_url(prompt: str) -> str:
+    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+    params = _search_params()
     params["q"] = prompt
     return f"{base}?{urlencode(params)}"
 
@@ -316,6 +369,7 @@ def _extract_ai_answer_lines(lines: List[str], prompt: str = "") -> List[str]:
     end = len(lines)
     end_markers = (
         "ai can make mistakes",
+        "ai mode response is ready",
         "search results",
         "people also ask",
         "related searches",
@@ -369,6 +423,17 @@ def _create_profile(app: Any, *, user_agent: Optional[str] = None) -> Any:
     return profile
 
 
+def _set_default_page_viewport(page: Any) -> None:
+    try:
+        from PySide6.QtCore import QSize
+
+        width = max(320, _env_int("GEMINI_FREE_VIEWPORT_WIDTH", 1280))
+        height = max(480, _env_int("GEMINI_FREE_VIEWPORT_HEIGHT", 900))
+        page.setViewportSize(QSize(width, height))
+    except Exception:
+        pass
+
+
 def run_qtwebengine_request(
     *,
     url: str,
@@ -394,6 +459,7 @@ def run_qtwebengine_request(
 
     profile = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
+    _set_default_page_viewport(page)
 
     def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
         holder: Dict[str, Any] = {}
@@ -546,6 +612,7 @@ def load_rendered_page_text(
 
     profile = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
+    _set_default_page_viewport(page)
 
     def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
         holder: Dict[str, Any] = {}
@@ -585,18 +652,7 @@ def load_rendered_page_text(
         while time.time() < deadline:
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
-            raw = run_js(
-                """
-JSON.stringify({
-  url: location.href,
-  title: document.title || "",
-  ready: document.readyState || "",
-  text: document.body ? document.body.innerText || "" : "",
-  htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0
-})
-""",
-                js_timeout_ms=5000,
-            )
+            raw = run_js(PAGE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
             try:
                 result = json.loads(raw or "{}")
             except Exception:
@@ -613,6 +669,226 @@ JSON.stringify({
             wait_loop.exec()
 
         return last_result
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+
+
+def load_ai_mode_prompt_text(
+    prompt: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    wait_after_load_ms: Optional[int] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Open AI Mode, submit the prompt through the page UI, and return rendered text."""
+    _setup_qt_environment()
+
+    from PySide6.QtCore import QEventLoop, QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(["gemini-free-ai-mode"])
+
+    profile = _create_profile(app, user_agent=user_agent)
+    page = QWebEnginePage(profile, app)
+    _set_default_page_viewport(page)
+    base_url = _build_search_base_url()
+
+    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+        holder: Dict[str, Any] = {}
+        loop = QEventLoop()
+
+        def _done(value: Any) -> None:
+            holder["value"] = value
+            loop.quit()
+
+        page.runJavaScript(script, _done)
+        QTimer.singleShot(js_timeout_ms, loop.quit)
+        loop.exec()
+        return holder.get("value")
+
+    def run_json(script: str, js_timeout_ms: int = 15000) -> Dict[str, Any]:
+        raw = run_js(script, js_timeout_ms=js_timeout_ms)
+        try:
+            return json.loads(raw or "{}")
+        except Exception:
+            return {}
+
+    def wait_ms(ms: int) -> None:
+        wait_loop = QEventLoop()
+        QTimer.singleShot(max(1, int(ms)), wait_loop.quit)
+        wait_loop.exec()
+
+    try:
+        load_loop = QEventLoop()
+        load_state: Dict[str, Any] = {"ok": False}
+
+        def _loaded(ok: bool) -> None:
+            load_state["ok"] = bool(ok)
+            load_loop.quit()
+
+        page.loadFinished.connect(_loaded)
+        page.load(QUrl(base_url))
+        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        load_loop.exec()
+        if not load_state.get("ok"):
+            raise RuntimeError(f"Qt WebEngine failed to load {base_url}")
+
+        set_prompt_script = f"""
+(() => {{
+  const promptText = {json.dumps(prompt, ensure_ascii=False)};
+  const visibleScore = (element) => {{
+    if (!element) return 0;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === "hidden" || style.display === "none") return 0;
+    if (rect.width <= 0 || rect.height <= 0) return 0;
+    return rect.width * rect.height;
+  }};
+  const textareas = Array.from(document.querySelectorAll("textarea"));
+  const ranked = textareas
+    .map((element) => ({{element, score: visibleScore(element)}}))
+    .sort((a, b) => b.score - a.score);
+  const textarea =
+    ranked.find((item) => item.score > 0 && /ask/i.test(item.element.placeholder || ""))?.element ||
+    ranked.find((item) => item.score > 0)?.element ||
+    textareas.find((element) => /ask/i.test(element.placeholder || "")) ||
+    textareas[0];
+  if (!textarea) {{
+    return JSON.stringify({{ok: false, error: "AI Mode textarea not found", textareaCount: textareas.length}});
+  }}
+  textarea.scrollIntoView({{block: "center", inline: "center"}});
+  textarea.focus();
+  const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+  if (valueSetter) {{
+    valueSetter.call(textarea, promptText);
+  }} else {{
+    textarea.value = promptText;
+  }}
+  textarea.dispatchEvent(new Event("focus", {{bubbles: true}}));
+  try {{
+    textarea.dispatchEvent(new InputEvent("input", {{
+      bubbles: true,
+      inputType: "insertText",
+      data: promptText
+    }}));
+  }} catch (error) {{
+    textarea.dispatchEvent(new Event("input", {{bubbles: true}}));
+  }}
+  textarea.dispatchEvent(new Event("change", {{bubbles: true}}));
+  return JSON.stringify({{
+    ok: true,
+    textareaCount: textareas.length,
+    valueLength: textarea.value.length,
+    placeholder: textarea.placeholder || ""
+  }});
+}})()
+"""
+        set_state = run_json(set_prompt_script, js_timeout_ms=15000)
+        if not set_state.get("ok"):
+            detail = str(set_state.get("error") or "AI Mode textarea not found")
+            raise RuntimeError(detail)
+
+        click_send_script = """
+(() => {
+  const visibleScore = (element) => {
+    if (!element) return 0;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.visibility === "hidden" || style.display === "none") return 0;
+    if (rect.width <= 0 || rect.height <= 0) return 0;
+    return rect.width * rect.height;
+  };
+  const labelOf = (element) => [
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("title") || "",
+    element.innerText || "",
+    element.value || ""
+  ].join(" ").replace(/\\s+/g, " ").trim();
+  const buttons = Array.from(document.querySelectorAll('button,[role="button"],input[type="submit"]'));
+  const ranked = buttons
+    .map((element) => ({element, label: labelOf(element), score: visibleScore(element)}))
+    .sort((a, b) => b.score - a.score);
+  const exactSend = (item) => /^send$/i.test(item.element.getAttribute("aria-label") || "");
+  const enabled = (item) => !item.element.disabled && item.element.getAttribute("aria-disabled") !== "true";
+  const candidate =
+    ranked.find((item) => exactSend(item) && enabled(item)) ||
+    ranked.find((item) => /\\bsend\\b/i.test(item.label) && enabled(item)) ||
+    ranked.find((item) => exactSend(item));
+  if (!candidate) {
+    return JSON.stringify({
+      ok: false,
+      error: "AI Mode send button not ready",
+      buttonCount: buttons.length,
+      labels: ranked.slice(0, 8).map((item) => item.label)
+    });
+  }
+  candidate.element.click();
+  return JSON.stringify({ok: true, label: candidate.label, buttonCount: buttons.length});
+})()
+"""
+        click_state: Dict[str, Any] = {}
+        click_deadline = time.time() + min(10, max(2, int(timeout)))
+        while time.time() < click_deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            wait_ms(250)
+            click_state = run_json(click_send_script, js_timeout_ms=10000)
+            if click_state.get("ok"):
+                break
+        if not click_state.get("ok"):
+            detail = str(click_state.get("error") or "AI Mode send button not ready")
+            raise RuntimeError(detail)
+
+        wait_after_ms = wait_after_load_ms
+        if wait_after_ms is None:
+            wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
+        stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 2500)
+        deadline = time.time() + max(1, int(timeout))
+        min_ready_at = time.time() + max(0, int(wait_after_ms)) / 1000.0
+        last_result: Dict[str, Any] = {}
+        last_answer = ""
+        last_change_at = time.time()
+
+        while time.time() < deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            result = run_json(PAGE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+            result["submit_mode"] = "ui"
+            result["search_base_url"] = base_url
+            result["submit_state"] = {"set": set_state, "click": click_state}
+            last_result = result
+            if _google_blocked(result):
+                return result
+
+            text = str(result.get("text") or "")
+            lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
+            answer = "\n".join(_extract_ai_answer_lines(lines, prompt)).strip()
+            if answer and answer != last_answer:
+                last_answer = answer
+                last_change_at = time.time()
+            if (
+                answer
+                and time.time() >= min_ready_at
+                and not result.get("busy")
+                and (time.time() - last_change_at) * 1000 >= max(0, int(stable_ms))
+            ):
+                return result
+
+            wait_ms(500)
+
+        title = str(last_result.get("title") or "").strip()
+        url = _safe_url_for_log(last_result.get("url") or base_url)
+        raise RuntimeError(f"Google Search AI Mode did not produce a response after UI submit. title={title!r} url={url}")
     finally:
         try:
             page.deleteLater()
@@ -641,15 +917,25 @@ def _send_chat_completion_qt(
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
 
-    search_url = _build_search_url(prompt)
-    _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model})")
-    _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
-
-    page_data = load_rendered_page_text(
-        search_url,
-        timeout=timeout,
-        user_agent=user_agent,
-    )
+    submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", "ui").strip().lower() or "ui"
+    if submit_mode in ("url", "query", "q"):
+        search_url = _build_search_url(prompt)
+        _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=url)")
+        _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
+        page_data = load_rendered_page_text(
+            search_url,
+            timeout=timeout,
+            user_agent=user_agent,
+        )
+    else:
+        search_url = _build_search_base_url()
+        _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=ui)")
+        _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
+        page_data = load_ai_mode_prompt_text(
+            prompt,
+            timeout=timeout,
+            user_agent=user_agent,
+        )
     content = _extract_rendered_content(page_data, prompt=prompt)
     return {
         "content": content,
@@ -660,8 +946,10 @@ def _send_chat_completion_qt(
         },
         "raw_response": {
             "model": actual_model,
-            "search_url": search_url,
-            "page_url": page_data.get("url"),
+            "submit_mode": page_data.get("submit_mode") or submit_mode,
+            "search_url": _safe_url_for_log(search_url),
+            "page_url": _safe_url_for_log(page_data.get("url")),
+            "page_url_chars": len(str(page_data.get("url") or "")),
             "title": page_data.get("title"),
             "ready": page_data.get("ready"),
             "html_length": page_data.get("htmlLength"),
@@ -770,6 +1058,7 @@ def _run_search_subprocess(
         output_thread.start()
         try:
             next_wait_log = time.time() + 10
+            wait_log_printed = False
             while True:
                 try:
                     stdout, stderr = result_queue.get(timeout=0.1)
@@ -782,9 +1071,9 @@ def _run_search_subprocess(
                 if time.time() >= deadline:
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout}s")
-                if log_fn and time.time() >= next_wait_log:
-                    _log(log_fn, "Gemini Free: still waiting for Qt WebEngine helper...")
-                    next_wait_log = time.time() + 10
+                if log_fn and not wait_log_printed and time.time() >= next_wait_log:
+                    _log(log_fn, "⏳ Gemini Free: still waiting for Qt WebEngine helper...")
+                    wait_log_printed = True
         finally:
             with _active_helper_lock:
                 _active_helper_processes.discard(proc)
@@ -828,7 +1117,7 @@ def send_chat_completion(
             max_tokens=max_tokens,
             log_fn=log_fn,
         )
-    _log(log_fn, "Gemini Free: starting Qt WebEngine helper subprocess")
+    _log(log_fn, "🌐 Gemini Free: starting Qt WebEngine helper subprocess")
     return _run_search_subprocess(
         messages=messages,
         model=model,

@@ -24784,7 +24784,7 @@ class UnifiedClient:
                 "Gemini Free: Translation stopped by user",
                 error_type="cancelled"
             )
-        print(f"Gemini Free: Sending request via Google Search browser route (model={actual_model})")
+        print(f"🔎 Gemini Free: Sending request via Google Search browser route (model={actual_model})")
         try:
             tls = self._get_thread_local_client()
             _label = getattr(tls, 'current_request_label', None) or 'request'
