@@ -15360,6 +15360,7 @@ class UnifiedClient:
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_authnd = _model_lower.startswith('authnd')
+        _is_search = _model_lower.startswith('search')
         _is_native_gemini = _model_lower.startswith('gemini')
         _is_vertex = (
             _model_lower.startswith('vertex/') or
@@ -15380,7 +15381,7 @@ class UnifiedClient:
                 _is_sdk_provider = True
         except Exception:
             pass
-        if not _is_authgem and not _is_authnd and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
+        if not _is_authgem and not _is_authnd and not _is_search and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -24784,6 +24785,15 @@ class UnifiedClient:
                 error_type="cancelled"
             )
         print(f"Gemini Free: Sending request via Google Search browser route (model={actual_model})")
+        try:
+            tls = self._get_thread_local_client()
+            _label = getattr(tls, 'current_request_label', None) or 'request'
+            _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+        except Exception:
+            _label = 'request'
+            _ctx = 'translation'
+        _thread_name = threading.current_thread().name
+        search_progress_label = f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress"
 
         for attempt in range(max_retries):
             if self._is_stop_requested():
@@ -24809,14 +24819,31 @@ class UnifiedClient:
                     except (ValueError, TypeError):
                         pass
 
+                search_progress_logged = False
+
+                def _search_gemini_log_fn(message):
+                    nonlocal search_progress_logged
+                    print(message)
+                    try:
+                        if (
+                            not search_progress_logged
+                            and "still waiting for Qt WebEngine helper" in str(message or "")
+                        ):
+                            print(search_progress_label)
+                            search_progress_logged = True
+                    except Exception:
+                        pass
+
                 result = _search_gemini_send(
                     messages=messages,
                     model=actual_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=_read_timeout,
-                    log_fn=print,
+                    log_fn=_search_gemini_log_fn,
                 )
+                if not search_progress_logged:
+                    print(search_progress_label)
 
                 content = result.get("content", "")
                 return UnifiedResponse(

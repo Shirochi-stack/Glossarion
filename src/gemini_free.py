@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -690,6 +691,7 @@ def _run_search_subprocess(
     model: str,
     timeout: int,
     max_tokens: Optional[int],
+    log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     helper_timeout = max(30, int(timeout))
     temp_dir = tempfile.mkdtemp(prefix="glossarion_gemini_free_")
@@ -748,19 +750,41 @@ def _run_search_subprocess(
         deadline = time.time() + helper_timeout + 20
         stdout = ""
         stderr = ""
+        result_queue: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=1)
+
+        def _drain_output() -> None:
+            try:
+                out, err = proc.communicate()
+            except Exception as exc:
+                out, err = "", str(exc)
+            try:
+                result_queue.put_nowait((out or "", err or ""))
+            except Exception:
+                pass
+
+        output_thread = threading.Thread(
+            target=_drain_output,
+            name="GeminiFreeHelperOutput",
+            daemon=True,
+        )
+        output_thread.start()
         try:
-            while proc.poll() is None:
+            next_wait_log = time.time() + 10
+            while True:
+                try:
+                    stdout, stderr = result_queue.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    pass
                 if _is_cancelled():
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError("stream cancelled")
                 if time.time() >= deadline:
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout}s")
-                time.sleep(0.1)
-            try:
-                stdout, stderr = proc.communicate(timeout=1)
-            except Exception:
-                stdout, stderr = "", ""
+                if log_fn and time.time() >= next_wait_log:
+                    _log(log_fn, "Gemini Free: still waiting for Qt WebEngine helper...")
+                    next_wait_log = time.time() + 10
         finally:
             with _active_helper_lock:
                 _active_helper_processes.discard(proc)
@@ -810,6 +834,7 @@ def send_chat_completion(
         model=model,
         timeout=timeout_value,
         max_tokens=max_tokens,
+        log_fn=log_fn,
     )
 
 
