@@ -9254,6 +9254,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         api_call_delay=_ai_delay,
                     )
 
+                    # Route any deferred batch logs (key assignment, stagger
+                    # info) through the GUI logger instead of CMD/stdout.
+                    try:
+                        from unified_api_client import pop_deferred_batch_logs as _pop_logs
+                        for _deferred_msg in _pop_logs():
+                            _ai_safe_log(f"   {_deferred_msg}")
+                    except Exception:
+                        pass
+
                     if ai_result and ai_result.get('cancelled'):
                         return None
 
