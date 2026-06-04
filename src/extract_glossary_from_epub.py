@@ -3228,10 +3228,6 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     if _trans and _contains_cjk(_trans):
                         print(f"[Warning] Filtered entry with CJK in translated_name (output is non-CJK): {_raw} -> {_trans}")
                         continue
-                    # Reject raw_name if it contains no CJK characters (entirely Latin = not source language)
-                    if _raw and not _contains_cjk(_raw):
-                        print(f"[Warning] Filtered entry with no CJK in raw_name (expected source language): {_raw} -> {_trans}")
-                        continue
 
                 entries.append(entry_map)
                 continue
@@ -3282,6 +3278,22 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 print(f"[Warning] Malformed glossary line (IndexError): {line} -> {e}")
             continue
 
+    # Post-filter: reject entries with all-Latin raw_names when the batch
+    # is auto-detected as CJK source and the output is a known non-CJK language.
+    # Runs AFTER all entries are collected so we can detect the source script
+    # from the raw_names themselves - no hardcoded config dependency.
+    if entries and _is_known_non_cjk_output_language():
+        all_raw = [str(e.get('raw_name', '')) for e in entries]
+        if _is_cjk_source_detected(all_raw):
+            before = len(entries)
+            entries = [
+                e for e in entries
+                if _contains_cjk(str(e.get('raw_name', '')).strip())
+            ]
+            rejected = before - len(entries)
+            if rejected:
+                print(f"[Warning] Filtered {rejected} entries with no CJK in raw_name (auto-detected CJK source, non-CJK output)")
+
     # Post-filter: if the user did NOT include ``description`` in their
     # custom fields list, strip any description value the AI may have
     # returned anyway. Pairs with the prompt-side description-rule
@@ -3302,6 +3314,46 @@ def _is_cjk_output_language():
         '한국어', '日本語', '中文', '中国语',
     }
     return lang in cjk_langs
+
+def _detect_dominant_script_glossary(text):
+    """Lightweight dominant script detection (same logic as scan_html_folder.detect_dominant_script).
+
+    Returns one of: 'cjk', 'japanese', 'korean', 'cyrillic', 'arabic', 'latin', 'other'
+    """
+    ranges = [
+        ('cjk', [(0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF)]),
+        ('japanese', [(0x3040, 0x309F), (0x30A0, 0x30FF)]),
+        ('korean', [(0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)]),
+        ('cyrillic', [(0x0400, 0x04FF), (0x0500, 0x052F)]),
+        ('arabic', [(0x0600, 0x06FF), (0x0750, 0x077F)]),
+        ('latin', [(0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F)]),
+    ]
+    counts = {k: 0 for k, _ in ranges}
+    for ch in text[:10000]:
+        code = ord(ch)
+        for key, spans in ranges:
+            if any(start <= code <= end for start, end in spans):
+                counts[key] += 1
+                break
+    if not any(counts.values()):
+        return 'other'
+    return max(counts, key=counts.get)
+
+def _is_cjk_source_detected(raw_names):
+    """Auto-detect whether the source material is CJK by sampling raw_name entries.
+
+    Concatenates the raw_names and runs script detection heuristics.
+    Returns True when the dominant script is CJK/Korean/Japanese.
+    No hardcoded config dependency — purely content-driven.
+    """
+    if not raw_names:
+        return False
+    # Sample up to 50 raw names for speed
+    sample = ' '.join(str(n) for n in raw_names[:50])
+    if not sample.strip():
+        return False
+    script = _detect_dominant_script_glossary(sample)
+    return script in {'cjk', 'korean', 'japanese'}
 
 def _is_known_non_cjk_output_language():
     """Return True only for well-known non-CJK output languages.
@@ -3371,15 +3423,10 @@ def validate_extracted_entry(entry):
         if raw and trans and raw == trans:
             return False
     
-    # CJK/Latin script validation when output language is non-CJK
+    # CJK script validation: reject translated_name with CJK when output is non-CJK
     if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1' and _is_known_non_cjk_output_language():
-        raw = str(entry.get('raw_name', '')).strip()
         trans = str(entry.get('translated_name', '')).strip()
-        # Reject translated_name if it contains CJK characters (should be Latin/romaji)
         if trans and _contains_cjk(trans):
-            return False
-        # Reject raw_name if it contains no CJK characters (entirely Latin = not source language)
-        if raw and not _contains_cjk(raw):
             return False
     
     return True
