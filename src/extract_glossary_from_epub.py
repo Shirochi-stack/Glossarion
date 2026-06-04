@@ -3132,6 +3132,8 @@ def parse_api_response(response_text: str) -> List[Dict]:
         except Exception:
             return False
 
+
+
     for line in lines:
         try:
             line = line.strip()
@@ -3218,6 +3220,19 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     if str(entry_map.get('raw_name', '')).strip() == str(entry_map.get('translated_name', '')).strip():
                         continue
 
+                # CJK/Latin script validation when output language is non-CJK
+                if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1' and _is_known_non_cjk_output_language():
+                    _raw = str(entry_map.get('raw_name', '')).strip()
+                    _trans = str(entry_map.get('translated_name', '')).strip()
+                    # Reject translated_name if it contains CJK characters (should be Latin/romaji)
+                    if _trans and _contains_cjk(_trans):
+                        print(f"[Warning] Filtered entry with CJK in translated_name (output is non-CJK): {_raw} -> {_trans}")
+                        continue
+                    # Reject raw_name if it contains no CJK characters (entirely Latin = not source language)
+                    if _raw and not _contains_cjk(_raw):
+                        print(f"[Warning] Filtered entry with no CJK in raw_name (expected source language): {_raw} -> {_trans}")
+                        continue
+
                 entries.append(entry_map)
                 continue
 
@@ -3276,6 +3291,60 @@ def parse_api_response(response_text: str) -> List[Dict]:
     # every return path (JSON + CSV) applies the same filter.
     return _strip_unwanted_description_keys(entries)
 
+def _is_cjk_output_language():
+    """Return True when the glossary target language is CJK (Korean/Chinese/Japanese)."""
+    lang = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English').strip().lower()
+    cjk_langs = {
+        'korean', 'japanese', 'chinese',
+        'simplified chinese', 'traditional chinese',
+        'mandarin', 'cantonese',
+        # Common native names
+        '한국어', '日本語', '中文', '中国语',
+    }
+    return lang in cjk_langs
+
+def _is_known_non_cjk_output_language():
+    """Return True only for well-known non-CJK output languages.
+
+    The CJK script filter should only fire when we are confident the output
+    language uses a Latin/non-CJK script.  For custom or unrecognised
+    languages the filter is disabled to avoid false positives.
+    """
+    lang = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English').strip().lower()
+    known_non_cjk = {
+        'english', 'spanish', 'french', 'german', 'italian', 'portuguese',
+        'dutch', 'russian', 'polish', 'swedish', 'norwegian', 'danish',
+        'finnish', 'czech', 'hungarian', 'romanian', 'turkish', 'greek',
+        'arabic', 'hebrew', 'hindi', 'thai', 'vietnamese', 'indonesian',
+        'malay', 'tagalog', 'filipino', 'ukrainian', 'bulgarian',
+        'croatian', 'serbian', 'slovak', 'slovenian', 'latvian',
+        'lithuanian', 'estonian', 'persian', 'farsi', 'urdu', 'bengali',
+        'tamil', 'telugu', 'swahili', 'catalan', 'galician', 'basque',
+        'icelandic', 'albanian', 'macedonian', 'georgian', 'armenian',
+        'azerbaijani', 'kazakh', 'uzbek', 'mongolian', 'nepali',
+        'sinhala', 'burmese', 'khmer', 'lao', 'afrikaans',
+        'brazilian portuguese', 'latin american spanish',
+    }
+    return lang in known_non_cjk
+
+def _contains_cjk(s):
+    """Return True if the string contains any Hangul, CJK Unified, Hiragana, or Katakana characters."""
+    for ch in (s or ""):
+        cp = ord(ch)
+        if (
+            0xAC00 <= cp <= 0xD7AF        # Hangul Syllables
+            or 0x1100 <= cp <= 0x11FF      # Hangul Jamo
+            or 0x3130 <= cp <= 0x318F      # Hangul Compatibility Jamo
+            or 0x4E00 <= cp <= 0x9FFF      # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF      # CJK Unified Ideographs Extension A
+            or 0x20000 <= cp <= 0x2A6DF    # CJK Unified Ideographs Extension B
+            or 0xF900 <= cp <= 0xFAFF      # CJK Compatibility Ideographs
+            or 0x3040 <= cp <= 0x309F      # Hiragana
+            or 0x30A0 <= cp <= 0x30FF      # Katakana
+        ):
+            return True
+    return False
+
 def validate_extracted_entry(entry):
     """Validate that extracted entry has required fields and enabled type"""
     if 'type' not in entry:
@@ -3300,6 +3369,17 @@ def validate_extracted_entry(entry):
         raw = str(entry.get('raw_name', '')).strip()
         trans = str(entry.get('translated_name', '')).strip()
         if raw and trans and raw == trans:
+            return False
+    
+    # CJK/Latin script validation when output language is non-CJK
+    if os.getenv('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1') == '1' and _is_known_non_cjk_output_language():
+        raw = str(entry.get('raw_name', '')).strip()
+        trans = str(entry.get('translated_name', '')).strip()
+        # Reject translated_name if it contains CJK characters (should be Latin/romaji)
+        if trans and _contains_cjk(trans):
+            return False
+        # Reject raw_name if it contains no CJK characters (entirely Latin = not source language)
+        if raw and not _contains_cjk(raw):
             return False
     
     return True
