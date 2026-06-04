@@ -3226,7 +3226,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                     _trans = str(entry_map.get('translated_name', '')).strip()
                     # Reject translated_name if it contains CJK characters (should be Latin/romaji)
                     if _trans and _contains_cjk(_trans):
-                        print(f"[Warning] Filtered entry with CJK in translated_name (output is non-CJK): {_raw} -> {_trans}")
+                        print(f"🚫 [CJK Filter] Rejected entry — CJK in translated_name (output is non-CJK): {_raw} → {_trans}")
                         continue
 
                 entries.append(entry_map)
@@ -3292,7 +3292,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
             ]
             rejected = before - len(entries)
             if rejected:
-                print(f"[Warning] Filtered {rejected} entries with no CJK in raw_name (auto-detected CJK source, non-CJK output)")
+                print(f"🚫 [CJK Filter] Rejected {rejected} entries with no CJK in raw_name (auto-detected CJK source, non-CJK output)")
 
     # Post-filter: if the user did NOT include ``description`` in their
     # custom fields list, strip any description value the AI may have
@@ -3353,7 +3353,10 @@ def _is_cjk_source_detected(raw_names):
     if not sample.strip():
         return False
     script = _detect_dominant_script_glossary(sample)
-    return script in {'cjk', 'korean', 'japanese'}
+    is_cjk = script in {'cjk', 'korean', 'japanese'}
+    script_label = {'cjk': 'Chinese/CJK', 'korean': 'Korean', 'japanese': 'Japanese'}.get(script, script)
+    print(f"🔍 [CJK Filter] Auto-detected source script: {script_label} (raw sample: {len(raw_names)} entries) → {'✅ CJK source confirmed' if is_cjk else '⏭️ non-CJK source, filter skipped'}")
+    return is_cjk
 
 def _is_known_non_cjk_output_language():
     """Return True only for well-known non-CJK output languages.
