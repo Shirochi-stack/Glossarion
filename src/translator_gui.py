@@ -20386,12 +20386,23 @@ Important rules:
        
        # QA button
        if hasattr(self, 'qa_button'):
-           try:
-               self.qa_button.clicked.disconnect()
-           except:
-               pass
+           # Don't reset the QA button if it's in a stopping/finishing state
+           # This preserves the double-click force stop functionality
+           _qa_stopping = False
+           if hasattr(self, 'qa_text_label'):
+               _qa_btn_text = self.qa_text_label.text()
+               _qa_stopping = _qa_btn_text in ("Stopping...", "Finishing...")
            
-           if qa_running:
+           if _qa_stopping:
+               # Keep current state - don't disconnect stop_qa_scan
+               # Just make sure the button is still connected to stop
+               try:
+                   self.qa_button.clicked.disconnect()
+               except:
+                   pass
+               self.qa_button.clicked.connect(self.stop_qa_scan)
+               self.qa_button.setEnabled(True)  # Allow double-click for force stop
+           elif qa_running:
                # Update text label instead of button text
                if hasattr(self, 'qa_text_label'):
                    self.qa_text_label.setText("Stop Scan")
@@ -20408,6 +20419,10 @@ Important rules:
                        background-color: #dc3545;
                    }
                """)
+               try:
+                   self.qa_button.clicked.disconnect()
+               except:
+                   pass
                self.qa_button.clicked.connect(self.stop_qa_scan)
                self.qa_button.setEnabled(True)
                # Start spinner for QA icon
@@ -20436,6 +20451,10 @@ Important rules:
                        border-color: #555555;
                    }
                """)
+               try:
+                   self.qa_button.clicked.disconnect()
+               except:
+                   pass
                self.qa_button.clicked.connect(self.run_qa_scan)
                # Add delay to prevent accidental clicks after double-click stop
                if not any_process_running:
@@ -21422,6 +21441,33 @@ Important rules:
         else:
             self.append_log("🛑 Force stop requested — aborting queued/in-flight QA scan API calls")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
+        
+        # Poll until the QA thread/future actually finishes, then reset button
+        def _check_qa_done():
+            qa_still_running = (
+                (hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()) or
+                (hasattr(self, 'qa_future') and self.qa_future and not self.qa_future.done())
+            )
+            if qa_still_running:
+                # Still running, check again in 500ms
+                QTimer.singleShot(500, _check_qa_done)
+            else:
+                # Finished — reset button and clean up flags
+                if hasattr(self, 'qa_text_label'):
+                    self.qa_text_label.setText("QA Scan")
+                os.environ['GRACEFUL_STOP'] = '0'
+                os.environ.pop('TRANSLATION_CANCELLED', None)
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(False)
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = False
+                except Exception:
+                    pass
+                self.update_run_button()
+        
+        QTimer.singleShot(500, _check_qa_done)
 
     def on_close(self):
         reply = QMessageBox.question(self, "Quit", "Are you sure you want to exit?",
