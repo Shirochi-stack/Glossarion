@@ -37,6 +37,27 @@ if __name__ == '__main__':
             }, separators=(",", ":")), flush=True)
             raise SystemExit(1)
 
+    # PyInstaller-safe Gemini Free helper entrypoint.  gemini_free.py is normally
+    # run as a subprocess so Qt WebEngine stays out of translation worker threads.
+    if "--gemini-free-search" in _authnd_sys.argv:
+        _idx = _authnd_sys.argv.index("--gemini-free-search")
+        _remaining = _authnd_sys.argv[_idx + 1:]
+        _authnd_sys.argv = [_authnd_sys.argv[0], "--search-helper", *_remaining]
+        try:
+            from gemini_free import _main as _gemini_free_main
+            raise SystemExit(_gemini_free_main())
+        except ImportError:
+            print('{"content":"","finish_reason":"error","error":"Gemini Free is not available in this build."}', flush=True)
+            raise SystemExit(1)
+        except Exception as _gemini_free_exc:
+            import json as _gemini_free_json
+            print(_gemini_free_json.dumps({
+                "content": "",
+                "finish_reason": "error",
+                "error": f"Gemini Free is not available in this build: {_gemini_free_exc}",
+            }, separators=(",", ":")), flush=True)
+            raise SystemExit(1)
+
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os
@@ -21381,6 +21402,10 @@ Important rules:
                 
                 # Start polling for completion
                 self._qa_stop_poll_count = 0
+                # Increment generation so any old poller from a previous stop cycle dies
+                gen = getattr(self, '_qa_stop_poll_current_gen', 0) + 1
+                self._qa_stop_poll_current_gen = gen
+                self._qa_stop_poll_generation = gen
                 QTimer.singleShot(1000, self._check_qa_stop_done)
             else:
                 # Graceful stop disabled — go straight to force
@@ -21456,10 +21481,21 @@ Important rules:
         
         # Start polling for completion (reset button when thread finishes)
         self._qa_stop_poll_count = 0
+        # Increment generation to kill any graceful-phase poller that's still running
+        gen = getattr(self, '_qa_stop_poll_current_gen', 0) + 1
+        self._qa_stop_poll_current_gen = gen
+        self._qa_stop_poll_generation = gen
         QTimer.singleShot(500, self._check_qa_stop_done)
 
     def _check_qa_stop_done(self):
         """Poll until QA scan thread/future finishes, then reset button state."""
+        # Generation check: if a newer poller was started (e.g. force stop
+        # replaced the graceful stop poller), this older poller must die.
+        my_gen = getattr(self, '_qa_stop_poll_generation', 0)
+        current_gen = getattr(self, '_qa_stop_poll_current_gen', 0)
+        if my_gen != current_gen:
+            return  # Stale poller from a previous phase — stop running
+        
         self._qa_stop_poll_count = getattr(self, '_qa_stop_poll_count', 0) + 1
         
         qa_still_running = (
@@ -21477,21 +21513,28 @@ Important rules:
             # so user can still click to force stop. Poll up to 30 seconds.
             QTimer.singleShot(500, self._check_qa_stop_done)
         else:
-            # Done (or timeout) — reset everything
+            # Done (or timeout) — reset button state first
             self._qa_stop_phase = 'idle'
             if hasattr(self, 'qa_text_label'):
                 self.qa_text_label.setText("QA Scan")
             os.environ['GRACEFUL_STOP'] = '0'
-            os.environ.pop('TRANSLATION_CANCELLED', None)
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'set_stop_flag'):
-                    unified_api_client.set_stop_flag(False)
-                if hasattr(unified_api_client, 'UnifiedClient'):
-                    unified_api_client.UnifiedClient._global_cancelled = False
-            except Exception:
-                pass
             self.update_run_button()
+            
+            # Delay clearing heavy stop flags by 3 seconds — background threads
+            # (e.g. ThreadPoolExecutor workers) may still be checking these
+            def _delayed_flag_cleanup():
+                try:
+                    # Only clear if no new scan has started in the meantime
+                    if getattr(self, '_qa_stop_phase', 'idle') == 'idle':
+                        os.environ.pop('TRANSLATION_CANCELLED', None)
+                        import unified_api_client
+                        if hasattr(unified_api_client, 'set_stop_flag'):
+                            unified_api_client.set_stop_flag(False)
+                        if hasattr(unified_api_client, 'UnifiedClient'):
+                            unified_api_client.UnifiedClient._global_cancelled = False
+                except Exception:
+                    pass
+            QTimer.singleShot(3000, _delayed_flag_cleanup)
 
     def on_close(self):
         reply = QMessageBox.question(self, "Quit", "Are you sure you want to exit?",

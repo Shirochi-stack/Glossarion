@@ -1,0 +1,938 @@
+"""
+gemini_free.py - browser-backed Google Search / Gemini route.
+
+This module is intentionally not an official Gemini API client. It uses Qt
+WebEngine to open Google Search's AI/search page and extract the rendered page
+text. The public entry point mirrors the other browser-backed auth modules:
+send_chat_completion(...) returns a dict with content/finish_reason/raw_response.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse
+
+
+SEARCH_BASE_URL = "https://www.google.com/search"
+DEFAULT_SEARCH_PARAMS = {
+    "udm": "50",
+    "aep": "46",
+    "source": "25q2-US-SearchSites-Site-CTA",
+    "hl": "en",
+}
+DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
+DEFAULT_MODEL = "gemini"
+DEFAULT_TIMEOUT = 90
+DEFAULT_MAX_QUERY_CHARS = 7000
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+_cancel_event = threading.Event()
+_active_helper_processes: set = set()
+_active_helper_lock = threading.Lock()
+
+
+def _repo_src_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("GEMINI_FREE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: bool = False) -> None:
+    if not log_fn:
+        return
+    if debug_only and not _debug_enabled():
+        return
+    log_fn(message)
+
+
+def _short_error(error: Any, limit: int = 1200) -> str:
+    text = str(error or "").replace("\r", " ").replace("\n", " ").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def cancel_stream() -> None:
+    """Cancel an active helper subprocess if the translation run is stopped."""
+    _cancel_event.set()
+    with _active_helper_lock:
+        helpers = list(_active_helper_processes)
+    for proc in helpers:
+        _terminate_process_tree(proc, kill=True)
+
+
+def reset_cancel() -> None:
+    _cancel_event.clear()
+
+
+def _is_cancelled() -> bool:
+    return _cancel_event.is_set()
+
+
+def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
+    try:
+        if proc is None or proc.poll() is not None:
+            return
+    except Exception:
+        return
+    if os.name == "nt":
+        try:
+            args = ["taskkill", "/T", "/PID", str(proc.pid)]
+            if kill:
+                args.insert(1, "/F")
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            return
+        except Exception:
+            pass
+    try:
+        if kill:
+            proc.kill()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
+
+
+def _qtwebengine_chromium_flags(existing: str = "") -> str:
+    try:
+        sys.path.insert(0, str(_repo_src_dir()))
+        from authnd_auth import _qtwebengine_chromium_flags as authnd_flags
+
+        return authnd_flags(existing)
+    except Exception:
+        pass
+
+    try:
+        tokens = shlex.split(existing or "")
+    except ValueError:
+        tokens = (existing or "").split()
+
+    required_flags = [
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+    ]
+    seen = set()
+    merged: List[str] = []
+    for flag in [*tokens, *required_flags]:
+        if flag in seen:
+            continue
+        seen.add(flag)
+        merged.append(flag)
+    return " ".join(merged)
+
+
+def _default_user_agent() -> str:
+    try:
+        sys.path.insert(0, str(_repo_src_dir()))
+        from authnd_auth import USER_AGENT
+
+        return USER_AGENT
+    except Exception:
+        return DEFAULT_USER_AGENT
+
+
+def _origin_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_headers(values: Optional[List[str]]) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    for value in values or []:
+        if ":" not in value:
+            raise ValueError(f"header must be in 'Name: value' form: {value}")
+        name, header_value = value.split(":", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"header name is empty: {value}")
+        headers[name] = header_value.strip()
+    return headers
+
+
+def _read_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _write_text(path: str, value: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(value)
+
+
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                item_type = str(item.get("type") or "").lower()
+                if item_type in ("", "text", "input_text"):
+                    parts.append(str(item.get("text") or ""))
+                elif item_type in ("image_url", "input_image", "image"):
+                    parts.append("[image omitted]")
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        text = _content_to_text(message.get("content")).strip()
+        if not text:
+            continue
+        if role == "system":
+            parts.append(f"System instructions:\n{text}")
+        elif role == "assistant":
+            parts.append(f"Assistant:\n{text}")
+        else:
+            parts.append(f"User:\n{text}")
+    return "\n\n".join(parts).strip()
+
+
+def _strip_search_prefix(model: str) -> str:
+    raw = str(model or "").strip()
+    match = re.match(r"^search\d{0,4}/", raw, flags=re.IGNORECASE)
+    if match:
+        raw = raw[match.end():]
+    elif raw.lower().startswith("search"):
+        raw = raw[len("search"):].lstrip("/")
+    return raw.strip("/") or DEFAULT_MODEL
+
+
+def _build_search_url(prompt: str) -> str:
+    base = os.getenv("GEMINI_FREE_SEARCH_BASE_URL", SEARCH_BASE_URL).strip() or SEARCH_BASE_URL
+    params = dict(DEFAULT_SEARCH_PARAMS)
+    extra = os.getenv("GEMINI_FREE_SEARCH_PARAMS", "").strip()
+    if extra:
+        for key, value in parse_qsl(extra.lstrip("?"), keep_blank_values=True):
+            if key:
+                params[key] = value
+    params["q"] = prompt
+    return f"{base}?{urlencode(params)}"
+
+
+def _google_blocked(page_data: Dict[str, Any]) -> bool:
+    url = str(page_data.get("url") or "").lower()
+    text = str(page_data.get("text") or "")
+    text_l = text.lower()
+    return (
+        "google.com/sorry/" in url
+        or "our systems have detected unusual traffic" in text_l
+        or ("about this page" in text_l and "unusual traffic" in text_l)
+        or "to continue, please type the characters" in text_l
+    )
+
+
+def _extract_rendered_content(
+    page_data: Dict[str, Any],
+    *,
+    prompt: str = "",
+    max_output_chars: int = 0,
+) -> str:
+    if _google_blocked(page_data):
+        raise RuntimeError(
+            "Google Search returned a verification page instead of a Gemini/Search response. "
+            "Open Google in a regular browser/profile and clear the verification, or retry later."
+        )
+    text = str(page_data.get("text") or "")
+    lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
+    lines = [line for line in lines if line]
+    content_lines = _extract_ai_answer_lines(lines, prompt)
+    content = "\n".join(content_lines or lines).strip()
+    if not content:
+        title = str(page_data.get("title") or "").strip()
+        raise RuntimeError(f"Google Search returned an empty rendered page. title={title!r}")
+    if max_output_chars and max_output_chars > 0 and len(content) > max_output_chars:
+        content = content[:max_output_chars]
+    return content
+
+
+def _extract_ai_answer_lines(lines: List[str], prompt: str = "") -> List[str]:
+    """Best-effort cleanup for Google AI mode rendered page text."""
+    if not lines:
+        return []
+
+    start = 0
+    for idx, line in enumerate(lines):
+        if line.strip().lower() == "you said:":
+            start = idx + 1
+            break
+    else:
+        return []
+
+    prompt_lines = {
+        line.strip()
+        for line in str(prompt or "").replace("\r", "\n").split("\n")
+        if line.strip()
+    }
+    role_markers = {"user:", "assistant:", "system instructions:"}
+    while start < len(lines):
+        current = lines[start].strip()
+        current_l = current.lower()
+        if not current:
+            start += 1
+            continue
+        if current_l in role_markers or current in prompt_lines:
+            start += 1
+            continue
+        break
+
+    end = len(lines)
+    end_markers = (
+        "ai can make mistakes",
+        "search results",
+        "people also ask",
+        "related searches",
+    )
+    for idx in range(start, len(lines)):
+        current_l = lines[idx].strip().lower()
+        if any(marker in current_l for marker in end_markers):
+            end = idx
+            break
+        if re.match(r"^\d+\s+sites?$", current_l):
+            end = idx
+            break
+
+    extracted = []
+    for line in lines[start:end]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^\+\d+$", stripped):
+            continue
+        extracted.append(stripped)
+    return extracted
+
+
+def _setup_qt_environment() -> None:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(
+        os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    )
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+
+def _create_profile(app: Any, *, user_agent: Optional[str] = None) -> Any:
+    from PySide6.QtWebEngineCore import QWebEngineProfile
+
+    profile_root = Path.home() / ".glossarion" / "gemini_free_browser"
+    if os.getenv("GEMINI_FREE_EPHEMERAL_PROFILE", "0").lower() in ("1", "true", "yes"):
+        profile_root = profile_root / uuid.uuid4().hex
+    profile_root.mkdir(parents=True, exist_ok=True)
+
+    profile = QWebEngineProfile(f"gemini-free-{uuid.uuid4().hex}", app)
+    profile.setHttpUserAgent(user_agent or _default_user_agent())
+    try:
+        profile.setPersistentStoragePath(str(profile_root))
+        profile.setCachePath(str(profile_root / "cache"))
+    except Exception:
+        pass
+    try:
+        profile.setHttpAcceptLanguage(os.getenv("GEMINI_FREE_ACCEPT_LANGUAGE", "en-US,en;q=0.9"))
+    except Exception:
+        pass
+    return profile
+
+
+def run_qtwebengine_request(
+    *,
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    body: Optional[str] = None,
+    bootstrap_url: Optional[str] = None,
+    credentials: str = "include",
+    mode: str = "same-origin",
+    timeout: int = 60,
+    max_body_chars: int = 200_000,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run a browser-side fetch() from a Qt WebEngine page."""
+    _setup_qt_environment()
+
+    from PySide6.QtCore import QEventLoop, QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(["gemini-free-request"])
+
+    profile = _create_profile(app, user_agent=user_agent)
+    page = QWebEnginePage(profile, app)
+
+    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+        holder: Dict[str, Any] = {}
+        loop = QEventLoop()
+
+        def _done(value: Any) -> None:
+            holder["value"] = value
+            loop.quit()
+
+        page.runJavaScript(script, _done)
+        QTimer.singleShot(js_timeout_ms, loop.quit)
+        loop.exec()
+        return holder.get("value")
+
+    try:
+        load_loop = QEventLoop()
+        load_state: Dict[str, Any] = {"ok": False, "error": "", "last_event": ""}
+
+        def _loaded(ok: bool) -> None:
+            load_state["ok"] = bool(ok)
+            load_loop.quit()
+
+        page.loadFinished.connect(_loaded)
+        page.load(QUrl(bootstrap_url or _origin_url(url)))
+        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        load_loop.exec()
+        if not load_state.get("ok"):
+            raise RuntimeError(f"Qt WebEngine failed to load bootstrap page {bootstrap_url}")
+
+        payload = {
+            "url": url,
+            "method": method.upper(),
+            "headers": headers or {},
+            "body": body,
+            "credentials": credentials,
+            "mode": mode,
+            "timeoutMs": max(1000, int(timeout * 1000)),
+            "maxBodyChars": max_body_chars,
+        }
+        script = f"""
+(() => {{
+  const request = {json.dumps(payload, ensure_ascii=False)};
+  window.__geminiFreeRequestResult = {{pending: true}};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), request.timeoutMs);
+  (async () => {{
+    try {{
+      const init = {{
+        method: request.method,
+        credentials: request.credentials,
+        redirect: "follow",
+        headers: request.headers || {{}},
+        signal: controller.signal
+      }};
+      if (request.mode) init.mode = request.mode;
+      if (!["GET", "HEAD"].includes(request.method) && request.body !== null && request.body !== undefined) {{
+        init.body = String(request.body);
+      }}
+      const response = await fetch(request.url, init);
+      const responseHeaders = {{}};
+      try {{
+        response.headers.forEach((value, key) => {{ responseHeaders[key] = value; }});
+      }} catch (error) {{}}
+      const text = await response.text();
+      const maxChars = Number(request.maxBodyChars);
+      const shouldTrim = Number.isFinite(maxChars) && maxChars >= 0 && text.length > maxChars;
+      window.__geminiFreeRequestResult = {{
+        pending: false,
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        redirected: response.redirected,
+        type: response.type,
+        headers: responseHeaders,
+        body: shouldTrim ? text.slice(0, maxChars) : text,
+        bodyLength: text.length,
+        truncated: shouldTrim,
+        error: null
+      }};
+    }} catch (error) {{
+      window.__geminiFreeRequestResult = {{
+        pending: false,
+        ok: false,
+        status: 0,
+        statusText: "Qt WebEngine fetch failed",
+        url: request.url,
+        redirected: false,
+        type: "",
+        headers: {{}},
+        body: "",
+        bodyLength: 0,
+        truncated: false,
+        error: String(error && (error.stack || error.message || error))
+      }};
+    }} finally {{
+      clearTimeout(timer);
+    }}
+  }})();
+  return true;
+}})();
+"""
+        run_js(script, js_timeout_ms=10000)
+
+        deadline = time.time() + max(1, int(timeout))
+        last_result: Dict[str, Any] = {}
+        while time.time() < deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            raw = run_js("JSON.stringify(window.__geminiFreeRequestResult || {pending:true})", js_timeout_ms=5000)
+            try:
+                result = json.loads(raw or "{}")
+            except Exception:
+                result = {}
+            last_result = result
+            if result and not result.get("pending", True):
+                result["bootstrap_url"] = bootstrap_url
+                return result
+
+            wait_loop = QEventLoop()
+            QTimer.singleShot(100, wait_loop.quit)
+            wait_loop.exec()
+
+        raise RuntimeError(f"Qt WebEngine fetch timed out: {last_result}")
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+
+
+def load_rendered_page_text(
+    url: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    wait_after_load_ms: Optional[int] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Load a page in Qt WebEngine and return rendered body text."""
+    _setup_qt_environment()
+
+    from PySide6.QtCore import QEventLoop, QTimer, QUrl
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(["gemini-free-page"])
+
+    profile = _create_profile(app, user_agent=user_agent)
+    page = QWebEnginePage(profile, app)
+
+    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+        holder: Dict[str, Any] = {}
+        loop = QEventLoop()
+
+        def _done(value: Any) -> None:
+            holder["value"] = value
+            loop.quit()
+
+        page.runJavaScript(script, _done)
+        QTimer.singleShot(js_timeout_ms, loop.quit)
+        loop.exec()
+        return holder.get("value")
+
+    try:
+        load_loop = QEventLoop()
+        load_state: Dict[str, Any] = {"ok": False}
+
+        def _loaded(ok: bool) -> None:
+            load_state["ok"] = bool(ok)
+            load_loop.quit()
+
+        page.loadFinished.connect(_loaded)
+        page.load(QUrl(url))
+        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        load_loop.exec()
+        if not load_state.get("ok"):
+            raise RuntimeError(f"Qt WebEngine failed to load {url}")
+
+        wait_ms = wait_after_load_ms
+        if wait_ms is None:
+            wait_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
+        deadline = time.time() + max(1, int(timeout))
+        min_ready_at = time.time() + max(0, int(wait_ms)) / 1000.0
+        last_result: Dict[str, Any] = {}
+
+        while time.time() < deadline:
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            raw = run_js(
+                """
+JSON.stringify({
+  url: location.href,
+  title: document.title || "",
+  ready: document.readyState || "",
+  text: document.body ? document.body.innerText || "" : "",
+  htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0
+})
+""",
+                js_timeout_ms=5000,
+            )
+            try:
+                result = json.loads(raw or "{}")
+            except Exception:
+                result = {}
+            last_result = result
+            text = str(result.get("text") or "")
+            if _google_blocked(result):
+                return result
+            if text.strip() and time.time() >= min_ready_at:
+                return result
+
+            wait_loop = QEventLoop()
+            QTimer.singleShot(500, wait_loop.quit)
+            wait_loop.exec()
+
+        return last_result
+    finally:
+        try:
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
+        except Exception:
+            pass
+
+
+def _send_chat_completion_qt(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_tokens: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    actual_model = _strip_search_prefix(model)
+    if actual_model.lower() != DEFAULT_MODEL:
+        raise RuntimeError(f"Gemini Free only supports search/{DEFAULT_MODEL}; got search/{actual_model}")
+
+    prompt = _messages_to_prompt(messages)
+    if not prompt:
+        raise RuntimeError("Gemini Free request has an empty prompt")
+
+    max_query_chars = _env_int("GEMINI_FREE_MAX_QUERY_CHARS", DEFAULT_MAX_QUERY_CHARS)
+    if max_query_chars > 0 and len(prompt) > max_query_chars:
+        raise RuntimeError(
+            f"Gemini Free Search route prompt is too large for a Google Search URL "
+            f"({len(prompt)} chars > {max_query_chars}). Reduce batch size/chunk size or "
+            "raise GEMINI_FREE_MAX_QUERY_CHARS if you know the browser route can handle it."
+        )
+
+    search_url = _build_search_url(prompt)
+    _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model})")
+    _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
+
+    page_data = load_rendered_page_text(
+        search_url,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    max_output_chars = 0
+    try:
+        if max_tokens:
+            max_output_chars = max(0, int(max_tokens) * 4)
+    except Exception:
+        max_output_chars = 0
+    content = _extract_rendered_content(page_data, prompt=prompt, max_output_chars=max_output_chars)
+    return {
+        "content": content,
+        "finish_reason": "stop",
+        "usage": {
+            "prompt_chars": len(prompt),
+            "completion_chars": len(content),
+        },
+        "raw_response": {
+            "model": actual_model,
+            "search_url": search_url,
+            "page_url": page_data.get("url"),
+            "title": page_data.get("title"),
+            "ready": page_data.get("ready"),
+            "html_length": page_data.get("htmlLength"),
+        },
+    }
+
+
+def _is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError("Gemini Free helper did not return JSON")
+
+
+def _run_search_subprocess(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str,
+    timeout: int,
+    max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    helper_timeout = max(30, int(timeout))
+    temp_dir = tempfile.mkdtemp(prefix="glossarion_gemini_free_")
+    prompt_path = os.path.join(temp_dir, "messages.json")
+    try:
+        with open(prompt_path, "w", encoding="utf-8") as handle:
+            json.dump({"messages": list(messages or [])}, handle, ensure_ascii=False)
+
+        if _is_frozen_app():
+            cmd = [
+                sys.executable,
+                "--gemini-free-search",
+                "--messages",
+                prompt_path,
+                "--model",
+                model,
+                "--timeout",
+                str(helper_timeout),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--search-helper",
+                "--messages",
+                prompt_path,
+                "--model",
+                model,
+                "--timeout",
+                str(helper_timeout),
+            ]
+        if max_tokens:
+            cmd.extend(["--max-tokens", str(int(max_tokens))])
+
+        env = os.environ.copy()
+        env["GEMINI_FREE_HELPER"] = "1"
+        env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
+        env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+        creationflags = 0
+        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=creationflags,
+        )
+        with _active_helper_lock:
+            _active_helper_processes.add(proc)
+        deadline = time.time() + helper_timeout + 20
+        stdout = ""
+        stderr = ""
+        try:
+            while proc.poll() is None:
+                if _is_cancelled():
+                    _terminate_process_tree(proc, kill=True)
+                    raise RuntimeError("stream cancelled")
+                if time.time() >= deadline:
+                    _terminate_process_tree(proc, kill=True)
+                    raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout}s")
+                time.sleep(0.1)
+            try:
+                stdout, stderr = proc.communicate(timeout=1)
+            except Exception:
+                stdout, stderr = "", ""
+        finally:
+            with _active_helper_lock:
+                _active_helper_processes.discard(proc)
+
+        result = _extract_json_from_process(stdout)
+        if proc.returncode != 0:
+            error = str(result.get("error") or "").strip()
+            if error:
+                raise RuntimeError(f"Gemini Free helper failed ({proc.returncode}): {error}")
+            detail = (stderr or stdout or "").strip()
+            raise RuntimeError(f"Gemini Free helper failed ({proc.returncode}): {detail[-1200:]}")
+        if result.get("error"):
+            raise RuntimeError(str(result.get("error")))
+        return result
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def send_chat_completion(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str = DEFAULT_MODEL,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[int] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    **_: Any,
+) -> Dict[str, Any]:
+    """Send a chat-style prompt through the browser-backed Search/Gemini route."""
+    del temperature
+    timeout_value = int(timeout or _env_int("GEMINI_FREE_TIMEOUT", DEFAULT_TIMEOUT))
+    mode = os.getenv("GEMINI_FREE_MODE", "subprocess").strip().lower()
+    if mode == "inline":
+        return _send_chat_completion_qt(
+            messages=messages,
+            model=model,
+            timeout=timeout_value,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+        )
+    _log(log_fn, "Gemini Free: starting Qt WebEngine helper subprocess")
+    return _run_search_subprocess(
+        messages=messages,
+        model=model,
+        timeout=timeout_value,
+        max_tokens=max_tokens,
+    )
+
+
+def _load_cli_messages(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    if args.messages:
+        with open(args.messages, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and isinstance(data.get("messages"), list):
+            data = data["messages"]
+        if not isinstance(data, list):
+            raise ValueError("--messages must contain a JSON list or an object with a messages list")
+        return data
+    prompt = ""
+    if args.prompt_file:
+        prompt = _read_text(args.prompt_file)
+    elif args.prompt == "-":
+        prompt = sys.stdin.read()
+    elif args.prompt:
+        prompt = args.prompt
+    return [{"role": "user", "content": prompt}]
+
+
+def _print_summary(result: Dict[str, Any]) -> None:
+    if "content" in result:
+        print(result.get("content") or "")
+        return
+    body = str(result.get("body") or "")
+    print(f"{result.get('status')} {result.get('statusText')}")
+    print(f"url: {result.get('url')}")
+    print(f"ok: {result.get('ok')} redirected: {result.get('redirected')} type: {result.get('type')}")
+    print(f"bodyLength: {result.get('bodyLength')} truncated: {result.get('truncated')}")
+    if result.get("error"):
+        print(f"error: {result.get('error')}")
+    if body:
+        print("\nbody:")
+        print(body)
+
+
+def _main() -> int:
+    for stream_name in ("stdout", "stderr"):
+        stream_obj = getattr(sys, stream_name, None)
+        if hasattr(stream_obj, "reconfigure"):
+            try:
+                stream_obj.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    parser = argparse.ArgumentParser(
+        description="Use Qt WebEngine for Google Search/Gemini browser-backed requests.",
+    )
+    parser.add_argument("url", nargs="?", default=DEFAULT_URL, help="Raw request URL for fetch mode.")
+    parser.add_argument("--search-helper", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--prompt", help="Prompt text. Use '-' to read stdin.")
+    parser.add_argument("--prompt-file", help="UTF-8 file containing prompt text.")
+    parser.add_argument("--messages", help="JSON file containing messages list or {'messages': [...]}.")
+    parser.add_argument("--method", default="GET", help="Raw fetch HTTP method. Default: GET.")
+    parser.add_argument("--header", action="append", help="Raw fetch request header in 'Name: value' form.")
+    parser.add_argument("--data", help="Raw fetch request body text.")
+    parser.add_argument("--data-file", help="Read raw fetch request body text from a UTF-8 file.")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Timeout in seconds.")
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--max-body-chars", type=int, default=200_000)
+    parser.add_argument("--output", help="Write response body/content to a UTF-8 file.")
+    parser.add_argument("--json", action="store_true", help="Print the full result object as JSON.")
+    args = parser.parse_args()
+
+    try:
+        if args.search_helper or args.prompt or args.prompt_file or args.messages:
+            result = _send_chat_completion_qt(
+                messages=_load_cli_messages(args),
+                model=args.model,
+                timeout=args.timeout,
+                max_tokens=args.max_tokens,
+            )
+        else:
+            body = _read_text(args.data_file) if args.data_file else args.data
+            result = run_qtwebengine_request(
+                url=args.url,
+                method=args.method,
+                headers=_parse_headers(args.header),
+                body=body,
+                bootstrap_url=_origin_url(args.url),
+                timeout=args.timeout,
+                max_body_chars=args.max_body_chars,
+            )
+        if args.output:
+            _write_text(args.output, str(result.get("content") or result.get("body") or ""))
+        if args.json or args.search_helper:
+            print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        else:
+            _print_summary(result)
+        return 0 if not result.get("error") else 1
+    except Exception as exc:
+        error = {"content": "", "finish_reason": "error", "error": _short_error(exc)}
+        if args.json or args.search_helper:
+            print(json.dumps(error, ensure_ascii=False, separators=(",", ":")))
+        else:
+            print(f"Gemini Free request failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

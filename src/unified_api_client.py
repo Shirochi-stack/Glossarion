@@ -1218,6 +1218,18 @@ except ImportError:
     _authnd_reset_cancel = None
     AUTHND_AVAILABLE = False
 
+# Search/Gemini Free - Google Search browser-backed route (optional, no API key)
+try:
+    from gemini_free import send_chat_completion as _search_gemini_send
+    from gemini_free import cancel_stream as _search_gemini_cancel_stream
+    from gemini_free import reset_cancel as _search_gemini_reset_cancel
+    SEARCH_GEMINI_AVAILABLE = True
+except ImportError:
+    _search_gemini_send = None
+    _search_gemini_cancel_stream = None
+    _search_gemini_reset_cancel = None
+    SEARCH_GEMINI_AVAILABLE = False
+
 # AuthCD - Claude subscription via OAuth (optional)
 try:
     from authcd_auth import get_default_store as _authcd_get_store
@@ -2207,6 +2219,8 @@ class UnifiedClient:
         'opencode-go/': 'opencode',
         'fireworks': 'fireworks',
         'nd/': 'nvidia',
+        'search/': 'search',
+        'search': 'search',
         'authnd/': 'authnd',
         'authnd': 'authnd',
         'eh/': 'electronhub',
@@ -2258,7 +2272,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -3346,6 +3360,13 @@ class UnifiedClient:
                 _authnd_cancel_stream()
         except Exception:
             pass
+
+        # Cancel any in-flight Gemini Free browser helper
+        try:
+            if _search_gemini_cancel_stream is not None:
+                _search_gemini_cancel_stream()
+        except Exception:
+            pass
     
     @classmethod
     def is_globally_cancelled(cls) -> bool:
@@ -3392,6 +3413,12 @@ class UnifiedClient:
         try:
             if _authnd_reset_cancel is not None:
                 _authnd_reset_cancel()
+        except Exception:
+            pass
+        # Reset Gemini Free cancel event
+        try:
+            if _search_gemini_reset_cancel is not None:
+                _search_gemini_reset_cancel()
         except Exception:
             pass
         
@@ -3883,6 +3910,13 @@ class UnifiedClient:
         if self._is_stop_requested():
             self._cancelled = True
             raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        
+        # Check TRANSLATION_CANCELLED env var — this is always set by QA scanner stop
+        # and catches cases where _is_stop_requested() misses (e.g. newly created
+        # clients where _stop_callback hasn't been set yet in __init__)
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            self._cancelled = True
+            raise UnifiedClientError("Operation cancelled (TRANSLATION_CANCELLED)", error_type="cancelled")
         
         # Also bail on graceful stop — no point initializing clients for threads
         # that will be skipped anyway. _is_stop_requested() intentionally doesn't
@@ -7708,6 +7742,9 @@ class UnifiedClient:
                     # Non-chat prefix routes are handled by direct HTTP/provider-specific paths.
                     self.openai_client = None
                 else:
+                    # Re-check stop before expensive client creation
+                    if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
+                        return
                     # Use regular OpenAI client - individual endpoint will be set later
                     _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url_for_client)
                     _iso_http = _create_isolated_httpx_client()
@@ -7751,6 +7788,9 @@ class UnifiedClient:
                     tls.gemini_api_key = api_key_snapshot
                 
             if not (use_gemini_endpoint and gemini_endpoint and not _is_grpc_endpoint) and not _is_grpc_endpoint:
+                # Re-check stop before expensive Gemini client creation
+                if self._is_stop_requested() or os.environ.get('TRANSLATION_CANCELLED') == '1':
+                    return
                 # MICROSECOND LOCK for native Gemini client
                 # Check if this key has Google credentials (multi-key mode)
                 google_creds = None
@@ -7947,6 +7987,13 @@ class UnifiedClient:
                     "AuthND package not found. Make sure 'authnd_auth.py' exists under src/."
                 )
 
+        elif self.client_type == 'search':
+            # Gemini Free uses Google Search through a Qt WebEngine helper.
+            if not SEARCH_GEMINI_AVAILABLE:
+                raise ImportError(
+                    "Gemini Free package not found. Make sure 'gemini_free.py' exists under src/."
+                )
+
         elif self.client_type == 'authcd':
             # AuthCD uses Anthropic Messages API via OAuth – no persistent SDK client
             if not AUTHCD_AVAILABLE:
@@ -8082,7 +8129,8 @@ class UnifiedClient:
                     or _key_identifier.startswith('RollingSummaryKey#')
                 )
                 _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(ai-truncation-key)" if _is_ai_truncation_detection_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(image-gen/edit-key)" if _is_inpainter_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
-                defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model} {_pool_label}")
+                if not self._is_stop_requested() and os.environ.get('TRANSLATION_CANCELLED') != '1':
+                    defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif str(getattr(self, 'key_identifier', '') or '').startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'Refinement Key#', 'RollingSummaryKey#', 'TruncationRetryKey#', 'ImageGenEditKey#')) and not self._is_stop_requested():
                 _key_identifier = str(getattr(self, 'key_identifier', '') or '')
                 if _key_identifier.startswith('AITruncationDetectionKey#'):
@@ -16979,6 +17027,7 @@ class UnifiedClient:
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
             'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
+            'search': self._send_search_gemini,  # Google Search/Gemini browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
             'sambanova': self._send_openai_provider_router,  # SambaNova Cloud API
         }
@@ -24705,6 +24754,121 @@ class UnifiedClient:
             error_type="api_error"
         )
 
+    def _send_search_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request through Google Search's browser-backed Gemini/Search route.
+
+        Model names should be prefixed with 'search/' (currently search/gemini).
+        This route does not use an API key; gemini_free.py opens Google Search in
+        a Qt WebEngine helper process and extracts the rendered page text.
+        """
+        if not SEARCH_GEMINI_AVAILABLE or _search_gemini_send is None:
+            raise UnifiedClientError(
+                "Gemini Free is not available. Ensure 'gemini_free.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        actual_model = self.model
+        import re as _re
+        _m = _re.match(r'^search\d{0,4}/', actual_model, _re.IGNORECASE)
+        if _m:
+            actual_model = actual_model[_m.end():]
+        elif actual_model.lower().startswith('search'):
+            actual_model = actual_model[len('search'):].lstrip('/')
+        actual_model = actual_model or 'gemini'
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        if self._should_abort_retry():
+            raise UnifiedClientError(
+                "Gemini Free: Translation stopped by user",
+                error_type="cancelled"
+            )
+        print(f"Gemini Free: Sending request via Google Search browser route (model={actual_model})")
+
+        for attempt in range(max_retries):
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "Gemini Free: Translation stopped by user",
+                    error_type="cancelled"
+                )
+
+            try:
+                if _search_gemini_reset_cancel is not None:
+                    _search_gemini_reset_cancel()
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Gemini Free: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                _read_timeout = self.request_timeout
+                if _http_tuning_on:
+                    try:
+                        _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (ValueError, TypeError):
+                        pass
+
+                result = _search_gemini_send(
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=_read_timeout,
+                    log_fn=print,
+                )
+
+                content = result.get("content", "")
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=result.get("finish_reason") or "stop",
+                    usage=result.get("usage"),
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+                if "stream cancelled" in error_str.lower():
+                    self._log_once("Gemini Free: Stream cancelled by user")
+                    raise UnifiedClientError(
+                        "Gemini Free: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Gemini Free: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                if "verification page" in error_str.lower() or "unusual traffic" in error_str.lower():
+                    raise UnifiedClientError(
+                        f"Gemini Free blocked by Google verification: {error_str}",
+                        error_type="auth_error"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"Gemini Free error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("Gemini Free: Translation stopped by user", error_type="cancelled")
+                    continue
+
+            except Exception as exc:
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Gemini Free: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"Gemini Free error (attempt {attempt+1}/{max_retries}): {exc}")
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("Gemini Free: Translation stopped by user", error_type="cancelled")
+                    continue
+
+        raise UnifiedClientError(
+            f"Gemini Free request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
     def _send_authnd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request through NVIDIA Build's browser-backed public route.
 
@@ -27943,6 +28107,11 @@ def set_stop_flag(value: bool = True):
             _authnd_cancel_stream()
         except Exception:
             pass
+    if value and _search_gemini_cancel_stream is not None:
+        try:
+            _search_gemini_cancel_stream()
+        except Exception:
+            pass
 
 
 def reset_api_call_stagger():
@@ -27975,5 +28144,10 @@ def hard_cancel_all():
     if _authnd_cancel_stream is not None:
         try:
             _authnd_cancel_stream()
+        except Exception:
+            pass
+    if _search_gemini_cancel_stream is not None:
+        try:
+            _search_gemini_cancel_stream()
         except Exception:
             pass

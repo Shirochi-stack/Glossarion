@@ -305,6 +305,9 @@ def get_model_options() -> List[str]:
         "antigravity/gemini-3.1-flash-image",
         "antigravity/gemini-3.1-pro-high", "antigravity/gemini-3.1-pro-low",
 
+        # Google Search / Gemini browser-backed route (no API key needed)
+        "search/gemini",
+
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
         "authnd/mistralai/mistral-medium-3.5-128b",
         "authnd/deepseek-ai/deepseek-v4-flash",

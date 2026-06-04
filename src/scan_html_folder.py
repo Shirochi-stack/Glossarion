@@ -9355,9 +9355,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             finally:
                 if _ai_pool is not None:
                     try:
-                        _ai_pool.shutdown(wait=not should_stop(), cancel_futures=True)
+                        # ALWAYS wait for threads to finish before returning.
+                        # cancel_futures=True kills QUEUED tasks instantly.
+                        # Running tasks hit stop checks in _ai_check_one/_setup_client
+                        # and exit quickly, so this won't block for long.
+                        # Using wait=False caused threads to outlive the scan function,
+                        # and _check_qa_stop_done would clear stop flags while threads
+                        # were still initializing clients.
+                        _ai_pool.shutdown(wait=True, cancel_futures=True)
                     except TypeError:
-                        _ai_pool.shutdown(wait=not should_stop())
+                        _ai_pool.shutdown(wait=True)
                 # Restore original BATCH_TRANSLATION env var
                 if _orig_batch_env is not None:
                     os.environ['BATCH_TRANSLATION'] = _orig_batch_env
