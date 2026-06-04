@@ -14371,6 +14371,22 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             refine_system = f"{refine_system}\n\n{enhanced_system}"
         refine_system = refine_system.strip()
 
+        # Append glossary (with compression) to the refinement system prompt,
+        # respecting the same compress_glossary logic used during main translation.
+        glossary_path = find_glossary_file(out)
+        append_glossary_enabled = os.getenv('APPEND_GLOSSARY', '1') == '1'
+        if (
+            append_glossary_enabled
+            and glossary_path
+            and os.path.exists(glossary_path)
+            and os.getenv('DISABLE_GLOSSARY_TRANSLATION') != '1'
+        ):
+            refine_system = build_system_prompt(
+                refine_system,
+                glossary_path,
+                source_text=html_content,
+            )
+
         refine_user = _format_refinement_prompt(
             user_template,
             html_content,

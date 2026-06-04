@@ -10,6 +10,8 @@ send_chat_completion(...) returns a dict with content/finish_reason/raw_response
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import html
 import json
 import os
 import queue
@@ -37,7 +39,13 @@ DEFAULT_SEARCH_PARAMS = {
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 2400
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 1200
+DEFAULT_SUBCHUNK_URL_CHARS = 3500
+DEFAULT_SUBCHUNK_SAFETY_CHARS = 300
+DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
+DEFAULT_SUBCHUNK_PARALLELISM = 4
+DEFAULT_SUBCHUNK_STATUS_SECONDS = 15
+AUTHND_TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -68,6 +76,124 @@ JSON.stringify({
     return visible && label.includes("stop") && !button.disabled && button.getAttribute("aria-disabled") !== "true";
   })
 })
+"""
+
+
+def _page_snapshot_script(prompt: str = "") -> str:
+    prompt_json = json.dumps(str(prompt or ""), ensure_ascii=False)
+    return f"""
+(() => {{
+  const promptText = {prompt_json};
+  const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  const bodyText = document.body ? document.body.innerText || "" : "";
+  const promptLines = new Set(
+    String(promptText || "")
+      .replace(/\\r/g, "\\n")
+      .split("\\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+  const roleMarkers = new Set(["user:", "assistant:", "system instructions:"]);
+  const endMarkers = [
+    "ai can make mistakes",
+    "ai mode response is ready",
+    "search results",
+    "people also ask",
+    "related searches"
+  ];
+
+  const lines = bodyText.replace(/\\r/g, "\\n").split("\\n").map((line) => line.trim()).filter(Boolean);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {{
+    if (lines[i].toLowerCase() === "you said:") {{
+      start = i + 1;
+      break;
+    }}
+  }}
+  if (start >= 0) {{
+    while (start < lines.length) {{
+      const current = lines[start] || "";
+      const lower = current.toLowerCase();
+      if (!current || roleMarkers.has(lower) || promptLines.has(current)) {{
+        start += 1;
+        continue;
+      }}
+      break;
+    }}
+  }}
+  let end = start >= 0 ? lines.length : 0;
+  for (let i = Math.max(0, start); i < lines.length; i++) {{
+    const lower = (lines[i] || "").toLowerCase();
+    if (endMarkers.some((marker) => lower.includes(marker)) || /^\\d+\\s+sites?$/.test(lower)) {{
+      end = i;
+      break;
+    }}
+  }}
+  const answerLines = start >= 0
+    ? lines.slice(start, end).filter((line) => line && !/^\\+\\d+$/.test(line))
+    : [];
+  const answerText = answerLines.join("\\n").trim();
+
+  const visible = (element) => {{
+    if (!element || !element.getBoundingClientRect) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  }};
+  const firstNeedle = normalize(answerLines[0] || "").slice(0, 100);
+  const lastNeedle = normalize(answerLines[answerLines.length - 1] || "").slice(0, 100);
+  const promptNeedle = normalize(String(promptText || "").split("\\n").find((line) => line.trim()) || "").slice(0, 100);
+  const candidates = Array.from(document.body ? document.body.querySelectorAll("article, main, section, div, [role='article'], [data-md], [data-attrid]") : []);
+  let best = null;
+  for (const element of candidates) {{
+    if (!visible(element)) continue;
+    const text = normalize(element.innerText || "");
+    if (!text) continue;
+    let score = 0;
+    if (firstNeedle && text.includes(firstNeedle)) score += 80;
+    if (lastNeedle && text.includes(lastNeedle)) score += 80;
+    if (answerText && text.includes(normalize(answerText).slice(0, Math.min(160, normalize(answerText).length)))) score += 30;
+    if (/\\byou said:\\b/i.test(text)) score -= 120;
+    if (promptNeedle && text.includes(promptNeedle)) score -= 80;
+    if (/ai can make mistakes|search results|people also ask|related searches/i.test(text)) score -= 35;
+    const answerLength = Math.max(1, normalize(answerText).length);
+    score -= Math.abs(text.length - answerLength) / Math.max(60, answerLength / 10);
+    score += Math.min(40, element.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,table,br").length * 3);
+    if (!best || score > best.score || (score === best.score && text.length < best.textLength)) {{
+      best = {{
+        score,
+        textLength: text.length,
+        html: element.innerHTML || "",
+        text: element.innerText || "",
+        tag: element.tagName || ""
+      }};
+    }}
+  }}
+
+  return JSON.stringify({{
+    url: location.href,
+    title: document.title || "",
+    ready: document.readyState || "",
+    text: bodyText,
+    answerText,
+    answerHtml: best ? best.html : "",
+    answerContainerText: best ? best.text : "",
+    answerContainerTag: best ? best.tag : "",
+    answerContainerScore: best ? best.score : null,
+    htmlLength: document.documentElement ? document.documentElement.outerHTML.length : 0,
+    busy: Array.from(document.querySelectorAll('button,[role="button"]')).some((button) => {{
+      const style = window.getComputedStyle(button);
+      const rect = button.getBoundingClientRect();
+      const visibleButton = style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      const label = [
+        button.getAttribute("aria-label") || "",
+        button.getAttribute("title") || "",
+        button.innerText || ""
+      ].join(" ").toLowerCase();
+      return visibleButton && label.includes("stop") && !button.disabled && button.getAttribute("aria-disabled") !== "true";
+    }})
+  }});
+}})()
 """
 
 _cancel_event = threading.Event()
@@ -123,10 +249,14 @@ def _safe_url_for_log(url: Any, limit: int = 500) -> str:
 def cancel_stream() -> None:
     """Cancel an active helper subprocess if the translation run is stopped."""
     _cancel_event.set()
+    _terminate_active_helper_processes(kill=True)
+
+
+def _terminate_active_helper_processes(*, kill: bool = False) -> None:
     with _active_helper_lock:
         helpers = list(_active_helper_processes)
     for proc in helpers:
-        _terminate_process_tree(proc, kill=True)
+        _terminate_process_tree(proc, kill=kill)
 
 
 def reset_cancel() -> None:
@@ -276,6 +406,10 @@ def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _messages_to_search_url_chars(messages: Iterable[Dict[str, Any]]) -> int:
+    return len(_build_search_url(_messages_to_prompt(messages)))
+
+
 def _generation_failure_error(error: Any) -> bool:
     text = str(error or "").lower()
     return (
@@ -290,26 +424,144 @@ def _adaptive_split_enabled() -> bool:
 
 
 def _subchunk_prompt_chars() -> int:
-    return max(1200, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+    return max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+
+
+def _subchunk_url_chars() -> int:
+    return max(1000, _env_int("GEMINI_FREE_SUBCHUNK_URL_CHARS", DEFAULT_SUBCHUNK_URL_CHARS))
+
+
+def _subchunk_safety_chars() -> int:
+    return max(0, _env_int("GEMINI_FREE_SUBCHUNK_SAFETY_CHARS", DEFAULT_SUBCHUNK_SAFETY_CHARS))
+
+
+def _min_subchunk_body_chars() -> int:
+    return max(1, _env_int("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", DEFAULT_MIN_SUBCHUNK_BODY_CHARS))
+
+
+def _subchunk_parallelism_limits(chunk_count: int) -> tuple[int, int, int]:
+    count = max(1, int(chunk_count or 1))
+    requested_workers = max(1, _env_int("GEMINI_FREE_SUBCHUNK_PARALLELISM", DEFAULT_SUBCHUNK_PARALLELISM))
+    subprocess_cap = max(1, _env_int(AUTHND_TOKEN_SUBPROCESS_CONCURRENCY_ENV, requested_workers))
+    worker_count = max(1, min(count, requested_workers, subprocess_cap))
+    return worker_count, requested_workers, subprocess_cap
+
+
+def _subchunk_parallelism(chunk_count: int) -> int:
+    worker_count, _requested_workers, _subprocess_cap = _subchunk_parallelism_limits(chunk_count)
+    return worker_count
+
+
+def _subchunk_status_seconds() -> int:
+    return max(0, _env_int("GEMINI_FREE_SUBCHUNK_STATUS_SECONDS", DEFAULT_SUBCHUNK_STATUS_SECONDS))
 
 
 def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
     raw = str(text or "")
     if not raw:
         return "", ""
-    html_match = re.search(r"<(?:!doctype|html|head|body|h[1-6]|p|div|img|ruby|br|ul|ol|li|table|span)\b", raw, re.IGNORECASE)
+    html_match = re.search(r"<(?:\?xml|!doctype|html|head|body|h[1-6]|p|div|img|ruby|br|ul|ol|li|table|span)\b", raw, re.IGNORECASE)
     if html_match and html_match.start() > 0:
-        return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
-    double_newline = raw.find("\n\n")
-    if 0 <= double_newline <= 1200:
-        return raw[:double_newline].rstrip(), raw[double_newline + 2 :].lstrip()
-    first_newline = raw.find("\n")
-    if 0 <= first_newline <= 700 and raw[:first_newline].strip().startswith("["):
-        return raw[:first_newline].rstrip(), raw[first_newline + 1 :].lstrip()
+        lead = raw[: html_match.start()].strip()
+        if lead.startswith("[") and len(lead) <= 200:
+            return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
+    first_line = re.match(r"^([^\r\n]{1,200})(\r\n|\n|\r)(.*)$", raw, flags=re.DOTALL)
+    if first_line:
+        lead = first_line.group(1).strip()
+        if lead.startswith("[") and lead.endswith("]"):
+            return first_line.group(1).rstrip(), first_line.group(3).lstrip()
     return "", raw
 
 
-def _split_text_units(text: str) -> List[str]:
+def _configured_text_extraction_method() -> str:
+    method = os.getenv("TEXT_EXTRACTION_METHOD", "").strip().lower()
+    extraction_mode = os.getenv("EXTRACTION_MODE", "").strip().lower()
+    use_html2text = os.getenv("USE_HTML2TEXT", "").strip().lower() in ("1", "true", "yes", "on")
+    if method in ("enhanced", "html2text", "markdown") or extraction_mode == "enhanced" or use_html2text:
+        return "enhanced"
+    if method in ("standard", "beautifulsoup", "bs"):
+        return "standard"
+    return ""
+
+
+def _looks_like_html_payload(text: str) -> bool:
+    raw = str(text or "")
+    return bool(re.search(r"<[A-Za-z][A-Za-z0-9:_-]*(?:\s[^<>]*)?/?>|</[A-Za-z][A-Za-z0-9:_-]*>", raw))
+
+
+def _payload_format_for_split(text: str) -> str:
+    raw = str(text or "")
+    configured_method = _configured_text_extraction_method()
+    if configured_method == "enhanced":
+        return "text"
+    if configured_method == "standard" and _looks_like_html_payload(raw):
+        return "html"
+    if re.search(r"<(?:!doctype|html|head|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)\b|</(?:div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)>", raw, re.IGNORECASE):
+        return "html"
+    return "text"
+
+
+def _splitter_name_for_payload(payload_format: str) -> str:
+    return "beautifulsoup4" if payload_format == "html" else "text"
+
+
+def _split_plain_text_units(text: str) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    units = re.findall(r".*?(?:\n\s*\n|$)", raw, flags=re.DOTALL)
+    units = [unit for unit in units if unit]
+    if len(units) <= 1:
+        units = [line + "\n" for line in raw.splitlines() if line.strip()]
+    return units or [raw]
+
+
+def _split_html_units_beautifulsoup(text: str) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    try:
+        from bs4 import BeautifulSoup
+        from bs4.element import NavigableString, Tag
+
+        soup = BeautifulSoup(raw, "html.parser")
+        container = soup.body if soup.body else soup
+        block_names = {
+            "article", "aside", "blockquote", "br", "center", "dd", "div", "dl", "dt",
+            "figure", "figcaption", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+            "header", "hr", "li", "main", "nav", "ol", "p", "pre", "ruby", "section",
+            "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+        }
+
+        def child_units(parent: Any) -> List[str]:
+            found: List[str] = []
+            for child in getattr(parent, "children", []):
+                if isinstance(child, NavigableString):
+                    text_value = str(child)
+                    if text_value.strip():
+                        found.append(text_value)
+                    continue
+                if isinstance(child, Tag):
+                    if child.name and child.name.lower() in block_names:
+                        found.append(str(child))
+                    elif str(child).strip():
+                        found.append(str(child))
+            return found
+
+        units = child_units(container)
+        if len(units) == 1:
+            only = BeautifulSoup(units[0], "html.parser")
+            only_tags = [child for child in only.contents if isinstance(child, Tag)]
+            if len(only_tags) == 1:
+                nested_units = child_units(only_tags[0])
+                if len(nested_units) > 1:
+                    units = nested_units
+        return units or [raw]
+    except Exception:
+        return _split_html_units_regex(raw)
+
+
+def _split_html_units_regex(text: str) -> List[str]:
     raw = str(text or "")
     if not raw:
         return []
@@ -318,11 +570,32 @@ def _split_text_units(text: str) -> List[str]:
         re.IGNORECASE | re.DOTALL,
     )
     if re.search(r"</(?:p|div|h[1-6]|li|tr|table|blockquote)>|<img\b|<br\b", raw, re.IGNORECASE):
-        units = [match.group(0) for match in html_pattern.finditer(raw) if match.group(0)]
-    else:
-        units = re.findall(r".*?(?:\n\s*\n|$)", raw, flags=re.DOTALL)
-        units = [unit for unit in units if unit]
-    return units or [raw]
+        return [match.group(0) for match in html_pattern.finditer(raw) if match.group(0)] or [raw]
+    return _split_plain_text_units(raw)
+
+
+def _split_text_units(text: str, *, payload_format: Optional[str] = None) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    if (payload_format or _payload_format_for_split(raw)) == "html":
+        return _split_html_units_beautifulsoup(raw)
+    return _split_plain_text_units(raw)
+
+
+def _avoid_split_inside_tag(raw: str, end: int) -> int:
+    if end <= 0 or end >= len(raw):
+        return end
+    last_lt = raw.rfind("<", 0, end)
+    last_gt = raw.rfind(">", 0, end)
+    if last_lt <= last_gt:
+        return end
+    next_gt = raw.find(">", end)
+    if next_gt >= 0 and next_gt - end <= 80:
+        return min(len(raw), next_gt + 1)
+    if last_lt > 0:
+        return last_lt
+    return end
 
 
 def _split_large_unit(unit: str, max_chars: int) -> List[str]:
@@ -345,29 +618,39 @@ def _split_large_unit(unit: str, max_chars: int) -> List[str]:
             )
             if split_at > max_chars * 0.45:
                 end = start + split_at + 1
+        end = _avoid_split_inside_tag(raw, end)
+        if end <= start:
+            end = min(len(raw), start + max_chars)
         pieces.append(raw[start:end])
         start = end
     return pieces
 
 
-def _split_messages_for_search_budget(messages: Iterable[Dict[str, Any]], max_prompt_chars: int) -> List[List[Dict[str, Any]]]:
+def _split_messages_for_search_budget(
+    messages: Iterable[Dict[str, Any]],
+    max_prompt_chars: int,
+    *,
+    return_metadata: bool = False,
+) -> Any:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     if not source_messages:
-        return []
+        return ([], {}) if return_metadata else []
     user_indices = [
         idx for idx, message in enumerate(source_messages)
         if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
     ]
     if not user_indices:
-        return [source_messages]
+        return ([source_messages], {}) if return_metadata else [source_messages]
 
     split_idx = user_indices[-1]
     original_user = source_messages[split_idx]
     user_text = _content_to_text(original_user.get("content"))
     prefix, body = _split_user_instruction_prefix(user_text)
     if not body.strip():
-        return [source_messages]
+        return ([source_messages], {}) if return_metadata else [source_messages]
 
+    payload_format = _payload_format_for_split(body)
+    splitter_name = _splitter_name_for_payload(payload_format)
     fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
     def make_messages(chunk_text: str) -> List[Dict[str, Any]]:
         content_parts = [part for part in (prefix, chunk_text.strip()) if part]
@@ -375,17 +658,60 @@ def _split_messages_for_search_budget(messages: Iterable[Dict[str, Any]], max_pr
         chunk_user["content"] = "\n".join(content_parts)
         return fixed_messages + [chunk_user]
 
+    def fits_budget(chunk_text: str) -> bool:
+        probe_messages = make_messages(chunk_text)
+        return (
+            len(_messages_to_prompt(probe_messages)) <= prompt_limit_chars
+            and _messages_to_search_url_chars(probe_messages) <= url_limit_chars
+        )
+
     units: List[str] = []
-    rough_body_budget = max(400, max_prompt_chars - len(_messages_to_prompt(make_messages(""))) - 200)
-    for unit in _split_text_units(body):
-        units.extend(_split_large_unit(unit, rough_body_budget))
+    fixed_probe = "x"
+    fixed_prompt_chars = max(0, len(_messages_to_prompt(make_messages(fixed_probe))) - len(fixed_probe))
+    fixed_url_chars = max(0, _messages_to_search_url_chars(make_messages(fixed_probe)) - len(fixed_probe))
+    safety_chars = _subchunk_safety_chars()
+    url_limit_chars = _subchunk_url_chars()
+    available_body_chars = max_prompt_chars - fixed_prompt_chars - safety_chars
+    min_body_chars = _min_subchunk_body_chars()
+    if available_body_chars <= 0:
+        body_budget = min_body_chars
+    else:
+        body_budget = max(1, available_body_chars)
+    prompt_limit_chars = max(1, max_prompt_chars - safety_chars)
+    if fixed_prompt_chars + body_budget > prompt_limit_chars:
+        prompt_limit_chars = fixed_prompt_chars + body_budget
+
+    def split_piece_to_budget(piece: str) -> List[str]:
+        raw_piece = str(piece or "")
+        if not raw_piece or fits_budget(raw_piece):
+            return [raw_piece] if raw_piece else []
+        if len(raw_piece) <= 1:
+            return [raw_piece]
+
+        split_at = len(raw_piece) // 2
+        window = raw_piece[:split_at]
+        boundary = max(window.rfind("\n"), window.rfind(" "), window.rfind(">"))
+        if boundary > max(1, split_at // 3):
+            split_at = boundary + 1
+        split_at = _avoid_split_inside_tag(raw_piece, split_at)
+        if split_at <= 0 or split_at >= len(raw_piece):
+            split_at = len(raw_piece) // 2
+        left = raw_piece[:split_at]
+        right = raw_piece[split_at:]
+        return [*split_piece_to_budget(left), *split_piece_to_budget(right)]
+
+    for unit in _split_text_units(body, payload_format=payload_format):
+        if payload_format == "html":
+            units.append(unit)
+            continue
+        for piece in _split_large_unit(unit, body_budget):
+            units.extend(split_piece_to_budget(piece))
 
     chunks: List[str] = []
     current = ""
     for unit in units:
         candidate = current + unit
-        probe_messages = make_messages(candidate)
-        if current and len(_messages_to_prompt(probe_messages)) > max_prompt_chars:
+        if current and not fits_budget(candidate):
             chunks.append(current)
             current = unit
         else:
@@ -393,9 +719,23 @@ def _split_messages_for_search_budget(messages: Iterable[Dict[str, Any]], max_pr
     if current:
         chunks.append(current)
 
-    if len(chunks) <= 1:
-        return [source_messages]
-    return [make_messages(chunk) for chunk in chunks]
+    result = [source_messages] if len(chunks) <= 1 else [make_messages(chunk) for chunk in chunks]
+    metadata = {
+        "target_prompt_chars": max_prompt_chars,
+        "fixed_prompt_chars": fixed_prompt_chars,
+        "safety_chars": safety_chars,
+        "prompt_limit_chars": prompt_limit_chars,
+        "url_limit_chars": url_limit_chars,
+        "available_body_chars": available_body_chars,
+        "body_budget_chars": body_budget,
+        "fixed_url_chars": fixed_url_chars,
+        "body_chars": len(body),
+        "prefix_chars": len(prefix),
+        "subchunk_count": len(result),
+        "payload_format": payload_format,
+        "splitter": splitter_name,
+    }
+    return (result, metadata) if return_metadata else result
 
 
 def _strip_search_prefix(model: str) -> str:
@@ -452,16 +792,76 @@ def _contains_generation_failure(lines: Iterable[str]) -> bool:
     return False
 
 
+def _messages_expect_html_response(messages: Iterable[Dict[str, Any]]) -> bool:
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        if role in ("system", "assistant"):
+            continue
+        if _payload_format_for_split(_content_to_text(message.get("content"))) == "html":
+            return True
+    return False
+
+
+def _html_has_block_structure(value: str) -> bool:
+    return bool(re.search(r"<(?:html|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|blockquote|br)\b|</(?:p|div|h[1-6]|li|tr|blockquote)>", str(value or ""), re.IGNORECASE))
+
+
+def _clean_answer_html(answer_html: str) -> str:
+    raw = str(answer_html or "").strip()
+    if not raw:
+        return ""
+    if "&lt;" in raw and not _html_has_block_structure(raw):
+        raw = html.unescape(raw)
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(raw, "html.parser")
+        for tag in soup(["script", "style", "button", "svg", "form", "input", "textarea", "noscript"]):
+            tag.decompose()
+        for tag in soup.find_all(True):
+            for attr in list(tag.attrs):
+                if attr not in ("href", "src", "alt", "title", "colspan", "rowspan"):
+                    del tag.attrs[attr]
+        container = soup.body if soup.body else soup
+        cleaned = "".join(str(child) for child in container.children if str(child).strip()).strip()
+        return cleaned
+    except Exception:
+        return raw
+
+
 def _extract_rendered_content(
     page_data: Dict[str, Any],
     *,
     prompt: str = "",
+    prefer_html: bool = False,
 ) -> str:
     if _google_blocked(page_data):
         raise RuntimeError(
             "Google Search returned a verification page instead of a Gemini/Search response. "
             "Open Google in a regular browser/profile and clear the verification, or retry later."
         )
+    if prefer_html:
+        html_content = _clean_answer_html(str(page_data.get("answerHtml") or ""))
+        if _html_has_block_structure(html_content):
+            failure_probe = html_content
+            try:
+                from bs4 import BeautifulSoup
+
+                failure_probe = BeautifulSoup(html_content, "html.parser").get_text("\n")
+            except Exception:
+                pass
+            if _contains_generation_failure(failure_probe.splitlines()):
+                raise RuntimeError(
+                    "Google Search AI Mode returned a generation failure: "
+                    "Something went wrong and the content wasn't generated."
+                )
+            return html_content
+        answer_text = str(page_data.get("answerText") or "").strip()
+        if _html_has_block_structure(answer_text):
+            return answer_text
+
     text = str(page_data.get("text") or "")
     lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
     lines = [line for line in lines if line]
@@ -737,6 +1137,7 @@ def run_qtwebengine_request(
 def load_rendered_page_text(
     url: str,
     *,
+    prompt: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     wait_after_load_ms: Optional[int] = None,
     user_agent: Optional[str] = None,
@@ -794,7 +1195,7 @@ def load_rendered_page_text(
         while time.time() < deadline:
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
-            raw = run_js(PAGE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+            raw = run_js(_page_snapshot_script(prompt), js_timeout_ms=5000)
             try:
                 result = json.loads(raw or "{}")
             except Exception:
@@ -1112,7 +1513,11 @@ def _send_chat_completion_split(
 ) -> Dict[str, Any]:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     max_prompt_chars = _subchunk_prompt_chars()
-    chunks = _split_messages_for_search_budget(source_messages, max_prompt_chars)
+    chunks, split_metadata = _split_messages_for_search_budget(
+        source_messages,
+        max_prompt_chars,
+        return_metadata=True,
+    )
     if len(chunks) <= 1:
         return _send_chat_completion_qt_once(
             messages=source_messages,
@@ -1126,7 +1531,14 @@ def _send_chat_completion_split(
     _log(
         log_fn,
         f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
-        f"(target prompt chars: {max_prompt_chars})"
+        f"(target prompt chars: {max_prompt_chars}, "
+        f"payload format: {split_metadata.get('payload_format')}, "
+        f"splitter: {split_metadata.get('splitter')}, "
+        f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
+        f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+        f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
+        f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
+        f"body budget chars: {split_metadata.get('body_budget_chars')})"
     )
     contents: List[str] = []
     raw_parts: List[Dict[str, Any]] = []
@@ -1172,6 +1584,14 @@ def _send_chat_completion_split(
             "submit_mode": "adaptive_split",
             "subchunk_count": len(chunks),
             "subchunk_prompt_target_chars": max_prompt_chars,
+            "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
+            "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
+            "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
+            "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
+            "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
+            "subchunk_safety_chars": split_metadata.get("safety_chars"),
+            "subchunk_payload_format": split_metadata.get("payload_format"),
+            "subchunk_splitter": split_metadata.get("splitter"),
             "parts": raw_parts,
         },
     }
@@ -1235,26 +1655,17 @@ def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
     raise RuntimeError("Gemini Free helper did not return JSON")
 
 
-def _run_search_subprocess(
+def _run_search_subprocess_once(
     *,
     messages: Iterable[Dict[str, Any]],
     model: str,
     timeout: int,
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
+    wait_log_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     message_list = list(messages or [])
-    prompt_chars = len(_messages_to_prompt(message_list))
-    estimated_subchunks = 1
-    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
-        target_chars = _subchunk_prompt_chars()
-        estimated_subchunks = max(1, (prompt_chars + target_chars - 1) // target_chars)
-        _log(
-            log_fn,
-            f"🧩 Gemini Free: large prompt will use adaptive browser subchunks "
-            f"(~{estimated_subchunks}, {prompt_chars:,} prompt chars)"
-        )
-    helper_timeout = max(30, int(timeout) * estimated_subchunks)
+    helper_timeout = max(30, int(timeout))
     temp_dir = tempfile.mkdtemp(prefix="glossarion_gemini_free_")
     prompt_path = os.path.join(temp_dir, "messages.json")
     try:
@@ -1345,7 +1756,11 @@ def _run_search_subprocess(
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout}s")
                 if log_fn and not wait_log_printed and time.time() >= next_wait_log:
-                    _log(log_fn, "⏳ Gemini Free: still waiting for Qt WebEngine helper...")
+                    should_log_wait = wait_log_event is None or not wait_log_event.is_set()
+                    if wait_log_event is not None:
+                        wait_log_event.set()
+                    if should_log_wait:
+                        _log(log_fn, "⏳ Gemini Free: still waiting for Qt WebEngine helper...")
                     wait_log_printed = True
         finally:
             with _active_helper_lock:
@@ -1366,6 +1781,218 @@ def _run_search_subprocess(
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception:
             pass
+
+
+def _drain_log_queue(log_queue: "queue.Queue[str]", log_fn: Optional[Callable[[str], None]]) -> None:
+    if not log_fn:
+        return
+    while True:
+        try:
+            message = log_queue.get_nowait()
+        except queue.Empty:
+            break
+        _log(log_fn, message)
+
+
+def _run_search_subprocess_parallel(
+    *,
+    source_messages: List[Dict[str, Any]],
+    chunks: List[List[Dict[str, Any]]],
+    split_metadata: Dict[str, Any],
+    model: str,
+    timeout: int,
+    max_tokens: Optional[int],
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    worker_count, requested_workers, subprocess_cap = _subchunk_parallelism_limits(len(chunks))
+    max_prompt_chars = _subchunk_prompt_chars()
+    _log(
+        log_fn,
+        f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
+        f"({worker_count} parallel helpers, requested: {requested_workers}, "
+        f"token subprocess cap: {subprocess_cap}, target prompt chars: {max_prompt_chars}, "
+        f"payload format: {split_metadata.get('payload_format')}, "
+        f"splitter: {split_metadata.get('splitter')}, "
+        f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
+        f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+        f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
+        f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
+        f"body budget chars: {split_metadata.get('body_budget_chars')})"
+    )
+
+    log_queue: "queue.Queue[str]" = queue.Queue()
+    wait_log_event = threading.Event()
+
+    def worker_log(message: str) -> None:
+        if log_fn:
+            log_queue.put(str(message))
+
+    def run_chunk(index: int, chunk_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
+        _log(worker_log, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} helper start ({chunk_prompt_chars:,} prompt chars)")
+        result = _run_search_subprocess_once(
+            messages=chunk_messages,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=worker_log,
+            wait_log_event=wait_log_event,
+        )
+        content = str(result.get("content") or "")
+        raw_response = dict(result.get("raw_response") or {})
+        raw_response.pop("content", None)
+        _log(worker_log, f"✅ Gemini Free: subchunk {index}/{len(chunks)} complete ({len(content):,} chars)")
+        return {
+            "index": index,
+            "content": content,
+            "prompt_chars": chunk_prompt_chars,
+            "completion_chars": len(content),
+            "raw_response": raw_response,
+        }
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="GeminiFreeSubchunk",
+    )
+    futures: Dict[concurrent.futures.Future, int] = {
+        executor.submit(run_chunk, index, chunk_messages): index
+        for index, chunk_messages in enumerate(chunks, start=1)
+    }
+    pending = set(futures)
+    ordered_results: List[Optional[Dict[str, Any]]] = [None] * len(chunks)
+    started_at = time.time()
+    status_seconds = _subchunk_status_seconds()
+    next_status_log = started_at + status_seconds if status_seconds else 0
+    try:
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=0.2,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            _drain_log_queue(log_queue, log_fn)
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            if status_seconds and pending and time.time() >= next_status_log:
+                pending_indices = sorted(futures[future] for future in pending)
+                completed_count = len(chunks) - len(pending_indices)
+                elapsed = time.time() - started_at
+                _log(
+                    log_fn,
+                    f"⏳ Gemini Free: waiting on subchunks {pending_indices} "
+                    f"({completed_count}/{len(chunks)} complete, {elapsed:.0f}s elapsed)"
+                )
+                next_status_log = time.time() + status_seconds
+            for future in done:
+                index = futures[future]
+                try:
+                    ordered_results[index - 1] = future.result()
+                except Exception as exc:
+                    _log(log_fn, f"❌ Gemini Free: subchunk {index}/{len(chunks)} failed: {_short_error(exc)}")
+                    raise
+    except Exception:
+        for future in pending:
+            future.cancel()
+        _terminate_active_helper_processes(kill=True)
+        executor.shutdown(wait=True, cancel_futures=True)
+        _drain_log_queue(log_queue, log_fn)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        _drain_log_queue(log_queue, log_fn)
+
+    completed_results = [result for result in ordered_results if result is not None]
+    _log(log_fn, f"✅ Gemini Free: all {len(completed_results)}/{len(chunks)} subchunks complete; merging responses")
+    contents = [str(result.get("content") or "") for result in completed_results]
+    raw_parts = [
+        {
+            "index": int(result.get("index") or 0),
+            "prompt_chars": int(result.get("prompt_chars") or 0),
+            "completion_chars": int(result.get("completion_chars") or 0),
+            "raw_response": dict(result.get("raw_response") or {}),
+        }
+        for result in completed_results
+    ]
+    combined = "\n".join(part for part in contents if part).strip()
+    return {
+        "content": combined,
+        "finish_reason": "stop",
+        "usage": {
+            "prompt_chars": len(_messages_to_prompt(source_messages)),
+            "subchunk_prompt_chars": sum(int(result.get("prompt_chars") or 0) for result in completed_results),
+            "completion_chars": sum(int(result.get("completion_chars") or 0) for result in completed_results),
+        },
+        "raw_response": {
+            "model": _strip_search_prefix(model),
+            "submit_mode": "adaptive_split_parallel",
+            "subchunk_count": len(chunks),
+            "subchunk_parallel_workers": worker_count,
+            "subchunk_parallel_requested_workers": requested_workers,
+            "subchunk_parallel_token_subprocess_cap": subprocess_cap,
+            "subchunk_prompt_target_chars": max_prompt_chars,
+            "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
+            "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
+            "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
+            "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
+            "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
+            "subchunk_safety_chars": split_metadata.get("safety_chars"),
+            "subchunk_payload_format": split_metadata.get("payload_format"),
+            "subchunk_splitter": split_metadata.get("splitter"),
+            "parts": raw_parts,
+        },
+    }
+
+
+def _run_search_subprocess(
+    *,
+    messages: Iterable[Dict[str, Any]],
+    model: str,
+    timeout: int,
+    max_tokens: Optional[int],
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    message_list = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    prompt_chars = len(_messages_to_prompt(message_list))
+    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
+        target_chars = _subchunk_prompt_chars()
+        planned_chunks, split_metadata = _split_messages_for_search_budget(
+            message_list,
+            target_chars,
+            return_metadata=True,
+        )
+        estimated_subchunks = max(1, len(planned_chunks))
+        _log(
+            log_fn,
+            f"🧩 Gemini Free: large prompt will use adaptive browser subchunks "
+            f"({estimated_subchunks}, {prompt_chars:,} prompt chars, "
+            f"payload format: {split_metadata.get('payload_format')}, "
+            f"splitter: {split_metadata.get('splitter')}, "
+            f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
+            f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+            f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
+            f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
+            f"body budget chars: {split_metadata.get('body_budget_chars')})"
+        )
+        if len(planned_chunks) > 1:
+            return _run_search_subprocess_parallel(
+                source_messages=message_list,
+                chunks=planned_chunks,
+                split_metadata=split_metadata,
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                log_fn=log_fn,
+            )
+
+    return _run_search_subprocess_once(
+        messages=message_list,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        log_fn=log_fn,
+    )
 
 
 def send_chat_completion(

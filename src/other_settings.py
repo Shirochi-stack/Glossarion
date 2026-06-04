@@ -3453,7 +3453,7 @@ def _create_response_handling_section(self, parent):
     nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(nim_title)
 
-    authnd_desc = QLabel("Controls the browser token flow used by authnd/.")
+    authnd_desc = QLabel("Controls the browser helper flow used by authnd/ and search/gemini subchunks.")
     authnd_desc.setWordWrap(True)
     authnd_desc.setStyleSheet("color: gray; font-size: 9pt;")
     authnd_desc.setContentsMargins(12, 0, 0, 4)
@@ -3582,7 +3582,7 @@ def _create_response_handling_section(self, parent):
     authnd_auto_cb = self._create_styled_checkbox("Auto token helper limits")
     authnd_auto_cb.setChecked(authnd_auto_enabled)
     authnd_auto_cb.setToolTip(
-        "Automatically set AuthND token helper limits from CPU cores "
+        "Automatically set AuthND/Gemini Free browser helper limits from CPU cores "
         "(token flows capped at 4, helper subprocesses capped at 8)."
     )
     authnd_auto_hint = QLabel(
@@ -3621,7 +3621,8 @@ def _create_response_handling_section(self, parent):
         128,
         8,
         14,
-        "Maximum helper child processes AuthND may launch for token minting.",
+        "Maximum helper child processes AuthND may launch for token minting.\n"
+        "Also caps Gemini Free adaptive subchunk helper concurrency.",
     ))
     authnd_limits_h.addStretch()
     section_v.addWidget(authnd_limits_row)
