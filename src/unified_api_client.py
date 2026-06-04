@@ -3226,12 +3226,6 @@ class UnifiedClient:
                 cls._last_api_call_start_by_scope = {}
         except Exception:
             pass
-        try:
-            if hasattr(cls, '_parallel_batch_stagger_lock'):
-                with cls._parallel_batch_stagger_lock:
-                    cls._parallel_batch_last_call = {}
-        except Exception:
-            pass
 
     @classmethod
     def hard_cancel_all(cls):
@@ -15152,57 +15146,7 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         stagger_scope = self._get_api_stagger_scope()
         no_snap_scope = stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
-
-        # ── Parallel-batch bypass ──────────────────────────────────────────
-        # QA truncation / Vision / image-scan batch workers must NOT use the
-        # global sequential slot reservation.  That system causes Thread N to
-        # sleep (N-1)*api_delay when many workers enter simultaneously.
-        # Instead each worker paces its OWN consecutive calls with a per-
-        # (thread, scope) timestamp.
-        _parallel_batch_scopes = {
-            'context:qa_truncation',
-            'context:truncation',
-            'context:image_scan',
-            'context:image_ocr',
-            'context:vision_ocr',
-            'context:manga_ocr',
-            'context:image_translation',
-            'pool:AITruncationDetectionKey',
-            'pool:VisionKey',
-            'pool:QAScanKey',
-        }
-        if stagger_scope in _parallel_batch_scopes:
-            if not hasattr(self.__class__, '_parallel_batch_stagger_lock'):
-                self.__class__._parallel_batch_stagger_lock = threading.Lock()
-            if not hasattr(self.__class__, '_parallel_batch_last_call'):
-                self.__class__._parallel_batch_last_call = {}
-
-            _pb_tid = threading.current_thread().ident
-            _pb_key = (_pb_tid, stagger_scope)
-            _pb_now = time.time()
-            _pb_wait = 0.0
-
-            with self.__class__._parallel_batch_stagger_lock:
-                _pb_last = self.__class__._parallel_batch_last_call.get(_pb_key, 0.0)
-                _pb_gap = _pb_now - _pb_last
-                if _pb_gap < api_delay and _pb_last > 0:
-                    _pb_wait = api_delay - _pb_gap
-                if _pb_wait > 0:
-                    self.__class__._parallel_batch_last_call[_pb_key] = _pb_last + api_delay
-                else:
-                    self.__class__._parallel_batch_last_call[_pb_key] = _pb_now
-
-            flush_deferred_batch_logs()
-
-            if _pb_wait > 0:
-                if not self._sleep_with_cancel(_pb_wait, 0.1):
-                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-
-            with self.__class__._parallel_batch_stagger_lock:
-                self.__class__._parallel_batch_last_call[_pb_key] = time.time()
-            return
-
-        # ── Normal sequential stagger (translation, glossary, etc.) ────────
+        
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_api_stagger_lock'):
             self.__class__._api_stagger_lock = threading.Lock()

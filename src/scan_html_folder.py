@@ -9080,7 +9080,6 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 if isinstance(key, dict)
                 and key.get('enabled', True)
                 and key.get('model')
-                and (key.get('api_key') or key.get('google_credentials') or key.get('use_individual_endpoint'))
             ]
             if _ai_pool_enabled:
                 if not _ai_pool_usable_keys:
