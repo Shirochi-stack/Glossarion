@@ -1405,7 +1405,7 @@ def load_ai_mode_prompt_text(
         while time.time() < deadline:
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
-            result = run_json(PAGE_SNAPSHOT_SCRIPT, js_timeout_ms=5000)
+            result = run_json(_page_snapshot_script(prompt), js_timeout_ms=5000)
             result["submit_mode"] = "ui"
             result["search_base_url"] = base_url
             result["submit_state"] = {"set": set_state, "click": click_state}
@@ -1461,6 +1461,7 @@ def _send_chat_completion_qt_once(
     prompt = _messages_to_prompt(messages)
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
+    prefer_html = _messages_expect_html_response(messages)
 
     submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", "ui").strip().lower() or "ui"
     if submit_mode in ("url", "query", "q"):
@@ -1469,6 +1470,7 @@ def _send_chat_completion_qt_once(
         _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
         page_data = load_rendered_page_text(
             search_url,
+            prompt=prompt,
             timeout=timeout,
             user_agent=user_agent,
         )
@@ -1481,7 +1483,7 @@ def _send_chat_completion_qt_once(
             timeout=timeout,
             user_agent=user_agent,
         )
-    content = _extract_rendered_content(page_data, prompt=prompt)
+    content = _extract_rendered_content(page_data, prompt=prompt, prefer_html=prefer_html)
     return {
         "content": content,
         "finish_reason": "stop",
@@ -1498,6 +1500,8 @@ def _send_chat_completion_qt_once(
             "title": page_data.get("title"),
             "ready": page_data.get("ready"),
             "html_length": page_data.get("htmlLength"),
+            "answer_html_length": len(str(page_data.get("answerHtml") or "")),
+            "prefer_html_response": prefer_html,
         },
     }
 
