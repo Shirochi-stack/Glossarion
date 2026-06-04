@@ -3921,7 +3921,7 @@ class UnifiedClient:
                     # Only log rotation for non-glossary keys (glossary rotation is too noisy)
                     _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
                     if not _is_glossary_pool:
-                        print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
+                        defer_batch_log(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
                 # Release previous thread assignment to avoid stale usage tracking
@@ -4172,13 +4172,13 @@ class UnifiedClient:
                     else:
                         masked_key = self.api_key or "***"
                     if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                        print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
+                        defer_batch_log(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
                     
                     # Setup client for this key
                     self._setup_client()
                     self._apply_custom_endpoint_if_needed()
                     if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                        print(f"[THREAD-{thread_name}] 🔄 Key assignment: Client setup completed, ready for requests...")
+                        defer_batch_log(f"[THREAD-{thread_name}] 🔄 Key assignment: Client setup completed, ready for requests...")
                     time.sleep(0.1)  # Brief pause after key assignment for stability
                     return
             
@@ -4291,11 +4291,11 @@ class UnifiedClient:
                     is_limited = self._api_key_pool._rate_limit_cache.is_rate_limited(key_id)
                 if key.is_available() and not is_limited:
                     if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                        print(f"[{thread_name}] 🔑 Assigned {key_id} (fallback)")
+                        defer_batch_log(f"[{thread_name}] 🔑 Assigned {key_id} (fallback)")
                     return (key, current_idx)
             
             # No available keys
-            print(f"[{thread_name}] All keys unavailable in fallback")
+            defer_batch_log(f"[{thread_name}] All keys unavailable in fallback")
             return None
 
     def _wait_for_available_key(self) -> Optional[Tuple]:
@@ -4444,7 +4444,7 @@ class UnifiedClient:
                     key = self._api_key_pool.keys[current_key_index]
                     cooldown = getattr(key, 'cooldown', 60)
             
-            print(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
+            defer_batch_log(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
             
             # APIKeyPool.mark_key_error already updates this pool's cooldown cache.
         
@@ -4468,7 +4468,7 @@ class UnifiedClient:
         
         # Now force getting a new key
         # This will call _ensure_thread_client which will get a new key
-        print(f"[THREAD-{thread_name}] 🔄 Requesting new key after rate limit...")
+        defer_batch_log(f"[THREAD-{thread_name}] 🔄 Requesting new key after rate limit...")
         
         try:
             # Ensure we get a new client with a new key
@@ -4479,12 +4479,12 @@ class UnifiedClient:
             new_key_identifier = getattr(tls, 'key_identifier', 'Unknown')
             
             if new_key_index != current_key_index:
-                print(f"[THREAD-{thread_name}] ✅ Successfully rotated from {current_key_identifier} to {new_key_identifier}")
+                defer_batch_log(f"[THREAD-{thread_name}] ✅ Successfully rotated from {current_key_identifier} to {new_key_identifier}")
             else:
-                print(f"[THREAD-{thread_name}] ⚠️ Warning: Got same key back: {new_key_identifier}")
+                defer_batch_log(f"[THREAD-{thread_name}] ⚠️ Warning: Got same key back: {new_key_identifier}")
                 
         except Exception as e:
-            print(f"[THREAD-{thread_name}] ❌ Failed to get new key after rate limit: {e}")
+            defer_batch_log(f"[THREAD-{thread_name}] ❌ Failed to get new key after rate limit: {e}")
             raise UnifiedClientError(f"Failed to rotate key after rate limit: {e}", error_type="no_keys")
     
     # Helper methods that need to check instance state
@@ -4622,7 +4622,7 @@ class UnifiedClient:
                         _oai_kwargs['http_client'] = _iso_http
                     self.openai_client = openai.OpenAI(**_oai_kwargs)
             except ImportError:
-                print(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
+                defer_batch_log(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
                 self.client_type = original_client_type  # Restore original type
     
     def _apply_individual_key_endpoint_if_needed(self):
@@ -4635,7 +4635,7 @@ class UnifiedClient:
         
         #print(f"[DEBUG] _apply_individual_key_endpoint_if_needed: has_individual_endpoint={has_individual_endpoint}")
         if has_individual_endpoint:
-            print(f"[DEBUG] Individual endpoint: {self.current_key_azure_endpoint}")
+            defer_batch_log(f"[DEBUG] Individual endpoint: {self.current_key_azure_endpoint}")
             # Use individual endpoint - works independently of global custom endpoint toggle
             individual_endpoint = self.current_key_azure_endpoint
             
@@ -4679,7 +4679,7 @@ class UnifiedClient:
                         tls.client_type = 'azure'
                 except Exception:
                     pass
-                print(f"[DEBUG] Individual Azure endpoint applied: {azure_base} (api-version={self.azure_api_version})")
+                defer_batch_log(f"[DEBUG] Individual Azure endpoint applied: {azure_base} (api-version={self.azure_api_version})")
                 return  # Handled; do not fall through to custom endpoint logic
             
             # Non-Azure: Override to use OpenAI-compatible client against the provided base URL
@@ -4718,7 +4718,7 @@ class UnifiedClient:
                 self.client_type = original_client_type  # Restore original type
                 return
             except Exception as e:
-                print(f"[ERROR] Failed to create individual endpoint client: {e}")
+                defer_batch_log(f"[ERROR] Failed to create individual endpoint client: {e}")
                 self.client_type = original_client_type  # Restore original type
                 return
         
@@ -4744,11 +4744,11 @@ class UnifiedClient:
         # Force rotation to next key on every request
         if self.current_key_index is not None:
             # We already have a key, rotate to next
-            print(f"[DEBUG] Rotating from {self.key_identifier} to next key")
+            defer_batch_log(f"[DEBUG] Rotating from {self.key_identifier} to next key")
             self._force_next_key()
         else:
             # First request, get initial key
-            print(f"[DEBUG] First request, selecting initial key")
+            defer_batch_log(f"[DEBUG] First request, selecting initial key")
             key_info = self._get_next_available_key()
             if key_info:
                 self._apply_key_change(key_info, "Initial")
@@ -4767,13 +4767,13 @@ class UnifiedClient:
         if key_info:
             # Check if it's available
             if not key_info[0].is_available():
-                print(f"[WARNING] Next key in rotation is on cooldown, but using it anyway")
+                defer_batch_log(f"[WARNING] Next key in rotation is on cooldown, but using it anyway")
             
             self._apply_key_change(key_info, old_key_identifier)
-            print(f"🔄 Force key rotation: Key change completed, system ready...")
+            defer_batch_log(f"🔄 Force key rotation: Key change completed, system ready...")
             time.sleep(0.5)  # Brief pause after force rotation for system stability
         else:
-            print(f"[ERROR] Failed to rotate to next key")
+            defer_batch_log(f"[ERROR] Failed to rotate to next key")
     
     def _rotate_to_next_key(self) -> bool:
         """Rotate to the next available key and reinitialize client - THREAD SAFE"""
@@ -4807,7 +4807,7 @@ class UnifiedClient:
                 masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
             else:
                 masked_key = self.api_key or "***"
-            print(f"[DEBUG] 🔄 Rotating from {old_key_identifier} to {self.key_identifier} - {masked_key}")
+            defer_batch_log(f"[DEBUG] 🔄 Rotating from {old_key_identifier} to {self.key_identifier} - {masked_key}")
             
             # Re-setup the client with new key
             self._setup_client()

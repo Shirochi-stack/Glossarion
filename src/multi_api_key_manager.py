@@ -527,7 +527,11 @@ class APIKeyPool:
                                         del self._keys_in_use[k_idx]
 
                         if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                            print(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
+                            try:
+                                from unified_api_client import defer_batch_log
+                                defer_batch_log(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
+                            except ImportError:
+                                print(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
                         # logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
                         time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
                         return key, key_index, key_id
