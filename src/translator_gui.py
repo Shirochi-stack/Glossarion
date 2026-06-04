@@ -1,4 +1,4 @@
-#translator_gui.py
+﻿#translator_gui.py
 if __name__ == '__main__':
     import multiprocessing
     import sys as _early_sys
@@ -21336,7 +21336,7 @@ Important rules:
                     unified_api_client.hard_cancel_all()
             except Exception:
                 pass
-        
+
         # Log message depends on stop mode
         if graceful_stop:
             try:
@@ -21425,7 +21425,7 @@ Important rules:
         self.stop_requested = True
         
         # Set ALL stop flags
-        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP'] = '1'
         os.environ['TRANSLATION_CANCELLED'] = '1'
         
         try:
@@ -21507,10 +21507,6 @@ Important rules:
         
         if qa_still_running:
             # Still running — keep polling
-            QTimer.singleShot(500, self._check_qa_stop_done)
-        elif current_phase == 'graceful' and self._qa_stop_poll_count < 60:
-            # Graceful phase: scan thread is done but keep button as "Finishing..."
-            # so user can still click to force stop. Poll up to 30 seconds.
             QTimer.singleShot(500, self._check_qa_stop_done)
         else:
             # Done (or timeout) — reset button state first

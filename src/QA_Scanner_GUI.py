@@ -524,12 +524,18 @@ class QAScannerMixin:
                 import os
                 import unified_api_client
                 os.environ['TRANSLATION_CANCELLED'] = '0'
+                os.environ.pop('GRACEFUL_STOP', None)
+                os.environ.pop('GRACEFUL_STOP_COMPLETED', None)
                 if hasattr(unified_api_client, 'UnifiedClient'):
                     unified_api_client.UnifiedClient._global_cancelled = False
                 if hasattr(unified_api_client, '_cancel_event'):
                     unified_api_client._cancel_event.clear()
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(False)
             except Exception:
                 pass
+            # Reset stop phase state machine for the new scan
+            self._qa_stop_phase = 'idle'
 
             # Check for scan_html_folder in the global scope from translator_gui
             import sys

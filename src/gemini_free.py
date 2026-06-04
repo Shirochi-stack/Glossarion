@@ -36,7 +36,6 @@ DEFAULT_SEARCH_PARAMS = {
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
-DEFAULT_MAX_QUERY_CHARS = 7000
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -266,7 +265,6 @@ def _extract_rendered_content(
     page_data: Dict[str, Any],
     *,
     prompt: str = "",
-    max_output_chars: int = 0,
 ) -> str:
     if _google_blocked(page_data):
         raise RuntimeError(
@@ -281,8 +279,6 @@ def _extract_rendered_content(
     if not content:
         title = str(page_data.get("title") or "").strip()
         raise RuntimeError(f"Google Search returned an empty rendered page. title={title!r}")
-    if max_output_chars and max_output_chars > 0 and len(content) > max_output_chars:
-        content = content[:max_output_chars]
     return content
 
 
@@ -382,7 +378,6 @@ def run_qtwebengine_request(
     credentials: str = "include",
     mode: str = "same-origin",
     timeout: int = 60,
-    max_body_chars: int = 200_000,
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a browser-side fetch() from a Qt WebEngine page."""
@@ -435,7 +430,6 @@ def run_qtwebengine_request(
             "credentials": credentials,
             "mode": mode,
             "timeoutMs": max(1000, int(timeout * 1000)),
-            "maxBodyChars": max_body_chars,
         }
         script = f"""
 (() => {{
@@ -462,8 +456,6 @@ def run_qtwebengine_request(
         response.headers.forEach((value, key) => {{ responseHeaders[key] = value; }});
       }} catch (error) {{}}
       const text = await response.text();
-      const maxChars = Number(request.maxBodyChars);
-      const shouldTrim = Number.isFinite(maxChars) && maxChars >= 0 && text.length > maxChars;
       window.__geminiFreeRequestResult = {{
         pending: false,
         ok: response.ok,
@@ -473,9 +465,9 @@ def run_qtwebengine_request(
         redirected: response.redirected,
         type: response.type,
         headers: responseHeaders,
-        body: shouldTrim ? text.slice(0, maxChars) : text,
+        body: text,
         bodyLength: text.length,
-        truncated: shouldTrim,
+        truncated: false,
         error: null
       }};
     }} catch (error) {{
@@ -648,14 +640,6 @@ def _send_chat_completion_qt(
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
 
-    max_query_chars = _env_int("GEMINI_FREE_MAX_QUERY_CHARS", DEFAULT_MAX_QUERY_CHARS)
-    if max_query_chars > 0 and len(prompt) > max_query_chars:
-        raise RuntimeError(
-            f"Gemini Free Search route prompt is too large for a Google Search URL "
-            f"({len(prompt)} chars > {max_query_chars}). Reduce batch size/chunk size or "
-            "raise GEMINI_FREE_MAX_QUERY_CHARS if you know the browser route can handle it."
-        )
-
     search_url = _build_search_url(prompt)
     _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model})")
     _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
@@ -665,13 +649,7 @@ def _send_chat_completion_qt(
         timeout=timeout,
         user_agent=user_agent,
     )
-    max_output_chars = 0
-    try:
-        if max_tokens:
-            max_output_chars = max(0, int(max_tokens) * 4)
-    except Exception:
-        max_output_chars = 0
-    content = _extract_rendered_content(page_data, prompt=prompt, max_output_chars=max_output_chars)
+    content = _extract_rendered_content(page_data, prompt=prompt)
     return {
         "content": content,
         "finish_reason": "stop",
@@ -894,7 +872,6 @@ def _main() -> int:
     parser.add_argument("--data-file", help="Read raw fetch request body text from a UTF-8 file.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Timeout in seconds.")
     parser.add_argument("--max-tokens", type=int)
-    parser.add_argument("--max-body-chars", type=int, default=200_000)
     parser.add_argument("--output", help="Write response body/content to a UTF-8 file.")
     parser.add_argument("--json", action="store_true", help="Print the full result object as JSON.")
     args = parser.parse_args()
@@ -916,7 +893,6 @@ def _main() -> int:
                 body=body,
                 bootstrap_url=_origin_url(args.url),
                 timeout=args.timeout,
-                max_body_chars=args.max_body_chars,
             )
         if args.output:
             _write_text(args.output, str(result.get("content") or result.get("body") or ""))

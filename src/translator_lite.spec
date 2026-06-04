@@ -203,6 +203,7 @@ app_files = [
 	('authgem_auth.py', '.'),
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
 	('authza_auth.py', '.'),
+	('gemini_free.py', '.'),  # Google Search/Gemini browser-backed route
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -296,6 +297,7 @@ app_modules = [
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
 	'authza_auth',  # Azure/Additional auth
+	'gemini_free',  # Google Search/Gemini browser-backed route
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client

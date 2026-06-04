@@ -7898,6 +7898,19 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 _stop_logged[0] = True
                 log("⛔ Stop requested via global stop_scan() function")
             return True
+        # Belt-and-suspenders: also check process-wide env vars set by
+        # the GUI's force/graceful stop mechanism.  These are always set
+        # and catch edge cases where stop_flag() hasn't propagated yet.
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Stop requested via TRANSLATION_CANCELLED env var")
+            return True
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            if not _stop_logged[0]:
+                _stop_logged[0] = True
+                log("⛔ Graceful stop requested via GRACEFUL_STOP env var")
+            return True
         return False
     
     start_time = time.time()
