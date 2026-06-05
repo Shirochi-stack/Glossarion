@@ -296,6 +296,80 @@ class ChapterSplitter:
         
         total_chunks = len(chunks)
         return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
+
+    def split_blocks(self, blocks, max_tokens=None, separator="\n\n"):
+        """
+        Split pre-segmented text blocks into balanced chunks.
+
+        This is used for html2text/enhanced extraction, where each block is
+        aligned to an original source HTML block such as <p>, a heading, or a
+        list item. Boundaries are preserved even when a single block is larger
+        than the nominal token budget.
+        """
+        if max_tokens is None:
+            max_tokens = self.target_tokens
+
+        block_list = [str(block).strip() for block in (blocks or []) if str(block).strip()]
+        if not block_list:
+            return []
+
+        content = separator.join(block_list)
+        total_tokens = self.count_tokens(content)
+        if total_tokens <= max_tokens:
+            return [(content, 1, 1)]
+
+        num_chunks = max(1, (total_tokens + max_tokens - 1) // max_tokens)
+        if num_chunks == 1:
+            return [(content, 1, 1)]
+
+        target_tokens_per_chunk = total_tokens / num_chunks
+        separator_tokens = self.count_tokens(separator)
+        block_tokens = [self.count_tokens(block) for block in block_list]
+        chunks = []
+        current_blocks = []
+        current_tokens = 0
+
+        for i, block in enumerate(block_list):
+            tokens = block_tokens[i]
+
+            if tokens > max_tokens and current_blocks:
+                chunks.append(separator.join(current_blocks))
+                current_blocks = []
+                current_tokens = 0
+
+            added_tokens = tokens + (separator_tokens if current_blocks else 0)
+            current_blocks.append(block)
+            current_tokens += added_tokens
+
+            if tokens > max_tokens:
+                chunks.append(separator.join(current_blocks))
+                current_blocks = []
+                current_tokens = 0
+                continue
+
+            is_last = i == len(block_list) - 1
+            chunks_remaining = num_chunks - len(chunks)
+            blocks_remaining = len(block_list) - i - 1
+
+            should_split = False
+            if current_tokens >= target_tokens_per_chunk and chunks_remaining > 1:
+                if blocks_remaining >= chunks_remaining - 1:
+                    should_split = True
+            if current_tokens > max_tokens:
+                should_split = True
+            if is_last:
+                should_split = True
+
+            if should_split:
+                chunks.append(separator.join(current_blocks))
+                current_blocks = []
+                current_tokens = 0
+
+        if current_blocks:
+            chunks.append(separator.join(current_blocks))
+
+        total_chunks = len(chunks)
+        return [(chunk, i + 1, total_chunks) for i, chunk in enumerate(chunks)]
     
     def _split_large_element(self, element, max_tokens):
         """Split a single large element (like a long paragraph)"""

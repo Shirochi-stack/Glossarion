@@ -2933,6 +2933,8 @@ def _process_single_html_file(
             chapter_info["enhanced_filtering"] = enhanced_filtering
             chapter_info["preserve_structure"] = preserve_structure
             chapter_info["markdown_provenance"] = getattr(enhanced_extractor, "last_markdown_provenance", {})
+            chapter_info["html2text_blocks"] = getattr(enhanced_extractor, "last_html2text_blocks", []) or []
+            chapter_info["html2text_blocks_source_hash"] = content_hash
 
         # Store original HTML for image-only chapters so text-mode copy-as-is
         # preserves document metadata such as <title> and stylesheet links.

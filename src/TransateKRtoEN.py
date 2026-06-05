@@ -82,6 +82,26 @@ def _is_sdlxliff_placeholder_only_chapter(chapter):
     )
 
 
+def _split_chapter_for_translation(chapter_splitter, chapter, available_tokens, filename=None, *, allow_html2text_blocks=True):
+    """Split chapters while preserving source block boundaries for html2text output."""
+    body = chapter.get("body", "") if isinstance(chapter, dict) else str(chapter or "")
+
+    if allow_html2text_blocks and isinstance(chapter, dict) and chapter.get("enhanced_extraction"):
+        blocks = chapter.get("html2text_blocks")
+        source_hash = chapter.get("html2text_blocks_source_hash")
+        try:
+            current_hash = hashlib.sha256(body.encode('utf-8', errors='ignore')).hexdigest()
+        except Exception:
+            current_hash = None
+
+        if isinstance(blocks, list) and blocks and source_hash and current_hash == source_hash:
+            chunks = chapter_splitter.split_blocks(blocks, available_tokens)
+            if chunks:
+                return chunks
+
+    return chapter_splitter.split_chapter(body, available_tokens, filename=filename)
+
+
 def _sdlxliff_json_records(text):
     try:
         data = json.loads(str(text or ""))
@@ -6060,7 +6080,16 @@ class BatchTranslationProcessor:
             # Split into chunks if needed
             # Get filename for content type detection
             chapter_filename = chapter.get('filename') or chapter.get('original_basename', '')
-            chunks = chapter_splitter.split_chapter(chapter_body, available_tokens, filename=chapter_filename)
+            chapter_for_split = chapter
+            if chapter_body != chapter.get("body", ""):
+                chapter_for_split = dict(chapter)
+                chapter_for_split["body"] = chapter_body
+            chunks = _split_chapter_for_translation(
+                chapter_splitter,
+                chapter_for_split,
+                available_tokens,
+                filename=chapter_filename,
+            )
             total_chunks = len(chunks)
             
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
@@ -19625,9 +19654,9 @@ def main(log_callback=None, stop_callback=None):
         if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
             # Don't modify c["body"] at all during chunk calculation
             # Just pass the body as-is, the chunking will be slightly off but that's OK
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
+            chunks = _split_chapter_for_translation(chapter_splitter, c, available_tokens, filename=chapter_filename)
         else:
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
+            chunks = _split_chapter_for_translation(chapter_splitter, c, available_tokens, filename=chapter_filename)
         
         chapter_key_str = content_hash
         old_key_str = str(idx)
@@ -22097,7 +22126,13 @@ def main(log_callback=None, stop_callback=None):
                     
                     if chapter_tokens > available_tokens:
                         # Even pre-split chunks might need further splitting
-                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
+                        chunks = _split_chapter_for_translation(
+                            chapter_splitter,
+                            c,
+                            available_tokens,
+                            filename=chapter_filename,
+                            allow_html2text_blocks=(merge_info is None),
+                        )
                         print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
                     else:
                         chunks = [(c["body"], 1, 1)]
@@ -22119,7 +22154,13 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Get filename for content type detection (prefer source_file for PDFs)
                     chapter_filename = c.get('source_file') or c.get('filename') or c.get('original_basename', '')
-                    chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
+                    chunks = _split_chapter_for_translation(
+                        chapter_splitter,
+                        c,
+                        available_tokens,
+                        filename=chapter_filename,
+                        allow_html2text_blocks=(merge_info is None),
+                    )
                     
                     # Use consistent terminology
                     is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)

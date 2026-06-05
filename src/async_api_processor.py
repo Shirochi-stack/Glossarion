@@ -3489,6 +3489,8 @@ class AsyncProcessingDialog:
         original_basename = None
         chapter_mapping = {}  # Map custom_id to chapter info
         markdown_provenance_by_file = {}
+        html2text_blocks_by_file = {}
+        html2text_block_hash_by_file = {}
 
         # Respect GUI extraction mode/radio
         extraction_method = env_vars.get('TEXT_EXTRACTION_METHOD', env_vars.get('EXTRACTION_MODE', 'standard')).lower()
@@ -3555,6 +3557,10 @@ class AsyncProcessingDialog:
                                         cleaned_text, _, _ = extractor.extract_chapter_content(chapter_html, extraction_mode=extraction_method)
                                         chapter_payload = cleaned_text
                                         markdown_provenance_by_file[html_file] = getattr(extractor, "last_markdown_provenance", {})
+                                        html2text_blocks_by_file[html_file] = getattr(extractor, "last_html2text_blocks", []) or []
+                                        html2text_block_hash_by_file[html_file] = hashlib.sha256(
+                                            chapter_payload.encode('utf-8', errors='ignore')
+                                        ).hexdigest()
                                     except Exception as e:
                                         print(f"⚠️ html2text extraction failed, using HTML: {e}")
                                         chapter_payload = chapter_html
@@ -3651,7 +3657,18 @@ class AsyncProcessingDialog:
                             chunk_target = max(1024, int(output_limit / compression_factor))
                             splitter = ChapterSplitter(model_name=env_vars.get('MODEL', 'gpt-4'), target_tokens=chunk_target, compression_factor=compression_factor)
                         chunk_target = max(1024, int(output_limit / compression_factor))
-                        chunk_list = splitter.split_chapter(content, max_tokens=chunk_target, filename=original_filename)
+                        block_chunks = []
+                        blocks = html2text_blocks_by_file.get(original_filename)
+                        block_hash = html2text_block_hash_by_file.get(original_filename)
+                        try:
+                            content_hash_for_blocks = hashlib.sha256(
+                                str(content or "").encode('utf-8', errors='ignore')
+                            ).hexdigest()
+                        except Exception:
+                            content_hash_for_blocks = None
+                        if isinstance(blocks, list) and blocks and block_hash and content_hash_for_blocks == block_hash:
+                            block_chunks = splitter.split_blocks(blocks, max_tokens=chunk_target)
+                        chunk_list = block_chunks or splitter.split_chapter(content, max_tokens=chunk_target, filename=original_filename)
                         total_chunks = len(chunk_list)
                         base_slug = Path(original_filename).stem if original_filename else f"ch{ordered_num}"
                         base_provenance = markdown_provenance_by_file.get(original_filename, {})

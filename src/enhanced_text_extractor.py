@@ -156,6 +156,8 @@ class EnhancedTextExtractor:
         self.h2t = None
         self.detected_language = None
         self.last_markdown_provenance = {}
+        self.last_html2text_blocks = []
+        self._html2text_block_marker_count = 0
         
         self._configure_html2text()
 
@@ -198,6 +200,63 @@ class EnhancedTextExtractor:
             'atx_headings': provenance,
         }
         return ''.join(cleaned_lines)
+
+    def _strip_heading_markers(self, text: str) -> str:
+        """Remove temporary heading markers without changing recorded provenance."""
+        return re.sub(r'GLXMDH\d{5}L[1-6]START|GLXMDH\d{5}END', '', text or '')
+
+    def _mark_html2text_block_boundaries(self, soup: BeautifulSoup) -> None:
+        """Mark source block elements so html2text chunks can split on original HTML boundaries."""
+        self.last_html2text_blocks = []
+        self._html2text_block_marker_count = 0
+
+        root = soup.body or soup
+        block_tags = {
+            'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'li', 'blockquote', 'pre', 'table', 'figure',
+            'figcaption', 'dt', 'dd', 'img'
+        }
+        skip_containers = {'script', 'style', 'noscript'}
+
+        for tag in list(root.find_all(block_tags)):
+            try:
+                if tag.name in skip_containers:
+                    continue
+                # Mark the outer block only when block tags are nested.
+                if tag.find_parent(block_tags):
+                    continue
+                if tag.name != 'img' and not tag.get_text(strip=True) and not tag.find('img'):
+                    continue
+
+                marker_index = self._html2text_block_marker_count
+                self._html2text_block_marker_count += 1
+                start = f"\nGLXH2TBLOCK{marker_index:06d}START\n"
+                end = f"\nGLXH2TBLOCK{marker_index:06d}END\n"
+                tag.insert_before(soup.new_string(start))
+                tag.insert_after(soup.new_string(end))
+            except Exception:
+                continue
+
+    def _extract_html2text_blocks_from_markers(self, text: str) -> tuple[str, list[str]]:
+        """Strip html2text block markers and return source-block-aligned markdown blocks."""
+        marker_re = re.compile(r'GLXH2TBLOCK(\d{6})(START|END)')
+        block_re = re.compile(
+            r'GLXH2TBLOCK(\d{6})START(?P<body>.*?)GLXH2TBLOCK\1END',
+            re.DOTALL,
+        )
+
+        blocks = []
+        for match in block_re.finditer(text or ''):
+            block = marker_re.sub('', match.group('body')).strip()
+            block = re.sub(r'\n{3,}', '\n\n', block)
+            if block:
+                blocks.append(block)
+
+        cleaned = marker_re.sub('', text or '')
+        cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+        cleaned = re.sub(r'\n[ \t]+', '\n', cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned, blocks
     
     def _detect_encoding(self, content: bytes) -> str:
         """Detect the encoding of the content"""
@@ -776,6 +835,7 @@ class EnhancedTextExtractor:
             
             # Determine content to convert (after removals)
             self._mark_html_headings_for_provenance(soup)
+            self._mark_html2text_block_boundaries(soup)
             if extraction_mode == "full":
                 content_to_convert = str(soup)
             else:
@@ -842,7 +902,13 @@ class EnhancedTextExtractor:
             clean_text = unescape_valid_html_tag_entities(clean_text)
 
             # Strip internal provenance markers before the model sees the text.
+            clean_text, html2text_blocks = self._extract_html2text_blocks_from_markers(clean_text)
             clean_text = self._strip_heading_markers_and_record_provenance(clean_text)
+            self.last_html2text_blocks = []
+            for block in html2text_blocks:
+                block = self._strip_heading_markers(block).strip()
+                if block:
+                    self.last_html2text_blocks.append(block)
             
             # Remove markdown duplicate headers if enabled
             # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
