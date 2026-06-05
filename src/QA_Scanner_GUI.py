@@ -467,7 +467,7 @@ class QAScannerMixin:
             qa_settings = dict(self.config.get('qa_scanner_settings', {}) or {})
             if not qa_settings:
                 qa_settings = {
-                    'foreign_char_threshold': 10,
+                    'foreign_char_threshold': 0,
                     'excluded_characters': '',
                     'target_language': 'english',
                     'source_language': 'auto',
@@ -2686,7 +2686,7 @@ class QAScannerMixin:
             threshold_spinbox = QSpinBox()
             threshold_spinbox.setMinimum(0)
             threshold_spinbox.setMaximum(1000)
-            threshold_spinbox.setValue(qa_settings.get('foreign_char_threshold', 10))
+            threshold_spinbox.setValue(qa_settings.get('foreign_char_threshold', 0))
             threshold_spinbox.setMinimumWidth(100)
             disable_wheel_event(threshold_spinbox)
             threshold_layout.addWidget(threshold_spinbox)
@@ -4754,7 +4754,7 @@ class QAScannerMixin:
                     try:
                         # QA Scanner environment variables
                         qa_env_mappings = [
-                            ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
+                            ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 0))),
                             ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
                             ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
                             ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
@@ -4856,7 +4856,7 @@ class QAScannerMixin:
                     saved_excluded_chars = excluded_text.toPlainText()
 
                     # Foreign character / language defaults
-                    threshold_spinbox.setValue(10)
+                    threshold_spinbox.setValue(0)
                     source_lang_combo.setCurrentText('Auto')
                     target_language_combo.setCurrentText('English')
 

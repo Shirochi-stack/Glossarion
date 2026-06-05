@@ -1067,10 +1067,10 @@ def detect_non_english_content(text, qa_settings=None):
         tuple: (has_issues, list_of_issues)
     """
     if qa_settings is None:
-        qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english'}
+        qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english'}
     
     # Get threshold, excluded characters, and target language
-    threshold = qa_settings.get('foreign_char_threshold', 10)
+    threshold = qa_settings.get('foreign_char_threshold', 0)
     target_language = qa_settings.get('target_language', 'english').lower()
     excluded_chars = set()
     if qa_settings.get('excluded_characters'):
@@ -7922,7 +7922,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Load default settings if not provided
     if qa_settings is None:
         qa_settings = {
-            'foreign_char_threshold': 10,
+            'foreign_char_threshold': 0,
             'excluded_characters': '',
             'target_language': 'english',
             'check_encoding_issues': False,
@@ -8298,7 +8298,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     except Exception:
         pass
 
-    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
+    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 0)}")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")

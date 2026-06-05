@@ -617,7 +617,7 @@ def _load_qa_scanner_settings_from_env():
 
     if not settings:
         settings = {
-            "foreign_char_threshold": _env_int("QA_FOREIGN_CHAR_THRESHOLD", 10),
+            "foreign_char_threshold": _env_int("QA_FOREIGN_CHAR_THRESHOLD", 0),
             "target_language": os.getenv("QA_TARGET_LANGUAGE", "english"),
             "check_encoding_issues": _env_bool("QA_CHECK_ENCODING", False),
             "check_repetition": _env_bool("QA_CHECK_REPETITION", True),

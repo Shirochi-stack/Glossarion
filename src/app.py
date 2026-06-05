@@ -528,6 +528,7 @@ class GlossarionWeb:
             'manga_bg_opacity': 0,  # Transparent background by default
             'manga_free_text_only_bg_opacity': False,
             'manga_bg_style': 'circle',
+            'qa_min_foreign_chars': 0,
             'manga_settings': {
                 'ocr': {
                     'detector_type': 'rtdetr_onnx',
@@ -719,7 +720,7 @@ class GlossarionWeb:
         
         # QA Scanner Settings
         os.environ['ENABLE_POST_TRANSLATION_SCAN'] = '1' if config('enable_post_translation_scan', False) else '0'
-        os.environ['QA_MIN_FOREIGN_CHARS'] = str(config('qa_min_foreign_chars', 10))
+        os.environ['QA_MIN_FOREIGN_CHARS'] = str(config('qa_min_foreign_chars', 0))
         os.environ['QA_TARGET_LANGUAGE'] = config('qa_target_language', 'english')
         os.environ['QA_CHECK_REPETITION'] = '1' if config('qa_check_repetition', True) else '0'
         os.environ['QA_CHECK_GLOSSARY_LEAKAGE'] = '1' if config('qa_check_glossary_leakage', True) else '0'
@@ -5573,7 +5574,7 @@ CRITICAL EXTRACTION RULES:
                                 min_foreign_chars = gr.Slider(
                                     minimum=0,
                                     maximum=50,
-                                    value=self.get_config_value('qa_min_foreign_chars', 10),
+                                    value=self.get_config_value('qa_min_foreign_chars', 0),
                                     step=1,
                                     label="Minimum foreign characters to flag",
                                     info="0 = always flag, higher = more tolerant"

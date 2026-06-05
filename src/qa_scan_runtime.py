@@ -71,7 +71,7 @@ def normalize_target_language(display_text):
 
 def default_qa_scan_settings():
     return {
-        "foreign_char_threshold": 10,
+        "foreign_char_threshold": 0,
         "excluded_characters": "",
         "target_language": "english",
         "source_language": "auto",
@@ -188,7 +188,7 @@ def apply_qa_scan_env_from_settings(qa_settings):
     settings = qa_settings if isinstance(qa_settings, dict) else {}
     counting_mode = str(settings.get("counting_mode", "") or "").strip().lower()
     mappings = {
-        "QA_FOREIGN_CHAR_THRESHOLD": str(settings.get("foreign_char_threshold", 10)),
+        "QA_FOREIGN_CHAR_THRESHOLD": str(settings.get("foreign_char_threshold", 0)),
         "QA_TARGET_LANGUAGE": str(settings.get("target_language", "english")),
         "QA_CHECK_ENCODING": "1" if settings.get("check_encoding_issues", False) else "0",
         "QA_CHECK_REPETITION": "1" if settings.get("check_repetition", True) else "0",
