@@ -9184,8 +9184,38 @@ def apply_emergency_glossary_compliance(content, output_dir):
     elif is_token_efficient:
         # Token-efficient / parsed CSV format
         # === CHARACTERS ===
-        # * TranslatedName (RawName) [gender]: Description
+        # * RawName = TranslatedName [gender]: Description
         current_type = "term"
+
+        def _token_entry_head(entry_text):
+            paren_depth = 0
+            bracket_depth = 0
+            split_idx = -1
+            for idx, ch in enumerate(entry_text):
+                if ch == '(' and bracket_depth == 0:
+                    paren_depth += 1
+                elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                    paren_depth -= 1
+                elif ch == '[' and paren_depth == 0:
+                    bracket_depth += 1
+                elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                    bracket_depth -= 1
+                elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                    split_idx = idx
+                    break
+            head = entry_text[:split_idx] if split_idx != -1 else entry_text
+
+            def _strip_custom_tails(text):
+                while True:
+                    tail = re.search(r"\s+\([^()]*(?::)[^()]*\)\s*$", text)
+                    if not tail:
+                        return text.strip()
+                    text = text[:tail.start()].strip()
+
+            head = _strip_custom_tails(head.strip())
+            head = re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip()
+            return _strip_custom_tails(head)
+
         for line in raw.split("\n"):
             stripped = line.strip()
             if stripped.startswith("=== ") and stripped.endswith(" ==="):
@@ -9195,16 +9225,22 @@ def apply_emergency_glossary_compliance(content, output_dir):
                     section = section[:-1]
                 current_type = section
             elif stripped.startswith("* "):
-                # Parse: * TranslatedName (RawName) [gender]: Description
+                # Parse canonical "* RawName = TranslatedName" and legacy "* TranslatedName (RawName)"
                 entry_text = stripped[2:]
-                # Extract raw name from parentheses
-                paren_start = entry_text.find("(")
-                paren_end = entry_text.find(")", paren_start) if paren_start != -1 else -1
-                if paren_start != -1 and paren_end != -1:
-                    translated = entry_text[:paren_start].strip()
-                    raw_name = entry_text[paren_start + 1:paren_end].strip()
-                    if raw_name and translated:
-                        entries.append((current_type, raw_name, translated))
+                head = _token_entry_head(entry_text)
+                equal_match = re.match(r"^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$", head)
+                if equal_match:
+                    raw_name = equal_match.group("raw").strip()
+                    translated = equal_match.group("translated").strip()
+                else:
+                    paren_start = head.find("(")
+                    paren_end = head.find(")", paren_start) if paren_start != -1 else -1
+                    if paren_start == -1 or paren_end == -1:
+                        continue
+                    translated = head[:paren_start].strip()
+                    raw_name = head[paren_start + 1:paren_end].strip()
+                if raw_name and translated:
+                    entries.append((current_type, raw_name, translated))
     else:
         # Raw CSV format: type{sep}raw_name{sep}translated_name[{sep}gender[{sep}description]]
         # Auto-detect separator: Unit Separator (\x1F) or comma
@@ -18531,7 +18567,7 @@ def main(log_callback=None, stop_callback=None):
                                     # Find start of BOOKS section or create it at top
                                     book_lines = [
                                         f"=== BOOKS ===\n",
-                                        f"* {t_val} ({r_val})\n",
+                                        f"* {r_val} = {t_val}\n",
                                         "\n"
                                     ]
                                     
@@ -19162,17 +19198,52 @@ def main(log_callback=None, stop_callback=None):
                     preview_entries = []
                     is_token_efficient = "=== " in raw_glossary_text and "* " in raw_glossary_text
                     if is_token_efficient:
+                        def _token_entry_head(entry_text):
+                            paren_depth = 0
+                            bracket_depth = 0
+                            split_idx = -1
+                            for idx, ch in enumerate(entry_text):
+                                if ch == '(' and bracket_depth == 0:
+                                    paren_depth += 1
+                                elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                                    paren_depth -= 1
+                                elif ch == '[' and paren_depth == 0:
+                                    bracket_depth += 1
+                                elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                                    bracket_depth -= 1
+                                elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                                    split_idx = idx
+                                    break
+                            head = entry_text[:split_idx] if split_idx != -1 else entry_text
+
+                            def _strip_custom_tails(text):
+                                while True:
+                                    tail = re.search(r"\s+\([^()]*(?::)[^()]*\)\s*$", text)
+                                    if not tail:
+                                        return text.strip()
+                                    text = text[:tail.start()].strip()
+
+                            head = _strip_custom_tails(head.strip())
+                            head = re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip()
+                            return _strip_custom_tails(head)
+
                         for line in raw_glossary_text.splitlines():
                             stripped = line.strip()
                             if not stripped.startswith("* "):
                                 continue
                             entry_text = stripped[2:]
-                            paren_start = entry_text.find("(")
-                            paren_end = entry_text.find(")", paren_start) if paren_start != -1 else -1
-                            if paren_start == -1 or paren_end == -1:
-                                continue
-                            translated = entry_text[:paren_start].strip()
-                            raw_name = entry_text[paren_start + 1:paren_end].strip()
+                            head = _token_entry_head(entry_text)
+                            equal_match = re.match(r"^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$", head)
+                            if equal_match:
+                                raw_name = equal_match.group("raw").strip()
+                                translated = equal_match.group("translated").strip()
+                            else:
+                                paren_start = head.find("(")
+                                paren_end = head.find(")", paren_start) if paren_start != -1 else -1
+                                if paren_start == -1 or paren_end == -1:
+                                    continue
+                                translated = head[:paren_start].strip()
+                                raw_name = head[paren_start + 1:paren_end].strip()
                             if raw_name and translated:
                                 preview_entries.append((raw_name, translated, stripped))
                     else:

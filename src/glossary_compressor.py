@@ -242,7 +242,7 @@ def _log_gender_bias_effect(entry, raw_name, actual_gender):
         return
     _gender_bias_log_seen.add(key)
     translated_name = str(entry.get("translated_name", "") or "").strip() if isinstance(entry, dict) else ""
-    label = f"{translated_name} ({raw_name})" if translated_name and raw_name else (translated_name or str(raw_name or "unknown"))
+    label = f"{raw_name} = {translated_name}" if translated_name and raw_name else (translated_name or str(raw_name or "unknown"))
     print(
         "📑 Gender tracker bias active: "
         f"keeping rare {actual_gender} variant for {label} "
@@ -415,16 +415,42 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
 
 def _token_entry_identity(line):
     body = line.strip()[2:].strip()
-    custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", body)
-    if custom_tail and ":" in custom_tail.group(1):
-        body = body[:custom_tail.start()].rstrip()
-    desc_match = re.match(r"^(?P<head>.*\)\s*(?:\[[^\]]*\])?)\s*:\s*(?P<desc>.*)$", body)
-    head = desc_match.group("head").rstrip() if desc_match else body
+
+    def _split_head_desc(text):
+        paren_depth = 0
+        bracket_depth = 0
+        for idx, ch in enumerate(text):
+            if ch == '(' and bracket_depth == 0:
+                paren_depth += 1
+            elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                paren_depth -= 1
+            elif ch == '[' and paren_depth == 0:
+                bracket_depth += 1
+            elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                bracket_depth -= 1
+            elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                return text[:idx].rstrip(), text[idx + 1:].strip()
+        return text, ""
+
+    head, _desc = _split_head_desc(body)
+
+    def _strip_custom_tails(text):
+        while True:
+            custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", text)
+            if not custom_tail or ":" not in custom_tail.group(1):
+                return text.rstrip()
+            text = text[:custom_tail.start()].rstrip()
+
+    head = _strip_custom_tails(head)
     gender = ""
     gender_match = re.search(r"\s*\[([^\]]*)\]\s*$", head)
     if gender_match:
         gender = gender_match.group(1).strip()
         head = head[:gender_match.start()].rstrip()
+        head = _strip_custom_tails(head)
+    equal_match = re.match(r"^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$", head)
+    if equal_match:
+        return equal_match.group("raw").strip(), gender
     name_match = re.match(r"^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$", head)
     if not name_match:
         return "", ""

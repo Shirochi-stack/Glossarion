@@ -2351,7 +2351,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_path = temp_f.name
                     
                     # Write column header
-                    column_headers = ['translated_name', 'raw_name']
+                    column_headers = ['raw_name', 'translated_name']
                     # Add gender if any type supports it
                     has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                     if has_gender:
@@ -2374,7 +2374,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         for entry in entries:
                             raw_name = entry.get('raw_name', '')
                             translated_name = entry.get('translated_name', '')
-                            line = f"* {translated_name} ({raw_name})"
+                            line = f"* {raw_name} = {translated_name}"
                             if type_config.get('has_gender', False):
                                 gender = entry.get('gender', '')
                                 if gender and gender != 'Unknown':
@@ -2480,7 +2480,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             custom_fields_list = json.loads(custom_fields_json)
                         except:
                             custom_fields_list = []
-                        column_headers = ['translated_name', 'raw_name']
+                        column_headers = ['raw_name', 'translated_name']
                         # Add gender if any type supports it
                         has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                         if has_gender:
@@ -2506,7 +2506,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             for entry in entries:
                                 raw_name = entry.get('raw_name', '')
                                 translated_name = entry.get('translated_name', '')
-                                line = f"* {translated_name} ({raw_name})"
+                                line = f"* {raw_name} = {translated_name}"
                                 if type_config.get('has_gender', False):
                                     gender = entry.get('gender', '')
                                     if gender and gender != 'Unknown':
@@ -4364,7 +4364,7 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
     if not (first.lower().startswith("glossary columns:") or first.startswith("===") or first.startswith("* ")):
         return []
 
-    header_cols = ['translated_name', 'raw_name', 'gender', 'description']
+    header_cols = ['raw_name', 'translated_name', 'gender', 'description']
     section_re = re.compile(r"^===\s*(.+?)\s*===\s*$")
     entries: List[Dict] = []
     current_section = None
@@ -4395,35 +4395,53 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
         body = line[2:].strip()
         custom_values = {}
 
-        # Custom-only writer form:
-        #   * Translated (Raw) [gender] (Field: value)
-        custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", body)
-        if custom_tail:
-            parsed_custom = _split_custom_field_parts(custom_tail.group(1), extra_cols)
-            if parsed_custom:
+        def _split_head_desc(text):
+            paren_depth = 0
+            bracket_depth = 0
+            for idx, ch in enumerate(text):
+                if ch == '(' and bracket_depth == 0:
+                    paren_depth += 1
+                elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                    paren_depth -= 1
+                elif ch == '[' and paren_depth == 0:
+                    bracket_depth += 1
+                elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                    bracket_depth -= 1
+                elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                    return text[:idx].rstrip(), text[idx + 1:].strip()
+            return text, ""
+
+        head, desc = _split_head_desc(body)
+
+        def _pull_custom_tails(text):
+            while True:
+                custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", text)
+                if not custom_tail:
+                    return text.rstrip()
+                parsed_custom = _split_custom_field_parts(custom_tail.group(1), extra_cols)
+                if not parsed_custom:
+                    return text.rstrip()
                 custom_values.update(parsed_custom)
-                body = body[:custom_tail.start()].rstrip()
+                text = text[:custom_tail.start()].rstrip()
 
-        desc = ""
-        desc_match = re.match(r"^(?P<head>.*\)\s*(?:\[[^\]]*\])?)\s*:\s*(?P<desc>.*)$", body)
-        if desc_match:
-            head = desc_match.group("head").rstrip()
-            desc = (desc_match.group("desc") or "").strip()
-        else:
-            head = body
-
+        head = _pull_custom_tails(head)
         gender = ""
         gender_match = re.search(r"\s*\[([^\]]*)\]\s*$", head)
         if gender_match:
             gender = (gender_match.group(1) or "").strip()
             head = head[:gender_match.start()].rstrip()
+            head = _pull_custom_tails(head)
 
-        name_match = re.match(r"^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$", head)
-        if not name_match:
-            return None
-
-        translated = (name_match.group("translated") or "").strip()
-        raw_name = (name_match.group("raw") or "").strip()
+        equal_match = re.match(r"^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$", head)
+        if equal_match:
+            raw_name = (equal_match.group("raw") or "").strip()
+            translated = (equal_match.group("translated") or "").strip()
+        else:
+            name_match = re.match(r"^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$", head)
+            if not name_match:
+                return None
+            translated = (name_match.group("translated") or "").strip()
+            raw_name = (name_match.group("raw") or "").strip()
 
         # Writer form with description plus custom fields:
         #   : description text (Field: value)
@@ -4447,7 +4465,7 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
             cols_text = line.split(":", 1)[1]
             header_cols = [c.strip() for c in cols_text.split(",") if c.strip()]
             if not header_cols:
-                header_cols = ['translated_name', 'raw_name', 'gender', 'description']
+                header_cols = ['raw_name', 'translated_name', 'gender', 'description']
             continue
 
         # Section line

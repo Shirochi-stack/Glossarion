@@ -683,7 +683,7 @@ class GlossaryManagerMixin:
         entries = []
         sections = []
         current_section = None
-        header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+        header_columns = ['raw_name', 'translated_name', 'gender', 'description']
         default_extra_columns = []
         try:
             import PatternManager as _pm
@@ -707,6 +707,64 @@ class GlossaryManagerMixin:
                 type_map[f"{t_lower}s"] = t
 
         import re
+
+        def _parse_token_entry_line(line):
+            body = line[2:].strip()
+
+            def _split_head_desc(text):
+                paren_depth = 0
+                bracket_depth = 0
+                for idx, ch in enumerate(text):
+                    if ch == '(' and bracket_depth == 0:
+                        paren_depth += 1
+                    elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                        paren_depth -= 1
+                    elif ch == '[' and paren_depth == 0:
+                        bracket_depth += 1
+                    elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                        bracket_depth -= 1
+                    elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                        return text[:idx].rstrip(), text[idx + 1:].strip()
+                return text, ""
+
+            head, desc = _split_head_desc(body)
+
+            extra_values = {}
+
+            def _pull_custom_tails(text):
+                while True:
+                    tail = re.search(r'\s+\(([^()]*)\)\s*$', text)
+                    if not tail or ':' not in tail.group(1):
+                        return text.rstrip()
+                    for paren_m in re.finditer(r'\(([^)]+)\)', tail.group(0)):
+                        content = paren_m.group(1).strip()
+                        if ':' in content:
+                            k, v = content.split(':', 1)
+                            extra_values[k.strip()] = v.strip()
+                    text = text[:tail.start()].rstrip()
+
+            head = _pull_custom_tails(head)
+            bracket = ""
+            gender_match = re.search(r'\s*\[([^\]]*)\]\s*$', head)
+            if gender_match:
+                bracket = (gender_match.group(1) or '').strip()
+                head = head[:gender_match.start()].rstrip()
+                head = _pull_custom_tails(head)
+
+            equal_match = re.match(r'^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$', head)
+            if equal_match:
+                raw_name = (equal_match.group('raw') or '').strip()
+                translated = (equal_match.group('translated') or '').strip()
+                return translated, raw_name, bracket, desc, extra_values
+
+            legacy_match = re.match(r'^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$', head)
+            if legacy_match:
+                translated = (legacy_match.group('translated') or '').strip()
+                raw_name = (legacy_match.group('raw') or '').strip()
+                return translated, raw_name, bracket, desc, extra_values
+
+            return None
+
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
@@ -715,7 +773,7 @@ class GlossaryManagerMixin:
                 cols_text = line.split(':', 1)[1]
                 header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
                 if len(header_columns) < 4:
-                    header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                    header_columns = ['raw_name', 'translated_name', 'gender', 'description']
                 positional = {'translated_name', 'raw_name', 'gender'}
                 extra_columns = [c for c in header_columns if c.lower() not in positional]
                 if not extra_columns:
@@ -729,24 +787,10 @@ class GlossaryManagerMixin:
             if not line.startswith('* '):
                 continue
 
-            m = re.match(r'^\*\s+(.*?)\s*\(([^)]*)\)\s*((?:\([^)]+\)\s*)*)\s*(?:\[(.*?)\])?\s*((?:\([^)]+\)\s*)*)\s*(?::\s*(.*))?$', line)
-            if not m:
+            parsed_line = _parse_token_entry_line(line)
+            if not parsed_line:
                 continue
-            translated = (m.group(1) or '').strip()
-            raw_name = (m.group(2) or '').strip()
-            pre_extras_raw = (m.group(3) or '').strip()
-            bracket = (m.group(4) or '').strip()
-            post_extras_raw = (m.group(5) or '').strip()
-            desc = (m.group(6) or '').strip()
-
-            extra_values = {}
-            paren_extras_raw = f"{pre_extras_raw} {post_extras_raw}".strip()
-            if paren_extras_raw:
-                for paren_m in re.finditer(r'\(([^)]+)\)', paren_extras_raw):
-                    content = paren_m.group(1).strip()
-                    if ':' in content:
-                        k, v = content.split(':', 1)
-                        extra_values[k.strip()] = v.strip()
+            translated, raw_name, bracket, desc, extra_values = parsed_line
             if desc and ' | ' in desc:
                 parts = desc.split(' | ')
                 desc = parts[0].strip()
@@ -6122,7 +6166,7 @@ Do not stop after the glossary."""
                    sections = []
                    current_section = None
                    gender_keywords = {'male', 'female', 'unknown'}
-                   header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                   header_columns = ['raw_name', 'translated_name', 'gender', 'description']
                    # Default extra columns: pattern manager + custom fields (used if header omits them)
                    default_extra_columns = []
                    try:
@@ -6147,6 +6191,65 @@ Do not stop after the glossary."""
                        if not t.lower().endswith('s'):
                            type_map[f"{t.lower()}s"] = t
 
+                   import re
+
+                   def _parse_token_entry_line(line):
+                       body = line[2:].strip()
+
+                       def _split_head_desc(text):
+                           paren_depth = 0
+                           bracket_depth = 0
+                           for idx, ch in enumerate(text):
+                               if ch == '(' and bracket_depth == 0:
+                                   paren_depth += 1
+                               elif ch == ')' and bracket_depth == 0 and paren_depth > 0:
+                                   paren_depth -= 1
+                               elif ch == '[' and paren_depth == 0:
+                                   bracket_depth += 1
+                               elif ch == ']' and paren_depth == 0 and bracket_depth > 0:
+                                   bracket_depth -= 1
+                               elif ch == ':' and paren_depth == 0 and bracket_depth == 0:
+                                   return text[:idx].rstrip(), text[idx + 1:].strip()
+                           return text, ""
+
+                       head, desc = _split_head_desc(body)
+
+                       extra_values = {}
+
+                       def _pull_custom_tails(text):
+                           while True:
+                               tail = re.search(r'\s+\(([^()]*)\)\s*$', text)
+                               if not tail or ':' not in tail.group(1):
+                                   return text.rstrip()
+                               for paren_m in re.finditer(r'\(([^)]+)\)', tail.group(0)):
+                                   content = paren_m.group(1).strip()
+                                   if ':' in content:
+                                       k, v = content.split(':', 1)
+                                       extra_values[k.strip()] = v.strip()
+                               text = text[:tail.start()].rstrip()
+
+                       head = _pull_custom_tails(head)
+                       bracket = ""
+                       gender_match = re.search(r'\s*\[([^\]]*)\]\s*$', head)
+                       if gender_match:
+                           bracket = (gender_match.group(1) or '').strip()
+                           head = head[:gender_match.start()].rstrip()
+                           head = _pull_custom_tails(head)
+
+                       equal_match = re.match(r'^(?P<raw>.+?)\s*=\s*(?P<translated>.+?)\s*$', head)
+                       if equal_match:
+                           raw_name = (equal_match.group('raw') or '').strip()
+                           translated = (equal_match.group('translated') or '').strip()
+                           return translated, raw_name, bracket, desc, extra_values
+
+                       legacy_match = re.match(r'^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$', head)
+                       if legacy_match:
+                           translated = (legacy_match.group('translated') or '').strip()
+                           raw_name = (legacy_match.group('raw') or '').strip()
+                           return translated, raw_name, bracket, desc, extra_values
+
+                       return None
+
                    for raw_line in lines:
                        line = raw_line.strip()
                        if not line:
@@ -6156,7 +6259,7 @@ Do not stop after the glossary."""
                            cols_text = line.split(':', 1)[1]
                            header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
                            if len(header_columns) < 4:
-                               header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                               header_columns = ['raw_name', 'translated_name', 'gender', 'description']
                            # Only translated_name, raw_name, gender are positionally fixed
                            # Everything else (including description) is extracted from tail text
                            positional = {'translated_name', 'raw_name', 'gender'}
@@ -6172,27 +6275,10 @@ Do not stop after the glossary."""
                        if not line.startswith('* '):
                            continue
 
-                       # Pattern: * translated (raw) [gender]: description
-                       import re
-                       m = re.match(r'^\*\s+(.*?)\s*\(([^)]*)\)\s*((?:\([^)]+\)\s*)*)\s*(?:\[(.*?)\])?\s*((?:\([^)]+\)\s*)*)\s*(?::\s*(.*))?$', line)
-                       if not m:
+                       parsed_line = _parse_token_entry_line(line)
+                       if not parsed_line:
                            continue
-                       translated = (m.group(1) or '').strip()
-                       raw_name = (m.group(2) or '').strip()
-                       pre_extras_raw = (m.group(3) or '').strip()
-                       bracket = (m.group(4) or '').strip()
-                       post_extras_raw = (m.group(5) or '').strip()
-                       desc = (m.group(6) or '').strip()
-
-                       # Parse parenthetical extras like "(item_detail: value)" into extra_values
-                       extra_values = {}
-                       paren_extras_raw = f"{pre_extras_raw} {post_extras_raw}".strip()
-                       if paren_extras_raw:
-                           for paren_m in re.finditer(r'\(([^)]+)\)', paren_extras_raw):
-                               content = paren_m.group(1).strip()
-                               if ':' in content:
-                                   k, v = content.split(':', 1)
-                                   extra_values[k.strip()] = v.strip()
+                       translated, raw_name, bracket, desc, extra_values = parsed_line
                        if desc and ' | ' in desc:
                            parts = desc.split(' | ')
                            desc = parts[0].strip()
@@ -6585,7 +6671,7 @@ Do not stop after the glossary."""
                                grouped[sec].append(entry)
 
                            # Build header columns: standard + pattern-manager fields + custom/additional fields
-                           standard_cols = ['translated_name', 'raw_name', 'gender', 'description']
+                           standard_cols = ['raw_name', 'translated_name', 'gender', 'description']
                            pattern_fields = []
                            try:
                                import PatternManager as _pm
@@ -6618,9 +6704,7 @@ Do not stop after the glossary."""
                                    gender = e.get('gender', '')
                                    desc = e.get('description', '')
 
-                                   line = f"* {translated}"
-                                   if raw_name:
-                                       line += f" ({raw_name})"
+                                   line = f"* {raw_name} = {translated}" if raw_name else f"* {translated}"
                                    if gender:
                                        line += f" [{gender}]"
                                    extra_tail = []
@@ -9395,7 +9479,7 @@ Do not stop after the glossary."""
                     grouped[sec].append(entry)
 
                 # Build header columns
-                standard_cols = ['translated_name', 'raw_name', 'gender', 'description']
+                standard_cols = ['raw_name', 'translated_name', 'gender', 'description']
                 pattern_fields = []
                 try:
                     import PatternManager as _pm
@@ -9427,9 +9511,7 @@ Do not stop after the glossary."""
                         gender = e.get('gender', '')
                         desc = e.get('description', '')
 
-                        line = f"* {translated}"
-                        if raw_name:
-                            line += f" ({raw_name})"
+                        line = f"* {raw_name} = {translated}" if raw_name else f"* {translated}"
                         if gender:
                             line += f" [{gender}]"
                         extra_tail = []

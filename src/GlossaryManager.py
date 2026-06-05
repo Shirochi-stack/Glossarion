@@ -1533,7 +1533,7 @@ def _convert_to_token_efficient_format(csv_lines):
     # Rebuild with token-efficient format
     result = []
     # Extract column headers from CSV to show in dynamic header
-    columns = ['translated_name', 'raw_name']
+    columns = ['raw_name', 'translated_name']
     # Check for gender and description columns
     try:
         header_parts = _gsplit(header, sep) if header else []
@@ -1593,7 +1593,7 @@ def _convert_to_token_efficient_format(csv_lines):
             if not raw_name or not translated_name:
                 continue
 
-            entry_line = f"* {translated_name} ({raw_name})"
+            entry_line = f"* {raw_name} = {translated_name}"
 
             # Gender support — only for character entries (mirrors extract script's has_gender check)
             if entry_type_val == 'character' and gender_idx != -1 and len(parts) > gender_idx:
