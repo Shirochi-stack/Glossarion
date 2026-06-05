@@ -1141,6 +1141,19 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
+    def _on_glossary_manager_consider_translated_compression_toggle(self, state=None):
+        """Sync translated-column glossary compression matching to config and environment."""
+        try:
+            enabled = bool(self.consider_translated_compression_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_consider_translated_column'] = enabled
+            self.compress_glossary_consider_translated_column_var = enabled
+            os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
     def glossary_manager(self, *args, show=True):
         """Open comprehensive glossary management dialog"""
         # Reuse existing dialog if it hasn't been destroyed
@@ -1154,6 +1167,7 @@ class GlossaryManagerMixin:
                     ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load', False),
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching', False),
+                    ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
@@ -1647,6 +1661,7 @@ class GlossaryManagerMixin:
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'),
+                    ('consider_translated_compression_checkbox', 'compress_glossary_consider_translated_column_var'),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
@@ -1692,6 +1707,9 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'strict_gender_compression_checkbox':
                             self.config['compress_glossary_strict_gender_matching'] = bool(checked)
                             os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if checked else '0'
+                        elif checkbox_name == 'consider_translated_compression_checkbox':
+                            self.config['compress_glossary_consider_translated_column'] = bool(checked)
+                            os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if checked else '0'
                         elif checkbox_name == 'save_glossary_in_output_checkbox':
                             self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
@@ -3806,6 +3824,27 @@ Do not stop after the glossary."""
         # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
+
+        consider_translated_widget = QWidget()
+        consider_translated_layout = QHBoxLayout(consider_translated_widget)
+        consider_translated_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(consider_translated_widget)
+
+        if not hasattr(self, 'consider_translated_compression_checkbox'):
+            self.consider_translated_compression_checkbox = self._create_styled_checkbox("Consider Translated Column")
+            self.consider_translated_compression_checkbox.setChecked(self.config.get('compress_glossary_consider_translated_column', False))
+        if not getattr(self.consider_translated_compression_checkbox, '_glossary_manager_sync_connected', False):
+            self.consider_translated_compression_checkbox.stateChanged.connect(self._on_glossary_manager_consider_translated_compression_toggle)
+            self.consider_translated_compression_checkbox._glossary_manager_sync_connected = True
+        self.consider_translated_compression_checkbox.setToolTip(
+            "When ON, glossary compression keeps an entry if either raw_name or translated_name appears in the source text.\n"
+            "Default OFF preserves raw-name-only matching."
+        )
+        consider_translated_layout.addWidget(self.consider_translated_compression_checkbox)
+
+        consider_translated_hint = QLabel("(Optional: also match translated_name during compression; default OFF)")
+        consider_translated_layout.addWidget(consider_translated_hint)
+        consider_translated_layout.addStretch()
 
         strict_gender_widget = QWidget()
         strict_gender_layout = QHBoxLayout(strict_gender_widget)

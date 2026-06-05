@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     'glossary_filter_mode': 'all',
     'glossary_fuzzy_threshold': 0.90,
     'compress_glossary_strict_gender_matching': False,
+    'compress_glossary_consider_translated_column': False,
 
     # Thinking mode
     'enable_gpt_thinking': True,

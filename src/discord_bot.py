@@ -1446,6 +1446,7 @@ async def translate(
         # Enable glossary prompt compression (filtering unused entries) by default
         os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config.get('compress_glossary_prompt', True) else '0'
         os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if config.get('compress_glossary_strict_gender_matching', False) else '0'
+        os.environ['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = '1' if config.get('compress_glossary_consider_translated_column', False) else '0'
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))

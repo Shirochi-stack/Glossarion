@@ -3325,6 +3325,13 @@ class AsyncProcessingDialog:
         else:
             strict_gender_matching = self.gui.config.get('compress_glossary_strict_gender_matching', False)
         env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = "1" if strict_gender_matching else "0"
+        if hasattr(self.gui, 'compress_glossary_consider_translated_column_var'):
+            consider_translated_column = _val(self.gui.compress_glossary_consider_translated_column_var, False)
+        elif hasattr(self.gui, 'consider_translated_compression_checkbox'):
+            consider_translated_column = _val(self.gui.consider_translated_compression_checkbox, False)
+        else:
+            consider_translated_column = self.gui.config.get('compress_glossary_consider_translated_column', False)
+        env_vars['COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN'] = "1" if consider_translated_column else "0"
         
         # History and summary settings
         env_vars['TRANSLATION_HISTORY_ROLLING'] = "1"
@@ -3878,8 +3885,9 @@ class AsyncProcessingDialog:
                             compressed_tokens = len(enc.encode(glossary_text))
                             token_reduction_pct = ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0
                             strict_gender_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING') == '1' else "OFF"
+                            translated_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_CONSIDER_TRANSLATED_COLUMN') == '1' else "OFF"
                             
-                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (strict gender {strict_gender_state})")
+                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (strict gender {strict_gender_state}, translated column {translated_state})")
                         except ImportError:
                             logger.info(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
                     except Exception as e:
