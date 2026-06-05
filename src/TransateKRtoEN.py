@@ -19599,7 +19599,7 @@ def main(log_callback=None, stop_callback=None):
         max_output_tokens = config.get_effective_output_limit() 
         safety_margin_output = 500
         
-        # Korean to English typically compresses to 0.7-0.9x
+        # Expected output/input token ratio used to keep translated chunks under the output limit.
         compression_factor = config.get_effective_compression_factor()
         available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
         
@@ -22081,7 +22081,7 @@ def main(log_callback=None, stop_callback=None):
                     max_output_tokens = config.get_effective_output_limit()
                     safety_margin_output = 500
                     
-                    # CJK to English typically compresses to 0.7-0.9x
+                    # Expected output/input token ratio used to keep translated chunks under the output limit.
                     compression_factor = config.get_effective_compression_factor()
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
@@ -22108,7 +22108,7 @@ def main(log_callback=None, stop_callback=None):
                     max_output_tokens = config.get_effective_output_limit()
                     safety_margin_output = 500
                     
-                    # CJK to English typically compresses to 0.7-0.9x
+                    # Expected output/input token ratio used to keep translated chunks under the output limit.
                     compression_factor = config.get_effective_compression_factor()
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     

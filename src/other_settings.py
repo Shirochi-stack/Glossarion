@@ -3877,8 +3877,8 @@ def _create_response_handling_section(self, parent):
     sep5.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep5)
     
-    # Compression Factor
-    compression_title = QLabel("Translation Compression Factor")
+    # Input/output token ratio for translation chunk sizing
+    compression_title = QLabel("Translation Input->Output Compression Factor")
     compression_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(compression_title)
     
@@ -3892,7 +3892,7 @@ def _create_response_handling_section(self, parent):
     compression_w = QWidget()
     compression_h = QHBoxLayout(compression_w)
     compression_h.setContentsMargins(20, 5, 0, 0)
-    compression_label = QLabel("CJK→English compression:")
+    compression_label = QLabel("Input->Output compression:")
     compression_h.addWidget(compression_label)
     compression_edit = QLineEdit()
     compression_edit.setFixedWidth(60)
@@ -3900,6 +3900,44 @@ def _create_response_handling_section(self, parent):
         compression_edit.setText(str(self.compression_factor_var))
     except Exception:
         pass
+
+    compression_budget_label = QLabel()
+    compression_budget_label.setStyleSheet("color: #8fbce6; font-size: 10pt;")
+    compression_budget_label.setContentsMargins(20, 0, 0, 6)
+    compression_budget_label.setWordWrap(True)
+
+    def _update_compression_token_budget_label():
+        try:
+            output_tokens = int(getattr(self, 'max_output_tokens', self.config.get('max_output_tokens', 65536)))
+        except Exception:
+            output_tokens = 65536
+
+        try:
+            raw_factor = compression_edit.text().strip()
+            if not raw_factor:
+                raw_factor = getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))
+            compression_factor = float(raw_factor)
+        except Exception:
+            compression_budget_label.setText("Max input chunk budget: enter a valid compression factor")
+            return
+
+        safety_margin = 500
+        if compression_factor <= 0:
+            compression_budget_label.setText(
+                f"Max input chunk budget: not limited by compression factor (output limit {output_tokens:,})"
+            )
+            return
+
+        raw_budget = int((output_tokens - safety_margin) / compression_factor)
+        chunk_budget = max(1000, raw_budget)
+        minimum_note = " minimum" if raw_budget < 1000 else ""
+        compression_budget_label.setText(
+            f"Max input chunk budget = ({output_tokens:,} output - {safety_margin:,} safety) "
+            f"/ {compression_factor:g} = {chunk_budget:,} tokens{minimum_note}"
+        )
+
+    self.compression_token_budget_label = compression_budget_label
+    self._update_compression_token_budget_label = _update_compression_token_budget_label
     
     def _update_compression_factor():
         """Update compression factor based on output token limit when auto is enabled"""
@@ -3910,7 +3948,7 @@ def _create_response_handling_section(self, parent):
             # Get current output token limit
             output_tokens = int(getattr(self, 'max_output_tokens', 65536))
             
-            # Determine compression factor based on token limit
+            # Determine input/output factor based on token limit
             if output_tokens < 16379:
                 factor = 1.5
             elif output_tokens < 32769:
@@ -3923,6 +3961,7 @@ def _create_response_handling_section(self, parent):
             # Update the field and variable
             compression_edit.setText(str(factor))
             self.compression_factor_var = str(factor)
+            _update_compression_token_budget_label()
         except Exception as e:
             print(f"Error updating compression factor: {e}")
     
@@ -3932,6 +3971,7 @@ def _create_response_handling_section(self, parent):
     def _on_compression_changed(text):
         try:
             self.compression_factor_var = text
+            _update_compression_token_budget_label()
         except Exception:
             pass
     
@@ -3947,6 +3987,8 @@ def _create_response_handling_section(self, parent):
             # Update factor when enabling auto
             if checked:
                 _update_compression_factor()
+            else:
+                _update_compression_token_budget_label()
         except Exception as e:
             print(f"Error toggling auto compression: {e}")
     
@@ -3960,15 +4002,16 @@ def _create_response_handling_section(self, parent):
     
     compression_edit.textChanged.connect(_on_compression_changed)
     compression_h.addWidget(compression_edit)
-    compression_hint_label = QLabel("(Decrease this for less chunking)")
+    compression_hint_label = QLabel("(Decrease this for larger chunks)")
     compression_h.addWidget(compression_hint_label)
     compression_h.addStretch()
     section_v.addWidget(compression_w)
+    section_v.addWidget(compression_budget_label)
     
     # Apply initial state
     _on_auto_compression_toggle(auto_compression_cb.isChecked())
     
-    compression_desc = QLabel("Ratio for chunk sizing based on output limits")
+    compression_desc = QLabel("Expected output tokens per input token for chunk sizing")
     compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
     compression_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(compression_desc)

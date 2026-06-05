@@ -4192,12 +4192,17 @@ Recent translations to summarize:
         try:
             # Check if auto compression is enabled
             if not self.config.get('auto_compression_factor', True):
+                if hasattr(self, '_update_compression_token_budget_label'):
+                    try:
+                        self._update_compression_token_budget_label()
+                    except Exception:
+                        pass
                 return
             
             # Get current output token limit
             output_tokens = int(getattr(self, 'max_output_tokens', 128000))
             
-            # Determine compression factor based on token limit
+            # Determine input/output token factor based on output token limit
             if output_tokens < 16379:
                 factor = 1.5
             elif output_tokens < 32769:
@@ -4212,6 +4217,12 @@ Recent translations to summarize:
             
             # Also update config so it persists
             self.config['compression_factor'] = factor
+
+            if hasattr(self, '_update_compression_token_budget_label'):
+                try:
+                    self._update_compression_token_budget_label()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Error updating auto compression factor: {e}")
 
@@ -23674,6 +23685,12 @@ Important rules:
                    self._update_auto_compression_factor()
                except Exception as e:
                    print(f"Error updating auto compression factor: {e}")
+
+           if hasattr(self, '_update_compression_token_budget_label'):
+               try:
+                   self._update_compression_token_budget_label()
+               except Exception as e:
+                   print(f"Error updating compression token budget label: {e}")
            
            # Clamp Anthropic thinking budget if it now exceeds the new limit
            try:

@@ -10,7 +10,7 @@ class ChapterSplitter:
         """
         Initialize splitter with token counter
         target_tokens: Target size for each chunk (leaving room for system prompt & history)
-        compression_factor: Expected compression ratio from source to target language (0.7-1.0)
+        compression_factor: Expected output/input token ratio for translation chunk sizing
         """
         try:
             self.enc = tiktoken.encoding_for_model(model_name)
