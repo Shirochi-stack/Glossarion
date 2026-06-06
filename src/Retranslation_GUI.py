@@ -188,6 +188,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._last_review_signature = None
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
+        self._seamless_review_old_page = None
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -358,11 +359,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             signature = self._current_review_signature()
             if signature != self._last_review_signature:
-                self.refresh_review_data(force=True, signature=signature)
+                self.refresh_review_data(force=True, signature=signature, seamless=True)
         except Exception:
             pass
 
-    def refresh_review_data(self, force=False, current_path=None, signature=None):
+    def refresh_review_data(self, force=False, current_path=None, signature=None, seamless=False):
         if self._refreshing_review_data:
             return
         try:
@@ -370,6 +371,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 signature = self._current_review_signature()
                 if signature == self._last_review_signature:
                     return
+            old_visible_page = None
+            if seamless:
+                try:
+                    old_visible_page = self.rows_stack.currentWidget()
+                    if old_visible_page is self.loading_page:
+                        old_visible_page = None
+                except Exception:
+                    old_visible_page = None
             self._refreshing_review_data = True
             self._save_current_review_scroll()
             self._flush_target_edits()
@@ -382,12 +391,26 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             self.current_path = selected_path if selected_path and os.path.isfile(selected_path) else self.current_path
             self._render_token += 1
-            self._clear_cached_review_pages()
+            if seamless and old_visible_page is not None:
+                self._cancel_active_review_render()
+                for _row, page in list(self._piece_pages.items()):
+                    if page is old_visible_page:
+                        continue
+                    self._remove_review_page_widget(page)
+                self._piece_pages.clear()
+                self._piece_render_complete.clear()
+                self._highlighted_status_frame = None
+                self._status_jump_indices.clear()
+                self._seamless_review_old_page = old_visible_page
+            else:
+                self._seamless_review_old_page = None
+                self._clear_cached_review_pages()
             self.pieces = self._load_pieces()
             self._populate_piece_list()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             if self.pieces and self.isVisible():
-                QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+                show_loading = not (seamless and old_visible_page is not None)
+                QTimer.singleShot(0, lambda show_loading=show_loading: self._render_piece(self._initial_piece_row, show_loading=show_loading))
         except Exception:
             pass
         finally:
@@ -678,22 +701,14 @@ class SDLXLIFFReviewDialog(QDialog):
     def _clear_cached_review_pages(self):
         self._cancel_active_review_render()
         for row, page in list(self._piece_pages.items()):
-            try:
-                self.rows_stack.removeWidget(page)
-            except Exception:
-                pass
-            try:
-                page.hide()
-                page.setParent(None)
-                page.deleteLater()
-            except Exception:
-                pass
+            self._remove_review_page_widget(page)
         self._piece_pages.clear()
         self._piece_render_complete.clear()
         self._piece_scroll_positions.clear()
         self._current_scroll_piece_row = None
         self._highlighted_status_frame = None
         self._status_jump_indices.clear()
+        self._seamless_review_old_page = None
 
     def _switch_review_book(self, index):
         if self._book_nav_updating:
@@ -1485,6 +1500,27 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _remove_review_page_widget(self, page):
+        if page is None or page is self.loading_page:
+            return
+        try:
+            self.rows_stack.removeWidget(page)
+        except Exception:
+            pass
+        try:
+            page.hide()
+            page.setParent(None)
+            page.deleteLater()
+        except Exception:
+            pass
+
+    def _finish_seamless_review_swap(self, new_page):
+        old_page = self._seamless_review_old_page
+        self._seamless_review_old_page = None
+        if old_page is None or old_page is new_page:
+            return
+        self._remove_review_page_widget(old_page)
+
     def _discard_piece_page(self, row, page=None):
         page = page or self._piece_pages.get(row)
         if page is None:
@@ -1772,7 +1808,19 @@ class SDLXLIFFReviewDialog(QDialog):
         editor_height = max(28, int(height or 38))
         editor.setFixedHeight(editor_height)
         editor.setReadOnly(not editable)
-        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        editor.setMinimumWidth(0)
+        editor.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        try:
+            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        except Exception:
+            try:
+                editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+            except Exception:
+                pass
+        try:
+            editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        except Exception:
+            pass
         editor.setToolTip(str(text or ""))
         try:
             editor.viewport().setCursor(Qt.IBeamCursor)
@@ -1976,6 +2024,9 @@ class SDLXLIFFReviewDialog(QDialog):
         label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
+        label.setMinimumWidth(0)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setContextMenuPolicy(Qt.CustomContextMenu)
         label.customContextMenuRequested.connect(
@@ -1985,8 +2036,23 @@ class SDLXLIFFReviewDialog(QDialog):
         return label
 
     def _review_row_height(self, source_text, target_text):
-        longest = max(len(str(source_text or "")), len(str(target_text or "")))
-        extra_lines = max(0, min(6, (longest - 120 + 79) // 80))
+        try:
+            viewport_width = max(700, self.scroll.viewport().width())
+        except Exception:
+            viewport_width = 1200
+        fixed_width = 92 + 180 + 26 + 180 + 20 + 50
+        text_column_width = max(180, (viewport_width - fixed_width) // 2)
+        chars_per_line = max(24, int(text_column_width / 9))
+        max_lines = 1
+        for value in (source_text, target_text):
+            text = str(value or "")
+            if not text:
+                continue
+            wrapped_lines = 0
+            for part in text.splitlines() or [text]:
+                wrapped_lines += max(1, (len(part) + chars_per_line - 1) // chars_per_line)
+            max_lines = max(max_lines, wrapped_lines)
+        extra_lines = max(0, min(6, max_lines - 1))
         return min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
 
     def _add_review_row(self, piece, row_data, idx, max_len, colors):
@@ -2047,7 +2113,7 @@ class SDLXLIFFReviewDialog(QDialog):
         grid.addWidget(target_widget, 0, 5)
         self.rows_layout.addWidget(frame)
 
-    def _render_piece(self, row):
+    def _render_piece(self, row, show_loading=True):
         if row < 0 or row >= len(self.pieces):
             return
         try:
@@ -2092,7 +2158,8 @@ class SDLXLIFFReviewDialog(QDialog):
         if cached_page is not None:
             self._discard_piece_page(row, cached_page)
 
-        self._show_review_loading_page()
+        if show_loading:
+            self._show_review_loading_page()
         page, layout = self._create_review_rows_page()
         self._piece_pages[row] = page
         self._piece_render_complete.discard(row)
@@ -2112,6 +2179,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._active_render_row = None
             self._active_render_page = None
             self.rows_stack.setCurrentWidget(page)
+            self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
             return
@@ -2134,6 +2202,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._active_render_row = None
             self._active_render_page = None
             self.rows_stack.setCurrentWidget(page)
+            self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
             return
@@ -2176,6 +2245,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 layout.addStretch(1)
                 self._piece_render_complete.add(row)
                 self.rows_stack.setCurrentWidget(page)
+                self._finish_seamless_review_swap(page)
                 self._finish_rows_rebuild(final=True)
                 self._restore_review_scroll(row)
                 if self._active_render_page is page:
@@ -2191,6 +2261,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     layout.addStretch(1)
                     self._piece_render_complete.add(row)
                     self.rows_stack.setCurrentWidget(page)
+                    self._finish_seamless_review_swap(page)
                     self._finish_rows_rebuild(final=True)
                     self._restore_review_scroll(row)
                 if self._active_render_page is page:
