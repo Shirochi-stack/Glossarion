@@ -421,6 +421,14 @@ def _adaptive_split_enabled() -> bool:
     return os.getenv("GEMINI_FREE_ADAPTIVE_SPLIT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def _url_load_fallback_enabled() -> bool:
+    return os.getenv("GEMINI_FREE_URL_LOAD_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _html_text_node_transport_enabled() -> bool:
+    return os.getenv("GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _subchunk_prompt_chars() -> int:
     return max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
 
@@ -472,6 +480,12 @@ def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
     if html_match and html_match.start() > 0:
         lead = raw[: html_match.start()].strip()
         if lead.startswith("[") and len(lead) <= 200:
+            return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
+        if len(lead) <= 1500 and re.search(
+            r"\b(translate|translation|return|respond|output|preserve|valid\s+html|html|tags|markdown|code\s+fence)\b",
+            lead,
+            re.IGNORECASE,
+        ):
             return raw[: html_match.start()].rstrip(), raw[html_match.start():].lstrip()
     first_line = re.match(r"^([^\r\n]{1,200})(\r\n|\n|\r)(.*)$", raw, flags=re.DOTALL)
     if first_line:
@@ -746,6 +760,196 @@ def _split_messages_for_search_budget(
     return (result, metadata) if return_metadata else result
 
 
+def _html_text_node_skip_parent_names() -> set:
+    return {"script", "style", "textarea", "noscript"}
+
+
+def _collect_html_text_nodes(soup: Any) -> List[Any]:
+    try:
+        from bs4.element import NavigableString
+    except Exception:
+        return []
+
+    nodes: List[Any] = []
+    for node in soup.find_all(string=True):
+        if not isinstance(node, NavigableString):
+            continue
+        raw = str(node)
+        if not raw.strip():
+            continue
+        parent = getattr(node, "parent", None)
+        parent_name = str(getattr(parent, "name", "") or "").lower()
+        if parent_name in _html_text_node_skip_parent_names():
+            continue
+        nodes.append(node)
+    return nodes
+
+
+def _build_html_text_node_transport(messages: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not _html_text_node_transport_enabled():
+        return None
+
+    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    user_indices = [
+        idx for idx, message in enumerate(source_messages)
+        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
+    ]
+    if not user_indices:
+        return None
+
+    split_idx = user_indices[-1]
+    original_user = source_messages[split_idx]
+    user_text = _content_to_text(original_user.get("content"))
+    prefix, body = _split_user_instruction_prefix(user_text)
+    if _payload_format_for_split(body) != "html":
+        return None
+
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return None
+
+    soup = BeautifulSoup(body, "html.parser")
+    text_nodes = _collect_html_text_nodes(soup)
+    if not text_nodes:
+        return None
+
+    segments: List[tuple[int, str]] = []
+    for index, node in enumerate(text_nodes, start=1):
+        text = re.sub(r"\s+", " ", str(node).strip())
+        if text:
+            segments.append((index, text))
+    if not segments:
+        return None
+
+    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
+    segment_lines = [f"[{index}] {text}" for index, text in segments]
+    instruction_parts = []
+    if prefix.strip():
+        instruction_parts.append(prefix.strip())
+    instruction_parts.append(
+        "Translate each numbered text segment below. Preserve the segment numbers exactly. "
+        "Return only one translated line per segment in the form [number] translated text. "
+        "Do not output HTML tags; tags will be restored automatically."
+    )
+    instruction_parts.append("Text segments:\n" + "\n".join(segment_lines))
+
+    transport_user = dict(original_user)
+    transport_user["content"] = "\n\n".join(instruction_parts)
+    return {
+        "messages": fixed_messages + [transport_user],
+        "html": body,
+        "count": len(segments),
+    }
+
+
+def _strip_response_noise_line(line: str) -> bool:
+    current = str(line or "").strip().lower()
+    return current in {
+        "",
+        "```",
+        "```text",
+        "```html",
+        "```json",
+        "use code with caution.",
+        "use code with caution",
+    }
+
+
+def _parse_html_text_node_translations(content: str, expected_count: int) -> Dict[int, str]:
+    raw = str(content or "").strip()
+    if not raw or expected_count <= 0:
+        return {}
+
+    fenced = re.match(r"^```(?:json|text)?\s*(.*?)\s*```$", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {
+                idx: str(value).strip()
+                for idx, value in enumerate(parsed, start=1)
+                if idx <= expected_count and str(value).strip()
+            }
+        if isinstance(parsed, dict):
+            translations: Dict[int, str] = {}
+            for key, value in parsed.items():
+                try:
+                    idx = int(str(key).strip().strip("[]"))
+                except Exception:
+                    continue
+                if 1 <= idx <= expected_count and str(value).strip():
+                    translations[idx] = str(value).strip()
+            if translations:
+                return translations
+    except Exception:
+        pass
+
+    translations: Dict[int, str] = {}
+    current_idx: Optional[int] = None
+    current_parts: List[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_idx, current_parts
+        if current_idx is not None and current_parts:
+            value = "\n".join(part for part in current_parts if part).strip()
+            if value:
+                translations[current_idx] = value
+        current_idx = None
+        current_parts = []
+
+    marker = re.compile(r"^\s*(?:\[?(\d{1,5})\]?|segment\s+(\d{1,5}))\s*[\]\).:\-–—]*\s*(.*)$", re.IGNORECASE)
+    for line in raw.replace("\r", "\n").split("\n"):
+        if _strip_response_noise_line(line):
+            continue
+        match = marker.match(line)
+        if match:
+            idx = int(match.group(1) or match.group(2))
+            if 1 <= idx <= expected_count:
+                flush_current()
+                current_idx = idx
+                remainder = match.group(3).strip()
+                if remainder:
+                    current_parts.append(remainder)
+                continue
+    flush_current()
+    if translations:
+        return translations
+
+    fallback_lines = [
+        line.strip()
+        for line in raw.replace("\r", "\n").split("\n")
+        if line.strip() and not _strip_response_noise_line(line)
+    ]
+    if len(fallback_lines) >= expected_count:
+        return {idx: fallback_lines[idx - 1] for idx in range(1, expected_count + 1)}
+    return {}
+
+
+def _apply_html_text_node_translations(html_fragment: str, translations: Dict[int, str]) -> str:
+    raw_html = str(html_fragment or "")
+    if not raw_html or not translations:
+        return raw_html
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return raw_html
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+    text_nodes = _collect_html_text_nodes(soup)
+    for index, node in enumerate(text_nodes, start=1):
+        translated = translations.get(index)
+        if translated is None:
+            continue
+        original = str(node)
+        leading = re.match(r"^\s*", original).group(0)
+        trailing = re.search(r"\s*$", original).group(0)
+        node.replace_with(f"{leading}{translated}{trailing}")
+    return str(soup)
+
+
 def _strip_search_prefix(model: str) -> str:
     raw = str(model or "").strip()
     match = re.match(r"^search\d{0,4}/", raw, flags=re.IGNORECASE)
@@ -913,10 +1117,7 @@ def _extract_rendered_content(
         if _html_has_block_structure(answer_text):
             return answer_text
         if answer_text:
-            raise RuntimeError(
-                "Google Search AI Mode returned plain text for an HTML request; "
-                "refusing to accept a response that would destroy BeautifulSoup HTML structure."
-            )
+            return answer_text
 
     text = str(page_data.get("text") or "")
     lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
@@ -931,11 +1132,6 @@ def _extract_rendered_content(
     if not content:
         title = str(page_data.get("title") or "").strip()
         raise RuntimeError(f"Google Search returned an empty rendered page. title={title!r}")
-    if prefer_html and not _html_has_block_structure(content):
-        raise RuntimeError(
-            "Google Search AI Mode returned plain text for an HTML request; "
-            "refusing to accept a response that would destroy BeautifulSoup HTML structure."
-        )
     return content
 
 
@@ -1523,18 +1719,39 @@ def _send_chat_completion_qt_once(
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
     prefer_html = _messages_expect_html_response(messages)
+    html_text_node_transport = _build_html_text_node_transport(messages) if prefer_html else None
+    send_messages = html_text_node_transport["messages"] if html_text_node_transport else messages
+    prompt = _messages_to_prompt(send_messages)
 
     submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", DEFAULT_SUBMIT_MODE).strip().lower() or DEFAULT_SUBMIT_MODE
+    url_load_fallback = False
     if submit_mode in ("url", "query", "q"):
         search_url = _build_search_url(prompt)
         _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=url)")
         _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
-        page_data = load_rendered_page_text(
-            search_url,
-            prompt=prompt,
-            timeout=timeout,
-            user_agent=user_agent,
-        )
+        try:
+            page_data = load_rendered_page_text(
+                search_url,
+                prompt=prompt,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except RuntimeError as exc:
+            if not _url_load_fallback_enabled() or "failed to load" not in str(exc).lower():
+                raise
+            url_load_fallback = True
+            _log(
+                log_fn,
+                "Gemini Free: URL-mode page load failed; retrying through AI Mode UI submit "
+                f"(URL chars: {len(search_url):,})"
+            )
+            search_url = _build_search_base_url()
+            page_data = load_ai_mode_prompt_text(
+                prompt,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+            page_data["submit_mode"] = "ui_fallback"
     else:
         search_url = _build_search_base_url()
         _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=ui)")
@@ -1544,7 +1761,21 @@ def _send_chat_completion_qt_once(
             timeout=timeout,
             user_agent=user_agent,
         )
-    content = _extract_rendered_content(page_data, prompt=prompt, prefer_html=prefer_html)
+    content = _extract_rendered_content(
+        page_data,
+        prompt=prompt,
+        prefer_html=bool(prefer_html and not html_text_node_transport),
+    )
+    html_text_node_count = int(html_text_node_transport.get("count") or 0) if html_text_node_transport else 0
+    html_text_node_translated = 0
+    if html_text_node_transport:
+        translations = _parse_html_text_node_translations(content, html_text_node_count)
+        html_text_node_translated = len(translations)
+        if translations:
+            content = _apply_html_text_node_translations(
+                str(html_text_node_transport.get("html") or ""),
+                translations,
+            )
     return {
         "content": content,
         "finish_reason": "stop",
@@ -1563,6 +1794,10 @@ def _send_chat_completion_qt_once(
             "html_length": page_data.get("htmlLength"),
             "answer_html_length": len(str(page_data.get("answerHtml") or "")),
             "prefer_html_response": prefer_html,
+            "html_text_node_transport": bool(html_text_node_transport),
+            "html_text_node_count": html_text_node_count,
+            "html_text_node_translated": html_text_node_translated,
+            "url_load_fallback": url_load_fallback,
         },
     }
 
