@@ -834,6 +834,11 @@ GLOSSARY_SOURCE_LANGUAGE = None
 GLOSSARY_SOURCE_LANGUAGE_PATH = None
 _GLOSSARY_SOURCE_LANGUAGE_LOADED = False
 _GLOSSARY_SOURCE_LANGUAGE_LOGGED = False
+GLOSSARY_SOURCE_SCRIPT = None
+GLOSSARY_SOURCE_SCRIPT_IS_CJK = None
+_GLOSSARY_SOURCE_SCRIPT_READY = False
+_GLOSSARY_SOURCE_SCRIPT_LOGGED = False
+_glossary_source_script_lock = threading.Lock()
 
 def _ensure_user_message(msgs: List[Dict], fallback_text: str) -> List[Dict]:
     """
@@ -3445,7 +3450,7 @@ def _is_cjk_output_language():
     }
     return lang in cjk_langs
 
-def _detect_dominant_script_glossary(text):
+def _detect_dominant_script_glossary(text, max_chars=10000):
     """Lightweight dominant script detection (same logic as scan_html_folder.detect_dominant_script).
 
     Returns one of: 'cjk', 'japanese', 'korean', 'cyrillic', 'arabic', 'latin', 'other'
@@ -3459,7 +3464,7 @@ def _detect_dominant_script_glossary(text):
         ('latin', [(0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F)]),
     ]
     counts = {k: 0 for k, _ in ranges}
-    for ch in text[:10000]:
+    for ch in text[:max_chars]:
         code = ord(ch)
         for key, spans in ranges:
             if any(start <= code <= end for start, end in spans):
@@ -3468,6 +3473,73 @@ def _detect_dominant_script_glossary(text):
     if not any(counts.values()):
         return 'other'
     return max(counts, key=counts.get)
+
+
+def _glossary_script_is_cjk(script):
+    return script in {'cjk', 'korean', 'japanese'}
+
+
+def _glossary_script_label(script):
+    return {'cjk': 'Chinese/CJK', 'korean': 'Korean', 'japanese': 'Japanese'}.get(script, script or 'other')
+
+
+def _set_glossary_source_script_detection(script, sample_count, sample_kind="raw entries", log=True):
+    global GLOSSARY_SOURCE_SCRIPT, GLOSSARY_SOURCE_SCRIPT_IS_CJK
+    global _GLOSSARY_SOURCE_SCRIPT_READY, _GLOSSARY_SOURCE_SCRIPT_LOGGED
+    with _glossary_source_script_lock:
+        if _GLOSSARY_SOURCE_SCRIPT_READY:
+            return bool(GLOSSARY_SOURCE_SCRIPT_IS_CJK)
+        GLOSSARY_SOURCE_SCRIPT = script
+        GLOSSARY_SOURCE_SCRIPT_IS_CJK = _glossary_script_is_cjk(script)
+        _GLOSSARY_SOURCE_SCRIPT_READY = True
+        is_cjk = bool(GLOSSARY_SOURCE_SCRIPT_IS_CJK)
+        should_log = log and not _GLOSSARY_SOURCE_SCRIPT_LOGGED
+        if should_log:
+            _GLOSSARY_SOURCE_SCRIPT_LOGGED = True
+
+    if should_log:
+        unit = "chapter" if sample_kind == "chapter sample" else "entry"
+        suffix = "" if int(sample_count or 0) == 1 else "s"
+        status = "CJK source confirmed" if is_cjk else "non-CJK source, filter skipped"
+        print(
+            f"[CJK Filter] Auto-detected source script: {_glossary_script_label(script)} "
+            f"({sample_kind}: {int(sample_count or 0)} {unit}{suffix}) -> {status}"
+        )
+    return is_cjk
+
+
+def _get_glossary_source_script_detection():
+    with _glossary_source_script_lock:
+        if not _GLOSSARY_SOURCE_SCRIPT_READY:
+            return None
+        return bool(GLOSSARY_SOURCE_SCRIPT_IS_CJK)
+
+
+def _glossary_cjk_filter_active():
+    return os.getenv('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1' and _is_known_non_cjk_output_language()
+
+
+def _prime_glossary_source_script_from_chapters(chapters_to_process, sample_size=10, chars_per_chapter=5000):
+    if not _glossary_cjk_filter_active():
+        return None
+
+    metadata_language = _get_glossary_source_language_from_metadata()
+    if metadata_language:
+        return _metadata_language_is_cjk(metadata_language)
+
+    sample_parts = []
+    for _idx, chapter_text in list(chapters_to_process or [])[:sample_size]:
+        text = str(chapter_text or "").strip()
+        if text:
+            sample_parts.append(text[:chars_per_chapter])
+
+    if not sample_parts:
+        return None
+
+    sample = "\n\n".join(sample_parts)
+    script = _detect_dominant_script_glossary(sample, max_chars=sample_size * chars_per_chapter)
+    return _set_glossary_source_script_detection(script, len(sample_parts), "chapter sample")
+
 
 def _is_cjk_source_detected(raw_names):
     """Auto-detect whether the source material is CJK by sampling raw_name entries.
@@ -3480,6 +3552,10 @@ def _is_cjk_source_detected(raw_names):
     if metadata_language:
         return _metadata_language_is_cjk(metadata_language)
 
+    cached_script = _get_glossary_source_script_detection()
+    if cached_script is not None:
+        return cached_script
+
     if not raw_names:
         return False
     # Sample up to 50 raw names for speed
@@ -3487,10 +3563,7 @@ def _is_cjk_source_detected(raw_names):
     if not sample.strip():
         return False
     script = _detect_dominant_script_glossary(sample)
-    is_cjk = script in {'cjk', 'korean', 'japanese'}
-    script_label = {'cjk': 'Chinese/CJK', 'korean': 'Korean', 'japanese': 'Japanese'}.get(script, script)
-    print(f"🔍 [CJK Filter] Auto-detected source script: {script_label} (raw sample: {len(raw_names)} entries) → {'✅ CJK source confirmed' if is_cjk else '⏭️ non-CJK source, filter skipped'}")
-    return is_cjk
+    return _set_glossary_source_script_detection(script, len(raw_names), "raw fallback sample")
 
 def _is_known_non_cjk_output_language():
     """Return True only for well-known non-CJK output languages.
@@ -6038,10 +6111,16 @@ def main(log_callback=None, stop_callback=None):
     global _skipped_chapters
     global GLOSSARY_SOURCE_LANGUAGE, GLOSSARY_SOURCE_LANGUAGE_PATH
     global _GLOSSARY_SOURCE_LANGUAGE_LOADED, _GLOSSARY_SOURCE_LANGUAGE_LOGGED
+    global GLOSSARY_SOURCE_SCRIPT, GLOSSARY_SOURCE_SCRIPT_IS_CJK
+    global _GLOSSARY_SOURCE_SCRIPT_READY, _GLOSSARY_SOURCE_SCRIPT_LOGGED
     GLOSSARY_SOURCE_LANGUAGE = None
     GLOSSARY_SOURCE_LANGUAGE_PATH = None
     _GLOSSARY_SOURCE_LANGUAGE_LOADED = False
     _GLOSSARY_SOURCE_LANGUAGE_LOGGED = False
+    GLOSSARY_SOURCE_SCRIPT = None
+    GLOSSARY_SOURCE_SCRIPT_IS_CJK = None
+    _GLOSSARY_SOURCE_SCRIPT_READY = False
+    _GLOSSARY_SOURCE_SCRIPT_LOGGED = False
     
     # Redirect print/logs to callback if provided
     if log_callback:
@@ -6875,6 +6954,8 @@ def main(log_callback=None, stop_callback=None):
     if len(chapters_to_process) < total_chapters:
         print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} chapters")
     
+    _prime_glossary_source_script_from_chapters(chapters_to_process)
+
     # Get chunk timeout (respect RETRY_TIMEOUT toggle)
     retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
     chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
