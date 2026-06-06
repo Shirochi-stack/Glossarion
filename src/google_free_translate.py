@@ -12,6 +12,73 @@ from typing import Optional, Dict, Any
 import urllib.parse
 import random
 
+GOOGLETRANS_AJAX_ENDPOINT = 'https://translate.googleapis.com/translate_a/single'
+GOOGLE_TRANSLATE_CO_IN_ENDPOINT = 'https://translate.google.co.in/translate_a/single'
+
+GOOGLE_TRANSLATE_LANGUAGE_CODES = {
+    "english": "en",
+    "spanish": "es",
+    "french": "fr",
+    "german": "de",
+    "italian": "it",
+    "portuguese": "pt",
+    "russian": "ru",
+    "arabic": "ar",
+    "hindi": "hi",
+    "chinese": "zh-CN",
+    "chinese simplified": "zh-CN",
+    "chinese (simplified)": "zh-CN",
+    "simplified chinese": "zh-CN",
+    "chinese traditional": "zh-TW",
+    "chinese (traditional)": "zh-TW",
+    "traditional chinese": "zh-TW",
+    "japanese": "ja",
+    "korean": "ko",
+    "turkish": "tr",
+    "vietnamese": "vi",
+    "auto": "auto",
+}
+
+GOOGLE_TRANSLATE_CODE_ALIASES = {
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+    "zh-hans": "zh-CN",
+    "zh-tw": "zh-TW",
+    "zh-hant": "zh-TW",
+}
+
+
+def google_translate_language_code(language: Any, default: str = "en") -> str:
+    """Normalize GUI display names or language-code values for Google Translate."""
+    if language is None:
+        return default
+
+    value = str(language).strip()
+    if not value:
+        return default
+
+    normalized = " ".join(value.lower().replace("_", "-").split())
+    normalized_name = normalized.replace("（", "(").replace("）", ")")
+    normalized_name = normalized_name.replace("-", " ")
+
+    if normalized_name in GOOGLE_TRANSLATE_LANGUAGE_CODES:
+        return GOOGLE_TRANSLATE_LANGUAGE_CODES[normalized_name]
+
+    normalized_code = normalized.replace(" ", "-")
+    if normalized_code in GOOGLE_TRANSLATE_CODE_ALIASES:
+        return GOOGLE_TRANSLATE_CODE_ALIASES[normalized_code]
+
+    if 2 <= len(normalized_code) <= 3 and normalized_code.isalpha():
+        return normalized_code
+
+    if len(normalized_code) == 5 and normalized_code[2] == "-":
+        lang, region = normalized_code.split("-", 1)
+        if lang.isalpha() and region.isalpha():
+            return f"{lang}-{region.upper()}"
+
+    return default
+
+
 class GoogleFreeTranslateNew:
     """Google Translate API for free translation using public web endpoints.
     
@@ -20,7 +87,9 @@ class GoogleFreeTranslateNew:
     """
     name = 'Google(Free)New'
     free = True
-    endpoint: str = 'https://translate.googleapis.com/translate_a/single'
+    endpoint: str = GOOGLETRANS_AJAX_ENDPOINT
+    primary_ajax_endpoint: str = GOOGLETRANS_AJAX_ENDPOINT
+    secondary_endpoint: str = GOOGLE_TRANSLATE_CO_IN_ENDPOINT
     
     def __init__(self, source_language: str = "auto", target_language: str = "en", logger=None):
         self.source_language = source_language
@@ -48,24 +117,11 @@ class GoogleFreeTranslateNew:
         
     def _get_source_code(self):
         """Get the source language code."""
-        lang_map = {
-            "zh": "zh-CN", 
-            "ja": "ja", 
-            "ko": "ko", 
-            "en": "en",
-            "auto": "auto"
-        }
-        return lang_map.get(self.source_language, self.source_language)
+        return google_translate_language_code(self.source_language, default=self.source_language)
 
     def _get_target_code(self):
         """Get the target language code."""
-        lang_map = {
-            "en": "en", 
-            "zh": "zh-CN", 
-            "ja": "ja", 
-            "ko": "ko"
-        }
-        return lang_map.get(self.target_language, self.target_language)
+        return google_translate_language_code(self.target_language, default=self.target_language)
 
     def get_headers(self):
         """Get request headers that mimic a browser with random user agent."""
@@ -177,11 +233,12 @@ class GoogleFreeTranslateNew:
             source_lang = self._get_source_code()
             target_lang = self._get_target_code()
             
-            # Try multiple FREE endpoint formats (no credentials needed)
-            # These are public endpoints used by the web interface and mobile apps
-            # Ordered from most reliable to least reliable based on common usage
+            # Try multiple FREE endpoint formats (no credentials needed).
+            # First: py-googletrans-style Ajax API (client=gtx) on translate.googleapis.com.
+            # Second: the requested translate.google.co.in host.
             endpoints_to_try = [
-                'https://translate.googleapis.com/translate_a/single',  # Most reliable public endpoint
+                self.primary_ajax_endpoint,
+                self.secondary_endpoint,
                 'https://translate.google.com/translate_a/single',  # Direct web endpoint
                 'https://clients5.google.com/translate_a/t',  # Mobile client endpoint
                 'https://clients5.google.com/translate_a/single',  # Alternative client5
@@ -203,10 +260,13 @@ class GoogleFreeTranslateNew:
                 if _stop_requested():
                     raise Exception("Operation cancelled")
                 try:
-                    # Check if it's a mobile endpoint (t) or single api
-                    is_mobile = '/t' in endpoint_url
+                    # Check if it's the mobile /translate_a/t API, not merely a translate.* host.
+                    is_mobile = endpoint_url.rstrip('/').endswith('/translate_a/t')
                     
-                    if is_mobile:
+                    if endpoint_url == self.primary_ajax_endpoint:
+                        # Match py-googletrans' tokenless Ajax path: GET /translate_a/single?client=gtx
+                        result = self._translate_via_googletrans_ajax(text, source_lang, target_lang, endpoint_url)
+                    elif is_mobile:
                         # Use mobile client API format
                         result = self._translate_via_mobile_api(text, source_lang, target_lang, endpoint_url)
                     else:
@@ -393,6 +453,17 @@ class GoogleFreeTranslateNew:
             self.logger.error(f"❌ Argos fallback failed: {e}")
             return None
     
+    def _translate_via_googletrans_ajax(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
+        """Translate using the tokenless Ajax route used by py-googletrans."""
+        params = {
+            'client': 'gtx',
+            'sl': source_lang,
+            'tl': target_lang,
+            'dt': 't',
+            'q': text
+        }
+        return self._try_single_api_request(params, endpoint_url, 'gtx', method='get')
+
     def _translate_via_single_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the translate_a/single endpoint (older format)."""
         # Try multiple client types to avoid 403 errors
@@ -429,15 +500,23 @@ class GoogleFreeTranslateNew:
             raise last_error
         return None
     
-    def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
+    def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str, method: str = 'post') -> Optional[Dict[str, Any]]:
         """Try a single API request with given parameters."""
-        # Use POST to avoid URI too long errors
-        response = requests.post(
-            endpoint_url,
-            data=params,
-            headers=self.get_headers(),
-            timeout=10
-        )
+        if method == 'get':
+            response = requests.get(
+                endpoint_url,
+                params=params,
+                headers=self.get_headers(),
+                timeout=10
+            )
+        else:
+            # Use POST to avoid URI too long errors on non-primary fallback endpoints.
+            response = requests.post(
+                endpoint_url,
+                data=params,
+                headers=self.get_headers(),
+                timeout=10
+            )
         
         # Log response details for debugging
         if response.status_code != 200:
@@ -472,7 +551,8 @@ class GoogleFreeTranslateNew:
                     return {
                         'translatedText': translated_text,
                         'detectedSourceLanguage': detected_lang,
-                        'provider': 'google'
+                        'provider': 'google',
+                        'endpoint': endpoint_url
                     }
             
             # Handle standard array format
@@ -493,7 +573,8 @@ class GoogleFreeTranslateNew:
                 return {
                     'translatedText': translated_text,
                     'detectedSourceLanguage': detected_lang,
-                    'provider': 'google'
+                    'provider': 'google',
+                    'endpoint': endpoint_url
                 }
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
             parse_error = f"Parse Error: {type(e).__name__}"
@@ -556,7 +637,8 @@ class GoogleFreeTranslateNew:
                 return {
                     'translatedText': translated_text,
                     'detectedSourceLanguage': source_lang,
-                    'provider': 'google'
+                    'provider': 'google',
+                    'endpoint': endpoint_url
                 }
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
             parse_error = f"Parse Error: {type(e).__name__}"

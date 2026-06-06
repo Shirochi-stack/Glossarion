@@ -27971,7 +27971,7 @@ class UnifiedClient:
         
         try:
             # Import our free Google Translate class
-            from google_free_translate import GoogleFreeTranslateNew
+            from google_free_translate import GoogleFreeTranslateNew, google_translate_language_code
         except ImportError:
             raise UnifiedClientError(
                 "Google Free Translate module not found.\n\n"
@@ -27982,30 +27982,13 @@ class UnifiedClient:
             # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = "auto"  # Auto-detect by default
-            # Determine target language from environment
-            output_lang_name = os.getenv("OUTPUT_LANGUAGE", "English").lower()
-            
-            # Google Translate language code mapping
-            google_lang_map = {
-                "english": "en",
-                "spanish": "es",
-                "french": "fr",
-                "german": "de",
-                "italian": "it",
-                "portuguese": "pt",
-                "russian": "ru",
-                "arabic": "ar",
-                "hindi": "hi",
-                "chinese (simplified)": "zh-CN",
-                "chinese": "zh-CN",
-                "chinese (traditional)": "zh-TW",
-                "japanese": "ja",
-                "korean": "ko",
-                "turkish": "tr",
-                "vietnamese": "vi"
-            }
-            
-            target_lang = google_lang_map.get(output_lang_name, "en")
+            # The GUI writes this from translator_gui.py's target language dropdown.
+            output_lang_name = (
+                os.getenv("OUTPUT_LANGUAGE")
+                or os.getenv("GLOSSARY_TARGET_LANGUAGE")
+                or "English"
+            )
+            target_lang = google_translate_language_code(output_lang_name, default="en")
             
             # Extract only user messages, ignore system prompts completely
             for msg in messages:
