@@ -39,7 +39,7 @@ except ImportError:
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
-from html_tag_entities import unescape_valid_html_tag_entities
+from html_tag_entities import fix_stray_p_gt_artifacts, unescape_valid_html_tag_entities
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
@@ -2750,6 +2750,8 @@ def _process_single_html_file(
                     content_html = html_content
                     content_text = soup.get_text(strip=True)
             content_html = unescape_valid_html_tag_entities(content_html)
+            if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1':
+                content_html = fix_stray_p_gt_artifacts(content_html)
             
             # Extract title (with ignore settings support)
             chapter_title = None

@@ -53,6 +53,7 @@ from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
+from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
@@ -7367,6 +7368,9 @@ class BatchTranslationProcessor:
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and chapter.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
+
+            if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
+                cleaned = _fix_stray_p_gt_artifacts(cleaned)
             
             # Escape non-standard HTML tags (e.g. <concept>, <luck>) to HTML
             # entities so they render as visible text instead of being silently
@@ -8112,6 +8116,9 @@ class BatchTranslationProcessor:
                     cleaned = _fix_empty_attr_tags_bs(cleaned)
                 elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and enhanced_group_check:
                     cleaned = _fix_empty_attr_tags_bs(cleaned)
+
+                if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not enhanced_group_check:
+                    cleaned = _fix_stray_p_gt_artifacts(cleaned)
                 
                 # Escape non-standard HTML tags for BS-mode merged groups
                 if not enhanced_group_check:
@@ -23528,6 +23535,9 @@ def main(log_callback=None, stop_callback=None):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and c.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
+
+            if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not c.get('enhanced_extraction', False):
+                cleaned = _fix_stray_p_gt_artifacts(cleaned)
 
             # Escape non-standard HTML tags (e.g. <concept>, <luck>) to HTML
             # entities so they render as visible text instead of being silently

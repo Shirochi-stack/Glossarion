@@ -2292,6 +2292,49 @@ class RetranslationMixin:
 
     _RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY = "retranslation_show_model_info"
 
+    def _open_or_reuse_sdlxliff_review(self, output_dir, review_path=None, parent=None):
+        try:
+            key = os.path.normcase(os.path.abspath(output_dir))
+        except Exception:
+            key = str(output_dir or "")
+        cache = getattr(self, "_sdlxliff_review_dialog_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_sdlxliff_review_dialog_cache", cache)
+
+        review_dialog = cache.get(key)
+        if review_dialog is not None:
+            try:
+                review_dialog.isVisible()
+            except RuntimeError:
+                review_dialog = None
+                cache.pop(key, None)
+
+        if review_dialog is None:
+            review_dialog = SDLXLIFFReviewDialog(
+                output_dir,
+                review_path,
+                parent or self,
+                config=getattr(self, 'config', {}),
+            )
+            review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+            cache[key] = review_dialog
+
+            def _forget_dialog():
+                try:
+                    cache.pop(key, None)
+                except Exception:
+                    pass
+
+            review_dialog.destroyed.connect(_forget_dialog)
+        else:
+            review_dialog.reopen_for_path(output_dir, review_path)
+
+        review_dialog.show()
+        review_dialog.raise_()
+        review_dialog.activateWindow()
+        return review_dialog
+
     def _get_retranslation_show_model_info_state(self, file_path=None):
         """Return the persisted Show Model Info preference, with live dialog cache first."""
         try:
@@ -4223,50 +4266,6 @@ class RetranslationMixin:
             except Exception:
                 text_analysis_btn.setVisible(False)
 
-        def _open_or_reuse_sdlxliff_review(_output_dir, _review_path, _parent):
-            cache_owner = self
-            try:
-                key = os.path.normcase(os.path.abspath(_output_dir))
-            except Exception:
-                key = str(_output_dir or "")
-            cache = getattr(cache_owner, "_sdlxliff_review_dialog_cache", None)
-            if not isinstance(cache, dict):
-                cache = {}
-                setattr(cache_owner, "_sdlxliff_review_dialog_cache", cache)
-
-            review_dialog = cache.get(key)
-            if review_dialog is not None:
-                try:
-                    review_dialog.isVisible()
-                except RuntimeError:
-                    review_dialog = None
-                    cache.pop(key, None)
-
-            if review_dialog is None:
-                review_dialog = SDLXLIFFReviewDialog(
-                    _output_dir,
-                    _review_path,
-                    _parent or dialog,
-                    config=getattr(self, 'config', {}),
-                )
-                review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-                cache[key] = review_dialog
-
-                def _forget_dialog():
-                    try:
-                        cache.pop(key, None)
-                    except Exception:
-                        pass
-
-                review_dialog.destroyed.connect(_forget_dialog)
-            else:
-                review_dialog.reopen_for_path(_output_dir, _review_path)
-
-            review_dialog.show()
-            review_dialog.raise_()
-            review_dialog.activateWindow()
-            return review_dialog
-
         def _show_text_analysis():
             sidecars = _text_analysis_sidecars()
             if not sidecars:
@@ -4278,7 +4277,7 @@ class RetranslationMixin:
                 )
                 return
             try:
-                _open_or_reuse_sdlxliff_review(output_dir, None, dialog)
+                self._open_or_reuse_sdlxliff_review(output_dir, None, dialog)
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=dialog)
 
@@ -6425,6 +6424,14 @@ class RetranslationMixin:
                     return key, ch
             return None
 
+        def _sdlxliff_sidecar_path_for_output_file(output_file):
+            if not output_file:
+                return None
+            output_name = os.path.basename(str(output_file).replace("\\", "/"))
+            if not output_name:
+                return None
+            return os.path.join(data['output_dir'], "SDLXLIFF", f"{output_name}.sdlxliff")
+
         def _clear_refinement_progress_fields(entry):
             """Remove stale refinement metadata when a chapter is queued again."""
             if not isinstance(entry, dict):
@@ -6726,18 +6733,18 @@ class RetranslationMixin:
             count = len(selected_chapters)
             if count > 10:
                 if missing_count > 0 and existing_count > 0:
-                    confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters\n\nTotal: {count} chapters\n\nContinue?"
+                    confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters and their SDLXLIFF sidecars\n\nTotal: {count} chapters\n\nContinue?"
                 elif missing_count > 0:
                     confirm_msg = f"This will mark {missing_count} missing chapters for translation.\n\nContinue?"
                 else:
-                    confirm_msg = f"This will delete {existing_count} translated chapters and mark them for retranslation.\n\nContinue?"
+                    confirm_msg = f"This will delete {existing_count} translated chapters and their SDLXLIFF sidecars, then mark them for retranslation.\n\nContinue?"
             else:
                 chapters = [f"Ch.{ch['num']}" for ch in selected_chapters]
                 confirm_msg = f"This will process:\n\n{', '.join(chapters)}\n\n"
                 if missing_count > 0:
                     confirm_msg += f"• {missing_count} missing chapters will be marked for translation\n"
                 if existing_count > 0:
-                    confirm_msg += f"• {existing_count} existing chapters will be deleted and retranslated\n"
+                    confirm_msg += f"• {existing_count} existing chapters and SDLXLIFF sidecars will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
             reply = self._styled_msgbox(QMessageBox.Question, data.get('dialog', self), "Confirm Retranslation", confirm_msg,
@@ -6751,6 +6758,8 @@ class RetranslationMixin:
             status_reset_count = 0
             refinement_cleared_count = 0
             merged_cleared_count = 0
+            sidecar_deleted_count = 0
+            sidecar_failed_count = 0
             progress_updated = False
 
             for ch_info in selected_chapters:
@@ -6768,6 +6777,8 @@ class RetranslationMixin:
                     old_status = ch_info['status']
                     
                     if match:
+                        chapter_key, ch_entry = match
+                        target_output_file = ch_entry.get('output_file') or ch_info['output_file']
                         # Delete existing file only after we know which entry to update
                         if output_file:
                             output_path = os.path.join(data['output_dir'], output_file)
@@ -6778,8 +6789,28 @@ class RetranslationMixin:
                                     print(f"Deleted: {output_path}")
                             except Exception as e:
                                 print(f"Failed to delete {output_path}: {e}")
-                        chapter_key, ch_entry = match
-                        target_output_file = ch_entry.get('output_file') or ch_info['output_file']
+
+                        sidecar_paths = []
+                        seen_sidecars = set()
+                        for candidate_output in (output_file, target_output_file):
+                            sidecar_path = _sdlxliff_sidecar_path_for_output_file(candidate_output)
+                            if not sidecar_path:
+                                continue
+                            sidecar_key = os.path.normcase(os.path.abspath(sidecar_path))
+                            if sidecar_key in seen_sidecars:
+                                continue
+                            seen_sidecars.add(sidecar_key)
+                            sidecar_paths.append(sidecar_path)
+                        for sidecar_path in sidecar_paths:
+                            try:
+                                if os.path.exists(sidecar_path):
+                                    os.remove(sidecar_path)
+                                    sidecar_deleted_count += 1
+                                    print(f"Deleted SDLXLIFF sidecar: {sidecar_path}")
+                            except Exception as e:
+                                sidecar_failed_count += 1
+                                print(f"Failed to delete SDLXLIFF sidecar {sidecar_path}: {e}")
+
                         print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
@@ -6824,6 +6855,8 @@ class RetranslationMixin:
             success_parts = []
             if deleted_count > 0:
                 success_parts.append(f"Deleted {deleted_count} files")
+            if sidecar_deleted_count > 0:
+                success_parts.append(f"deleted {sidecar_deleted_count} SDLXLIFF sidecar(s)")
             if marked_count > 0:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
@@ -6832,6 +6865,8 @@ class RetranslationMixin:
                 success_parts.append(f"cleared refinement state for {refinement_cleared_count} chapter(s)")
             if merged_cleared_count > 0:
                 success_parts.append(f"cleared {merged_cleared_count} merged child chapters")
+            if sidecar_failed_count > 0:
+                success_parts.append(f"failed to delete {sidecar_failed_count} SDLXLIFF sidecar(s)")
             
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
@@ -7230,13 +7265,7 @@ class RetranslationMixin:
 
         def _sdlxliff_review_path_for_item(display_info):
             progress_entry = display_info.get('info', {}) or {}
-            output_file = display_info.get('output_file') or progress_entry.get('output_file')
-            if not output_file:
-                return None
-            output_name = os.path.basename(str(output_file).replace("\\", "/"))
-            if not output_name:
-                return None
-            path = os.path.join(data['output_dir'], "SDLXLIFF", f"{output_name}.sdlxliff")
+            path = _sdlxliff_sidecar_path_for_output_file(display_info.get('output_file') or progress_entry.get('output_file'))
             return path if os.path.isfile(path) else None
 
         def _open_sdlxliff_review_for_item(display_info):
@@ -7248,7 +7277,7 @@ class RetranslationMixin:
                 self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
                 return
             try:
-                _open_or_reuse_sdlxliff_review(data['output_dir'], review_path, data.get('dialog', self))
+                self._open_or_reuse_sdlxliff_review(data['output_dir'], review_path, data.get('dialog', self))
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 

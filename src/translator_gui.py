@@ -2308,6 +2308,8 @@ Text to analyze:
         self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
+        self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
+        self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
         self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
         _raw_ns = self.config.get('number_spacing_token_fix', '0')
         if isinstance(_raw_ns, bool):
@@ -2317,6 +2319,8 @@ Text to analyze:
         os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_bs_var else '0'
+        os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.fix_stray_p_gt_epub_var else '0'
+        os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.fix_stray_p_gt_bs_var else '0'
         os.environ['OUTPUT_SDLXLIFF'] = '1' if self.output_sdlxliff_var else '0'
         os.environ['NUMBER_SPACING_TOKEN_FIX'] = self.number_spacing_token_fix_var
         
@@ -15093,6 +15097,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', False) else '0'
                 os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
+                os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.config.get('fix_stray_p_gt_epub', False) else '0'
+                os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.config.get('fix_stray_p_gt_bs', False) else '0'
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
                 # Update temperature and max output tokens from GUI's current values
                 os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
@@ -18121,6 +18127,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
             'OUTPUT_SDLXLIFF': '1' if getattr(self, 'output_sdlxliff_var', True) else '0',
+            'FIX_STRAY_P_GT_EPUB': '1' if getattr(self, 'fix_stray_p_gt_epub_var', self.config.get('fix_stray_p_gt_epub', False)) else '0',
+            'FIX_STRAY_P_GT_BS': '1' if getattr(self, 'fix_stray_p_gt_bs_var', self.config.get('fix_stray_p_gt_bs', False)) else '0',
 
             # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') or output_mode == 'vision' else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
@@ -19989,6 +19997,11 @@ Important rules:
                 self,
                 'remove_duplicate_h1_p_var',
                 self.config.get('remove_duplicate_h1_p', False),
+            ) else "0"
+            os.environ['FIX_STRAY_P_GT_EPUB'] = "1" if getattr(
+                self,
+                'fix_stray_p_gt_epub_var',
+                self.config.get('fix_stray_p_gt_epub', False),
             ) else "0"
 
             # If user selected a CSS override file, pass it to EPUB converter
@@ -26975,6 +26988,8 @@ Important rules:
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
                 ('output_sdlxliff', ['output_sdlxliff_var'], True, bool),
+                ('fix_stray_p_gt_epub', ['fix_stray_p_gt_epub_var'], False, bool),
+                ('fix_stray_p_gt_bs', ['fix_stray_p_gt_bs_var'], False, bool),
 
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),

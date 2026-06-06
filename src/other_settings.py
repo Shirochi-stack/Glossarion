@@ -8471,6 +8471,31 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
 
+    # Fix stray p&gt; text artifacts (EPUB)
+    stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix")
+    try:
+        if not hasattr(self, 'fix_stray_p_gt_epub_var'):
+            self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
+        stray_p_gt_epub_cb.setChecked(bool(self.fix_stray_p_gt_epub_var))
+    except Exception:
+        pass
+    def _on_stray_p_gt_epub_toggle(checked):
+        try:
+            self.fix_stray_p_gt_epub_var = bool(checked)
+            self.config['fix_stray_p_gt_epub'] = self.fix_stray_p_gt_epub_var
+            os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if checked else '0'
+        except Exception:
+            pass
+    stray_p_gt_epub_cb.toggled.connect(_on_stray_p_gt_epub_toggle)
+    stray_p_gt_epub_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(stray_p_gt_epub_cb)
+
+    stray_p_gt_epub_desc = QLabel("Removes stray paragraph-tag crumbs like p&gt; before EPUB compile.")
+    stray_p_gt_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    stray_p_gt_epub_desc.setContentsMargins(20, 0, 0, 5)
+    stray_p_gt_epub_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(stray_p_gt_epub_desc)
+
     # Number Spacing Tokenization Fix
     number_spacing_row = QHBoxLayout()
     number_spacing_row.setContentsMargins(0, 2, 0, 0)
@@ -8800,6 +8825,31 @@ def _create_processing_options_section(self, parent):
     empty_attr_bs_desc.setContentsMargins(20, 0, 0, 3)
     empty_attr_bs_desc.setTextFormat(Qt.RichText)
     bs_opts_v.addWidget(empty_attr_bs_desc)
+
+    # Fix stray p&gt; text artifacts (BeautifulSoup)
+    stray_p_gt_bs_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (BeautifulSoup) - Gemma Token Fix")
+    try:
+        if not hasattr(self, 'fix_stray_p_gt_bs_var'):
+            self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
+        stray_p_gt_bs_cb.setChecked(bool(self.fix_stray_p_gt_bs_var))
+    except Exception:
+        pass
+    def _on_stray_p_gt_bs_toggle(checked):
+        try:
+            self.fix_stray_p_gt_bs_var = bool(checked)
+            self.config['fix_stray_p_gt_bs'] = self.fix_stray_p_gt_bs_var
+            os.environ['FIX_STRAY_P_GT_BS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    stray_p_gt_bs_cb.toggled.connect(_on_stray_p_gt_bs_toggle)
+    stray_p_gt_bs_cb.setContentsMargins(0, 2, 0, 0)
+    bs_opts_v.addWidget(stray_p_gt_bs_cb)
+
+    stray_p_gt_bs_desc = QLabel("Removes stray paragraph-tag crumbs like p&gt; from BeautifulSoup/Standard output.")
+    stray_p_gt_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    stray_p_gt_bs_desc.setContentsMargins(20, 0, 0, 3)
+    stray_p_gt_bs_desc.setTextFormat(Qt.RichText)
+    bs_opts_v.addWidget(stray_p_gt_bs_desc)
 
     # Output SDLXLIFF sidecar files for BeautifulSoup-mode HTML translations
     output_sdlxliff_cb = self._create_styled_checkbox("Output sdlxliff")

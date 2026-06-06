@@ -22,6 +22,7 @@ from _empty_attr_fix import fix_empty_attr_tags
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
+    fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
 )
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -749,6 +750,9 @@ class XHTMLConverter:
                 html_content = html_content.replace(placeholder_lt, '&lt;').replace(placeholder_gt, '&gt;')
 
             html_content = XHTMLConverter.unescape_valid_html_tag_entities(html_content)
+
+            if os.getenv('FIX_STRAY_P_GT_EPUB', '0') == '1':
+                html_content = _fix_stray_p_gt_artifacts(html_content)
             
             # Strip out ANY existing DOCTYPE, XML declaration, or html wrapper
             # We only want the body content
@@ -927,6 +931,9 @@ class XHTMLConverter:
             # EPUB-converter pass all use the same regex.
             if os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1':
                 html_content = fix_empty_attr_tags(html_content)
+
+            if os.getenv('FIX_STRAY_P_GT_EPUB', '0') == '1':
+                html_content = _fix_stray_p_gt_artifacts(html_content)
 
             # Number Spacing Tokenization Fix (also applied during translation).
             # Rerunning it here is idempotent (the (?<![a-zA-Z0-9]) lookbehind
