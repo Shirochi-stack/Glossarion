@@ -7,11 +7,13 @@ import os
 import sys
 import json
 import re
+import html as html_lib
 import copy
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
-                                QScrollArea, QSizePolicy, QMenu, QAbstractItemView)
+                                QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
+                                QSplitter, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
@@ -117,6 +119,640 @@ class AnimatedRefreshButton(QPushButton):
             self.style().polish(self)
             
             self.update()
+
+
+class SDLXLIFFReviewDialog(QDialog):
+    """Internal source/output reviewer for generated SDLXLIFF HTML sidecars."""
+
+    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
+    THEME = {
+        "bg": "#1e1e1e",
+        "panel": "#2d2d2d",
+        "panel_alt": "#242424",
+        "border": "#4a5568",
+        "accent": "#5a9fd4",
+        "info": "#17a2b8",
+        "success": "#28a745",
+        "warning": "#d39e00",
+        "danger": "#dc3545",
+        "text": "#ffffff",
+        "muted": "#94a3b8",
+    }
+
+    def __init__(self, output_dir, current_path=None, parent=None):
+        super().__init__(parent)
+        self.output_dir = output_dir
+        self.current_path = os.path.abspath(current_path) if current_path else ""
+        self.pieces = self._load_pieces()
+        self._pending_target_edits = {}
+        self._edit_save_timer = QTimer(self)
+        self._edit_save_timer.setSingleShot(True)
+        self._edit_save_timer.timeout.connect(self._flush_target_edits)
+
+        self.setWindowTitle("SDLXLIFF Source -> Output Review")
+        self.setObjectName("SDLXLIFFReviewDialog")
+        self.setWindowModality(Qt.NonModal)
+        self.resize(1500, 900)
+        self._apply_translator_theme(parent)
+        try:
+            if parent is not None and not parent.windowIcon().isNull():
+                self.setWindowIcon(parent.windowIcon())
+        except Exception:
+            pass
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(splitter, 1)
+
+        self.piece_list = QListWidget()
+        self.piece_list.setObjectName("SdlReviewPieceList")
+        self.piece_list.setMinimumWidth(260)
+        self.piece_list.setMaximumWidth(360)
+        splitter.addWidget(self.piece_list)
+
+        detail = QWidget()
+        detail.setObjectName("SdlReviewDetail")
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(14, 0, 0, 0)
+        detail_layout.setSpacing(8)
+        splitter.addWidget(detail)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self.header_label = QLabel()
+        self.header_label.setTextFormat(Qt.PlainText)
+        self.header_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {self.THEME['accent']};")
+        detail_layout.addWidget(self.header_label)
+
+        legend = QLabel("green ok   yellow density-off   red dropped/added/empty/untranslated      left = source   right = output   bar width ~= length")
+        legend.setTextFormat(Qt.PlainText)
+        legend.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt;")
+        detail_layout.addWidget(legend)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("SdlReviewScroll")
+        self.scroll.setWidgetResizable(True)
+        self.rows_widget = QWidget()
+        self.rows_widget.setObjectName("SdlReviewRows")
+        self.rows_layout = QVBoxLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(4)
+        self.scroll.setWidget(self.rows_widget)
+        detail_layout.addWidget(self.scroll, 1)
+
+        close_row = QHBoxLayout()
+        self.save_status_label = QLabel("")
+        self.save_status_label.setTextFormat(Qt.PlainText)
+        self.save_status_label.setStyleSheet(f"color: {self.THEME['muted']}; background: transparent;")
+        close_row.addWidget(self.save_status_label)
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        close_row.addWidget(close_btn)
+        main_layout.addLayout(close_row)
+
+        self._populate_piece_list()
+
+    def _apply_translator_theme(self, parent):
+        base_style = ""
+        try:
+            if parent is not None and hasattr(parent, "styleSheet"):
+                base_style = parent.styleSheet() or ""
+        except Exception:
+            base_style = ""
+        if not base_style:
+            try:
+                from PySide6.QtWidgets import QApplication
+                app = QApplication.instance()
+                active = app.activeWindow() if app else None
+                if active is not None and hasattr(active, "styleSheet"):
+                    base_style = active.styleSheet() or ""
+            except Exception:
+                base_style = ""
+
+        fallback = f"""
+            QWidget {{
+                background-color: {self.THEME['bg']};
+                color: {self.THEME['text']};
+            }}
+            QLabel {{
+                color: {self.THEME['text']};
+                background-color: transparent;
+            }}
+            QPushButton {{
+                background-color: #3d3d3d;
+                color: {self.THEME['text']};
+                border: 1px solid {self.THEME['border']};
+                border-radius: 3px;
+                padding: 5px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: #4d4d4d;
+                border-color: {self.THEME['accent']};
+            }}
+        """
+        local = f"""
+            QDialog#SDLXLIFFReviewDialog {{
+                background-color: {self.THEME['bg']};
+                color: {self.THEME['text']};
+            }}
+            QWidget#SdlReviewDetail, QWidget#SdlReviewRows {{
+                background-color: {self.THEME['bg']};
+            }}
+            QListWidget#SdlReviewPieceList {{
+                background-color: {self.THEME['panel']};
+                color: {self.THEME['text']};
+                border: 1px solid {self.THEME['border']};
+                border-radius: 3px;
+                padding: 4px;
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 10pt;
+            }}
+            QListWidget#SdlReviewPieceList::item {{
+                padding: 7px 8px;
+                border-radius: 3px;
+            }}
+            QListWidget#SdlReviewPieceList::item:selected {{
+                background-color: {self.THEME['accent']};
+                color: {self.THEME['text']};
+            }}
+            QScrollArea#SdlReviewScroll {{
+                border: 1px solid {self.THEME['border']};
+                border-radius: 3px;
+                background-color: {self.THEME['bg']};
+            }}
+            QScrollArea#SdlReviewScroll > QWidget > QWidget {{
+                background-color: {self.THEME['bg']};
+            }}
+            QPlainTextEdit#SdlReviewTargetEdit {{
+                background-color: {self.THEME['panel_alt']};
+                color: {self.THEME['text']};
+                border: 1px solid {self.THEME['border']};
+                border-radius: 3px;
+                padding: 4px;
+                selection-background-color: {self.THEME['accent']};
+            }}
+            QPlainTextEdit#SdlReviewTargetEdit:focus {{
+                border-color: {self.THEME['accent']};
+            }}
+        """
+        self.setStyleSheet((base_style or fallback) + "\n" + local)
+
+    @staticmethod
+    def _local_name(tag):
+        return str(tag).rsplit("}", 1)[-1].lower()
+
+    @staticmethod
+    def _inner_xml_or_text(element):
+        if element is None:
+            return ""
+        if len(list(element)) == 0:
+            return element.text or ""
+        parts = []
+        if element.text:
+            parts.append(element.text)
+        for child in list(element):
+            parts.append(ET.tostring(child, encoding="unicode"))
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    def _read_sdlxliff_html_pair(self, path):
+        source_parts = []
+        target_parts = []
+        root = ET.parse(path).getroot()
+        for element in root.iter():
+            name = self._local_name(element.tag)
+            if name == "source":
+                source_parts.append(self._inner_xml_or_text(element))
+            elif name == "target":
+                target_parts.append(self._inner_xml_or_text(element))
+        return "\n".join(source_parts), "\n".join(target_parts)
+
+    def _extract_text_units(self, html_text):
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            return []
+        text = html_lib.unescape(str(html_text or ""))
+        soup = BeautifulSoup(text, "html.parser")
+        units = []
+        for index, tag in enumerate(soup.find_all(self.TEXT_TAGS)):
+            value = tag.get_text(" ", strip=True)
+            if not value:
+                continue
+            units.append({
+                "index": index,
+                "tag": tag.name.lower(),
+                "text": value,
+            })
+        return units
+
+    def _row_status(self, source_text, target_text, source_missing=False, target_missing=False):
+        source_text = str(source_text or "").strip()
+        target_text = str(target_text or "").strip()
+        if source_missing or target_missing:
+            return "red", "dropped/added"
+        if not target_text:
+            return "red", "empty"
+        if source_text and source_text == target_text:
+            return "red", "untranslated"
+        if source_text:
+            ratio = len(target_text) / max(1, len(source_text))
+            if ratio < 0.25 or ratio > 3.5:
+                return "yellow", "density-off"
+        return "green", "ok"
+
+    def _build_piece(self, path, index):
+        try:
+            source_html, target_html = self._read_sdlxliff_html_pair(path)
+            source_units = self._extract_text_units(source_html)
+            target_units = self._extract_text_units(target_html)
+            rows = []
+            max_count = max(len(source_units), len(target_units))
+            red_count = 0
+            yellow_count = 0
+            for row_idx in range(max_count):
+                src = source_units[row_idx] if row_idx < len(source_units) else None
+                tgt = target_units[row_idx] if row_idx < len(target_units) else None
+                status, reason = self._row_status(
+                    src.get("text") if src else "",
+                    tgt.get("text") if tgt else "",
+                    source_missing=src is None,
+                    target_missing=tgt is None,
+                )
+                if src is not None and tgt is not None and src.get("tag") != tgt.get("tag"):
+                    status, reason = "red", "tag mismatch"
+                if status == "red":
+                    red_count += 1
+                elif status == "yellow":
+                    yellow_count += 1
+                rows.append({
+                    "row_index": row_idx,
+                    "source_tag": src.get("tag", "") if src else "",
+                    "source": src.get("text", "") if src else "",
+                    "source_index": src.get("index") if src else None,
+                    "target_tag": tgt.get("tag", "") if tgt else "",
+                    "target": tgt.get("text", "") if tgt else "",
+                    "target_index": tgt.get("index") if tgt else None,
+                    "status": status,
+                    "reason": reason,
+                })
+            count_ratio = (len(target_units) / len(source_units)) if source_units else (1.0 if not target_units else 0.0)
+            return {
+                "path": path,
+                "index": index,
+                "name": os.path.basename(path),
+                "source_html": source_html,
+                "target_html": target_html,
+                "source_count": len(source_units),
+                "target_count": len(target_units),
+                "count_ratio": count_ratio,
+                "red_count": red_count,
+                "yellow_count": yellow_count,
+                "mismatch": len(source_units) != len(target_units) or red_count > 0,
+                "rows": rows,
+            }
+        except Exception as exc:
+            return {
+                "path": path,
+                "index": index,
+                "name": os.path.basename(path),
+                "source_count": 0,
+                "target_count": 0,
+                "count_ratio": 0.0,
+                "red_count": 1,
+                "yellow_count": 0,
+                "mismatch": True,
+                "error": str(exc),
+                "rows": [],
+            }
+
+    def _load_pieces(self):
+        sidecar_dir = os.path.join(self.output_dir or "", "SDLXLIFF")
+        paths = []
+        try:
+            if os.path.isdir(sidecar_dir):
+                for fname in sorted(os.listdir(sidecar_dir)):
+                    if fname.lower().endswith(".sdlxliff"):
+                        paths.append(os.path.join(sidecar_dir, fname))
+        except Exception:
+            paths = []
+        if self.current_path and os.path.isfile(self.current_path):
+            current_norm = os.path.normcase(os.path.abspath(self.current_path))
+            if all(os.path.normcase(os.path.abspath(path)) != current_norm for path in paths):
+                paths.insert(0, self.current_path)
+        return [self._build_piece(path, idx) for idx, path in enumerate(paths)]
+
+    def _populate_piece_list(self):
+        self.piece_list.clear()
+        selected_row = 0
+        current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
+        for row, piece in enumerate(self.pieces):
+            label = self._output_name_for_piece(piece)
+            item = QListWidgetItem(label)
+            item.setToolTip(
+                f"{label}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+            )
+            item.setData(Qt.UserRole, row)
+            if piece["mismatch"]:
+                item.setForeground(QColor(self.THEME["danger"]))
+            elif piece["yellow_count"]:
+                item.setForeground(QColor(self.THEME["warning"]))
+            else:
+                item.setForeground(QColor(self.THEME["success"]))
+            self.piece_list.addItem(item)
+            if current_norm and os.path.normcase(os.path.abspath(piece["path"])) == current_norm:
+                selected_row = row
+
+        self.piece_list.currentRowChanged.connect(self._render_piece)
+        if self.pieces:
+            self.piece_list.setCurrentRow(selected_row)
+            self._render_piece(selected_row)
+        else:
+            self.header_label.setText("No SDLXLIFF review files found")
+
+    def _clear_rows(self):
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _tag_label(self, source_tag, target_tag, status):
+        source_tag = str(source_tag or "").strip()
+        target_tag = str(target_tag or "").strip()
+        if source_tag and target_tag:
+            text = source_tag if source_tag == target_tag else f"{source_tag} -> {target_tag}"
+        elif source_tag:
+            text = f"{source_tag} -> missing"
+        elif target_tag:
+            text = f"+ {target_tag}"
+        else:
+            text = "-"
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedWidth(92)
+        color = {
+            "green": self.THEME["success"],
+            "yellow": self.THEME["warning"],
+            "red": self.THEME["danger"],
+        }.get(status, self.THEME["muted"])
+        label.setStyleSheet(
+            f"color: {color}; background: transparent; font: 9pt Consolas, 'Courier New', monospace;"
+        )
+        return label
+
+    def _target_editor(self, piece_index, row_index, text, editable=True):
+        editor = QPlainTextEdit(str(text or ""))
+        editor.setObjectName("SdlReviewTargetEdit")
+        editor.setFrameShape(QFrame.NoFrame)
+        editor.setTabChangesFocus(True)
+        editor.setMinimumHeight(38)
+        editor.setMaximumHeight(92)
+        editor.setReadOnly(not editable)
+        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        if editable:
+            editor.textChanged.connect(
+                lambda pi=piece_index, ri=row_index, ed=editor: self._schedule_target_edit(pi, ri, ed.toPlainText())
+            )
+        return editor
+
+    def _schedule_target_edit(self, piece_index, row_index, text):
+        self._pending_target_edits[(piece_index, row_index)] = text
+        self.save_status_label.setText("Unsaved")
+        self._edit_save_timer.start(500)
+
+    def _flush_target_edits(self):
+        pending = dict(self._pending_target_edits)
+        self._pending_target_edits.clear()
+        if not pending:
+            return
+        saved = 0
+        try:
+            for (piece_index, row_index), text in pending.items():
+                if self._apply_target_edit(piece_index, row_index, text):
+                    saved += 1
+            self.save_status_label.setText("Saved" if saved else "")
+        except Exception as exc:
+            self.save_status_label.setText(f"Save failed: {exc}")
+
+    def _output_name_for_piece(self, piece):
+        sidecar_name = os.path.basename(str(piece.get("path") or piece.get("name") or ""))
+        suffix = ".sdlxliff"
+        if sidecar_name.lower().endswith(suffix):
+            output_name = sidecar_name[:-len(suffix)]
+        else:
+            output_name = sidecar_name
+        return output_name or piece.get("name") or "SDLXLIFF output"
+
+    def _output_path_for_piece(self, piece):
+        output_name = self._output_name_for_piece(piece)
+        if not output_name:
+            return None
+        return os.path.join(self.output_dir or "", output_name)
+
+    def _target_html_with_edit(self, piece, row_data, text):
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            return piece.get("target_html", "")
+        target_html = html_lib.unescape(str(piece.get("target_html") or ""))
+        soup = BeautifulSoup(target_html, "html.parser")
+        tag_nodes = list(soup.find_all(self.TEXT_TAGS))
+        target_index = row_data.get("target_index")
+        node = None
+        if isinstance(target_index, int) and 0 <= target_index < len(tag_nodes):
+            node = tag_nodes[target_index]
+        elif row_data.get("target_tag"):
+            editable_nodes = [tag for tag in tag_nodes if tag.get_text(" ", strip=True)]
+            fallback_index = min(len(editable_nodes) - 1, max(0, int(row_data.get("row_index", 0)))) if editable_nodes else -1
+            if fallback_index >= 0:
+                node = editable_nodes[fallback_index]
+
+        if node is None:
+            tag_name = row_data.get("source_tag") or row_data.get("target_tag") or "p"
+            node = soup.new_tag(tag_name)
+            if soup.body:
+                soup.body.append(node)
+            else:
+                soup.append(node)
+            row_data["target_tag"] = tag_name
+            row_data["target_index"] = len(list(soup.find_all(self.TEXT_TAGS))) - 1
+
+        node.clear()
+        node.append(str(text or ""))
+        return str(soup)
+
+    def _write_piece_target_html(self, piece, target_html):
+        sidecar_path = piece.get("path")
+        if not sidecar_path:
+            return
+        tree = ET.parse(sidecar_path)
+        root = tree.getroot()
+        target_element = None
+        for element in root.iter():
+            if self._local_name(element.tag) == "target":
+                target_element = element
+                break
+        if target_element is None:
+            raise ValueError("SDLXLIFF target element not found")
+        for child in list(target_element):
+            target_element.remove(child)
+        target_element.text = target_html
+        try:
+            ET.register_namespace("", "urn:oasis:names:tc:xliff:document:1.2")
+            ET.register_namespace("sdl", "http://sdl.com/FileTypes/SdlXliff/1.0")
+        except Exception:
+            pass
+        tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
+
+        output_path = self._output_path_for_piece(piece)
+        if output_path:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(target_html)
+
+    def _apply_target_edit(self, piece_index, row_index, text):
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return False
+        piece = self.pieces[piece_index]
+        rows = piece.get("rows") or []
+        if row_index < 0 or row_index >= len(rows):
+            return False
+        row_data = rows[row_index]
+        row_data["row_index"] = row_index
+        target_html = self._target_html_with_edit(piece, row_data, text)
+        self._write_piece_target_html(piece, target_html)
+        piece["target_html"] = target_html
+        row_data["target"] = str(text or "")
+        status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
+        if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
+            status, reason = "red", "tag mismatch"
+        row_data["status"] = status
+        row_data["reason"] = reason
+        return True
+
+    def closeEvent(self, event):
+        try:
+            if self._edit_save_timer.isActive():
+                self._edit_save_timer.stop()
+            self._flush_target_edits()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _bar_widget(self, length, max_length, color, align_right=False):
+        container = QWidget()
+        container.setObjectName("SdlReviewBarContainer")
+        container.setFixedWidth(180)
+        container.setStyleSheet("QWidget#SdlReviewBarContainer { background: transparent; }")
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        width = max(8, min(170, int(170 * (length / max(1, max_length)))))
+        bar = QFrame()
+        bar.setObjectName("SdlReviewLengthBar")
+        bar.setFixedSize(width, 10)
+        bar.setStyleSheet(f"QFrame#SdlReviewLengthBar {{ background-color: {color}; border-radius: 5px; }}")
+        if align_right:
+            layout.addStretch(1)
+            layout.addWidget(bar)
+        else:
+            layout.addWidget(bar)
+            layout.addStretch(1)
+        return container
+
+    def _text_label(self, text, missing=False):
+        label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
+        return label
+
+    def _render_piece(self, row):
+        if row < 0 or row >= len(self.pieces):
+            return
+        piece = self.pieces[row]
+        status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
+        flagged = piece["red_count"] + piece["yellow_count"]
+        output_name = self._output_name_for_piece(piece)
+        self.header_label.setText(
+            f"{output_name}  -  source {piece['source_count']} text units "
+            f"- output {piece['target_count']} - {status_text} - {flagged} flagged rows "
+            f"(ratio ~= {piece['count_ratio']:.2f})"
+        )
+        self._clear_rows()
+
+        if piece.get("error"):
+            error = QLabel(f"Could not parse SDLXLIFF:\n{piece['error']}")
+            error.setTextFormat(Qt.PlainText)
+            error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+            self.rows_layout.addWidget(error)
+            self.rows_layout.addStretch(1)
+            return
+
+        rows = piece.get("rows") or []
+        max_len = max([len(r.get("source", "")) for r in rows] + [len(r.get("target", "")) for r in rows] + [1])
+        colors = {
+            "green": (self.THEME["panel"], self.THEME["accent"], self.THEME["info"], self.THEME["success"], self.THEME["border"]),
+            "yellow": ("#3d3320", self.THEME["accent"], self.THEME["warning"], self.THEME["warning"], self.THEME["warning"]),
+            "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
+        }
+
+        for idx, row_data in enumerate(rows):
+            bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
+            frame = QFrame()
+            frame.setObjectName("SdlReviewRow")
+            frame.setStyleSheet(
+                f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
+            )
+            grid = QGridLayout(frame)
+            grid.setContentsMargins(10, 6, 10, 6)
+            grid.setHorizontalSpacing(10)
+            grid.setColumnStretch(0, 0)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 0)
+            grid.setColumnStretch(3, 0)
+            grid.setColumnStretch(4, 0)
+            grid.setColumnStretch(5, 1)
+            grid.setColumnMinimumWidth(0, 92)
+            grid.setColumnMinimumWidth(2, 180)
+            grid.setColumnMinimumWidth(3, 26)
+            grid.setColumnMinimumWidth(4, 180)
+
+            source_text = row_data.get("source", "")
+            target_text = row_data.get("target", "")
+            source_missing = not row_data.get("source_tag")
+            target_missing = not row_data.get("target_tag")
+
+            tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
+            tag_label.setToolTip(row_data.get("reason", ""))
+            source_label = self._text_label(source_text, missing=source_missing)
+            target_editor = self._target_editor(piece["index"], idx, target_text, editable=not source_missing or not target_missing)
+
+            dot = QLabel("●")
+            dot.setAlignment(Qt.AlignCenter)
+            dot.setStyleSheet(f"color: {dot_color}; background: transparent; font-size: 13pt;")
+            dot.setToolTip(row_data.get("reason", ""))
+
+            grid.addWidget(tag_label, 0, 0)
+            grid.addWidget(source_label, 0, 1)
+            grid.addWidget(self._bar_widget(len(source_text), max_len, source_bar, align_right=True), 0, 2)
+            grid.addWidget(dot, 0, 3)
+            grid.addWidget(self._bar_widget(len(target_text), max_len, target_bar, align_right=False), 0, 4)
+            grid.addWidget(target_editor, 0, 5)
+            self.rows_layout.addWidget(frame)
+
+        if not rows:
+            empty = QLabel("No p/h1-h6 text units found in this sidecar.")
+            empty.setTextFormat(Qt.PlainText)
+            empty.setStyleSheet(f"color: {self.THEME['muted']}; padding: 12px;")
+            self.rows_layout.addWidget(empty)
+        self.rows_layout.addStretch(1)
 
 
 class RetranslationMixin:
@@ -4759,7 +5395,21 @@ class RetranslationMixin:
                 self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
                 return
             try:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(review_path))
+                dialog = SDLXLIFFReviewDialog(data['output_dir'], review_path, data.get('dialog', self))
+                dialogs = getattr(self, '_sdlxliff_review_dialogs', [])
+                dialogs.append(dialog)
+                self._sdlxliff_review_dialogs = dialogs
+
+                def _forget_dialog():
+                    try:
+                        self._sdlxliff_review_dialogs.remove(dialog)
+                    except Exception:
+                        pass
+
+                dialog.destroyed.connect(_forget_dialog)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 
