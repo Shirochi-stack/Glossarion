@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap, QPainter
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics
 from PySide6.QtCore import QObject, Signal
 
 
@@ -3725,6 +3725,23 @@ def _create_response_handling_section(self, parent):
         except (TypeError, ValueError):
             return str(value)
 
+    gemini_chunk_label_texts = (
+        "Prompt target chars:",
+        "Safety chars:",
+        "Concurrency override:",
+        "Timeout (s):",
+        "HTML splitter:",
+        "URL limit chars:",
+        "Min body chars:",
+        "Start delay (s):",
+        "Payload:",
+        "Balancer:",
+    )
+    gemini_chunk_metrics = QFontMetrics(QLabel().font())
+    gemini_chunk_label_width = max(gemini_chunk_metrics.horizontalAdvance(text) for text in gemini_chunk_label_texts) + 6
+    gemini_chunk_input_width = 112
+    gemini_chunk_control_width = gemini_chunk_label_width + 4 + gemini_chunk_input_width
+
     def _make_gemini_checkbox(label_text, attr_name, checkbox_attr, config_key, env_key, default, tooltip):
         current_value = _gemini_bool_setting(config_key, env_key, default)
         setattr(self, attr_name, current_value)
@@ -3752,11 +3769,14 @@ def _create_response_handling_section(self, parent):
         os.environ[env_key] = _gemini_env_number(current_value, decimals)
 
         control = QWidget()
+        control.setFixedWidth(gemini_chunk_control_width)
         control_h = QHBoxLayout(control)
         control_h.setContentsMargins(0, 0, 0, 0)
         control_h.setSpacing(4)
 
         label = QLabel(label_text)
+        label.setFixedWidth(gemini_chunk_label_width)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         label.setToolTip(tooltip)
         label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         control_h.addWidget(label)
@@ -3767,7 +3787,7 @@ def _create_response_handling_section(self, parent):
         spin.setSingleStep(float(step))
         spin.setDecimals(int(decimals))
         spin.setValue(float(current_value))
-        spin.setFixedSize(112, 26)
+        spin.setFixedSize(gemini_chunk_input_width, 26)
         spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         spin.setFocusPolicy(Qt.StrongFocus)
         value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
@@ -3805,11 +3825,14 @@ def _create_response_handling_section(self, parent):
         os.environ[env_key] = current_value
 
         control = QWidget()
+        control.setFixedWidth(gemini_chunk_control_width)
         control_h = QHBoxLayout(control)
         control_h.setContentsMargins(0, 0, 0, 0)
         control_h.setSpacing(4)
 
         label = QLabel(label_text)
+        label.setFixedWidth(gemini_chunk_label_width)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         label.setToolTip(tooltip)
         label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         control_h.addWidget(label)
@@ -3817,7 +3840,7 @@ def _create_response_handling_section(self, parent):
         combo = QComboBox()
         combo.addItems([str(choice).strip().lower() for choice in choices])
         combo.setCurrentText(current_value)
-        combo.setFixedSize(112, 26)
+        combo.setFixedSize(gemini_chunk_input_width, 26)
         combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         combo.setToolTip(tooltip)
 
@@ -3991,7 +4014,7 @@ def _create_response_handling_section(self, parent):
         ["balanced", "greedy"],
         "balanced spreads work evenly across the planned chunks; greedy keeps the old first-fit packing.",
     ), 4, 1, Qt.AlignLeft)
-    section_v.addWidget(gemini_controls)
+    section_v.addWidget(gemini_controls, 0, Qt.AlignLeft)
 
 
     # Parallel Extraction
