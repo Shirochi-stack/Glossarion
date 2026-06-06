@@ -165,7 +165,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._active_render_row = None
         self._active_render_page = None
         self._sdl_review_loading_icon_timer = None
-        self._review_loading_minimum_ms = 90
+        self._sdl_review_loading_icon = None
+        self._sdl_review_loading_original_pixmap = None
+        self._sdl_review_loading_angle = 0
+        self._review_loading_minimum_ms = 140
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -383,23 +386,23 @@ class SDLXLIFFReviewDialog(QDialog):
         loading_layout.addStretch(1)
 
         try:
-            from spinning import animate_icon, create_icon_label
+            try:
+                from spinning import create_icon_label
+            except Exception:
+                from .spinning import create_icon_label
             base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
             loading_icon = create_icon_label(52, base_dir)
             loading_icon.setFixedSize(52, 52)
             loading_layout.addWidget(loading_icon, 0, Qt.AlignCenter)
+            self._sdl_review_loading_icon = loading_icon
+            pixmap = loading_icon.pixmap()
+            if pixmap is not None and not pixmap.isNull():
+                self._sdl_review_loading_original_pixmap = pixmap.copy()
 
             spin_timer = QTimer(self)
-
-            def _spin_loading_icon():
-                try:
-                    animate_icon(loading_icon)
-                except RuntimeError:
-                    spin_timer.stop()
-
-            spin_timer.timeout.connect(_spin_loading_icon)
-            spin_timer.start(540)
-            QTimer.singleShot(0, _spin_loading_icon)
+            spin_timer.timeout.connect(self._spin_review_loading_icon)
+            spin_timer.start(45)
+            QTimer.singleShot(0, self._spin_review_loading_icon)
             self._sdl_review_loading_icon_timer = spin_timer
         except Exception:
             pass
@@ -412,6 +415,32 @@ class SDLXLIFFReviewDialog(QDialog):
         loading_layout.addWidget(loading_label)
         loading_layout.addStretch(1)
         return loading_widget
+
+    def _spin_review_loading_icon(self):
+        icon = getattr(self, "_sdl_review_loading_icon", None)
+        original = getattr(self, "_sdl_review_loading_original_pixmap", None)
+        if icon is None or original is None or original.isNull():
+            return
+        try:
+            self._sdl_review_loading_angle = (self._sdl_review_loading_angle + 24) % 360
+            transform = QTransform().rotate(self._sdl_review_loading_angle)
+            rotated = original.transformed(transform, Qt.SmoothTransformation)
+            if rotated.isNull():
+                return
+            scaled = rotated.scaled(
+                icon.size().width(),
+                icon.size().height(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            icon.setPixmap(scaled)
+            icon.update()
+        except RuntimeError:
+            timer = getattr(self, "_sdl_review_loading_icon_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
 
     @staticmethod
     def _local_name(tag):
@@ -1278,6 +1307,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def closeEvent(self, event):
         try:
             self._commit_active_target_editor()
+            self._render_token += 1
             self._cancel_active_review_render()
             if self._sdl_review_loading_icon_timer is not None:
                 self._sdl_review_loading_icon_timer.stop()
@@ -1482,7 +1512,7 @@ class SDLXLIFFReviewDialog(QDialog):
             return
 
         row_state = {"idx": 0}
-        batch_size = 256
+        batch_size = 96
 
         def _start_render_stream():
             if render_token != self._render_token:
@@ -1491,68 +1521,52 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._active_render_row = None
                     self._active_render_page = None
                 return
-            timer = QTimer(self)
-
-            def _render_next_batch():
-                if render_token != self._render_token:
-                    timer.stop()
-                    timer.deleteLater()
-                    if self._active_render_timer is timer:
-                        self._active_render_timer = None
-                    self._discard_piece_page(row, page)
-                    if self._active_render_page is page:
-                        self._active_render_row = None
-                        self._active_render_page = None
-                    return
-                try:
+            try:
+                from PySide6.QtWidgets import QApplication
+                while row_state["idx"] < len(rows):
+                    if render_token != self._render_token:
+                        self._discard_piece_page(row, page)
+                        if self._active_render_page is page:
+                            self._active_render_row = None
+                            self._active_render_page = None
+                        return
                     self.rows_widget = page
                     self.rows_layout = layout
-                    self._set_rows_rebuild_active(True)
                     start = row_state["idx"]
                     end = min(len(rows), start + batch_size)
                     for idx in range(start, end):
                         self._add_review_row(piece, rows[idx], idx, max_len, colors)
                     row_state["idx"] = end
-                except Exception as exc:
-                    timer.stop()
-                    timer.deleteLater()
-                    if render_token == self._render_token:
-                        self._clear_rows(layout)
-                        error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
-                        error.setTextFormat(Qt.PlainText)
-                        error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
-                        layout.addWidget(error)
-                        layout.addStretch(1)
-                        self._piece_render_complete.add(row)
-                        self.rows_stack.setCurrentWidget(page)
-                        self._finish_rows_rebuild(final=True)
-                    if self._active_render_timer is timer:
-                        self._active_render_timer = None
+                    self._spin_review_loading_icon()
+                    QApplication.processEvents(QEventLoop.AllEvents, 10)
+
+                if render_token != self._render_token:
+                    self._discard_piece_page(row, page)
                     if self._active_render_page is page:
                         self._active_render_row = None
                         self._active_render_page = None
                     return
-                if end >= len(rows):
-                    timer.stop()
-                    timer.deleteLater()
-                    if render_token == self._render_token:
-                        layout.addStretch(1)
-                        self._piece_render_complete.add(row)
-                        self.rows_stack.setCurrentWidget(page)
-                        self._finish_rows_rebuild(final=True)
-                    if self._active_render_timer is timer:
-                        self._active_render_timer = None
-                    if self._active_render_page is page:
-                        self._active_render_row = None
-                        self._active_render_page = None
-                elif render_token == self._render_token:
-                    self._finish_rows_rebuild(final=False)
-
-            timer.timeout.connect(_render_next_batch)
-            self._active_render_timer = timer
-            _render_next_batch()
-            if self._active_render_timer is timer and row_state["idx"] < len(rows):
-                timer.start(1)
+                layout.addStretch(1)
+                self._piece_render_complete.add(row)
+                self.rows_stack.setCurrentWidget(page)
+                self._finish_rows_rebuild(final=True)
+                if self._active_render_page is page:
+                    self._active_render_row = None
+                    self._active_render_page = None
+            except Exception as exc:
+                if render_token == self._render_token:
+                    self._clear_rows(layout)
+                    error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
+                    error.setTextFormat(Qt.PlainText)
+                    error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                    layout.addWidget(error)
+                    layout.addStretch(1)
+                    self._piece_render_complete.add(row)
+                    self.rows_stack.setCurrentWidget(page)
+                    self._finish_rows_rebuild(final=True)
+                if self._active_render_page is page:
+                    self._active_render_row = None
+                    self._active_render_page = None
 
         QTimer.singleShot(self._review_loading_minimum_ms, _start_render_stream)
 
