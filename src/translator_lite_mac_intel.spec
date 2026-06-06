@@ -107,6 +107,7 @@ app_files = [
     ('sdlxliff_converter.py', '.'),
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
     ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
+    ('html_duplicate_cleanup.py', '.'),
     ('_pdf_worker.py', '.'),  # PDF generation subprocess worker
     ('pdf_generation_manager.py', '.'),  # PDF generation manager
     ('chapter_extraction_manager.py', '.'),  # Chapter extraction manager
@@ -211,6 +212,7 @@ app_modules = [
     'sdlxliff_converter',
     '_compress_worker',  # Lightweight image compression worker
     '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
+    'html_duplicate_cleanup',
     '_pdf_worker',  # PDF generation subprocess worker
     'pdf_generation_manager',  # PDF generation manager
     'chapter_extraction_manager',  # Chapter extraction manager

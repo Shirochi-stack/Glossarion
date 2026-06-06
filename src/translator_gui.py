@@ -17846,9 +17846,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except (TypeError, ValueError):
                 return str(default)
 
+        def _bounded_config_int(attr_name, config_key, default, minimum=0, maximum=None):
+            try:
+                value = getattr(self, attr_name, self.config.get(config_key, default))
+                numeric_value = int(float(value if value is not None else default))
+                numeric_value = max(int(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(int(maximum), numeric_value)
+                return str(numeric_value)
+            except (TypeError, ValueError):
+                return str(default)
+
+        def _bounded_config_float(attr_name, config_key, default, minimum=0.0, maximum=None):
+            try:
+                value = getattr(self, attr_name, self.config.get(config_key, default))
+                numeric_value = float(value if value is not None else default)
+                numeric_value = max(float(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(float(maximum), numeric_value)
+                return f"{numeric_value:g}"
+            except (TypeError, ValueError):
+                return f"{float(default):g}"
+
         def _bool_config_value(attr_name, config_key, default=False):
             value = getattr(self, attr_name, self.config.get(config_key, default))
             return _bool_setting(value, default)
+
+        def _choice_config_value(attr_name, config_key, default, allowed):
+            value = str(getattr(self, attr_name, self.config.get(config_key, default)) or default).strip().lower()
+            return value if value in allowed else default
 
         def _authnd_effective_token_limits():
             if _bool_config_value('authnd_token_concurrency_auto_var', 'authnd_token_concurrency_auto', True):
@@ -17980,6 +18006,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'AUTHND_TOKEN_CONCURRENCY_AUTO': authnd_auto_flag,
             'AUTHND_TOKEN_CONCURRENCY': authnd_token_limit,
             'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
+            'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',
+            'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',
+            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 14000, 300, 100000),
+            'GEMINI_FREE_SUBCHUNK_URL_CHARS': _bounded_config_int('gemini_free_subchunk_url_chars_var', 'gemini_free_subchunk_url_chars', 14500, 1000, 200000),
+            'GEMINI_FREE_SUBCHUNK_SAFETY_CHARS': _bounded_config_int('gemini_free_subchunk_safety_chars_var', 'gemini_free_subchunk_safety_chars', 600, 0, 20000),
+            'GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS': _bounded_config_int('gemini_free_min_subchunk_body_chars_var', 'gemini_free_min_subchunk_body_chars', 80, 1, 50000),
+            'GEMINI_FREE_SUBCHUNK_CONCURRENCY': _bounded_config_int('gemini_free_subchunk_concurrency_var', 'gemini_free_subchunk_concurrency', 0, 0, 64),
+            'GEMINI_FREE_SUBCHUNK_START_DELAY': _bounded_config_float('gemini_free_subchunk_start_delay_var', 'gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0),
+            'GEMINI_FREE_SUBCHUNK_TIMEOUT': _bounded_config_int('gemini_free_subchunk_timeout_var', 'gemini_free_subchunk_timeout', 0, 0, 7200),
+            'GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT': _choice_config_value('gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'}),
+            'GEMINI_FREE_HTML_SPLITTER': _choice_config_value('gemini_free_html_splitter_var', 'gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'}),
+            'GEMINI_FREE_SUBCHUNK_BALANCER': _choice_config_value('gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'}),
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
@@ -26831,6 +26869,18 @@ Important rules:
                 ('authnd_token_concurrency_auto', ['authnd_token_concurrency_auto_checkbox', 'authnd_token_concurrency_auto_var'], True, bool),
                 ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
+                ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),
+                ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),
+                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 14000, lambda v: min(100000, max(300, safe_int(v, 14000)))),
+                ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),
+                ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),
+                ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),
+                ('gemini_free_subchunk_concurrency', ['gemini_free_subchunk_concurrency_var'], 0, lambda v: min(64, max(0, safe_int(v, 0)))),
+                ('gemini_free_subchunk_start_delay', ['gemini_free_subchunk_start_delay_var'], 5.0, lambda v: min(60.0, max(0.0, safe_float(v, 5.0)))),
+                ('gemini_free_subchunk_timeout', ['gemini_free_subchunk_timeout_var'], 0, lambda v: min(7200, max(0, safe_int(v, 0)))),
+                ('gemini_free_subchunk_payload_format', ['gemini_free_subchunk_payload_format_var', 'gemini_free_subchunk_payload_format_combo'], 'auto', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('auto', 'html', 'text') else 'auto'),
+                ('gemini_free_html_splitter', ['gemini_free_html_splitter_var', 'gemini_free_html_splitter_combo'], 'beautifulsoup4', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('beautifulsoup4', 'regex') else 'beautifulsoup4'),
+                ('gemini_free_subchunk_balancer', ['gemini_free_subchunk_balancer_var', 'gemini_free_subchunk_balancer_combo'], 'balanced', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('balanced', 'greedy') else 'balanced'),
 
                 # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
@@ -27196,6 +27246,36 @@ Important rules:
                 if show_message and debug_enabled and old_val != val_to_set:
                     self.append_log(f"🔍 [DEBUG] ENV {key}: '{old_val}' → '{val_to_set}'")
                 return key
+
+            def _config_bool(key, default=False):
+                value = self.config.get(key, default)
+                if isinstance(value, str):
+                    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+                return bool(value)
+
+            def _config_int(key, default, minimum=0, maximum=None):
+                try:
+                    numeric_value = int(float(self.config.get(key, default)))
+                except (TypeError, ValueError):
+                    numeric_value = int(default)
+                numeric_value = max(int(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(int(maximum), numeric_value)
+                return numeric_value
+
+            def _config_float(key, default, minimum=0.0, maximum=None):
+                try:
+                    numeric_value = float(self.config.get(key, default))
+                except (TypeError, ValueError):
+                    numeric_value = float(default)
+                numeric_value = max(float(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(float(maximum), numeric_value)
+                return f"{numeric_value:g}"
+
+            def _config_choice(key, default, allowed):
+                value = str(self.config.get(key, default) or default).strip().lower()
+                return value if value in allowed else default
             
             env_vars_set = []
             # Standard env vars
@@ -27214,6 +27294,18 @@ Important rules:
             env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY_AUTO', authnd_auto_enabled, is_bool=True))
             env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', authnd_token_limit))
             env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', authnd_subprocess_limit))
+            env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))
+            env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 14000, 300, 100000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_URL_CHARS', _config_int('gemini_free_subchunk_url_chars', 14500, 1000, 200000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _config_int('gemini_free_subchunk_safety_chars', 600, 0, 20000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _config_int('gemini_free_min_subchunk_body_chars', 80, 1, 50000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _config_int('gemini_free_subchunk_concurrency', 0, 0, 64)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_START_DELAY', _config_float('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_TIMEOUT', _config_int('gemini_free_subchunk_timeout', 0, 0, 7200)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _config_choice('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})))
+            env_vars_set.append(_update_env('GEMINI_FREE_HTML_SPLITTER', _config_choice('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_BALANCER', _config_choice('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})))
 
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
@@ -27674,6 +27766,36 @@ Important rules:
                 except (TypeError, ValueError):
                     return str(default)
 
+            def _bool_config(key, default=False):
+                value = self.config.get(key, default)
+                if isinstance(value, str):
+                    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+                return bool(value)
+
+            def _int_config(key, default, minimum=0, maximum=None):
+                try:
+                    numeric_value = int(float(self.config.get(key, default)))
+                except (TypeError, ValueError):
+                    numeric_value = int(default)
+                numeric_value = max(int(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(int(maximum), numeric_value)
+                return str(numeric_value)
+
+            def _float_config(key, default, minimum=0.0, maximum=None):
+                try:
+                    numeric_value = float(self.config.get(key, default))
+                except (TypeError, ValueError):
+                    numeric_value = float(default)
+                numeric_value = max(float(minimum), numeric_value)
+                if maximum is not None:
+                    numeric_value = min(float(maximum), numeric_value)
+                return f"{numeric_value:g}"
+
+            def _choice_config(key, default, allowed):
+                value = str(self.config.get(key, default) or default).strip().lower()
+                return value if value in allowed else default
+
             authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
             if authnd_auto_enabled:
                 authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
@@ -27722,6 +27844,18 @@ Important rules:
                 ('AUTHND_TOKEN_CONCURRENCY_AUTO', '1' if authnd_auto_enabled else '0'),
                 ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
+                ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),
+                ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),
+                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 14000, 300, 100000)),
+                ('GEMINI_FREE_SUBCHUNK_URL_CHARS', _int_config('gemini_free_subchunk_url_chars', 14500, 1000, 200000)),
+                ('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _int_config('gemini_free_subchunk_safety_chars', 600, 0, 20000)),
+                ('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _int_config('gemini_free_min_subchunk_body_chars', 80, 1, 50000)),
+                ('GEMINI_FREE_SUBCHUNK_CONCURRENCY', _int_config('gemini_free_subchunk_concurrency', 0, 0, 64)),
+                ('GEMINI_FREE_SUBCHUNK_START_DELAY', _float_config('gemini_free_subchunk_start_delay', 5.0, 0.0, 60.0)),
+                ('GEMINI_FREE_SUBCHUNK_TIMEOUT', _int_config('gemini_free_subchunk_timeout', 0, 0, 7200)),
+                ('GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT', _choice_config('gemini_free_subchunk_payload_format', 'auto', {'auto', 'html', 'text'})),
+                ('GEMINI_FREE_HTML_SPLITTER', _choice_config('gemini_free_html_splitter', 'beautifulsoup4', {'beautifulsoup4', 'regex'})),
+                ('GEMINI_FREE_SUBCHUNK_BALANCER', _choice_config('gemini_free_subchunk_balancer', 'balanced', {'balanced', 'greedy'})),
             ]
             
             # Add QA Scanner environment variables

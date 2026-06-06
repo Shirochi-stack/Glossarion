@@ -29,6 +29,7 @@ except ImportError:
 from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -2541,38 +2542,13 @@ class BatchHeaderTranslator:
                         updated = True
                         content = content2
                     if updated:
-                        # Check if duplicate H1+P removal is enabled
+                        # Check if duplicate heading+P removal is enabled
                         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
                         if remove_duplicate_h1_p:
-                            # Remove duplicate H1+P pairs after updating (P before or after H1)
+                            # Remove duplicate heading+P pairs after updating (P before or after H1)
                             from bs4 import BeautifulSoup as BS
                             temp_soup = BS(content, 'html.parser')
-                            removed_any = False
-                            for h1_tag in temp_soup.find_all(['h1', 'h2', 'h3']):
-                                # Skip split marker H1 tags
-                                h1_id = h1_tag.get('id', '')
-                                if h1_id and h1_id.startswith('split-'):
-                                    continue
-                                h1_text = h1_tag.get_text(strip=True)
-                                if 'SPLIT MARKER' in h1_text:
-                                    continue
-                                
-                                # Check next sibling (P after H1)
-                                next_sibling = h1_tag.find_next_sibling()
-                                if next_sibling and next_sibling.name == 'p':
-                                    p_text = next_sibling.get_text(strip=True)
-                                    if h1_text == p_text:
-                                        next_sibling.decompose()
-                                        removed_any = True
-                                        continue
-                                
-                                # Check previous sibling (P before H1)
-                                prev_sibling = h1_tag.find_previous_sibling()
-                                if prev_sibling and prev_sibling.name == 'p':
-                                    p_text = prev_sibling.get_text(strip=True)
-                                    if h1_text == p_text:
-                                        prev_sibling.decompose()
-                                        removed_any = True
+                            removed_any = remove_duplicate_heading_paragraph_pairs(temp_soup)
                             if removed_any:
                                 content = str(temp_soup)
                         
@@ -2706,32 +2682,12 @@ class BatchHeaderTranslator:
                         updated = True
                         content = content2
                     if updated:
-                        # Check if duplicate H1+P removal is enabled
+                        # Check if duplicate heading+P removal is enabled
                         remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
                         if remove_duplicate_h1_p:
                             from bs4 import BeautifulSoup as BS
                             temp_soup = BS(content, 'html.parser')
-                            removed_any = False
-                            for h1_tag in temp_soup.find_all(['h1', 'h2', 'h3']):
-                                h1_id = h1_tag.get('id', '')
-                                if h1_id and h1_id.startswith('split-'):
-                                    continue
-                                h1_text = h1_tag.get_text(strip=True)
-                                if 'SPLIT MARKER' in h1_text:
-                                    continue
-                                # Check next sibling (P after H1)
-                                next_sibling = h1_tag.find_next_sibling()
-                                if next_sibling and next_sibling.name == 'p':
-                                    if h1_text == next_sibling.get_text(strip=True):
-                                        next_sibling.decompose()
-                                        removed_any = True
-                                        continue
-                                # Check previous sibling (P before H1)
-                                prev_sibling = h1_tag.find_previous_sibling()
-                                if prev_sibling and prev_sibling.name == 'p':
-                                    if h1_text == prev_sibling.get_text(strip=True):
-                                        prev_sibling.decompose()
-                                        removed_any = True
+                            removed_any = remove_duplicate_heading_paragraph_pairs(temp_soup)
                             if removed_any:
                                 content = str(temp_soup)
                         with open(html_path, 'w', encoding='utf-8') as wf:

@@ -40,12 +40,12 @@ DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
 DEFAULT_SUBMIT_MODE = "url"
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 15000
-DEFAULT_SUBCHUNK_URL_CHARS = 15500
-DEFAULT_SUBCHUNK_SAFETY_CHARS = 500
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 14000
+DEFAULT_SUBCHUNK_URL_CHARS = 14500
+DEFAULT_SUBCHUNK_SAFETY_CHARS = 600
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
 DEFAULT_SUBCHUNK_TIMEOUT = 0
-DEFAULT_SUBCHUNK_START_DELAY = 1.0
+DEFAULT_SUBCHUNK_START_DELAY = 5.0
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -140,6 +140,91 @@ def _page_snapshot_script(prompt: str = "") -> str:
     const rect = element.getBoundingClientRect();
     return style && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   }};
+  const cleanMarkdown = (value) => String(value || "")
+    .replace(/[\\t ]+\\n/g, "\\n")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .trim();
+  const inlineChildrenMarkdown = (element, state = {{}}) =>
+    Array.from(element.childNodes || []).map((node) => nodeMarkdown(node, state)).join("");
+  const blockChildrenMarkdown = (element, state = {{}}) => cleanMarkdown(inlineChildrenMarkdown(element, state));
+  const wrapInline = (text, marker, active) => {{
+    const value = String(text || "").trim();
+    if (!value || active) return text;
+    return `${{marker}}${{value}}${{marker}}`;
+  }};
+  const nodeMarkdown = (node, state = {{}}) => {{
+    if (!node) return "";
+    if (node.nodeType === Node.TEXT_NODE) {{
+      return String(node.nodeValue || "").replace(/\\u00a0/g, " ").replace(/\\s+/g, " ");
+    }}
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const element = node;
+    if (!visible(element)) return "";
+    const tag = String(element.tagName || "").toLowerCase();
+    const style = window.getComputedStyle(element);
+    const display = String(style.display || "").toLowerCase();
+    if (tag === "br") return "\\n";
+    if (tag === "hr") return "\\n\\n---\\n\\n";
+    if (tag === "img") {{
+      const attrs = Array.from(element.attributes || [])
+        .filter((attr) => ["src", "alt", "title", "width", "height"].includes(String(attr.name || "").toLowerCase()))
+        .map((attr) => `${{attr.name}}="${{String(attr.value || "").replace(/"/g, "&quot;")}}"`)
+        .join(" ");
+      return attrs ? `<img ${{attrs}}>` : "";
+    }}
+    if (tag === "pre") return `\\n\\n\\`\\`\\`\\n${{element.innerText || ""}}\\n\\`\\`\\`\\n\\n`;
+    if (tag === "code") return state.pre ? (element.innerText || "") : `\\`${{(element.innerText || "").trim()}}\\``;
+    const headingRole = String(element.getAttribute("role") || "").toLowerCase() === "heading";
+    const ariaLevel = parseInt(element.getAttribute("aria-level") || "", 10);
+    if (/^h[1-6]$/.test(tag) || headingRole || (ariaLevel >= 1 && ariaLevel <= 6)) {{
+      const level = /^h[1-6]$/.test(tag) ? parseInt(tag.slice(1), 10) : Math.min(6, Math.max(1, ariaLevel || 2));
+      return `\\n\\n${{"#".repeat(level)}} ${{blockChildrenMarkdown(element, state)}}\\n\\n`;
+    }}
+    if (tag === "ul" || tag === "ol") {{
+      const items = Array.from(element.children || []).filter((child) => String(child.tagName || "").toLowerCase() === "li");
+      const rendered = items.map((item, index) => {{
+        const marker = tag === "ol" ? `${{index + 1}}. ` : "- ";
+        const body = blockChildrenMarkdown(item, state).replace(/\\n/g, "\\n  ");
+        return `${{marker}}${{body}}`;
+      }}).join("\\n");
+      return rendered ? `\\n\\n${{rendered}}\\n\\n` : "";
+    }}
+    if (tag === "li" || display === "list-item") return `\\n- ${{blockChildrenMarkdown(element, state)}}\\n`;
+    if (tag === "blockquote") {{
+      const body = blockChildrenMarkdown(element, state).split("\\n").map((line) => `> ${{line}}`).join("\\n");
+      return `\\n\\n${{body}}\\n\\n`;
+    }}
+    if (tag === "table") return `\\n\\n${{(element.innerText || "").trim()}}\\n\\n`;
+    if (tag === "a") {{
+      const body = blockChildrenMarkdown(element, state) || String(element.getAttribute("href") || "").trim();
+      const href = String(element.getAttribute("href") || "").trim();
+      return href && body ? `[${{body}}](${{href}})` : body;
+    }}
+    let rendered = inlineChildrenMarkdown(element, state);
+    if (tag === "strong" || tag === "b") rendered = wrapInline(rendered, "**", state.bold);
+    if (tag === "em" || tag === "i") rendered = wrapInline(rendered, "*", state.italic);
+    if (tag === "s" || tag === "del" || tag === "strike") rendered = wrapInline(rendered, "~~", state.strike);
+    if (!["strong", "b", "em", "i", "s", "del", "strike"].includes(tag)) {{
+      const weight = parseInt(style.fontWeight || "0", 10);
+      const nextState = {{
+        bold: state.bold || weight >= 600,
+        italic: state.italic || String(style.fontStyle || "").toLowerCase() === "italic",
+        strike: state.strike || String(style.textDecorationLine || "").toLowerCase().includes("line-through")
+      }};
+      if (nextState.bold || nextState.italic || nextState.strike) {{
+        rendered = inlineChildrenMarkdown(element, nextState);
+        if (nextState.bold && !state.bold) rendered = wrapInline(rendered, "**", false);
+        if (nextState.italic && !state.italic) rendered = wrapInline(rendered, "*", false);
+        if (nextState.strike && !state.strike) rendered = wrapInline(rendered, "~~", false);
+      }}
+    }}
+    if (["p", "div", "section", "article", "main"].includes(tag) || display === "block") {{
+      const body = cleanMarkdown(rendered);
+      return body ? `\\n\\n${{body}}\\n\\n` : "";
+    }}
+    return rendered;
+  }};
+  const elementToMarkdown = (element) => cleanMarkdown(nodeMarkdown(element));
   const firstNeedle = normalize(answerLines[0] || "").slice(0, 100);
   const lastNeedle = normalize(answerLines[answerLines.length - 1] || "").slice(0, 100);
   const promptNeedle = normalize(String(promptText || "").split("\\n").find((line) => line.trim()) || "").slice(0, 100);
@@ -161,6 +246,7 @@ def _page_snapshot_script(prompt: str = "") -> str:
     score += Math.min(40, element.querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,table,br").length * 3);
     if (!best || score > best.score || (score === best.score && text.length < best.textLength)) {{
       best = {{
+        element,
         score,
         textLength: text.length,
         html: element.innerHTML || "",
@@ -177,6 +263,7 @@ def _page_snapshot_script(prompt: str = "") -> str:
     text: bodyText,
     answerText,
     answerHtml: best ? best.html : "",
+    answerMarkdown: best ? elementToMarkdown(best.element) : "",
     answerContainerText: best ? best.text : "",
     answerContainerTag: best ? best.tag : "",
     answerContainerScore: best ? best.score : null,
@@ -541,6 +628,25 @@ def _subchunk_start_delay_seconds() -> float:
     return max(0.0, _env_float("GEMINI_FREE_SUBCHUNK_START_DELAY", DEFAULT_SUBCHUNK_START_DELAY))
 
 
+def _subchunk_balancer_mode() -> str:
+    mode = os.getenv("GEMINI_FREE_SUBCHUNK_BALANCER", "balanced").strip().lower()
+    return mode if mode in ("balanced", "greedy") else "balanced"
+
+
+def _subchunk_payload_format_mode() -> str:
+    mode = os.getenv("GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT", "auto").strip().lower()
+    return mode if mode in ("auto", "html", "text") else "auto"
+
+
+def _html_splitter_mode() -> str:
+    mode = os.getenv("GEMINI_FREE_HTML_SPLITTER", "beautifulsoup4").strip().lower()
+    if mode in ("bs", "beautifulsoup", "beautifulsoup4"):
+        return "beautifulsoup4"
+    if mode in ("regex", "fallback"):
+        return "regex"
+    return "beautifulsoup4"
+
+
 def _sleep_with_cancel(seconds: float) -> None:
     deadline = time.time() + max(0.0, float(seconds or 0.0))
     while True:
@@ -592,6 +698,9 @@ def _looks_like_html_payload(text: str) -> bool:
 
 
 def _payload_format_for_split(text: str) -> str:
+    payload_mode = _subchunk_payload_format_mode()
+    if payload_mode in ("html", "text"):
+        return payload_mode
     raw = str(text or "")
     configured_method = _configured_text_extraction_method()
     if configured_method == "enhanced":
@@ -604,7 +713,9 @@ def _payload_format_for_split(text: str) -> str:
 
 
 def _splitter_name_for_payload(payload_format: str) -> str:
-    return "beautifulsoup4" if payload_format == "html" else "text"
+    if payload_format == "html":
+        return _html_splitter_mode()
+    return "text"
 
 
 def _split_plain_text_units(text: str) -> List[str]:
@@ -681,6 +792,8 @@ def _split_text_units(text: str, *, payload_format: Optional[str] = None) -> Lis
     if not raw:
         return []
     if (payload_format or _payload_format_for_split(raw)) == "html":
+        if _html_splitter_mode() == "regex":
+            return _split_html_units_regex(raw)
         return _split_html_units_beautifulsoup(raw)
     return _split_plain_text_units(raw)
 
@@ -803,23 +916,56 @@ def _split_messages_for_search_budget(
         return [*split_piece_to_budget(left), *split_piece_to_budget(right)]
 
     for unit in _split_text_units(body, payload_format=payload_format):
-        if payload_format == "html":
-            units.append(unit)
-            continue
-        for piece in _split_large_unit(unit, body_budget):
+        pieces = [unit] if payload_format == "html" else _split_large_unit(unit, body_budget)
+        for piece in pieces:
             units.extend(split_piece_to_budget(piece))
 
-    chunks: List[str] = []
-    current = ""
-    for unit in units:
-        candidate = current + unit
-        if current and not fits_budget(candidate):
-            chunks.append(current)
-            current = unit
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
+    def pack_units(max_chunk_body_chars: Optional[int] = None) -> List[str]:
+        packed: List[str] = []
+        current = ""
+        current_chars = 0
+        for unit in units:
+            unit_text = str(unit or "")
+            if not unit_text:
+                continue
+            unit_chars = len(unit_text)
+            candidate = current + unit_text
+            over_target = (
+                max_chunk_body_chars is not None
+                and current
+                and current_chars + unit_chars > max_chunk_body_chars
+            )
+            if current and (over_target or not fits_budget(candidate)):
+                packed.append(current)
+                current = unit_text
+                current_chars = unit_chars
+            else:
+                current = candidate
+                current_chars += unit_chars
+        if current:
+            packed.append(current)
+        return packed
+
+    greedy_chunks = pack_units()
+    target_chunk_count = len(greedy_chunks)
+    chunks = greedy_chunks
+    balanced_target_chars: Optional[int] = None
+    balancer_mode = _subchunk_balancer_mode()
+    if balancer_mode == "balanced" and target_chunk_count > 1 and units:
+        unit_lengths = [len(unit) for unit in units if unit]
+        total_unit_chars = sum(unit_lengths)
+        low = max(max(unit_lengths), (total_unit_chars + target_chunk_count - 1) // target_chunk_count)
+        high = max(low, total_unit_chars)
+        while low < high:
+            mid = (low + high) // 2
+            if len(pack_units(mid)) <= target_chunk_count:
+                high = mid
+            else:
+                low = mid + 1
+        balanced_target_chars = low
+        balanced_chunks = pack_units(balanced_target_chars)
+        if len(balanced_chunks) <= target_chunk_count:
+            chunks = balanced_chunks
 
     result = [source_messages] if len(chunks) <= 1 else [make_messages(chunk) for chunk in chunks]
     metadata = {
@@ -834,6 +980,9 @@ def _split_messages_for_search_budget(
         "body_chars": len(body),
         "prefix_chars": len(prefix),
         "subchunk_count": len(result),
+        "subchunk_balancer": "balanced" if balanced_target_chars is not None else "greedy",
+        "subchunk_balancer_mode": balancer_mode,
+        "balanced_target_body_chars": balanced_target_chars,
         "payload_format": payload_format,
         "splitter": splitter_name,
     }
@@ -1084,6 +1233,19 @@ def _contains_generation_failure(lines: Iterable[str]) -> bool:
     return False
 
 
+def _raise_if_generation_failure_text(value: str) -> None:
+    lines = [
+        line.strip()
+        for line in str(value or "").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    if _contains_generation_failure(lines):
+        raise RuntimeError(
+            "Google Search AI Mode returned a generation failure: "
+            "Something went wrong and the content wasn't generated."
+        )
+
+
 def _messages_expect_html_response(messages: Iterable[Dict[str, Any]]) -> bool:
     for message in messages or []:
         if not isinstance(message, dict):
@@ -1092,6 +1254,21 @@ def _messages_expect_html_response(messages: Iterable[Dict[str, Any]]) -> bool:
         if role in ("system", "assistant"):
             continue
         if _payload_format_for_split(_content_to_text(message.get("content"))) == "html":
+            return True
+    return False
+
+
+def _messages_expect_markdown_response(messages: Iterable[Dict[str, Any]]) -> bool:
+    if _configured_text_extraction_method() == "enhanced":
+        return True
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        if role in ("system", "assistant"):
+            continue
+        text = _content_to_text(message.get("content")).lower()
+        if "html2text" in text or "markdown" in text:
             return True
     return False
 
@@ -1166,19 +1343,79 @@ def _clean_answer_html(answer_html: str) -> str:
         return raw
 
 
+def _answer_html_to_markdown(answer_html: str, answer_text: str = "") -> str:
+    html_content = _clean_answer_html(answer_html)
+    if not html_content or not _answer_html_matches_text(html_content, answer_text):
+        return ""
+    try:
+        import html2text
+
+        converter = html2text.HTML2Text()
+        converter.body_width = 0
+        converter.unicode_snob = True
+        converter.escape_snob = os.getenv("HTML2TEXT_ESCAPE_SNOB", "0") == "1"
+        converter.use_automatic_links = False
+        converter.ignore_links = False
+        converter.ignore_images = False
+        converter.ignore_anchors = False
+        converter.skip_internal_links = False
+        converter.ignore_tables = False
+        converter.images_as_html = True
+        converter.images_to_alt = False
+        converter.images_with_size = True
+        converter.wrap_links = False
+        converter.wrap_list_items = False
+        converter.protect_links = True
+        converter.ignore_emphasis = False
+        converter.mark_code = True
+        return converter.handle(html_content).strip()
+    except Exception:
+        return ""
+
+
+def _markdown_visible_text(value: str) -> str:
+    raw = str(value or "")
+    raw = re.sub(r"```.*?```", " ", raw, flags=re.DOTALL)
+    raw = re.sub(r"`([^`]*)`", r"\1", raw)
+    raw = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", raw)
+    raw = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw)
+    raw = re.sub(r"^\s{0,3}#{1,6}\s+", "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"^\s{0,3}>\s?", "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw, flags=re.MULTILINE)
+    raw = raw.replace("**", "").replace("__", "").replace("~~", "")
+    raw = raw.replace("*", "").replace("_", "")
+    return _html_visible_text(raw)
+
+
+def _markdown_matches_text(markdown_content: str, answer_text: str) -> bool:
+    markdown_text = _normalize_visible_text(_markdown_visible_text(markdown_content))
+    expected_text = _normalize_visible_text(answer_text)
+    if not markdown_text:
+        return False
+    if not expected_text:
+        return True
+    expected_l = expected_text.lower()
+    markdown_l = markdown_text.lower()
+    if expected_l in markdown_l or markdown_l in expected_l:
+        return True
+    return len(markdown_text) <= max(250, len(expected_text) * 3)
+
+
 def _extract_rendered_content(
     page_data: Dict[str, Any],
     *,
     prompt: str = "",
     prefer_html: bool = False,
+    prefer_markdown: bool = False,
 ) -> str:
     if _google_blocked(page_data):
         raise RuntimeError(
             "Google Search returned a verification page instead of a Gemini/Search response. "
             "Open Google in a regular browser/profile and clear the verification, or retry later."
-        )
+    )
     if prefer_html:
         answer_text = str(page_data.get("answerText") or "").strip()
+        _raise_if_generation_failure_text(answer_text)
         html_content = _clean_answer_html(str(page_data.get("answerHtml") or ""))
         if _answer_html_matches_text(html_content, answer_text):
             failure_probe = html_content
@@ -1188,14 +1425,24 @@ def _extract_rendered_content(
                 failure_probe = BeautifulSoup(html_content, "html.parser").get_text("\n")
             except Exception:
                 pass
-            if _contains_generation_failure(failure_probe.splitlines()):
-                raise RuntimeError(
-                    "Google Search AI Mode returned a generation failure: "
-                    "Something went wrong and the content wasn't generated."
-                )
+            _raise_if_generation_failure_text(failure_probe)
             return html_content
         if _html_has_block_structure(answer_text):
             return answer_text
+        if answer_text:
+            return answer_text
+
+    if prefer_markdown:
+        answer_text = str(page_data.get("answerText") or "").strip()
+        _raise_if_generation_failure_text(answer_text)
+        browser_markdown = str(page_data.get("answerMarkdown") or "").strip()
+        if browser_markdown and _markdown_matches_text(browser_markdown, answer_text):
+            _raise_if_generation_failure_text(browser_markdown)
+            return browser_markdown
+        markdown_content = _answer_html_to_markdown(str(page_data.get("answerHtml") or ""), answer_text)
+        if markdown_content:
+            _raise_if_generation_failure_text(markdown_content)
+            return markdown_content
         if answer_text:
             return answer_text
 
@@ -1203,11 +1450,7 @@ def _extract_rendered_content(
     lines = [line.strip() for line in text.replace("\r", "\n").split("\n")]
     lines = [line for line in lines if line]
     content_lines = _extract_ai_answer_lines(lines, prompt)
-    if _contains_generation_failure(content_lines or lines):
-        raise RuntimeError(
-            "Google Search AI Mode returned a generation failure: "
-            "Something went wrong and the content wasn't generated."
-        )
+    _raise_if_generation_failure_text("\n".join(content_lines or lines))
     content = "\n".join(content_lines or lines).strip()
     if not content:
         title = str(page_data.get("title") or "").strip()
@@ -1806,6 +2049,7 @@ def _send_chat_completion_qt_once(
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
     prefer_html = _messages_expect_html_response(messages)
+    prefer_markdown = bool(not prefer_html and _messages_expect_markdown_response(messages))
     html_text_node_transport = _build_html_text_node_transport(messages) if prefer_html else None
     send_messages = html_text_node_transport["messages"] if html_text_node_transport else messages
     prompt = _messages_to_prompt(send_messages)
@@ -1852,6 +2096,7 @@ def _send_chat_completion_qt_once(
         page_data,
         prompt=prompt,
         prefer_html=bool(prefer_html and not html_text_node_transport),
+        prefer_markdown=prefer_markdown,
     )
     html_text_node_count = int(html_text_node_transport.get("count") or 0) if html_text_node_transport else 0
     html_text_node_translated = 0
@@ -1880,7 +2125,9 @@ def _send_chat_completion_qt_once(
             "ready": page_data.get("ready"),
             "html_length": page_data.get("htmlLength"),
             "answer_html_length": len(str(page_data.get("answerHtml") or "")),
+            "answer_markdown_length": len(str(page_data.get("answerMarkdown") or "")),
             "prefer_html_response": prefer_html,
+            "prefer_markdown_response": prefer_markdown,
             "html_text_node_transport": bool(html_text_node_transport),
             "html_text_node_count": html_text_node_count,
             "html_text_node_translated": html_text_node_translated,
@@ -1922,6 +2169,7 @@ def _send_chat_completion_split(
         f"(target prompt chars: {max_prompt_chars}, "
         f"payload format: {split_metadata.get('payload_format')}, "
         f"splitter: {split_metadata.get('splitter')}, "
+        f"balancer: {split_metadata.get('subchunk_balancer')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
         f"url limit chars: {split_metadata.get('url_limit_chars')}, "
         f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
@@ -1947,6 +2195,7 @@ def _send_chat_completion_split(
             user_agent=user_agent,
         )
         content = str(result.get("content") or "")
+        _raise_if_generation_failure_text(content)
         contents.append(content)
         completion_chars_total += len(content)
         raw_response = dict(result.get("raw_response") or {})
@@ -1980,6 +2229,9 @@ def _send_chat_completion_split(
             "subchunk_safety_chars": split_metadata.get("safety_chars"),
             "subchunk_payload_format": split_metadata.get("payload_format"),
             "subchunk_splitter": split_metadata.get("splitter"),
+            "subchunk_balancer": split_metadata.get("subchunk_balancer"),
+            "subchunk_balancer_mode": split_metadata.get("subchunk_balancer_mode"),
+            "subchunk_balanced_target_body_chars": split_metadata.get("balanced_target_body_chars"),
             "parts": raw_parts,
         },
     }
@@ -1999,20 +2251,30 @@ def _send_chat_completion_qt(
     if _adaptive_split_enabled() and should_split:
         html_text_node_transport = _build_html_text_node_transport(source_messages)
         if html_text_node_transport:
-            transport_prompt_chars, transport_url_chars = _message_budget_usage(html_text_node_transport["messages"])
+            transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
+                html_text_node_transport["messages"]
+            )
+            if not transport_should_split:
+                _log(
+                    log_fn,
+                    f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                    f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
+                    f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
+                )
+                return _send_chat_completion_qt_once(
+                    messages=source_messages,
+                    model=model,
+                    timeout=timeout,
+                    max_tokens=max_tokens,
+                    log_fn=log_fn,
+                    user_agent=user_agent,
+                )
             _log(
                 log_fn,
-                f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                f"🧩 Gemini Free: HTML text-node transport still exceeds single-request budget; "
+                f"using raw HTML adaptive split "
                 f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
                 f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-            )
-            return _send_chat_completion_qt_once(
-                messages=source_messages,
-                model=model,
-                timeout=timeout,
-                max_tokens=max_tokens,
-                log_fn=log_fn,
-                user_agent=user_agent,
             )
         _log(
             log_fn,
@@ -2224,6 +2486,7 @@ def _run_search_subprocess_sequential(
         f"target prompt chars: {max_prompt_chars}, "
         f"payload format: {split_metadata.get('payload_format')}, "
         f"splitter: {split_metadata.get('splitter')}, "
+        f"balancer: {split_metadata.get('subchunk_balancer')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
         f"url limit chars: {split_metadata.get('url_limit_chars')}, "
         f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
@@ -2259,6 +2522,7 @@ def _run_search_subprocess_sequential(
             _log(log_fn, f"❌ Gemini Free: subchunk {index}/{len(chunks)} failed after {elapsed:.1f}s: {_short_error(exc)}")
             raise
         content = str(result.get("content") or "")
+        _raise_if_generation_failure_text(content)
         raw_response = dict(result.get("raw_response") or {})
         raw_response.pop("content", None)
         elapsed = time.time() - chunk_started_at
@@ -2333,6 +2597,9 @@ def _run_search_subprocess_sequential(
             "subchunk_safety_chars": split_metadata.get("safety_chars"),
             "subchunk_payload_format": split_metadata.get("payload_format"),
             "subchunk_splitter": split_metadata.get("splitter"),
+            "subchunk_balancer": split_metadata.get("subchunk_balancer"),
+            "subchunk_balancer_mode": split_metadata.get("subchunk_balancer_mode"),
+            "subchunk_balanced_target_body_chars": split_metadata.get("balanced_target_body_chars"),
             "parts": raw_parts,
         },
     }
@@ -2351,19 +2618,29 @@ def _run_search_subprocess(
     if _adaptive_split_enabled() and should_split:
         html_text_node_transport = _build_html_text_node_transport(message_list)
         if html_text_node_transport:
-            transport_prompt_chars, transport_url_chars = _message_budget_usage(html_text_node_transport["messages"])
+            transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
+                html_text_node_transport["messages"]
+            )
+            if not transport_should_split:
+                _log(
+                    log_fn,
+                    f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                    f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
+                    f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
+                )
+                return _run_search_subprocess_once(
+                    messages=message_list,
+                    model=model,
+                    timeout=timeout,
+                    max_tokens=max_tokens,
+                    log_fn=log_fn,
+                )
             _log(
                 log_fn,
-                f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                f"🧩 Gemini Free: HTML text-node transport still exceeds single-request budget; "
+                f"using raw HTML adaptive split "
                 f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
                 f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
-            )
-            return _run_search_subprocess_once(
-                messages=message_list,
-                model=model,
-                timeout=timeout,
-                max_tokens=max_tokens,
-                log_fn=log_fn,
             )
         target_chars = _subchunk_prompt_chars()
         planned_chunks, split_metadata = _split_messages_for_search_budget(
@@ -2379,6 +2656,7 @@ def _run_search_subprocess(
             f"{url_chars:,} URL chars, "
             f"payload format: {split_metadata.get('payload_format')}, "
             f"splitter: {split_metadata.get('splitter')}, "
+            f"balancer: {split_metadata.get('subchunk_balancer')}, "
             f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
             f"url limit chars: {split_metadata.get('url_limit_chars')}, "
             f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "

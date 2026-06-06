@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QLineEdit,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter
@@ -3453,7 +3454,7 @@ def _create_response_handling_section(self, parent):
     nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(nim_title)
 
-    authnd_desc = QLabel("Controls the browser token flow used by authnd/.")
+    authnd_desc = QLabel("Controls the browser token flow used by authnd/ and Gemini Free browser helpers.")
     authnd_desc.setWordWrap(True)
     authnd_desc.setStyleSheet("color: gray; font-size: 9pt;")
     authnd_desc.setContentsMargins(12, 0, 0, 4)
@@ -3683,6 +3684,314 @@ def _create_response_handling_section(self, parent):
 
     authnd_auto_cb.toggled.connect(_apply_authnd_auto_state)
     _apply_authnd_auto_state(authnd_auto_enabled)
+
+    gemini_chunk_title = QLabel("Gemini Free Browser Chunking")
+    gemini_chunk_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    gemini_chunk_title.setContentsMargins(12, 8, 0, 0)
+    section_v.addWidget(gemini_chunk_title)
+
+    gemini_chunk_desc = QLabel("Controls the browser adaptive split settings used by search/gemini.")
+    gemini_chunk_desc.setWordWrap(True)
+    gemini_chunk_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    gemini_chunk_desc.setContentsMargins(20, 0, 0, 2)
+    section_v.addWidget(gemini_chunk_desc)
+
+    def _gemini_bool_value(value, default):
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def _gemini_bool_setting(config_key, env_key, default):
+        return _gemini_bool_value(self.config.get(config_key, os.environ.get(env_key, default)), default)
+
+    def _gemini_number_setting(config_key, env_key, default, minimum, maximum, decimals=0):
+        try:
+            raw_value = self.config.get(config_key, os.environ.get(env_key, default))
+            numeric_value = float(raw_value)
+            numeric_value = max(float(minimum), min(float(maximum), numeric_value))
+            return int(numeric_value) if int(decimals) <= 0 else numeric_value
+        except (TypeError, ValueError):
+            return default
+
+    def _gemini_choice_setting(config_key, env_key, default, allowed):
+        value = str(self.config.get(config_key, os.environ.get(env_key, default)) or default).strip().lower()
+        return value if value in allowed else default
+
+    def _gemini_env_number(value, decimals=0):
+        try:
+            return str(int(float(value))) if int(decimals) <= 0 else f"{float(value):g}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _make_gemini_checkbox(label_text, attr_name, checkbox_attr, config_key, env_key, default, tooltip):
+        current_value = _gemini_bool_setting(config_key, env_key, default)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = "1" if current_value else "0"
+
+        checkbox = self._create_styled_checkbox(label_text)
+        checkbox.setChecked(current_value)
+        checkbox.setToolTip(tooltip)
+        setattr(self, checkbox_attr, checkbox)
+
+        def _on_gemini_checkbox_toggled(checked):
+            value = bool(checked)
+            setattr(self, attr_name, value)
+            self.config[config_key] = value
+            os.environ[env_key] = "1" if value else "0"
+
+        checkbox.toggled.connect(_on_gemini_checkbox_toggled)
+        return checkbox
+
+    def _make_gemini_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, minimum, maximum, decimals, step, tooltip):
+        current_value = _gemini_number_setting(config_key, env_key, default, minimum, maximum, decimals)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = _gemini_env_number(current_value, decimals)
+
+        control = QWidget()
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(4)
+
+        label = QLabel(label_text)
+        label.setToolTip(tooltip)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_h.addWidget(label)
+
+        spin = QDoubleSpinBox()
+        spin.setObjectName(spin_attr)
+        spin.setRange(float(minimum), float(maximum))
+        spin.setSingleStep(float(step))
+        spin.setDecimals(int(decimals))
+        spin.setValue(float(current_value))
+        spin.setFixedSize(112, 26)
+        spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        spin.setFocusPolicy(Qt.StrongFocus)
+        value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
+        spin.setAlignment(value_alignment)
+        spin.lineEdit().setAlignment(value_alignment)
+        spin.lineEdit().setTextMargins(0, 0, 0, 1)
+        spin.setToolTip(tooltip)
+        try:
+            self._disable_spinbox_mousewheel(spin)
+        except Exception:
+            pass
+
+        def _on_gemini_spin_changed(value):
+            try:
+                numeric_value = max(float(minimum), min(float(maximum), float(value)))
+                typed_value = int(numeric_value) if int(decimals) <= 0 else numeric_value
+                setattr(self, attr_name, typed_value)
+                self.config[config_key] = typed_value
+                os.environ[env_key] = _gemini_env_number(typed_value, decimals)
+            except Exception:
+                pass
+
+        spin.valueChanged.connect(_on_gemini_spin_changed)
+        setattr(self, f"{spin_attr}_label", label)
+        setattr(self, spin_attr, spin)
+        control_h.addWidget(spin)
+        control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return control
+
+    def _make_gemini_combo_control(label_text, attr_name, combo_attr, config_key, env_key, default, choices, tooltip):
+        allowed = {str(choice).strip().lower() for choice in choices}
+        current_value = _gemini_choice_setting(config_key, env_key, default, allowed)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = current_value
+
+        control = QWidget()
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(4)
+
+        label = QLabel(label_text)
+        label.setToolTip(tooltip)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        control_h.addWidget(label)
+
+        combo = QComboBox()
+        combo.addItems([str(choice).strip().lower() for choice in choices])
+        combo.setCurrentText(current_value)
+        combo.setFixedSize(112, 26)
+        combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        combo.setToolTip(tooltip)
+
+        def _on_gemini_combo_changed(value):
+            selected = str(value or default).strip().lower()
+            if selected not in allowed:
+                selected = default
+            setattr(self, attr_name, selected)
+            self.config[config_key] = selected
+            os.environ[env_key] = selected
+
+        combo.currentTextChanged.connect(_on_gemini_combo_changed)
+        setattr(self, combo_attr, combo)
+        control_h.addWidget(combo)
+        control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return control
+
+    gemini_toggles_row = QWidget()
+    gemini_toggles_h = QHBoxLayout(gemini_toggles_row)
+    gemini_toggles_h.setContentsMargins(16, 2, 0, 0)
+    gemini_toggles_h.setSpacing(10)
+    gemini_toggles_h.addWidget(_make_gemini_checkbox(
+        "Adaptive browser subchunks",
+        "gemini_free_adaptive_split_var",
+        "gemini_free_adaptive_split_checkbox",
+        "gemini_free_adaptive_split",
+        "GEMINI_FREE_ADAPTIVE_SPLIT",
+        True,
+        "Split over-budget Gemini Free browser requests into subchunks.",
+    ))
+    gemini_toggles_h.addWidget(_make_gemini_checkbox(
+        "HTML text-node transport",
+        "gemini_free_html_text_node_transport_var",
+        "gemini_free_html_text_node_transport_checkbox",
+        "gemini_free_html_text_node_transport",
+        "GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT",
+        True,
+        "Send HTML as numbered text nodes when the transported request fits in one browser call.",
+    ))
+    gemini_toggles_h.addStretch()
+    section_v.addWidget(gemini_toggles_row)
+
+    gemini_controls = QWidget()
+    gemini_controls.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    gemini_grid = QGridLayout(gemini_controls)
+    gemini_grid.setContentsMargins(16, 2, 0, 8)
+    gemini_grid.setHorizontalSpacing(12)
+    gemini_grid.setVerticalSpacing(6)
+    gemini_grid.setAlignment(Qt.AlignLeft)
+    gemini_grid.setColumnStretch(0, 0)
+    gemini_grid.setColumnStretch(1, 0)
+
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Prompt target chars:",
+        "gemini_free_subchunk_prompt_chars_var",
+        "gemini_free_subchunk_prompt_chars_spin",
+        "gemini_free_subchunk_prompt_chars",
+        "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
+        14000,
+        300,
+        100000,
+        0,
+        100,
+        "Target prompt character budget before Gemini Free adaptive splitting is used.",
+    ), 0, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "URL limit chars:",
+        "gemini_free_subchunk_url_chars_var",
+        "gemini_free_subchunk_url_chars_spin",
+        "gemini_free_subchunk_url_chars",
+        "GEMINI_FREE_SUBCHUNK_URL_CHARS",
+        14500,
+        1000,
+        200000,
+        0,
+        100,
+        "Maximum encoded Google Search URL length for Gemini Free browser calls.",
+    ), 0, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Safety chars:",
+        "gemini_free_subchunk_safety_chars_var",
+        "gemini_free_subchunk_safety_chars_spin",
+        "gemini_free_subchunk_safety_chars",
+        "GEMINI_FREE_SUBCHUNK_SAFETY_CHARS",
+        600,
+        0,
+        20000,
+        0,
+        50,
+        "Reserved character cushion subtracted from prompt and URL limits.",
+    ), 1, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Min body chars:",
+        "gemini_free_min_subchunk_body_chars_var",
+        "gemini_free_min_subchunk_body_chars_spin",
+        "gemini_free_min_subchunk_body_chars",
+        "GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS",
+        80,
+        1,
+        50000,
+        0,
+        10,
+        "Minimum body budget allowed before the splitter reports the fixed prompt is too large.",
+    ), 1, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Concurrency override:",
+        "gemini_free_subchunk_concurrency_var",
+        "gemini_free_subchunk_concurrency_spin",
+        "gemini_free_subchunk_concurrency",
+        "GEMINI_FREE_SUBCHUNK_CONCURRENCY",
+        0,
+        0,
+        64,
+        0,
+        1,
+        "Maximum simultaneous Gemini Free subchunk browser helpers. 0 uses AuthND token concurrency.",
+    ), 2, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Start delay (s):",
+        "gemini_free_subchunk_start_delay_var",
+        "gemini_free_subchunk_start_delay_spin",
+        "gemini_free_subchunk_start_delay",
+        "GEMINI_FREE_SUBCHUNK_START_DELAY",
+        5.0,
+        0.0,
+        60.0,
+        1,
+        0.5,
+        "Delay between launching Gemini Free subchunk browser helpers.",
+    ), 2, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_spin_control(
+        "Timeout (s):",
+        "gemini_free_subchunk_timeout_var",
+        "gemini_free_subchunk_timeout_spin",
+        "gemini_free_subchunk_timeout",
+        "GEMINI_FREE_SUBCHUNK_TIMEOUT",
+        0,
+        0,
+        7200,
+        0,
+        30,
+        "Per-subchunk helper timeout. 0 disables this timeout.",
+    ), 3, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "Payload:",
+        "gemini_free_subchunk_payload_format_var",
+        "gemini_free_subchunk_payload_format_combo",
+        "gemini_free_subchunk_payload_format",
+        "GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT",
+        "auto",
+        ["auto", "html", "text"],
+        "Payload splitter mode. auto detects HTML unless html2text/enhanced mode is active.",
+    ), 3, 1, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "HTML splitter:",
+        "gemini_free_html_splitter_var",
+        "gemini_free_html_splitter_combo",
+        "gemini_free_html_splitter",
+        "GEMINI_FREE_HTML_SPLITTER",
+        "beautifulsoup4",
+        ["beautifulsoup4", "regex"],
+        "HTML unit splitter. beautifulsoup4 respects tag boundaries; regex is the fallback splitter.",
+    ), 4, 0, Qt.AlignLeft)
+    gemini_grid.addWidget(_make_gemini_combo_control(
+        "Balancer:",
+        "gemini_free_subchunk_balancer_var",
+        "gemini_free_subchunk_balancer_combo",
+        "gemini_free_subchunk_balancer",
+        "GEMINI_FREE_SUBCHUNK_BALANCER",
+        "balanced",
+        ["balanced", "greedy"],
+        "balanced spreads work evenly across the planned chunks; greedy keeps the old first-fit packing.",
+    ), 4, 1, Qt.AlignLeft)
+    section_v.addWidget(gemini_controls)
 
 
     # Parallel Extraction
@@ -7092,11 +7401,11 @@ def _create_prompt_management_section(self, parent):
     ignore_h2 = QHBoxLayout(ignore_row2)
     ignore_h2.setContentsMargins(20, 5, 0, 0)
     
-    # Remove duplicate H1/H2/H3+P pairs
+    # Remove duplicate H1-H6+P pairs
     if not hasattr(self, 'remove_duplicate_h1_p_var'):
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
     
-    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1/H2/H3+P pairs")
+    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1-H6+P pairs")
     try:
         remove_dup_cb.setChecked(bool(self.remove_duplicate_h1_p_var))
     except Exception:
@@ -7109,7 +7418,7 @@ def _create_prompt_management_section(self, parent):
             pass
     remove_dup_cb.toggled.connect(_on_remove_dup_toggle)
     remove_dup_cb.setToolTip(
-        "Remove paragraph tags that immediately follow H1, H2, or H3 tags with identical text.\n"
+        "Remove paragraph tags that follow or precede H1-H6 tags with identical text.\n"
         "Useful for novels that repeat chapter titles."
     )
     ignore_h2.addWidget(remove_dup_cb)

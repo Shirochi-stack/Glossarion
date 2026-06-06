@@ -38,6 +38,7 @@ except ImportError:
     pass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import unescape_valid_html_tag_entities
 
 _DEFAULT_SPECIAL_KEYWORDS = [
@@ -2856,25 +2857,9 @@ def _process_single_html_file(
                 for header_tag in content_soup.find_all(['h1', 'h2', 'h3']):
                     header_tag.decompose()
             
-            # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
+            # Remove duplicate heading+P pairs, ignoring empty tags in between.
             if remove_duplicate_h1_p:
-                for h1_tag in content_soup.find_all(['h1', 'h2', 'h3']):
-                    # Skip split marker H1 tags
-                    h1_id = h1_tag.get('id', '')
-                    if h1_id and h1_id.startswith('split-'):
-                        continue
-                    h1_text = h1_tag.get_text(strip=True)
-                    if 'SPLIT MARKER' in h1_text:
-                        continue
-                    
-                    # Get the next sibling (skipping whitespace/text nodes)
-                    next_sibling = h1_tag.find_next_sibling()
-                    if next_sibling and next_sibling.name == 'p':
-                        # Compare text content (stripped)
-                        p_text = next_sibling.get_text(strip=True)
-                        if h1_text == p_text:
-                            # Remove the duplicate paragraph
-                            next_sibling.decompose()
+                remove_duplicate_heading_paragraph_pairs(content_soup, check_previous=False)
             
             # Update content_html with filtered version
             content_html = str(content_soup)

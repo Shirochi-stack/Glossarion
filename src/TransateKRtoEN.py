@@ -52,6 +52,7 @@ from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
@@ -7280,30 +7281,13 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
             
-            # Post-process: Remove duplicate H1+P pairs from translated OUTPUT if enabled
+            # Post-process: Remove duplicate heading+P pairs from translated OUTPUT if enabled
             remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
             if remove_duplicate_h1_p and cleaned:
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
-                for h1_tag in output_soup.find_all(['h1', 'h2', 'h3']):
-                    h1_id = h1_tag.get('id', '')
-                    if h1_id and h1_id.startswith('split-'):
-                        continue
-                    h1_text = h1_tag.get_text(strip=True)
-                    if 'SPLIT MARKER' in h1_text:
-                        continue
-                    # Check next sibling (P after H1)
-                    next_sibling = h1_tag.find_next_sibling()
-                    if next_sibling and next_sibling.name == 'p':
-                        if h1_text == next_sibling.get_text(strip=True):
-                            next_sibling.decompose()
-                            continue
-                    # Check previous sibling (P before H1)
-                    prev_sibling = h1_tag.find_previous_sibling()
-                    if prev_sibling and prev_sibling.name == 'p':
-                        if h1_text == prev_sibling.get_text(strip=True):
-                            prev_sibling.decompose()
+                remove_duplicate_heading_paragraph_pairs(output_soup)
                 cleaned = str(output_soup)
                 
                 # Second: Markdown-based duplicate removal (for enhanced extraction mode)
@@ -7689,31 +7673,9 @@ class BatchTranslationProcessor:
                     for header_tag in body_soup.find_all(['h1', 'h2', 'h3']):
                         header_tag.decompose()
                 
-                # Remove duplicate H1+P pairs (where P is adjacent to H1 with same text)
+                # Remove duplicate heading+P pairs, ignoring empty tags in between.
                 if remove_duplicate_h1_p:
-                    for h1_tag in body_soup.find_all(['h1', 'h2', 'h3']):
-                        # Skip split marker H1 tags
-                        h1_id = h1_tag.get('id', '')
-                        if h1_id and h1_id.startswith('split-'):
-                            continue
-                        h1_text = h1_tag.get_text(strip=True)
-                        if 'SPLIT MARKER' in h1_text:
-                            continue
-                        
-                        # Check next sibling (P after H1)
-                        next_sibling = h1_tag.find_next_sibling()
-                        if next_sibling and next_sibling.name == 'p':
-                            p_text = next_sibling.get_text(strip=True)
-                            if h1_text == p_text:
-                                next_sibling.decompose()
-                                continue
-                        
-                        # Check previous sibling (P before H1)
-                        prev_sibling = h1_tag.find_previous_sibling()
-                        if prev_sibling and prev_sibling.name == 'p':
-                            p_text = prev_sibling.get_text(strip=True)
-                            if h1_text == p_text:
-                                prev_sibling.decompose()
+                    remove_duplicate_heading_paragraph_pairs(body_soup)
                 
                 chapter_body = str(body_soup)
             
@@ -23201,30 +23163,13 @@ def main(log_callback=None, stop_callback=None):
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
 
-            # Post-process: Remove duplicate H1+P pairs from translated OUTPUT if enabled
+            # Post-process: Remove duplicate heading+P pairs from translated OUTPUT if enabled
             remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
             if remove_duplicate_h1_p and cleaned:
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
-                for h1_tag in output_soup.find_all(['h1', 'h2', 'h3']):
-                    h1_id = h1_tag.get('id', '')
-                    if h1_id and h1_id.startswith('split-'):
-                        continue
-                    h1_text = h1_tag.get_text(strip=True)
-                    if 'SPLIT MARKER' in h1_text:
-                        continue
-                    # Check next sibling (P after H1)
-                    next_sibling = h1_tag.find_next_sibling()
-                    if next_sibling and next_sibling.name == 'p':
-                        if h1_text == next_sibling.get_text(strip=True):
-                            next_sibling.decompose()
-                            continue
-                    # Check previous sibling (P before H1)
-                    prev_sibling = h1_tag.find_previous_sibling()
-                    if prev_sibling and prev_sibling.name == 'p':
-                        if h1_text == prev_sibling.get_text(strip=True):
-                            prev_sibling.decompose()
+                remove_duplicate_heading_paragraph_pairs(output_soup)
                 cleaned = str(output_soup)
                 
                 # Second: Markdown-based duplicate removal (for enhanced extraction mode)

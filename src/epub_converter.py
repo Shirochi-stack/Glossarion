@@ -19,6 +19,7 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
 from _empty_attr_fix import fix_empty_attr_tags
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
@@ -765,22 +766,7 @@ class XHTMLConverter:
 
             if os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1':
                 soup = BeautifulSoup(html_content, 'html.parser')
-                for h1_tag in soup.find_all(['h1', 'h2', 'h3']):
-                    h1_id = h1_tag.get('id', '')
-                    if h1_id and h1_id.startswith('split-'):
-                        continue
-                    h1_text = h1_tag.get_text(strip=True)
-                    if 'SPLIT MARKER' in h1_text:
-                        continue
-                    next_sibling = h1_tag.find_next_sibling()
-                    if next_sibling and next_sibling.name == 'p':
-                        if h1_text == next_sibling.get_text(strip=True):
-                            next_sibling.decompose()
-                            continue
-                    prev_sibling = h1_tag.find_previous_sibling()
-                    if prev_sibling and prev_sibling.name == 'p':
-                        if h1_text == prev_sibling.get_text(strip=True):
-                            prev_sibling.decompose()
+                remove_duplicate_heading_paragraph_pairs(soup)
                 html_content = str(soup)
             
             # Now process the content normally

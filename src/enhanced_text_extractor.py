@@ -31,6 +31,7 @@ except ImportError:
     raise ImportError("html2text is required. Install with: pip install html2text")
 
 from _empty_attr_fix import fix_empty_attr_tags
+from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import unescape_valid_html_tag_entities
 
 # Standard HTML / SVG / MathML / common legacy tag names. Used by
@@ -804,31 +805,9 @@ class EnhancedTextExtractor:
                         for hdr in soup.find_all(tag_name):
                             hdr.decompose()
                 
-                # Remove duplicate H1+P pairs (where P immediately follows or precedes H1 with same text)
+                # Remove duplicate heading+P pairs, ignoring empty tags in between.
                 if remove_duplicate_h1_p:
-                    for h1_tag in soup.find_all(['h1', 'h2', 'h3']):
-                        # Skip split marker H1 tags
-                        h1_id = h1_tag.get('id', '')
-                        if h1_id and h1_id.startswith('split-'):
-                            continue
-                        h1_text = h1_tag.get_text(strip=True)
-                        if 'SPLIT MARKER' in h1_text:
-                            continue
-                        
-                        # Check next sibling (P after H1)
-                        next_sibling = h1_tag.find_next_sibling()
-                        if next_sibling and next_sibling.name == 'p':
-                            p_text = next_sibling.get_text(strip=True)
-                            if h1_text == p_text:
-                                next_sibling.decompose()
-                                continue
-                        
-                        # Check previous sibling (P before H1)
-                        prev_sibling = h1_tag.find_previous_sibling()
-                        if prev_sibling and prev_sibling.name == 'p':
-                            p_text = prev_sibling.get_text(strip=True)
-                            if h1_text == p_text:
-                                prev_sibling.decompose()
+                    remove_duplicate_heading_paragraph_pairs(soup)
             except Exception:
                 # Non-fatal – proceed with original soup if anything goes wrong
                 pass
