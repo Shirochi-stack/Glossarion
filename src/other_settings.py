@@ -13532,6 +13532,13 @@ def on_profile_select(self, event=None):
             if hasattr(self, 'enhanced_extraction_radio') and hasattr(self, 'standard_extraction_radio'):
                 self.enhanced_extraction_radio.setChecked(True)
 
+        try:
+            refresh_review_button = getattr(self, '_refresh_progress_text_analysis_button', None)
+            if callable(refresh_review_button):
+                refresh_review_button()
+        except Exception:
+            pass
+
 def save_profile(self):
     """Save current prompt under selected profile and persist."""
     from PySide6.QtWidgets import QMessageBox

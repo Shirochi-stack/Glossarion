@@ -11465,7 +11465,7 @@ Recent translations to summarize:
         self.update_target_language(final_lang)
         
         # Placeholder hint label (always visible)
-        self.target_lang_warning = QLabel("Targe Language Placeholder {target_lang}")
+        self.target_lang_warning = QLabel("Target Language Placeholder {target_lang}")
         self.target_lang_warning.setStyleSheet("color: #5a9fd4; font-size: 7pt; margin-top: 6px;")
         self.target_lang_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)  # Allow copy-paste
         self.target_lang_warning.setWordWrap(True)

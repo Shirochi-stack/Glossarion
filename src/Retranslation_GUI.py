@@ -3981,17 +3981,21 @@ class RetranslationMixin:
             profile_lower = _current_profile_name().strip().lower()
             return "_html2text" not in profile_lower and "html2text" not in profile_lower
 
-        def _text_analysis_extraction_method():
-            try:
-                enhanced_radio = getattr(self, "enhanced_extraction_radio", None)
-                standard_radio = getattr(self, "standard_extraction_radio", None)
-                if enhanced_radio is not None and enhanced_radio.isChecked():
-                    return "enhanced"
-                if standard_radio is not None and standard_radio.isChecked():
-                    return "standard"
-            except Exception:
-                pass
+        def _normalize_text_analysis_method(value):
+            value = str(value or "").strip().lower()
+            if not value:
+                return ""
+            if value in ("standard", "beautifulsoup", "beautiful_soup", "bs4"):
+                return "standard"
+            if value in ("enhanced", "html2text", "markdown", "md"):
+                return "enhanced" if value != "markdown" else "markdown"
+            if "html2text" in value:
+                return "enhanced"
+            if "beautifulsoup" in value or "beautiful_soup" in value:
+                return "standard"
+            return value
 
+        def _text_analysis_extraction_method():
             for source in (
                 lambda: getattr(self, "text_extraction_method_var", None),
                 lambda: getattr(self, "config", {}).get("text_extraction_method"),
@@ -4001,9 +4005,19 @@ class RetranslationMixin:
                     value = source()
                 except Exception:
                     value = None
-                value = str(value or "").strip().lower()
-                if value:
-                    return value
+                method = _normalize_text_analysis_method(value)
+                if method:
+                    return method
+
+            try:
+                enhanced_radio = getattr(self, "enhanced_extraction_radio", None)
+                standard_radio = getattr(self, "standard_extraction_radio", None)
+                if enhanced_radio is not None and enhanced_radio.isChecked():
+                    return "enhanced"
+                if standard_radio is not None and standard_radio.isChecked():
+                    return "standard"
+            except Exception:
+                pass
 
             profile_lower = _current_profile_name().strip().lower()
             if "_html2text" in profile_lower or "html2text" in profile_lower:
@@ -4126,16 +4140,27 @@ class RetranslationMixin:
 
         text_analysis_btn.clicked.connect(_show_text_analysis)
         _update_text_analysis_button()
+
+        def _queue_text_analysis_button_update():
+            for delay in (0, 75, 250, 750):
+                QTimer.singleShot(delay, _update_text_analysis_button)
+        try:
+            self._refresh_progress_text_analysis_button = _queue_text_analysis_button_update
+        except Exception:
+            pass
+
         try:
             if hasattr(self, "profile_menu") and self.profile_menu is not None:
-                self.profile_menu.currentTextChanged.connect(lambda *_: QTimer.singleShot(0, _update_text_analysis_button))
+                self.profile_menu.currentTextChanged.connect(lambda *_: _queue_text_analysis_button_update())
+                self.profile_menu.currentIndexChanged.connect(lambda *_: _queue_text_analysis_button_update())
+                self.profile_menu.activated.connect(lambda *_: _queue_text_analysis_button_update())
         except Exception:
             pass
         for _radio_name in ("standard_extraction_radio", "enhanced_extraction_radio"):
             try:
                 _radio = getattr(self, _radio_name, None)
                 if _radio is not None:
-                    _radio.toggled.connect(lambda *_: QTimer.singleShot(0, _update_text_analysis_button))
+                    _radio.toggled.connect(lambda *_: _queue_text_analysis_button_update())
             except Exception:
                 pass
 
