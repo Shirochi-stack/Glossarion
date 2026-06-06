@@ -11,6 +11,8 @@ import json
 import threading
 import time
 
+from shutdown_utils import subprocess_no_window_kwargs, terminate_subprocess_tree
+
 
 class PdfGenerationManager:
     """Manages PDF generation in a separate process to prevent GUI freezing."""
@@ -80,7 +82,8 @@ class PdfGenerationManager:
                 bufsize=1,
                 universal_newlines=True,
                 env=env,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                **subprocess_no_window_kwargs(),
             )
 
             # Heartbeat while waiting for subprocess (covers WeasyPrint import delay)
@@ -200,11 +203,11 @@ class PdfGenerationManager:
 
             if process_ref and process_ref.poll() is None:
                 try:
-                    process_ref.terminate()
+                    terminate_subprocess_tree(process_ref, kill=False, timeout=1)
                     process_ref.wait(timeout=3)
                 except Exception:
                     try:
-                        process_ref.kill()
+                        terminate_subprocess_tree(process_ref, kill=True, timeout=1)
                     except Exception:
                         pass
 
@@ -224,6 +227,6 @@ class PdfGenerationManager:
         """Terminate the subprocess."""
         if self.process and self.process.poll() is None:
             try:
-                self.process.terminate()
+                terminate_subprocess_tree(self.process, kill=False, timeout=1)
             except Exception:
                 pass

@@ -369,7 +369,13 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 # CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS so it survives app close
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
                 DETACHED_PROCESS = 0x00000008
-                kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+                try:
+                    from shutdown_utils import subprocess_no_window_kwargs
+                    kwargs.update(subprocess_no_window_kwargs(
+                        creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+                    ))
+                except Exception:
+                    kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
             else:
                 kwargs["start_new_session"] = True
 
@@ -414,8 +420,12 @@ def _kill_proxy_by_port(port: int = 8080):
     """Kill any process listening on the proxy port (Windows & Unix)."""
     try:
         if sys.platform == "win32":
+            try:
+                from shutdown_utils import run_no_window
+            except Exception:
+                run_no_window = subprocess.run
             # Find PID using netstat
-            result = subprocess.run(
+            result = run_no_window(
                 ["netstat", "-ano", "-p", "TCP"],
                 capture_output=True, text=True, timeout=5
             )
@@ -423,8 +433,8 @@ def _kill_proxy_by_port(port: int = 8080):
                 if f":{port}" in line and "LISTENING" in line:
                     parts = line.split()
                     pid = int(parts[-1])
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                                   capture_output=True, timeout=5)
+                    run_no_window(["taskkill", "/F", "/PID", str(pid)],
+                                  capture_output=True, timeout=5)
         else:
             subprocess.run(["fuser", "-k", f"{port}/tcp"],
                            capture_output=True, timeout=5)

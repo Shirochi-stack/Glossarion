@@ -12,6 +12,8 @@ import queue
 import time
 from pathlib import Path
 
+from shutdown_utils import subprocess_no_window_kwargs, terminate_subprocess_tree
+
 
 class ChapterExtractionManager:
     """
@@ -147,7 +149,8 @@ class ChapterExtractionManager:
                 errors='replace',  # Replace invalid chars instead of failing
                 bufsize=1,
                 universal_newlines=True,
-                env=env  # Pass the environment with UTF-8 settings
+                env=env,  # Pass the environment with UTF-8 settings
+                **subprocess_no_window_kwargs(),
             )
             
             # Read output in real-time
@@ -317,10 +320,10 @@ class ChapterExtractionManager:
             # If process is still running, try to clean it up
             if process_ref and process_ref.poll() is None:
                 try:
-                    process_ref.terminate()
+                    terminate_subprocess_tree(process_ref, kill=False, timeout=1)
                     time.sleep(0.1)  # Brief wait
                     if process_ref.poll() is None:
-                        process_ref.kill()
+                        terminate_subprocess_tree(process_ref, kill=True, timeout=1)
                 except Exception:
                     pass  # Ignore cleanup errors in finally block
             
@@ -375,13 +378,13 @@ class ChapterExtractionManager:
         try:
             # Check if process is still alive before attempting termination
             if process_ref.poll() is None:
-                process_ref.terminate()
+                terminate_subprocess_tree(process_ref, kill=False, timeout=1)
                 # Give it a moment to terminate
                 time.sleep(0.5)
                 
                 # Force kill if still running
                 if process_ref.poll() is None:
-                    process_ref.kill()
+                    terminate_subprocess_tree(process_ref, kill=True, timeout=1)
                     time.sleep(0.1)  # Brief wait after kill
                     
                 # Only log termination if not stopping (user already knows they stopped it)

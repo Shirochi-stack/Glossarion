@@ -18,6 +18,90 @@ from typing import Callable, Iterable, Optional
 
 
 _last_qt_shutdown_drain_at = 0.0
+_WINDOWS_CREATE_NO_WINDOW = 0x08000000
+_WINDOWS_SW_HIDE = 0
+
+
+def subprocess_no_window_kwargs(**kwargs):
+    """Return subprocess kwargs that suppress transient console windows on Windows."""
+    if os.name != "nt":
+        return kwargs
+
+    merged = dict(kwargs)
+    try:
+        creationflags = int(merged.get("creationflags") or 0)
+    except Exception:
+        creationflags = 0
+    merged["creationflags"] = creationflags | getattr(
+        subprocess,
+        "CREATE_NO_WINDOW",
+        _WINDOWS_CREATE_NO_WINDOW,
+    )
+
+    try:
+        startupinfo = merged.get("startupinfo")
+        if startupinfo is None:
+            startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = _WINDOWS_SW_HIDE
+        merged["startupinfo"] = startupinfo
+    except Exception:
+        pass
+
+    return merged
+
+
+def run_no_window(args, **kwargs):
+    """Run a subprocess without flashing a console window on Windows."""
+    return subprocess.run(args, **subprocess_no_window_kwargs(**kwargs))
+
+
+def popen_no_window(args, **kwargs):
+    """Start a subprocess without flashing a console window on Windows."""
+    return subprocess.Popen(args, **subprocess_no_window_kwargs(**kwargs))
+
+
+def _taskkill_pid_tree(pid, *, force: bool = True, timeout: float = 3.0) -> bool:
+    if os.name != "nt" or not pid:
+        return False
+    args = ["taskkill"]
+    if force:
+        args.append("/F")
+    args.extend(["/T", "/PID", str(pid)])
+    try:
+        run_no_window(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def terminate_subprocess_tree(proc, *, kill: bool = False, timeout: float = 3.0) -> None:
+    """Terminate a Popen-style process and its children without console flashes."""
+    try:
+        if proc is None or proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    if os.name == "nt":
+        try:
+            if _taskkill_pid_tree(proc.pid, force=kill, timeout=timeout):
+                return
+        except Exception:
+            pass
+
+    try:
+        if kill:
+            proc.kill()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
 
 
 def _normalize_exit_code(code) -> int:
@@ -180,7 +264,7 @@ def _ensure_safe_tempdir() -> None:
         pass
 
 
-def _terminate_psutil_children(timeout: float = 1.5) -> None:
+def _terminate_psutil_children(timeout: float = 1.5) -> int:
     """Terminate every descendant of the current process.
 
     Any grandchild that still has DLLs from `_MEIPASS` mapped will cause the
@@ -192,6 +276,9 @@ def _terminate_psutil_children(timeout: float = 1.5) -> None:
         import psutil
         parent = psutil.Process(os.getpid())
         children = parent.children(recursive=True)
+        count = len(children)
+        if not children:
+            return 0
         for proc in children:
             try:
                 proc.terminate()
@@ -206,6 +293,10 @@ def _terminate_psutil_children(timeout: float = 1.5) -> None:
                 proc.kill()
             except Exception:
                 pass
+            try:
+                _taskkill_pid_tree(proc.pid, force=True, timeout=min(1.0, max(0.2, timeout)))
+            except Exception:
+                pass
         # Re-check after kill to make sure handles to _MEIPASS DLLs are gone.
         try:
             still = [p for p in alive if p.is_running()]
@@ -213,8 +304,33 @@ def _terminate_psutil_children(timeout: float = 1.5) -> None:
                 psutil.wait_procs(still, timeout=timeout)
         except Exception:
             pass
+
+        # Some helpers can spawn during teardown; do one final quick pass so
+        # late children do not hold PyInstaller one-file DLLs open.
+        try:
+            late_children = parent.children(recursive=True)
+            count = max(count, len(late_children))
+            for proc in late_children:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    _taskkill_pid_tree(proc.pid, force=True, timeout=0.5)
+                except Exception:
+                    pass
+            if late_children:
+                psutil.wait_procs(late_children, timeout=min(0.5, max(0.1, timeout)))
+        except Exception:
+            pass
+        return count
     except Exception:
-        pass
+        return 0
+
+
+def terminate_current_process_children(timeout: float = 1.5) -> int:
+    """Terminate descendants of this process; returns the initial child count."""
+    return _terminate_psutil_children(timeout=timeout)
 
 
 def _taskkill_self_tree() -> None:
@@ -223,12 +339,10 @@ def _taskkill_self_tree() -> None:
     if os.environ.get("GLOSSARION_TASKKILL_SELF_ON_EXIT", "").strip().lower() not in ("1", "true", "yes", "on"):
         return
     try:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
+        popen_no_window(
             ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
         )
     except Exception:
         pass

@@ -131,10 +131,8 @@ def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
         return
     if os.name == "nt":
         try:
-            args = ["taskkill", "/T", "/PID", str(proc.pid)]
-            if kill:
-                args.insert(1, "/F")
-            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            from shutdown_utils import terminate_subprocess_tree
+            terminate_subprocess_tree(proc, kill=kill, timeout=3)
             return
         except Exception:
             pass
@@ -798,9 +796,11 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
     env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
-    creationflags = 0
-    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        creationflags = subprocess.CREATE_NO_WINDOW
+    try:
+        from shutdown_utils import subprocess_no_window_kwargs
+        no_window_kwargs = subprocess_no_window_kwargs()
+    except Exception:
+        no_window_kwargs = {}
 
     subprocess_gate = _get_configured_gate(
         TOKEN_SUBPROCESS_CONCURRENCY_ENV,
@@ -818,7 +818,7 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            creationflags=creationflags,
+            **no_window_kwargs,
         )
         with _active_helper_lock:
             _active_helper_processes.add(proc)

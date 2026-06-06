@@ -12,6 +12,8 @@ import threading
 import time
 from pathlib import Path
 
+from shutdown_utils import subprocess_no_window_kwargs, terminate_subprocess_tree
+
 
 class SdlxliffExtractionManager:
     def __init__(self, log_callback=None):
@@ -73,6 +75,7 @@ class SdlxliffExtractionManager:
                 bufsize=1,
                 universal_newlines=True,
                 env=env,
+                **subprocess_no_window_kwargs(),
             )
 
             while True:
@@ -111,10 +114,10 @@ class SdlxliffExtractionManager:
             self.process = None
             if process_ref and process_ref.poll() is None:
                 try:
-                    process_ref.terminate()
+                    terminate_subprocess_tree(process_ref, kill=False, timeout=1)
                     time.sleep(0.1)
                     if process_ref.poll() is None:
-                        process_ref.kill()
+                        terminate_subprocess_tree(process_ref, kill=True, timeout=1)
                 except Exception:
                     pass
             if self.result is None:
@@ -170,10 +173,10 @@ class SdlxliffExtractionManager:
     def _terminate_process_ref(self, process_ref):
         try:
             if process_ref and process_ref.poll() is None:
-                process_ref.terminate()
+                terminate_subprocess_tree(process_ref, kill=False, timeout=1)
                 time.sleep(0.5)
                 if process_ref.poll() is None:
-                    process_ref.kill()
+                    terminate_subprocess_tree(process_ref, kill=True, timeout=1)
         except Exception as exc:
             self._log(f"Error terminating SDLXLIFF worker: {exc}")
 

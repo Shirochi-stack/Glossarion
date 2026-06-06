@@ -151,38 +151,29 @@ def _kill_child_process_tree(timeout=1.5):
     """Terminate all child processes of the current process to free _MEIPASS locks.
     Returns the number of children we attempted to stop.
     """
-    count = 0
     try:
-        import psutil, os
-        parent = psutil.Process(os.getpid())
-        children = parent.children(recursive=True)
-        count = len(children)
-        for proc in children:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        gone, alive = psutil.wait_procs(children, timeout=timeout)
-        for proc in alive:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        from shutdown_utils import terminate_current_process_children
+        return terminate_current_process_children(timeout=timeout)
     except Exception:
         # Last-resort fallback. Disabled by default for the GUI process because
         # taskkill /F on our own PID can interrupt native Qt/PySide teardown and
         # trigger Windows' "memory could not be read" dialog.
         try:
-            import subprocess, os
+            import os
             if (
                 os.name == 'nt'
                 and os.environ.get("GLOSSARION_TASKKILL_SELF_ON_EXIT", "").strip().lower() in ("1", "true", "yes", "on")
             ):
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import subprocess
+                try:
+                    from shutdown_utils import run_no_window
+                except Exception:
+                    run_no_window = subprocess.run
+                run_no_window(["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-    return count
+    return 0
 
 
 def _preempt_temp_dir_warning():
@@ -2802,7 +2793,7 @@ Text to analyze:
                 print(f"[CLOSE] Warning: Could not save config on close: {e}")
             
             # Stop any background operations first
-            self.stop_all_operations(kill_child_processes=False)
+            self.stop_all_operations(kill_child_processes=False, fast=True)
             self._restore_in_progress_rows_for_shutdown()
 
             # Aggressively free PyInstaller temp dir to avoid warning message box
@@ -2896,7 +2887,7 @@ Text to analyze:
         except Exception as e:
             print(f"[CLOSE] Warning: shutdown progress cleanup failed: {e}")
 
-    def stop_all_operations(self, kill_child_processes=True):
+    def stop_all_operations(self, kill_child_processes=True, fast=False):
         """Stop all background operations and threads"""
         if getattr(self, '_stop_all_operations_done', False):
             print("[CLEANUP] Background operations already stopped")
@@ -2908,6 +2899,8 @@ Text to analyze:
         try:
             print("[CLEANUP] Stopping all background operations...")
             self._request_hard_stop_for_shutdown()
+            thread_timeout_ms = 250 if fast else 1500
+            shutdown_task_timeout = 0.15 if fast else 0.45
 
             try:
                 import concurrent.futures as _shutdown_cf
@@ -2936,7 +2929,7 @@ Text to analyze:
                     except Exception:
                         pass
 
-            def _drain_shutdown_tasks(timeout=0.45):
+            def _drain_shutdown_tasks(timeout=shutdown_task_timeout):
                 try:
                     if not shutdown_futures or _shutdown_time is None:
                         return
@@ -2995,7 +2988,7 @@ Text to analyze:
                 except Exception:
                     pass
 
-            def _stop_thread_like(label, thread_obj, timeout_ms=1500):
+            def _stop_thread_like(label, thread_obj, timeout_ms=thread_timeout_ms):
                 try:
                     if not thread_obj:
                         return
@@ -3070,7 +3063,7 @@ Text to analyze:
                         _stop_thread_like("translation thread", self._translation_thread)
                     elif hasattr(self._translation_thread, 'join'):
                         # threading.Thread path — cannot force-terminate, just wait briefly
-                        self._translation_thread.join(timeout=1.0)
+                        self._translation_thread.join(timeout=thread_timeout_ms / 1000.0)
                 except:
                     pass
             
@@ -3083,7 +3076,7 @@ Text to analyze:
                         _stop_thread_like("glossary thread", self._glossary_thread)
                     elif hasattr(self._glossary_thread, 'join'):
                         # threading.Thread path — cannot force-terminate, just wait briefly
-                        self._glossary_thread.join(timeout=1.0)
+                        self._glossary_thread.join(timeout=thread_timeout_ms / 1000.0)
                 except:
                     pass
             
@@ -3269,8 +3262,12 @@ Text to analyze:
                     if os.name == 'nt':
                         try:
                             import subprocess
-                            subprocess.run(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            try:
+                                from shutdown_utils import run_no_window
+                            except Exception:
+                                run_no_window = subprocess.run
+                            run_no_window(["taskkill", "/F", "/IM", "QtWebEngineProcess.exe"],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         except Exception:
                             pass
 
@@ -3318,11 +3315,13 @@ Text to analyze:
             
             _drain_shutdown_tasks()
             print("[CLEANUP] Background operations stopped")
-            self._stop_all_operations_done = True
+            if not fast:
+                self._stop_all_operations_done = True
             
         except Exception as e:
             print(f"[CLEANUP] Error stopping operations: {e}")
-            self._stop_all_operations_done = True
+            if not fast:
+                self._stop_all_operations_done = True
         finally:
             try:
                 if 'shutdown_pool' in locals() and shutdown_pool is not None:
