@@ -11441,6 +11441,12 @@ def _create_anti_duplicate_section(self, parent):
     bypass_min_p_cb = self._create_styled_checkbox("Bypass Min-P Provider Allowlist")
     try:
         bypass_min_p_cb.setChecked(bool(self.bypass_min_p_allowlist_var))
+        bypass_min_p_cb.setToolTip(
+            "Default Min-P allowlist:\n"
+            "local/vLLM OpenAI-compatible endpoints\n"
+            "OpenRouter, Fireworks, Chutes, NanoGPT\n"
+            "NVIDIA, SambaNova, Opencode, custom OpenAI endpoints"
+        )
     except Exception:
         pass
     def _on_bypass_min_p_toggle(checked):
@@ -11451,7 +11457,7 @@ def _create_anti_duplicate_section(self, parent):
     bypass_min_p_cb.toggled.connect(_on_bypass_min_p_toggle)
     core_v.addWidget(bypass_min_p_cb)
 
-    bypass_min_p_desc = QLabel("Force-sends Min-P to providers that are not on the compatibility allowlist.")
+    bypass_min_p_desc = QLabel("Force-sends Min-P outside the default compatibility allowlist.")
     bypass_min_p_desc.setStyleSheet("color: gray; font-size: 8pt;")
     bypass_min_p_desc.setWordWrap(True)
     bypass_min_p_desc.setContentsMargins(20, 0, 0, 8)
