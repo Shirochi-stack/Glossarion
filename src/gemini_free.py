@@ -39,9 +39,9 @@ DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
 DEFAULT_SUBMIT_MODE = "url"
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 1200
-DEFAULT_SUBCHUNK_URL_CHARS = 3500
-DEFAULT_SUBCHUNK_SAFETY_CHARS = 300
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 15000
+DEFAULT_SUBCHUNK_URL_CHARS = 15500
+DEFAULT_SUBCHUNK_SAFETY_CHARS = 500
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
 DEFAULT_SUBCHUNK_TIMEOUT = 90
 DEFAULT_USER_AGENT = (
@@ -435,6 +435,28 @@ def _subchunk_safety_chars() -> int:
 
 def _min_subchunk_body_chars() -> int:
     return max(1, _env_int("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", DEFAULT_MIN_SUBCHUNK_BODY_CHARS))
+
+
+def _message_budget_usage(messages: Iterable[Dict[str, Any]]) -> tuple[int, int]:
+    prompt_chars = len(_messages_to_prompt(messages))
+    url_chars = _messages_to_search_url_chars(messages)
+    return prompt_chars, url_chars
+
+
+def _requires_adaptive_split(messages: Iterable[Dict[str, Any]]) -> tuple[bool, int, int]:
+    prompt_chars, url_chars = _message_budget_usage(messages)
+    return (
+        prompt_chars > _subchunk_prompt_chars() or url_chars > _subchunk_url_chars(),
+        prompt_chars,
+        url_chars,
+    )
+
+
+def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
+    configured = _subchunk_prompt_chars()
+    if prompt_chars <= 0:
+        return configured
+    return max(1000, min(configured, int(prompt_chars * 0.6)))
 
 
 def _subchunk_timeout_seconds(request_timeout: int) -> int:
@@ -1553,9 +1575,10 @@ def _send_chat_completion_split(
     max_tokens: Optional[int] = None,
     log_fn: Optional[Callable[[str], None]] = None,
     user_agent: Optional[str] = None,
+    target_prompt_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    max_prompt_chars = _subchunk_prompt_chars()
+    max_prompt_chars = int(target_prompt_chars or _subchunk_prompt_chars())
     chunks, split_metadata = _split_messages_for_search_budget(
         source_messages,
         max_prompt_chars,
@@ -1650,8 +1673,13 @@ def _send_chat_completion_qt(
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    prompt_chars = len(_messages_to_prompt(source_messages))
-    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
+    should_split, prompt_chars, url_chars = _requires_adaptive_split(source_messages)
+    if _adaptive_split_enabled() and should_split:
+        _log(
+            log_fn,
+            f"🧩 Gemini Free: prompt exceeds single-request budget "
+            f"({prompt_chars:,} prompt chars, {url_chars:,} URL chars); using adaptive subchunks"
+        )
         return _send_chat_completion_split(
             messages=source_messages,
             model=model,
@@ -1671,6 +1699,7 @@ def _send_chat_completion_qt(
         )
     except RuntimeError as exc:
         if _adaptive_split_enabled() and _generation_failure_error(exc):
+            fallback_target = _fallback_subchunk_prompt_chars(prompt_chars)
             return _send_chat_completion_split(
                 messages=source_messages,
                 model=model,
@@ -1678,6 +1707,7 @@ def _send_chat_completion_qt(
                 max_tokens=max_tokens,
                 log_fn=log_fn,
                 user_agent=user_agent,
+                target_prompt_chars=fallback_target,
             )
         raise
 
@@ -1836,7 +1866,7 @@ def _run_search_subprocess_sequential(
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    max_prompt_chars = _subchunk_prompt_chars()
+    max_prompt_chars = int(split_metadata.get("target_prompt_chars") or _subchunk_prompt_chars())
     subchunk_timeout = _subchunk_timeout_seconds(timeout)
     _log(
         log_fn,
@@ -1939,8 +1969,8 @@ def _run_search_subprocess(
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     message_list = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    prompt_chars = len(_messages_to_prompt(message_list))
-    if _adaptive_split_enabled() and prompt_chars > _subchunk_prompt_chars():
+    should_split, prompt_chars, url_chars = _requires_adaptive_split(message_list)
+    if _adaptive_split_enabled() and should_split:
         target_chars = _subchunk_prompt_chars()
         planned_chunks, split_metadata = _split_messages_for_search_budget(
             message_list,
@@ -1952,6 +1982,7 @@ def _run_search_subprocess(
             log_fn,
             f"🧩 Gemini Free: large prompt will use adaptive browser subchunks "
             f"({estimated_subchunks}, {prompt_chars:,} prompt chars, "
+            f"{url_chars:,} URL chars, "
             f"payload format: {split_metadata.get('payload_format')}, "
             f"splitter: {split_metadata.get('splitter')}, "
             f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
@@ -1971,13 +2002,39 @@ def _run_search_subprocess(
                 log_fn=log_fn,
             )
 
-    return _run_search_subprocess_once(
-        messages=message_list,
-        model=model,
-        timeout=timeout,
-        max_tokens=max_tokens,
-        log_fn=log_fn,
-    )
+    try:
+        return _run_search_subprocess_once(
+            messages=message_list,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+        )
+    except RuntimeError as exc:
+        if not _adaptive_split_enabled() or not _generation_failure_error(exc):
+            raise
+        fallback_target = _fallback_subchunk_prompt_chars(prompt_chars)
+        planned_chunks, split_metadata = _split_messages_for_search_budget(
+            message_list,
+            fallback_target,
+            return_metadata=True,
+        )
+        if len(planned_chunks) <= 1:
+            raise
+        _log(
+            log_fn,
+            f"🧩 Gemini Free: single browser request failed at {prompt_chars:,} prompt chars; "
+            f"retrying as {len(planned_chunks)} adaptive subchunks"
+        )
+        return _run_search_subprocess_sequential(
+            source_messages=message_list,
+            chunks=planned_chunks,
+            split_metadata=split_metadata,
+            model=model,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            log_fn=log_fn,
+        )
 
 
 def send_chat_completion(
