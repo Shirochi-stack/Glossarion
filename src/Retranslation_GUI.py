@@ -3835,6 +3835,141 @@ class RetranslationMixin:
                 pass
             return None
 
+        def _sdlxliff_sidecar_paths_for_output_dir(_output_dir):
+            sidecar_dir = os.path.join(_output_dir or "", "SDLXLIFF")
+            paths = []
+            try:
+                if os.path.isdir(sidecar_dir):
+                    paths = [
+                        os.path.join(sidecar_dir, name)
+                        for name in os.listdir(sidecar_dir)
+                        if str(name).lower().endswith(".sdlxliff")
+                    ]
+            except Exception:
+                paths = []
+            return sorted(paths, key=lambda path: os.path.basename(path).lower())
+
+        def _current_profile_name():
+            try:
+                if hasattr(self, "profile_menu") and self.profile_menu is not None:
+                    name = self.profile_menu.currentText()
+                    if name:
+                        return str(name)
+            except Exception:
+                pass
+            try:
+                if getattr(self, "profile_var", None):
+                    return str(self.profile_var)
+            except Exception:
+                pass
+            try:
+                return str(getattr(self, "config", {}).get("active_profile") or "")
+            except Exception:
+                return ""
+
+        def _text_analysis_profile_allowed():
+            profile_lower = _current_profile_name().strip().lower()
+            return "_html2text" not in profile_lower and "html2text" not in profile_lower
+
+        def _text_analysis_is_beautifulsoup_mode():
+            if not _text_analysis_profile_allowed():
+                return False
+            profile_lower = _current_profile_name().strip().lower()
+            if "_beautifulsoup" in profile_lower or "beautifulsoup" in profile_lower:
+                return True
+            try:
+                method = str(getattr(self, "text_extraction_method_var", "") or "").strip().lower()
+            except Exception:
+                method = ""
+            if not method:
+                try:
+                    method = str(getattr(self, "config", {}).get("text_extraction_method", "standard") or "standard").strip().lower()
+                except Exception:
+                    method = "standard"
+            return method == "standard"
+
+        def _text_analysis_sidecars():
+            if not _text_analysis_is_beautifulsoup_mode():
+                return []
+            return _sdlxliff_sidecar_paths_for_output_dir(output_dir)
+
+        text_analysis_btn = QPushButton("🔍 Review source -> output")
+        text_analysis_btn.setCursor(Qt.PointingHandCursor)
+        text_analysis_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b4f6f;
+                color: #d7ecff;
+                border: 1px solid #5a9fd4;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #356b96;
+                border-color: #7bb3e0;
+            }
+        """)
+        text_analysis_btn.setVisible(False)
+
+        def _update_text_analysis_button():
+            try:
+                sidecars = _text_analysis_sidecars()
+                visible = bool(sidecars)
+                text_analysis_btn.setVisible(visible)
+                if visible:
+                    if len(sidecars) == 1:
+                        text_analysis_btn.setToolTip(f"Review source/output text analysis\n{sidecars[0]}")
+                    else:
+                        text_analysis_btn.setToolTip(
+                            f"Review source/output text analysis ({len(sidecars)} SDLXLIFF sidecars)"
+                        )
+                else:
+                    text_analysis_btn.setToolTip(
+                        "Text Analysis is available for BeautifulSoup outputs with SDLXLIFF sidecars."
+                    )
+            except RuntimeError:
+                pass
+            except Exception:
+                text_analysis_btn.setVisible(False)
+
+        def _show_text_analysis():
+            sidecars = _text_analysis_sidecars()
+            if not sidecars:
+                self._show_message(
+                    'info',
+                    "Text Analysis Unavailable",
+                    "No BeautifulSoup SDLXLIFF sidecars were found for this output folder.",
+                    parent=dialog,
+                )
+                return
+            try:
+                review_dialog = SDLXLIFFReviewDialog(
+                    output_dir,
+                    sidecars[0],
+                    dialog,
+                    config=getattr(self, 'config', {}),
+                )
+                dialogs = getattr(self, '_sdlxliff_review_dialogs', [])
+                dialogs.append(review_dialog)
+                self._sdlxliff_review_dialogs = dialogs
+
+                def _forget_dialog():
+                    try:
+                        self._sdlxliff_review_dialogs.remove(review_dialog)
+                    except Exception:
+                        pass
+
+                review_dialog.destroyed.connect(_forget_dialog)
+                review_dialog.show()
+                review_dialog.raise_()
+                review_dialog.activateWindow()
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=dialog)
+
+        text_analysis_btn.clicked.connect(_show_text_analysis)
+        _update_text_analysis_button()
+
         def _bool_setting(value):
             if isinstance(value, str):
                 return value.strip().lower() in ('1', 'true', 'yes', 'on')
@@ -5557,6 +5692,7 @@ class RetranslationMixin:
                     glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
                 else:
                     glossary_progress_btn.setToolTip("View glossary extraction progress")
+                _update_text_analysis_button()
             except RuntimeError:
                 # Widget was deleted
                 _gp_vis_timer.stop()
@@ -5754,6 +5890,7 @@ class RetranslationMixin:
         
         
         stats_layout.addStretch()
+        stats_layout.addWidget(text_analysis_btn)
         
         # Show temporary "folder created" label in the stats row if a folder was just created
         created_folder = getattr(self, '_pm_created_folder', None)
