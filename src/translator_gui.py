@@ -19444,6 +19444,29 @@ Important rules:
         except queue.Empty:
             raise UnifiedClientError("API call completed but no result received")
 
+    def _current_glossary_cjk_script_filter_enabled(self):
+        """Resolve the CJK glossary filter from live UI/config/env state."""
+        try:
+            if hasattr(self, 'cjk_script_filter_checkbox'):
+                value = bool(self.cjk_script_filter_checkbox.isChecked())
+                self.config['glossary_cjk_script_filter'] = value
+                self.glossary_cjk_script_filter_var = value
+                return value
+        except Exception:
+            pass
+
+        try:
+            value = bool(self.config.get(
+                'glossary_cjk_script_filter',
+                getattr(self, 'glossary_cjk_script_filter_var', False),
+            ))
+            self.glossary_cjk_script_filter_var = value
+            return value
+        except Exception:
+            pass
+
+        return os.environ.get('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1'
+
     def _extract_glossary_from_text_file(self, file_path, force_balanced_request_merging=False):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
         # Skip glossary extraction for traditional APIs
@@ -19530,6 +19553,13 @@ Important rules:
                 ) = self._current_glossary_request_env(
                     force_balanced_request_merging=force_balanced_request_merging
                 )
+                cjk_script_filter_enabled = self._current_glossary_cjk_script_filter_enabled()
+                glossary_target_language = (
+                    self.config.get('glossary_target_language')
+                    or self.config.get('output_language')
+                    or getattr(self, 'lang_var', 'English')
+                    or 'English'
+                )
 
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
@@ -19558,6 +19588,7 @@ Important rules:
                     'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
                     'CONTEXTUAL': self._glossary_contextual_env_value(),
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
+                    'GLOSSARY_TARGET_LANGUAGE': str(glossary_target_language),
                     
                     # Glossary anti-duplicate parameters (separate from translation)
                     'GLOSSARY_ENABLE_ANTI_DUPLICATE': '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0',
@@ -19603,7 +19634,7 @@ Important rules:
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
-                    'GLOSSARY_CJK_SCRIPT_FILTER': '1' if getattr(self, 'glossary_cjk_script_filter_var', False) else '0',
+                    'GLOSSARY_CJK_SCRIPT_FILTER': '1' if cjk_script_filter_enabled else '0',
                     'GLOSSARY_SKIP_GENDER_TRACKING': '1' if getattr(self, 'glossary_skip_gender_tracking_var', False) else '0',
                     'GLOSSARY_GENDER_NOISE_THRESHOLD': str(getattr(self, 'glossary_gender_noise_threshold_var', self.config.get('glossary_gender_noise_threshold', 10))),
                     'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, 'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', 'none'))),
@@ -19716,6 +19747,10 @@ Important rules:
                 
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {resolved_glossary_tokens} ({'glossary override' if str(glossary_token_cfg) != '-1' else 'global'})")
+                self.append_log(
+                    f"[DEBUG] GLOSSARY_CJK_SCRIPT_FILTER = {os.environ.get('GLOSSARY_CJK_SCRIPT_FILTER', '<NOT SET>')} "
+                    f"(enabled: {cjk_script_filter_enabled}, target: {os.environ.get('GLOSSARY_TARGET_LANGUAGE', '<NOT SET>')})"
+                )
                 format_parts = ["type", "raw_name", "translated_name", "gender"]
                 custom_fields_json = self.config.get('manual_custom_fields', '[]')
                 try:

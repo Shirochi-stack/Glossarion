@@ -6436,6 +6436,17 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Honorifics Filtering: ✅ ENABLED")
 
+    cjk_filter_env = os.getenv('GLOSSARY_CJK_SCRIPT_FILTER', '0')
+    cjk_filter_enabled = cjk_filter_env == '1'
+    cjk_target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
+    cjk_target_known_non_cjk = _is_known_non_cjk_output_language()
+    cjk_filter_active = cjk_filter_enabled and cjk_target_known_non_cjk
+    print(
+        f"[DEBUG] GLOSSARY_CJK_SCRIPT_FILTER = {cjk_filter_env} "
+        f"(enabled: {cjk_filter_enabled}, target: {cjk_target_language}, "
+        f"known_non_cjk_target: {cjk_target_known_non_cjk}, active: {cjk_filter_active})"
+    )
+
     # Log glossary anti-duplicate parameters usage (matches GlossaryManager)
     if os.getenv("GLOSSARY_ENABLE_ANTI_DUPLICATE", "0") == "1":
         ad_top_p = os.getenv("GLOSSARY_TOP_P", "1.0")
