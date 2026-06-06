@@ -1033,7 +1033,7 @@ def _set_glossary_source_language_from_metadata(output_path: str = None, epub_pa
     if detected and log and not _GLOSSARY_SOURCE_LANGUAGE_LOGGED:
         status = "CJK source confirmed" if _metadata_language_is_cjk(detected) else "non-CJK source, filter skipped"
         source = "metadata.json" if meta_path else "environment"
-        print(f"[CJK Filter] Source language from {source}: {detected} -> {status}")
+        print(f"🔍 [CJK Filter] Source language from {source}: {detected} -> {status}")
         _GLOSSARY_SOURCE_LANGUAGE_LOGGED = True
     return detected
 
@@ -1058,7 +1058,7 @@ def _get_glossary_source_language_from_metadata():
     if GLOSSARY_SOURCE_LANGUAGE and not _GLOSSARY_SOURCE_LANGUAGE_LOGGED:
         status = "CJK source confirmed" if _metadata_language_is_cjk(GLOSSARY_SOURCE_LANGUAGE) else "non-CJK source, filter skipped"
         source = "metadata.json" if GLOSSARY_SOURCE_LANGUAGE_PATH else "environment"
-        print(f"[CJK Filter] Source language from {source}: {GLOSSARY_SOURCE_LANGUAGE} -> {status}")
+        print(f"🔍 [CJK Filter] Source language from {source}: {GLOSSARY_SOURCE_LANGUAGE} -> {status}")
         _GLOSSARY_SOURCE_LANGUAGE_LOGGED = True
 
     return GLOSSARY_SOURCE_LANGUAGE
