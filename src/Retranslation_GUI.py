@@ -1048,6 +1048,13 @@ class SDLXLIFFReviewDialog(QDialog):
         return units
 
     @staticmethod
+    def _non_empty_text_unit_count(units):
+        try:
+            return sum(1 for unit in (units or []) if str(unit.get("text", "") or "").strip())
+        except Exception:
+            return 0
+
+    @staticmethod
     def _has_linguistic_letters(text):
         return any(ch.isalpha() for ch in str(text or ""))
 
@@ -1299,7 +1306,9 @@ class SDLXLIFFReviewDialog(QDialog):
                     "status": status,
                     "reason": reason,
                 })
-            count_ratio = (len(target_units) / len(source_units)) if source_units else (1.0 if not target_units else 0.0)
+            source_count = self._non_empty_text_unit_count(source_units)
+            target_count = self._non_empty_text_unit_count(target_units)
+            count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             return {
                 "path": path,
                 "index": index,
@@ -1310,12 +1319,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 "chapter_num": metadata.get("chapter_num"),
                 "source_html": source_html,
                 "target_html": target_html,
-                "source_count": len(source_units),
-                "target_count": len(target_units),
+                "source_count": source_count,
+                "target_count": target_count,
                 "count_ratio": count_ratio,
                 "red_count": red_count,
                 "yellow_count": yellow_count,
-                "mismatch": len(source_units) != len(target_units) or red_count > 0,
+                "mismatch": source_count != target_count or red_count > 0,
                 "rows": rows,
             }
         except Exception as exc:
@@ -1742,6 +1751,13 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _paste_review_text(self, widget):
+        try:
+            if isinstance(widget, QPlainTextEdit) and not widget.isReadOnly():
+                widget.paste()
+        except Exception:
+            pass
+
     def _select_all_review_text(self, widget):
         try:
             if isinstance(widget, QPlainTextEdit):
@@ -1765,6 +1781,14 @@ class SDLXLIFFReviewDialog(QDialog):
     def _show_review_text_context_menu(self, widget, pos, edit_callback=None):
         selected = self._selected_text_for_widget(widget).strip()
         has_selection = bool(selected)
+        is_editable_editor = isinstance(widget, QPlainTextEdit) and not widget.isReadOnly()
+        clipboard_text = ""
+        if is_editable_editor:
+            try:
+                from PySide6.QtWidgets import QApplication
+                clipboard_text = QApplication.clipboard().text() or ""
+            except Exception:
+                clipboard_text = ""
         target_lang = self._review_target_language()
         target_code = self._review_target_language_code()
 
@@ -1781,6 +1805,12 @@ class SDLXLIFFReviewDialog(QDialog):
         copy_action.setShortcut("Ctrl+C")
         copy_action.setEnabled(has_selection)
         copy_action.triggered.connect(lambda: self._copy_review_text(selected))
+
+        if is_editable_editor:
+            paste_action = menu.addAction("Paste")
+            paste_action.setShortcut("Ctrl+V")
+            paste_action.setEnabled(bool(clipboard_text))
+            paste_action.triggered.connect(lambda: self._paste_review_text(widget))
 
         select_all_action = menu.addAction("Select All")
         select_all_action.setShortcut("Ctrl+A")
