@@ -9,6 +9,8 @@ import json
 import re
 import html as html_lib
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote, unquote
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
@@ -138,18 +140,24 @@ class SDLXLIFFReviewDialog(QDialog):
         "text": "#ffffff",
         "muted": "#94a3b8",
     }
+    REVIEW_ROW_MIN_HEIGHT = 96
+    REVIEW_ROW_MAX_HEIGHT = 220
 
-    def __init__(self, output_dir, current_path=None, parent=None):
+    def __init__(self, output_dir, current_path=None, parent=None, config=None):
         super().__init__(parent)
         self.output_dir = output_dir
         self.current_path = os.path.abspath(current_path) if current_path else ""
+        parent_config = getattr(parent, "config", None)
+        self._config = config if isinstance(config, dict) else (parent_config if isinstance(parent_config, dict) else {})
         self.pieces = self._load_pieces()
         self._pending_target_edits = {}
         self._edit_save_timer = QTimer(self)
         self._edit_save_timer.setSingleShot(True)
         self._edit_save_timer.timeout.connect(self._flush_target_edits)
+        self._render_token = 0
+        self._active_render_timer = None
 
-        self.setWindowTitle("SDLXLIFF Source -> Output Review")
+        self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
         self.resize(1500, 900)
@@ -168,8 +176,8 @@ class SDLXLIFFReviewDialog(QDialog):
 
         self.piece_list = QListWidget()
         self.piece_list.setObjectName("SdlReviewPieceList")
-        self.piece_list.setMinimumWidth(260)
-        self.piece_list.setMaximumWidth(360)
+        self.piece_list.setMinimumWidth(180)
+        self.piece_list.setMaximumWidth(240)
         splitter.addWidget(self.piece_list)
 
         detail = QWidget()
@@ -183,6 +191,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         self.header_label = QLabel()
         self.header_label.setTextFormat(Qt.PlainText)
+        self.header_label.setWordWrap(True)
         self.header_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {self.THEME['accent']};")
         detail_layout.addWidget(self.header_label)
 
@@ -360,12 +369,198 @@ class SDLXLIFFReviewDialog(QDialog):
         if source_text and source_text == target_text:
             return "red", "untranslated"
         if source_text:
-            ratio = len(target_text) / max(1, len(source_text))
-            if ratio < 0.25 or ratio > 3.5:
-                return "yellow", "density-off"
+            source_len = len(source_text)
+            target_len = len(target_text)
+            ratio = target_len / max(1, source_len)
+            if source_len < 12:
+                if target_len > 120:
+                    return "yellow", f"density-off ({ratio:.1f}x)"
+            elif source_len < 30:
+                if target_len > max(140, source_len * 6) or target_len < max(2, int(source_len * 0.15)):
+                    return "yellow", f"density-off ({ratio:.1f}x)"
+            elif ratio < 0.25 or ratio > 3.5:
+                return "yellow", f"density-off ({ratio:.1f}x)"
         return "green", "ok"
 
-    def _build_piece(self, path, index):
+    @staticmethod
+    def _canonical_basename(name):
+        return os.path.basename(str(name or "").replace("\\", "/")).lower()
+
+    @staticmethod
+    def _sidecar_output_name(path_or_name):
+        sidecar_name = os.path.basename(str(path_or_name or "").replace("\\", "/"))
+        suffix = ".sdlxliff"
+        if sidecar_name.lower().endswith(suffix):
+            return sidecar_name[:-len(suffix)]
+        return sidecar_name
+
+    @staticmethod
+    def _chapter_number_from_name(name):
+        matches = re.findall(r"(\d+)", str(name or ""))
+        if not matches:
+            return 0
+        try:
+            return int(matches[-1])
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _format_chapter_number(value):
+        try:
+            if isinstance(value, float):
+                return f"{int(value):03d}" if value.is_integer() else f"{value:06.1f}"
+            return f"{int(value):03d}"
+        except Exception:
+            return "000"
+
+    def _read_progress_metadata(self):
+        progress_path = os.path.join(self.output_dir or "", "translation_progress.json")
+        output_map = {}
+        if not os.path.isfile(progress_path):
+            return output_map
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                progress_data = json.load(f)
+        except Exception:
+            return output_map
+
+        chapters = progress_data.get("chapters") if isinstance(progress_data, dict) else None
+        if not isinstance(chapters, dict):
+            chapters = progress_data if isinstance(progress_data, dict) else {}
+
+        for key, entry in chapters.items():
+            if not isinstance(entry, dict):
+                continue
+            output_file = entry.get("output_file")
+            if not output_file:
+                continue
+            normalized = self._canonical_basename(output_file)
+            if not normalized:
+                continue
+            copied = dict(entry)
+            copied["_progress_key"] = key
+            output_map[normalized] = copied
+        return output_map
+
+    def _find_opf_path(self):
+        output_dir = self.output_dir or ""
+        if not output_dir or not os.path.isdir(output_dir):
+            return None
+        direct_candidates = [
+            os.path.join(output_dir, "content.opf"),
+            os.path.join(output_dir, "OEBPS", "content.opf"),
+            os.path.join(output_dir, "EPUB", "content.opf"),
+        ]
+        for path in direct_candidates:
+            if os.path.isfile(path):
+                return path
+        try:
+            for root_dir, _dirs, files in os.walk(output_dir):
+                for fname in files:
+                    if fname.lower().endswith(".opf"):
+                        return os.path.join(root_dir, fname)
+        except Exception:
+            return None
+        return None
+
+    def _read_spine_positions(self):
+        opf_path = self._find_opf_path()
+        if not opf_path:
+            return {}
+        try:
+            root = ET.parse(opf_path).getroot()
+        except Exception:
+            return {}
+
+        id_to_href = {}
+        for element in root.iter():
+            if self._local_name(element.tag) != "item":
+                continue
+            item_id = element.attrib.get("id")
+            href = element.attrib.get("href")
+            if item_id and href:
+                id_to_href[item_id] = unquote(href)
+
+        spine_positions = {}
+        position = 0
+        for element in root.iter():
+            if self._local_name(element.tag) != "itemref":
+                continue
+            idref = element.attrib.get("idref")
+            href = id_to_href.get(idref)
+            if not href:
+                continue
+            href_base = self._canonical_basename(href)
+            if not href_base:
+                continue
+            spine_positions[href_base] = position
+            no_ext, _ext = os.path.splitext(href_base)
+            if no_ext:
+                spine_positions[no_ext] = position
+            position += 1
+        return spine_positions
+
+    def _original_name_from_output(self, output_name):
+        name = os.path.basename(str(output_name or ""))
+        if name.lower().startswith("response_"):
+            name = name[len("response_"):]
+        root, ext = os.path.splitext(name)
+        if ext.lower() in (".html", ".htm"):
+            return f"{root}.xhtml"
+        return name
+
+    def _sidecar_metadata(self, path, fallback_index, progress_map, spine_positions):
+        output_name = self._sidecar_output_name(path)
+        progress_entry = progress_map.get(self._canonical_basename(output_name), {})
+        original_name = (
+            progress_entry.get("original_basename")
+            or progress_entry.get("original_filename")
+            or self._original_name_from_output(output_name)
+        )
+
+        opf_position = None
+        for candidate in (original_name, output_name, self._original_name_from_output(output_name)):
+            normalized = self._canonical_basename(candidate)
+            if normalized in spine_positions:
+                opf_position = spine_positions[normalized]
+                break
+            no_ext, _ext = os.path.splitext(normalized)
+            if no_ext in spine_positions:
+                opf_position = spine_positions[no_ext]
+                break
+
+        chapter_num = progress_entry.get("actual_num", progress_entry.get("chapter_num"))
+        if chapter_num is None:
+            chapter_num = self._chapter_number_from_name(output_name)
+
+        sort_position = opf_position if opf_position is not None else 100000 + fallback_index
+        metadata = {
+            "output_name": output_name,
+            "progress_entry": progress_entry,
+            "original_name": original_name,
+            "opf_position": opf_position,
+            "chapter_num": chapter_num,
+            "sort_key": (sort_position, self._chapter_number_from_name(output_name), output_name.lower()),
+        }
+        return metadata
+
+    def _review_label_from_metadata(self, metadata):
+        display_position = metadata.get("display_position")
+        if display_position is None:
+            opf_position = metadata.get("opf_position")
+            display_position = (int(opf_position) + 1) if opf_position is not None else 1
+        chapter_label = self._format_chapter_number(metadata.get("chapter_num"))
+        return f"[{int(display_position):03d}] Ch.{chapter_label} |"
+
+    def _sidebar_label_for_piece(self, piece, row):
+        prefix = piece.get("review_label") or f"[{row + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
+        return f"{prefix} {piece.get('source_count', 0)} -> {piece.get('target_count', 0)}"
+
+    def _build_piece(self, path, index, metadata=None):
+        metadata = dict(metadata or {})
+        metadata.setdefault("output_name", self._sidecar_output_name(path))
+        metadata.setdefault("display_position", index + 1)
+        metadata.setdefault("label", self._review_label_from_metadata(metadata))
         try:
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_units = self._extract_text_units(source_html)
@@ -405,6 +600,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 "path": path,
                 "index": index,
                 "name": os.path.basename(path),
+                "output_name": metadata.get("output_name"),
+                "review_label": metadata.get("label"),
+                "opf_position": metadata.get("opf_position"),
+                "chapter_num": metadata.get("chapter_num"),
                 "source_html": source_html,
                 "target_html": target_html,
                 "source_count": len(source_units),
@@ -420,6 +619,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 "path": path,
                 "index": index,
                 "name": os.path.basename(path),
+                "output_name": metadata.get("output_name"),
+                "review_label": metadata.get("label"),
+                "opf_position": metadata.get("opf_position"),
+                "chapter_num": metadata.get("chapter_num"),
                 "source_count": 0,
                 "target_count": 0,
                 "count_ratio": 0.0,
@@ -435,7 +638,7 @@ class SDLXLIFFReviewDialog(QDialog):
         paths = []
         try:
             if os.path.isdir(sidecar_dir):
-                for fname in sorted(os.listdir(sidecar_dir)):
+                for fname in os.listdir(sidecar_dir):
                     if fname.lower().endswith(".sdlxliff"):
                         paths.append(os.path.join(sidecar_dir, fname))
         except Exception:
@@ -444,17 +647,52 @@ class SDLXLIFFReviewDialog(QDialog):
             current_norm = os.path.normcase(os.path.abspath(self.current_path))
             if all(os.path.normcase(os.path.abspath(path)) != current_norm for path in paths):
                 paths.insert(0, self.current_path)
-        return [self._build_piece(path, idx) for idx, path in enumerate(paths)]
+
+        progress_map = self._read_progress_metadata()
+        spine_positions = self._read_spine_positions()
+        work_items = []
+        for fallback_index, path in enumerate(paths):
+            metadata = self._sidecar_metadata(path, fallback_index, progress_map, spine_positions)
+            work_items.append((path, metadata))
+        work_items.sort(key=lambda item: item[1].get("sort_key", (999999, 999999, "")))
+
+        for index, (_path, metadata) in enumerate(work_items):
+            if metadata.get("opf_position") is None:
+                metadata["display_position"] = index + 1
+            else:
+                metadata["display_position"] = int(metadata["opf_position"]) + 1
+            metadata["label"] = self._review_label_from_metadata(metadata)
+
+        if len(work_items) <= 1:
+            return [self._build_piece(path, idx, metadata) for idx, (path, metadata) in enumerate(work_items)]
+
+        pieces = [None] * len(work_items)
+        max_workers = max(1, min(8, len(work_items)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._build_piece, path, idx, metadata): idx
+                for idx, (path, metadata) in enumerate(work_items)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    pieces[idx] = future.result()
+                except Exception as exc:
+                    path, metadata = work_items[idx]
+                    pieces[idx] = self._build_piece(path, idx, metadata)
+                    pieces[idx]["error"] = str(exc)
+        return [piece for piece in pieces if piece is not None]
 
     def _populate_piece_list(self):
         self.piece_list.clear()
         selected_row = 0
         current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
         for row, piece in enumerate(self.pieces):
-            label = self._output_name_for_piece(piece)
+            label = self._sidebar_label_for_piece(piece, row)
+            output_name = self._output_name_for_piece(piece)
             item = QListWidgetItem(label)
             item.setToolTip(
-                f"{label}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+                f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
             )
             item.setData(Qt.UserRole, row)
             if piece["mismatch"]:
@@ -470,7 +708,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list.currentRowChanged.connect(self._render_piece)
         if self.pieces:
             self.piece_list.setCurrentRow(selected_row)
-            self._render_piece(selected_row)
         else:
             self.header_label.setText("No SDLXLIFF review files found")
 
@@ -479,6 +716,7 @@ class SDLXLIFFReviewDialog(QDialog):
             item = self.rows_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _tag_label(self, source_tag, target_tag, status):
@@ -506,15 +744,130 @@ class SDLXLIFFReviewDialog(QDialog):
         )
         return label
 
-    def _target_editor(self, piece_index, row_index, text, editable=True):
+    _GT_LANG_CODES = {
+        "english": "en",
+        "spanish": "es",
+        "french": "fr",
+        "german": "de",
+        "italian": "it",
+        "portuguese": "pt",
+        "russian": "ru",
+        "arabic": "ar",
+        "hindi": "hi",
+        "chinese": "zh-CN",
+        "chinese (simplified)": "zh-CN",
+        "simplified chinese": "zh-CN",
+        "chinese (traditional)": "zh-TW",
+        "traditional chinese": "zh-TW",
+        "japanese": "ja",
+        "korean": "ko",
+        "turkish": "tr",
+        "vietnamese": "vi",
+    }
+
+    def _review_target_language(self):
+        language = ""
+        try:
+            language = str((self._config or {}).get("output_language") or "").strip()
+        except Exception:
+            language = ""
+        return language or "English"
+
+    def _review_target_language_code(self):
+        return self._GT_LANG_CODES.get(self._review_target_language().lower(), "en")
+
+    def _selected_text_for_widget(self, widget):
+        try:
+            if isinstance(widget, QPlainTextEdit):
+                return (widget.textCursor().selectedText() or "").replace("\u2029", "\n")
+            if hasattr(widget, "selectedText"):
+                return widget.selectedText() or ""
+        except Exception:
+            return ""
+        return ""
+
+    def _all_text_for_widget(self, widget):
+        try:
+            if isinstance(widget, QPlainTextEdit):
+                return widget.toPlainText() or ""
+            if hasattr(widget, "text"):
+                return widget.text() or ""
+        except Exception:
+            return ""
+        return ""
+
+    def _copy_review_text(self, text):
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(str(text or ""))
+        except Exception:
+            pass
+
+    def _select_all_review_text(self, widget):
+        try:
+            if isinstance(widget, QPlainTextEdit):
+                widget.selectAll()
+            elif hasattr(widget, "setSelection"):
+                widget.setSelection(0, len(self._all_text_for_widget(widget)))
+        except Exception:
+            pass
+
+    def _open_google_translate(self, text, target_code):
+        text = str(text or "").strip()
+        if not text:
+            return
+        encoded = quote(text, safe="")
+        url = f"https://translate.google.com/?sl=auto&tl={target_code}&text={encoded}&op=translate"
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
+
+    def _show_review_text_context_menu(self, widget, pos):
+        selected = self._selected_text_for_widget(widget).strip()
+        has_selection = bool(selected)
+        target_lang = self._review_target_language()
+        target_code = self._review_target_language_code()
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 9pt; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 3px; }
+            QMenu::item:selected { background: #3a3a5e; }
+            QMenu::item:disabled { color: #555; }
+        """)
+
+        copy_action = menu.addAction("Copy")
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.setEnabled(has_selection)
+        copy_action.triggered.connect(lambda: self._copy_review_text(selected))
+
+        select_all_action = menu.addAction("Select All")
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.setEnabled(bool(self._all_text_for_widget(widget)))
+        select_all_action.triggered.connect(lambda: self._select_all_review_text(widget))
+
+        menu.addSeparator()
+        gt_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
+        gt_action.setEnabled(has_selection)
+        gt_action.triggered.connect(lambda: self._open_google_translate(selected, target_code))
+
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _target_editor(self, piece_index, row_index, text, editable=True, height=None):
         editor = QPlainTextEdit(str(text or ""))
         editor.setObjectName("SdlReviewTargetEdit")
         editor.setFrameShape(QFrame.NoFrame)
         editor.setTabChangesFocus(True)
-        editor.setMinimumHeight(38)
-        editor.setMaximumHeight(92)
+        editor_height = max(28, int(height or 38))
+        editor.setFixedHeight(editor_height)
         editor.setReadOnly(not editable)
-        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        editor.customContextMenuRequested.connect(
+            lambda pos, ed=editor: self._show_review_text_context_menu(ed, pos)
+        )
         if editable:
             editor.textChanged.connect(
                 lambda pi=piece_index, ri=row_index, ed=editor: self._schedule_target_edit(pi, ri, ed.toPlainText())
@@ -541,12 +894,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.save_status_label.setText(f"Save failed: {exc}")
 
     def _output_name_for_piece(self, piece):
-        sidecar_name = os.path.basename(str(piece.get("path") or piece.get("name") or ""))
-        suffix = ".sdlxliff"
-        if sidecar_name.lower().endswith(suffix):
-            output_name = sidecar_name[:-len(suffix)]
-        else:
-            output_name = sidecar_name
+        output_name = piece.get("output_name") or self._sidecar_output_name(piece.get("path") or piece.get("name") or "")
         return output_name or piece.get("name") or "SDLXLIFF output"
 
     def _output_path_for_piece(self, piece):
@@ -637,12 +985,30 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def closeEvent(self, event):
         try:
+            if self._active_render_timer is not None:
+                self._active_render_timer.stop()
+                self._active_render_timer.deleteLater()
+                self._active_render_timer = None
             if self._edit_save_timer.isActive():
                 self._edit_save_timer.stop()
             self._flush_target_edits()
         except Exception:
             pass
         super().closeEvent(event)
+
+    def _refresh_review_stream_geometry(self, final=False):
+        try:
+            self.rows_layout.invalidate()
+            self.rows_layout.activate()
+            self.rows_widget.updateGeometry()
+            if final:
+                self.rows_widget.adjustSize()
+            self.scroll.updateGeometry()
+            viewport = self.scroll.viewport()
+            if viewport is not None:
+                viewport.update()
+        except Exception:
+            pass
 
     def _bar_widget(self, length, max_length, color, align_right=False):
         container = QWidget()
@@ -670,18 +1036,94 @@ class SDLXLIFFReviewDialog(QDialog):
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setContextMenuPolicy(Qt.CustomContextMenu)
+        label.customContextMenuRequested.connect(
+            lambda pos, lbl=label: self._show_review_text_context_menu(lbl, pos)
+        )
         label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
         return label
+
+    def _review_row_height(self, source_text, target_text):
+        longest = max(len(str(source_text or "")), len(str(target_text or "")))
+        extra_lines = max(0, min(6, (longest - 120 + 79) // 80))
+        return min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
+
+    def _add_review_row(self, piece, row_data, idx, max_len, colors):
+        bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
+        source_text = row_data.get("source", "")
+        target_text = row_data.get("target", "")
+        row_height = self._review_row_height(source_text, target_text)
+        frame = QFrame()
+        frame.setObjectName("SdlReviewRow")
+        frame.setFixedHeight(row_height)
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        frame.setStyleSheet(
+            f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
+        )
+        grid = QGridLayout(frame)
+        grid.setContentsMargins(10, 5, 10, 5)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(0)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 0)
+        grid.setColumnStretch(5, 1)
+        grid.setColumnMinimumWidth(0, 92)
+        grid.setColumnMinimumWidth(2, 180)
+        grid.setColumnMinimumWidth(3, 26)
+        grid.setColumnMinimumWidth(4, 180)
+
+        source_missing = not row_data.get("source_tag")
+        target_missing = not row_data.get("target_tag")
+
+        tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
+        tag_label.setToolTip(row_data.get("reason", ""))
+        source_label = self._text_label(source_text, missing=source_missing)
+        source_label.setMaximumHeight(max(24, row_height - 14))
+        source_label.setToolTip(source_text)
+        target_editor = self._target_editor(
+            piece["index"],
+            idx,
+            target_text,
+            editable=not source_missing or not target_missing,
+            height=max(30, row_height - 14),
+        )
+
+        dot = QLabel("●")
+        dot.setAlignment(Qt.AlignCenter)
+        dot.setStyleSheet(f"color: {dot_color}; background: transparent; font-size: 13pt;")
+        dot.setToolTip(row_data.get("reason", ""))
+
+        grid.addWidget(tag_label, 0, 0)
+        grid.addWidget(source_label, 0, 1)
+        grid.addWidget(self._bar_widget(len(source_text), max_len, source_bar, align_right=True), 0, 2)
+        grid.addWidget(dot, 0, 3)
+        grid.addWidget(self._bar_widget(len(target_text), max_len, target_bar, align_right=False), 0, 4)
+        grid.addWidget(target_editor, 0, 5)
+        self.rows_layout.addWidget(frame)
 
     def _render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        self._render_token += 1
+        render_token = self._render_token
+        if self._active_render_timer is not None:
+            try:
+                self._active_render_timer.stop()
+                self._active_render_timer.deleteLater()
+            except Exception:
+                pass
+            self._active_render_timer = None
+
         piece = self.pieces[row]
         status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
         flagged = piece["red_count"] + piece["yellow_count"]
         output_name = self._output_name_for_piece(piece)
+        review_label = piece.get("review_label") or f"[{row + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
         self.header_label.setText(
-            f"{output_name}  -  source {piece['source_count']} text units "
+            f"{review_label} {output_name}  -  source {piece['source_count']} text units "
             f"- output {piece['target_count']} - {status_text} - {flagged} flagged rows "
             f"(ratio ~= {piece['count_ratio']:.2f})"
         )
@@ -703,56 +1145,45 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
         }
 
-        for idx, row_data in enumerate(rows):
-            bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
-            frame = QFrame()
-            frame.setObjectName("SdlReviewRow")
-            frame.setStyleSheet(
-                f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
-            )
-            grid = QGridLayout(frame)
-            grid.setContentsMargins(10, 6, 10, 6)
-            grid.setHorizontalSpacing(10)
-            grid.setColumnStretch(0, 0)
-            grid.setColumnStretch(1, 1)
-            grid.setColumnStretch(2, 0)
-            grid.setColumnStretch(3, 0)
-            grid.setColumnStretch(4, 0)
-            grid.setColumnStretch(5, 1)
-            grid.setColumnMinimumWidth(0, 92)
-            grid.setColumnMinimumWidth(2, 180)
-            grid.setColumnMinimumWidth(3, 26)
-            grid.setColumnMinimumWidth(4, 180)
-
-            source_text = row_data.get("source", "")
-            target_text = row_data.get("target", "")
-            source_missing = not row_data.get("source_tag")
-            target_missing = not row_data.get("target_tag")
-
-            tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
-            tag_label.setToolTip(row_data.get("reason", ""))
-            source_label = self._text_label(source_text, missing=source_missing)
-            target_editor = self._target_editor(piece["index"], idx, target_text, editable=not source_missing or not target_missing)
-
-            dot = QLabel("●")
-            dot.setAlignment(Qt.AlignCenter)
-            dot.setStyleSheet(f"color: {dot_color}; background: transparent; font-size: 13pt;")
-            dot.setToolTip(row_data.get("reason", ""))
-
-            grid.addWidget(tag_label, 0, 0)
-            grid.addWidget(source_label, 0, 1)
-            grid.addWidget(self._bar_widget(len(source_text), max_len, source_bar, align_right=True), 0, 2)
-            grid.addWidget(dot, 0, 3)
-            grid.addWidget(self._bar_widget(len(target_text), max_len, target_bar, align_right=False), 0, 4)
-            grid.addWidget(target_editor, 0, 5)
-            self.rows_layout.addWidget(frame)
-
         if not rows:
             empty = QLabel("No p/h1-h6 text units found in this sidecar.")
             empty.setTextFormat(Qt.PlainText)
             empty.setStyleSheet(f"color: {self.THEME['muted']}; padding: 12px;")
             self.rows_layout.addWidget(empty)
-        self.rows_layout.addStretch(1)
+            self.rows_layout.addStretch(1)
+            return
+
+        row_state = {"idx": 0}
+        batch_size = 28
+        timer = QTimer(self)
+
+        def _render_next_batch():
+            if render_token != self._render_token:
+                timer.stop()
+                timer.deleteLater()
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+                return
+            start = row_state["idx"]
+            end = min(len(rows), start + batch_size)
+            for idx in range(start, end):
+                self._add_review_row(piece, rows[idx], idx, max_len, colors)
+            row_state["idx"] = end
+            self._refresh_review_stream_geometry(final=False)
+            if end >= len(rows):
+                timer.stop()
+                timer.deleteLater()
+                if render_token == self._render_token:
+                    self.rows_layout.addStretch(1)
+                    self._refresh_review_stream_geometry(final=True)
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+
+        timer.timeout.connect(_render_next_batch)
+        self._active_render_timer = timer
+        _render_next_batch()
+        if row_state["idx"] < len(rows):
+            timer.start(0)
 
 
 class RetranslationMixin:
@@ -5395,7 +5826,12 @@ class RetranslationMixin:
                 self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
                 return
             try:
-                dialog = SDLXLIFFReviewDialog(data['output_dir'], review_path, data.get('dialog', self))
+                dialog = SDLXLIFFReviewDialog(
+                    data['output_dir'],
+                    review_path,
+                    data.get('dialog', self),
+                    config=getattr(self, 'config', {}),
+                )
                 dialogs = getattr(self, '_sdlxliff_review_dialogs', [])
                 dialogs.append(dialog)
                 self._sdlxliff_review_dialogs = dialogs

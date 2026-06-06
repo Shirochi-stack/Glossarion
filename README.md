@@ -344,6 +344,7 @@ Built using:
 - OpenAI, Google, Anthropic, xAI, and many more AI provider APIs
 - Designed with assistance from ChatGPT & Claude
 - Community feedback and contributions
+- OMORIO - contributed the SDLXLIFF source-to-output reviewer workflow
 - Open source libraries and tools
 - comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
 
