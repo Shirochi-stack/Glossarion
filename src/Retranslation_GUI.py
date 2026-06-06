@@ -188,6 +188,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._last_review_signature = None
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
+        try:
+            self._last_review_signature = self._current_review_signature()
+        except Exception:
+            pass
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -295,6 +299,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._refresh_review_stream_geometry(final=True)
         except Exception:
             pass
+        self._start_review_auto_refresh()
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
 
@@ -389,14 +394,38 @@ class SDLXLIFFReviewDialog(QDialog):
             self._refreshing_review_data = False
 
     def reopen_for_path(self, output_dir=None, current_path=None):
+        output_changed = False
         if output_dir:
+            try:
+                old_output = os.path.normcase(os.path.abspath(self.output_dir or ""))
+                new_output = os.path.normcase(os.path.abspath(output_dir))
+                output_changed = old_output != new_output
+            except Exception:
+                output_changed = bool(output_dir != self.output_dir)
             self.output_dir = output_dir
         if current_path:
             self.current_path = os.path.abspath(current_path)
         self.show()
         self.raise_()
         self.activateWindow()
-        self.refresh_review_data(force=True, current_path=self.current_path)
+        self._start_review_auto_refresh()
+        try:
+            signature = self._current_review_signature()
+        except Exception:
+            signature = None
+        if output_changed or not self.pieces or (signature is not None and signature != self._last_review_signature):
+            self.refresh_review_data(force=True, current_path=self.current_path, signature=signature)
+            return
+        if self.current_path:
+            if self._select_piece_for_path(self.current_path):
+                return
+        try:
+            row = self.piece_list.currentRow()
+        except Exception:
+            row = self._initial_piece_row
+        if row < 0:
+            row = self._initial_piece_row
+        QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
     def _candidate_epub_paths_from_context(self, parent):
         candidates = []
@@ -1382,6 +1411,43 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
 
+    def _row_for_piece_path(self, path):
+        if not path:
+            return None
+        try:
+            target_norm = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            return None
+        for row, piece in enumerate(self.pieces):
+            try:
+                piece_norm = os.path.normcase(os.path.abspath(piece.get("path") or ""))
+            except Exception:
+                continue
+            if piece_norm == target_norm:
+                return row
+        return None
+
+    def _select_piece_for_path(self, path):
+        row = self._row_for_piece_path(path)
+        if row is None:
+            return False
+        try:
+            self.current_path = os.path.abspath(path)
+            self._initial_piece_row = row
+            if 0 <= self._book_index < len(self._book_entries):
+                self._book_entries[self._book_index]["current_path"] = self.current_path
+        except Exception:
+            pass
+        try:
+            current_row = self.piece_list.currentRow()
+        except Exception:
+            current_row = -1
+        if current_row != row:
+            self.piece_list.setCurrentRow(row)
+        else:
+            QTimer.singleShot(0, lambda row=row: self._render_piece(row))
+        return True
+
     def _clear_layout(self, layout):
         if layout is None:
             return
@@ -1997,6 +2063,13 @@ class SDLXLIFFReviewDialog(QDialog):
         self._cancel_active_review_render()
 
         piece = self.pieces[row]
+        try:
+            self.current_path = os.path.abspath(piece.get("path") or self.current_path or "")
+            self._initial_piece_row = row
+            if 0 <= self._book_index < len(self._book_entries):
+                self._book_entries[self._book_index]["current_path"] = self.current_path
+        except Exception:
+            pass
         status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
         flagged = piece["red_count"] + piece["yellow_count"]
         output_name = self._output_name_for_piece(piece)
@@ -4080,7 +4153,7 @@ class RetranslationMixin:
                 text_analysis_btn.setVisible(False)
 
         def _open_or_reuse_sdlxliff_review(_output_dir, _review_path, _parent):
-            cache_owner = _parent or dialog or self
+            cache_owner = self
             try:
                 key = os.path.normcase(os.path.abspath(_output_dir))
             except Exception:
@@ -4134,7 +4207,7 @@ class RetranslationMixin:
                 )
                 return
             try:
-                _open_or_reuse_sdlxliff_review(output_dir, sidecars[0], dialog)
+                _open_or_reuse_sdlxliff_review(output_dir, None, dialog)
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=dialog)
 

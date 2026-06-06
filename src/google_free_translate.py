@@ -12,8 +12,8 @@ from typing import Optional, Dict, Any
 import urllib.parse
 import random
 
-GOOGLETRANS_AJAX_ENDPOINT = 'https://translate.googleapis.com/translate_a/single'
 GOOGLE_TRANSLATE_CO_IN_ENDPOINT = 'https://translate.google.co.in/translate_a/single'
+GOOGLETRANS_AJAX_ENDPOINT = 'https://translate.googleapis.com/translate_a/single'
 
 GOOGLE_TRANSLATE_LANGUAGE_CODES = {
     "english": "en",
@@ -87,9 +87,7 @@ class GoogleFreeTranslateNew:
     """
     name = 'Google(Free)New'
     free = True
-    endpoint: str = GOOGLETRANS_AJAX_ENDPOINT
-    primary_ajax_endpoint: str = GOOGLETRANS_AJAX_ENDPOINT
-    secondary_endpoint: str = GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+    endpoint: str = GOOGLE_TRANSLATE_CO_IN_ENDPOINT
     
     def __init__(self, source_language: str = "auto", target_language: str = "en", logger=None):
         self.source_language = source_language
@@ -234,16 +232,15 @@ class GoogleFreeTranslateNew:
             target_lang = self._get_target_code()
             
             # Try multiple FREE endpoint formats (no credentials needed).
-            # First: py-googletrans-style Ajax API (client=gtx) on translate.googleapis.com.
-            # Second: the requested translate.google.co.in host.
+            # Keep the requested translate.google.co.in host first; it accepts longer POST bodies.
             endpoints_to_try = [
-                self.primary_ajax_endpoint,
-                self.secondary_endpoint,
+                self.endpoint,
                 'https://translate.google.com/translate_a/single',  # Direct web endpoint
                 'https://clients5.google.com/translate_a/t',  # Mobile client endpoint
                 'https://clients5.google.com/translate_a/single',  # Alternative client5
                 'https://clients1.google.com/translate_a/single',
                 'https://clients3.google.com/translate_a/t',
+                GOOGLETRANS_AJAX_ENDPOINT,  # Last-resort py-googletrans-style Ajax endpoint
             ]
             
             # Collect all errors for detailed reporting
@@ -263,8 +260,7 @@ class GoogleFreeTranslateNew:
                     # Check if it's the mobile /translate_a/t API, not merely a translate.* host.
                     is_mobile = endpoint_url.rstrip('/').endswith('/translate_a/t')
                     
-                    if endpoint_url == self.primary_ajax_endpoint:
-                        # Match py-googletrans' tokenless Ajax path: GET /translate_a/single?client=gtx
+                    if endpoint_url == GOOGLETRANS_AJAX_ENDPOINT:
                         result = self._translate_via_googletrans_ajax(text, source_lang, target_lang, endpoint_url)
                     elif is_mobile:
                         # Use mobile client API format
@@ -510,7 +506,6 @@ class GoogleFreeTranslateNew:
                 timeout=10
             )
         else:
-            # Use POST to avoid URI too long errors on non-primary fallback endpoints.
             response = requests.post(
                 endpoint_url,
                 data=params,
