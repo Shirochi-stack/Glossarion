@@ -3291,15 +3291,6 @@ class AsyncProcessingDialog:
         env_vars['LOGIT_BIAS_STRENGTH'] = str(_val(self.gui.logit_bias_strength_var, -0.5)) if hasattr(self.gui, 'logit_bias_strength_var') else '-0.5'
         env_vars['BIAS_COMMON_WORDS'] = '1' if hasattr(self.gui, 'bias_common_words_var') and _val(self.gui.bias_common_words_var, False) else '0'
         env_vars['BIAS_REPETITIVE_PHRASES'] = '1' if hasattr(self.gui, 'bias_repetitive_phrases_var') and _val(self.gui.bias_repetitive_phrases_var, False) else '0'
-        if env_vars['ENABLE_ANTI_DUPLICATE'] == '1':
-            print(
-                "🎯 Anti-duplicate enabled for translation "
-                f"(top_p={env_vars['TOP_P']}, min_p={env_vars['MIN_P']}, top_k={env_vars['TOP_K']}, "
-                f"freq_penalty={env_vars['FREQUENCY_PENALTY']}, "
-                f"presence_penalty={env_vars['PRESENCE_PENALTY']}, "
-                f"repetition_penalty={env_vars['REPETITION_PENALTY']})"
-            )
-        
         # Glossary settings
         env_vars['MANUAL_GLOSSARY'] = self.gui.manual_glossary_path if hasattr(self.gui, 'manual_glossary_path') and self.gui.manual_glossary_path else ''
         env_vars['DISABLE_AUTO_GLOSSARY'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"

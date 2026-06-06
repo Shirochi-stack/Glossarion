@@ -17487,7 +17487,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 import large_env
                 large_env.update_env(env_vars)
-                self._log_translation_anti_duplicate_settings(env_vars)
                 
                 # Handle chapter range
                 chap_range = self.chapter_range_entry.text().strip()
