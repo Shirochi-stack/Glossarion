@@ -498,6 +498,8 @@ def print_env_var_status():
         'ENHANCED_FILTERING': 'Enhanced filtering preset',
         'ENABLE_ANTI_DUPLICATE': 'Enable anti-duplicate',
         'TOP_P': 'Top-p sampling',
+        'MIN_P': 'Min-p sampling',
+        'BYPASS_MIN_P_ALLOWLIST': 'Bypass Min-p provider allowlist',
         'TOP_K': 'Top-k sampling',
         'FREQUENCY_PENALTY': 'Frequency penalty',
         'PRESENCE_PENALTY': 'Presence penalty',
@@ -580,7 +582,7 @@ def print_env_var_status():
         'GROQ_', 'FIREWORKS_', 'USE_CUSTOM_', 'USE_GEMINI_', 'GEMINI_', 'IMAGE_', 'WEBP_',
         'JPEG_', 'PNG_', 'TARGET_IMAGE_TOKENS', 'MAX_IMAGE_', 'PRESERVE_', 'OPTIMIZE_',
         'PROGRESSIVE_', 'SAVE_COMPRESSED_IMAGES', 'USE_FALLBACK_KEYS', 'FALLBACK_KEYS',
-        'TOP_P', 'TOP_K', 'FREQUENCY_PENALTY', 'PRESENCE_PENALTY', 'REPETITION_PENALTY',
+        'TOP_P', 'MIN_P', 'BYPASS_MIN_P_ALLOWLIST', 'TOP_K', 'FREQUENCY_PENALTY', 'PRESENCE_PENALTY', 'REPETITION_PENALTY',
         'CANDIDATE_COUNT', 'CUSTOM_STOP_SEQUENCES', 'LOGIT_BIAS_', 'BIAS_', 'THINKING_', 'GPT_',
         'AI_HUNTER_', 'SYSTEM_PROMPT', 'MODEL', 'RETAIN_SOURCE_EXTENSION', 'auto_update_check',
         'FORCE_NCX_ONLY', 'SINGLE_API_IMAGE_CHUNKS'

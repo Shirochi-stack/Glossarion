@@ -13826,6 +13826,7 @@ class UnifiedClient:
                         top_k = int(top_k_raw)
                         if top_k > 0:
                             config_params["top_k"] = top_k
+                    config_params.update(self._get_anti_duplicate_min_p_params("gemini"))
 
                 # ------------------------------------------------------------------
                 # Thinking configuration (Gemini 2.5 budget / Gemini 3 level).
@@ -17382,7 +17383,7 @@ class UnifiedClient:
             return True
         return False
 
-    def _get_anti_duplicate_params(self, temperature, log_key=None):
+    def _get_anti_duplicate_params(self, temperature, log_key=None, log=True):
         """Get user-configured anti-duplicate parameters from GUI settings"""
         # Check if user enabled anti-duplicate
         if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
@@ -17421,24 +17422,66 @@ class UnifiedClient:
                 params["top_k"] = top_k
         
         # Log applied parameters with exact values (once per request if log_key provided)
-        if params:
-            should_log = True
-            if log_key:
-                try:
-                    tls = self._get_thread_local_client()
-                    if not hasattr(tls, "anti_dupe_logged"):
-                        tls.anti_dupe_logged = set()
-                    if log_key in tls.anti_dupe_logged:
-                        should_log = False
-                    else:
-                        tls.anti_dupe_logged.add(log_key)
-                except Exception:
-                    pass
-            if should_log:
-                applied_kv = ", ".join([f"{k}={params[k]}" for k in params.keys()])
-                logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
+        if log:
+            self._log_anti_duplicate_applied(params, log_key)
         
         return params
+
+    def _get_anti_duplicate_min_p_params(self, provider=None, is_local_endpoint=False):
+        """Return min_p only for request shapes likely to support it."""
+        if self._get_anti_duplicate_env("ENABLE_ANTI_DUPLICATE", "0") != "1":
+            return {}
+        try:
+            min_p = float(self._get_anti_duplicate_env("MIN_P", "0.0"))
+        except (TypeError, ValueError):
+            min_p = 0.0
+        min_p = max(0.0, min(1.0, min_p))
+        if min_p <= 0.0:
+            return {}
+        if not self._supports_anti_duplicate_min_p(provider, is_local_endpoint=is_local_endpoint):
+            return {}
+        return {"min_p": min_p}
+
+    def _supports_anti_duplicate_min_p(self, provider=None, is_local_endpoint=False):
+        """min_p is common on local/vLLM-style OpenAI-compatible endpoints, not official APIs."""
+        try:
+            if self._get_anti_duplicate_env("BYPASS_MIN_P_ALLOWLIST", "0") == "1":
+                return True
+        except Exception:
+            pass
+        if is_local_endpoint:
+            return True
+        provider = str(provider or getattr(self, "client_type", "") or "").strip().lower()
+        return provider in {
+            "custom_openai",
+            "openrouter",
+            "opencode",
+            "chutes",
+            "nanogpt",
+            "nvidia",
+            "sambanova",
+            "fireworks",
+        }
+
+    def _log_anti_duplicate_applied(self, params, log_key=None):
+        """Log anti-duplicate params once per request."""
+        if not params:
+            return
+        should_log = True
+        if log_key:
+            try:
+                tls = self._get_thread_local_client()
+                if not hasattr(tls, "anti_dupe_logged"):
+                    tls.anti_dupe_logged = set()
+                if log_key in tls.anti_dupe_logged:
+                    should_log = False
+                else:
+                    tls.anti_dupe_logged.add(log_key)
+            except Exception:
+                pass
+        if should_log:
+            applied_kv = ", ".join([f"{k}={params[k]}" for k in params.keys()])
+            logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
 
     def _get_anti_duplicate_prefix(self) -> str:
         """Resolve which anti-duplicate namespace to use based on request context."""
@@ -17801,7 +17844,11 @@ class UnifiedClient:
                 params = self._build_openai_params(messages, temperature, max_tokens, max_completion_tokens)
                 
                 # Get user-configured anti-duplicate parameters
-                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+                anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params("fireworks")
+                if anti_dupe_min_p_params:
+                    anti_dupe_params = {**anti_dupe_params, **anti_dupe_min_p_params}
+                self._log_anti_duplicate_applied(anti_dupe_params, response_name)
                 params.update(anti_dupe_params)
                 
                 # Apply any fixes from previous attempts
@@ -18555,7 +18602,11 @@ class UnifiedClient:
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # Get user-configured anti-duplicate parameters
-                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+                anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params("gemini")
+                if anti_dupe_min_p_params:
+                    anti_dupe_params = {**anti_dupe_params, **anti_dupe_min_p_params}
+                self._log_anti_duplicate_applied(anti_dupe_params, response_name)
 
                 # Build generation config with anti-duplicate parameters
                 generation_config_params = {
@@ -19696,7 +19747,11 @@ class UnifiedClient:
             pass
         
         # Get user-configured anti-duplicate parameters
-        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+        anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params("anthropic")
+        if anti_dupe_min_p_params:
+            anti_dupe_params = {**anti_dupe_params, **anti_dupe_min_p_params}
+        self._log_anti_duplicate_applied(anti_dupe_params, response_name)
         original_model = self.model
         if model_override:
             self.model = request_model
@@ -21032,7 +21087,11 @@ class UnifiedClient:
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
                     
                     # Get user-configured anti-duplicate parameters
-                    anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+                    anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+                    anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params(
+                        provider,
+                        is_local_endpoint=is_local_endpoint,
+                    )
 
                     # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
                     req_temperature = temperature
@@ -21150,6 +21209,15 @@ class UnifiedClient:
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
+                    if anti_dupe_min_p_params and not use_responses_api:
+                        extra_body.update(anti_dupe_min_p_params)
+                    self._log_anti_duplicate_applied(
+                        {
+                            **(anti_dupe_params if not use_responses_api else {}),
+                            **(anti_dupe_min_p_params if not use_responses_api else {}),
+                        },
+                        response_name,
+                    )
                     enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
                     is_chutes_thinking_endpoint = str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1'
                     
@@ -23178,6 +23246,22 @@ class UnifiedClient:
                 elif self._get_openai_compatible_thinking_disabled(provider, effective_model):
                     data.setdefault("thinking", {"type": "disabled"})
             
+            anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+            anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params(
+                provider,
+                is_local_endpoint=is_local_endpoint,
+            )
+            if not use_responses_api:
+                data.update(anti_dupe_params)
+                data.update(anti_dupe_min_p_params)
+            self._log_anti_duplicate_applied(
+                {
+                    **(anti_dupe_params if not use_responses_api else {}),
+                    **(anti_dupe_min_p_params if not use_responses_api else {}),
+                },
+                response_name,
+            )
+
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)
             # Save OpenRouter config if requested
@@ -27030,7 +27114,11 @@ class UnifiedClient:
         }
 
         # Get user-configured anti-duplicate parameters
-        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+        anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+        anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params("anthropic")
+        if anti_dupe_min_p_params:
+            anti_dupe_params = {**anti_dupe_params, **anti_dupe_min_p_params}
+        self._log_anti_duplicate_applied(anti_dupe_params, response_name)
         data.update(anti_dupe_params)  # Add user's custom parameters
 
         if system_message:

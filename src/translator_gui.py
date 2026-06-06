@@ -2341,6 +2341,8 @@ Text to analyze:
         # Initialize anti-duplicate parameters (from Other Settings)
         self.enable_anti_duplicate_var = self.config.get('enable_anti_duplicate', False)
         self.top_p_var = self.config.get('top_p', 1.0)
+        self.min_p_var = self.config.get('min_p', 0.0)
+        self.bypass_min_p_allowlist_var = self.config.get('bypass_min_p_allowlist', False)
         self.top_k_var = self.config.get('top_k', 0)
         self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
         self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
@@ -14889,9 +14891,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Reset stop flags
         self.stop_requested = False
         self._glossary_stop_was_requested = False  # Reset glossary stop flag from previous run
+        self._translation_anti_duplicate_logged = False
         self.graceful_stop_active = False  # Reset graceful stop state
         self._zip_inputs_resolved_for_current_run = False
         os.environ.pop('TRANSLATION_CANCELLED', None)  # Clear hard-stop state from previous run
+        os.environ.pop('TRANSLATION_ANTI_DUPLICATE_LOGGED', None)
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         os.environ['WAIT_FOR_CHUNKS'] = '0'  # Reset graceful batch-stop mode
@@ -17483,6 +17487,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 import large_env
                 large_env.update_env(env_vars)
+                self._log_translation_anti_duplicate_settings(env_vars)
                 
                 # Handle chapter range
                 chap_range = self.chapter_range_entry.text().strip()
@@ -17617,6 +17622,41 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception as e:
             self.append_log(f"❌ Error in text file processing: {str(e)}")
             return False
+
+    def _format_translation_anti_duplicate_settings(self, env_vars=None):
+        """Return the translation anti-duplicate startup log line, or empty if disabled."""
+        env = env_vars or os.environ
+        try:
+            enabled = str(env.get('ENABLE_ANTI_DUPLICATE', '0')).strip() == '1'
+        except Exception:
+            enabled = False
+        if not enabled:
+            return ''
+        top_p = str(env.get('TOP_P', '1.0'))
+        min_p = str(env.get('MIN_P', '0.0'))
+        top_k = str(env.get('TOP_K', '0'))
+        freq = str(env.get('FREQUENCY_PENALTY', '0.0'))
+        pres = str(env.get('PRESENCE_PENALTY', '0.0'))
+        rep = str(env.get('REPETITION_PENALTY', '1.0'))
+        return (
+            f"🎯 Anti-duplicate enabled for translation "
+            f"(top_p={top_p}, min_p={min_p}, top_k={top_k}, "
+            f"freq_penalty={freq}, presence_penalty={pres}, repetition_penalty={rep})"
+        )
+
+    def _log_translation_anti_duplicate_settings(self, env_vars=None):
+        """Log translation anti-duplicate settings once per GUI translation run."""
+        if getattr(self, '_translation_anti_duplicate_logged', False):
+            return
+        message = self._format_translation_anti_duplicate_settings(env_vars)
+        if not message:
+            return
+        self.append_log(message)
+        self._translation_anti_duplicate_logged = True
+        try:
+            os.environ['TRANSLATION_ANTI_DUPLICATE_LOGGED'] = '1'
+        except Exception:
+            pass
 
     def _resolve_glossary_for_env(self, file_path: str) -> str:
         """Return the glossary path to use for a given input file.
@@ -18265,6 +18305,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Anti-duplicate parameters
             'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var else '0',
             'TOP_P': str(self.top_p_var) if hasattr(self, 'top_p_var') else '1.0',
+            'MIN_P': str(self.min_p_var) if hasattr(self, 'min_p_var') else '0.0',
+            'BYPASS_MIN_P_ALLOWLIST': '1' if hasattr(self, 'bypass_min_p_allowlist_var') and self.bypass_min_p_allowlist_var else '0',
             'TOP_K': str(self.top_k_var) if hasattr(self, 'top_k_var') else '0',
             'FREQUENCY_PENALTY': str(self.frequency_penalty_var) if hasattr(self, 'frequency_penalty_var') else '0.0',
             'PRESENCE_PENALTY': str(self.presence_penalty_var) if hasattr(self, 'presence_penalty_var') else '0.0',
@@ -19642,6 +19684,8 @@ Important rules:
                     # Glossary anti-duplicate parameters (separate from translation)
                     'GLOSSARY_ENABLE_ANTI_DUPLICATE': '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0',
                     'GLOSSARY_TOP_P': str(self.config.get('glossary_top_p', 1.0)),
+                    'GLOSSARY_MIN_P': str(self.config.get('glossary_min_p', 0.0)),
+                    'GLOSSARY_BYPASS_MIN_P_ALLOWLIST': '1' if self.config.get('glossary_bypass_min_p_allowlist', False) else '0',
                     'GLOSSARY_TOP_K': str(self.config.get('glossary_top_k', 0)),
                     'GLOSSARY_FREQUENCY_PENALTY': str(self.config.get('glossary_frequency_penalty', 0.0)),
                     'GLOSSARY_PRESENCE_PENALTY': str(self.config.get('glossary_presence_penalty', 0.0)),
@@ -27043,6 +27087,8 @@ Important rules:
                 # Anti-duplicate parameters - all vars updated by other_settings.py callbacks
                 ('enable_anti_duplicate', ['enable_anti_duplicate_var'], False, bool),
                 ('top_p', ['top_p_var'], 1.0, float),
+                ('min_p', ['min_p_var'], 0.0, float),
+                ('bypass_min_p_allowlist', ['bypass_min_p_allowlist_var'], False, bool),
                 ('top_k', ['top_k_var'], 50, int),
                 ('frequency_penalty', ['frequency_penalty_var'], 0.0, float),
                 ('presence_penalty', ['presence_penalty_var'], 0.0, float),
@@ -27057,6 +27103,8 @@ Important rules:
                 # Glossary anti-duplicate parameters (separate from translation)
                 ('glossary_enable_anti_duplicate', ['glossary_enable_anti_duplicate_var', ('config', 'glossary_enable_anti_duplicate')], False, bool),
                 ('glossary_top_p', ['glossary_top_p_var', ('config', 'glossary_top_p')], 1.0, float),
+                ('glossary_min_p', ['glossary_min_p_var', ('config', 'glossary_min_p')], 0.0, float),
+                ('glossary_bypass_min_p_allowlist', ['glossary_bypass_min_p_allowlist_var', ('config', 'glossary_bypass_min_p_allowlist')], False, bool),
                 ('glossary_top_k', ['glossary_top_k_var', ('config', 'glossary_top_k')], 0, int),
                 ('glossary_frequency_penalty', ['glossary_frequency_penalty_var', ('config', 'glossary_frequency_penalty')], 0.0, float),
                 ('glossary_presence_penalty', ['glossary_presence_penalty_var', ('config', 'glossary_presence_penalty')], 0.0, float),
@@ -27405,6 +27453,8 @@ Important rules:
                     # Glossary anti-duplicate parameters
                     ('GLOSSARY_ENABLE_ANTI_DUPLICATE', '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0'),
                     ('GLOSSARY_TOP_P', str(self.config.get('glossary_top_p', 1.0))),
+                    ('GLOSSARY_MIN_P', str(self.config.get('glossary_min_p', 0.0))),
+                    ('GLOSSARY_BYPASS_MIN_P_ALLOWLIST', '1' if self.config.get('glossary_bypass_min_p_allowlist', False) else '0'),
                     ('GLOSSARY_TOP_K', str(self.config.get('glossary_top_k', 0))),
                     ('GLOSSARY_FREQUENCY_PENALTY', str(self.config.get('glossary_frequency_penalty', 0.0))),
                     ('GLOSSARY_PRESENCE_PENALTY', str(self.config.get('glossary_presence_penalty', 0.0))),
@@ -27619,6 +27669,8 @@ Important rules:
             # Anti-Duplicate
             'ENABLE_ANTI_DUPLICATE': 'Enable anti-duplicate measures',
             'TOP_P': 'Top-P sampling parameter',
+            'MIN_P': 'Min-P sampling parameter',
+            'BYPASS_MIN_P_ALLOWLIST': 'Bypass Min-P provider allowlist',
             'TOP_K': 'Top-K sampling parameter',
             'FREQUENCY_PENALTY': 'Frequency penalty',
             'PRESENCE_PENALTY': 'Presence penalty',
@@ -28288,6 +28340,8 @@ Important rules:
                 # Anti-duplicate
                 ('ENABLE_ANTI_DUPLICATE', '1' if getattr(self, 'enable_anti_duplicate_var', False) else '0'),
                 ('TOP_P', str(getattr(self, 'top_p_var', '1.0'))),
+                ('MIN_P', str(getattr(self, 'min_p_var', '0.0'))),
+                ('BYPASS_MIN_P_ALLOWLIST', '1' if getattr(self, 'bypass_min_p_allowlist_var', False) else '0'),
                 ('TOP_K', str(getattr(self, 'top_k_var', '0'))),
                 ('FREQUENCY_PENALTY', str(getattr(self, 'frequency_penalty_var', '0.0'))),
                 ('PRESENCE_PENALTY', str(getattr(self, 'presence_penalty_var', '0.0'))),

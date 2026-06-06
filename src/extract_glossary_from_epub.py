@@ -830,6 +830,10 @@ BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_PRESENT = False
 BOOK_TITLE_VALUE = None
+GLOSSARY_SOURCE_LANGUAGE = None
+GLOSSARY_SOURCE_LANGUAGE_PATH = None
+_GLOSSARY_SOURCE_LANGUAGE_LOADED = False
+_GLOSSARY_SOURCE_LANGUAGE_LOGGED = False
 
 def _ensure_user_message(msgs: List[Dict], fallback_text: str) -> List[Dict]:
     """
@@ -922,6 +926,139 @@ def _extract_title_from_metadata(meta: Dict) -> str:
     return None
 
 
+def _unique_metadata_candidates(output_path: str = None, epub_path: str = None) -> List[str]:
+    """Return likely metadata.json paths without duplicate probes."""
+    epub_base = os.path.splitext(os.path.basename(epub_path or os.getenv("EPUB_PATH", "") or ""))[0]
+    candidates = []
+
+    for env_key in ("METADATA_JSON_PATH", "METADATA_PATH"):
+        env_path = (os.getenv(env_key) or "").strip()
+        if env_path:
+            candidates.append(env_path)
+
+    for env_key in ("EPUB_OUTPUT_DIR", "OUTPUT_DIRECTORY", "OUTPUT_DIR"):
+        env_dir = (os.getenv(env_key) or "").strip()
+        if not env_dir:
+            continue
+        candidates.append(os.path.join(env_dir, "metadata.json"))
+        if epub_base:
+            candidates.append(os.path.join(env_dir, epub_base, "metadata.json"))
+
+    if output_path:
+        meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
+        candidates.append(os.path.join(meta_dir, "metadata.json"))
+        if epub_base:
+            candidates.append(os.path.join(meta_dir, epub_base, "metadata.json"))
+        parent = os.path.dirname(meta_dir)
+        grandparent = os.path.dirname(parent)
+        if parent:
+            candidates.append(os.path.join(parent, "metadata.json"))
+            if epub_base:
+                candidates.append(os.path.join(parent, epub_base, "metadata.json"))
+        if grandparent and grandparent != parent:
+            candidates.append(os.path.join(grandparent, "metadata.json"))
+            if epub_base:
+                candidates.append(os.path.join(grandparent, epub_base, "metadata.json"))
+
+    if epub_base:
+        candidates.append(os.path.join(os.getcwd(), epub_base, "metadata.json"))
+        if epub_path:
+            source_dir = os.path.dirname(os.path.abspath(epub_path))
+            candidates.append(os.path.join(source_dir, epub_base, "metadata.json"))
+
+    seen = set()
+    unique = []
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            norm = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            norm = path
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(path)
+    return unique
+
+
+def _normalize_detected_language(value):
+    lang = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    if lang in ("", "unknown", "und", "none", "null"):
+        return None
+    return lang
+
+
+def _read_detected_language_from_metadata(output_path: str = None, epub_path: str = None):
+    for meta_path in _unique_metadata_candidates(output_path, epub_path):
+        if not os.path.exists(meta_path):
+            continue
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if not isinstance(meta, dict):
+                continue
+            detected = _normalize_detected_language(meta.get("detected_language") or meta.get("source_language"))
+            if detected:
+                return detected, meta_path
+        except Exception as e:
+            print(f"[Warning] Could not read metadata.json for detected language: {e}")
+    return None, None
+
+
+def _metadata_language_is_cjk(language: str) -> bool:
+    lang = _normalize_detected_language(language)
+    cjk_langs = {
+        "korean", "ko", "kor",
+        "japanese", "ja", "jpn",
+        "chinese", "zh", "zho", "chi",
+        "simplified chinese", "traditional chinese",
+        "mandarin", "cantonese",
+    }
+    return lang in cjk_langs
+
+
+def _set_glossary_source_language_from_metadata(output_path: str = None, epub_path: str = None, log: bool = False):
+    global GLOSSARY_SOURCE_LANGUAGE, GLOSSARY_SOURCE_LANGUAGE_PATH
+    global _GLOSSARY_SOURCE_LANGUAGE_LOADED, _GLOSSARY_SOURCE_LANGUAGE_LOGGED
+    detected, meta_path = _read_detected_language_from_metadata(output_path, epub_path)
+    GLOSSARY_SOURCE_LANGUAGE = detected
+    GLOSSARY_SOURCE_LANGUAGE_PATH = meta_path
+    _GLOSSARY_SOURCE_LANGUAGE_LOADED = True
+    if detected and log and not _GLOSSARY_SOURCE_LANGUAGE_LOGGED:
+        status = "CJK source confirmed" if _metadata_language_is_cjk(detected) else "non-CJK source, filter skipped"
+        source = "metadata.json" if meta_path else "environment"
+        print(f"[CJK Filter] Source language from {source}: {detected} -> {status}")
+        _GLOSSARY_SOURCE_LANGUAGE_LOGGED = True
+    return detected
+
+
+def _get_glossary_source_language_from_metadata():
+    global GLOSSARY_SOURCE_LANGUAGE, GLOSSARY_SOURCE_LANGUAGE_PATH
+    global _GLOSSARY_SOURCE_LANGUAGE_LOADED, _GLOSSARY_SOURCE_LANGUAGE_LOGGED
+
+    env_lang = _normalize_detected_language(os.getenv("GLOSSARY_SOURCE_LANGUAGE") or os.getenv("SOURCE_LANGUAGE"))
+    if env_lang:
+        GLOSSARY_SOURCE_LANGUAGE = env_lang
+        GLOSSARY_SOURCE_LANGUAGE_PATH = None
+        _GLOSSARY_SOURCE_LANGUAGE_LOADED = True
+
+    if not _GLOSSARY_SOURCE_LANGUAGE_LOADED:
+        _set_glossary_source_language_from_metadata(
+            os.getenv("OUTPUT_PATH") or None,
+            os.getenv("EPUB_PATH") or None,
+            log=False,
+        )
+
+    if GLOSSARY_SOURCE_LANGUAGE and not _GLOSSARY_SOURCE_LANGUAGE_LOGGED:
+        status = "CJK source confirmed" if _metadata_language_is_cjk(GLOSSARY_SOURCE_LANGUAGE) else "non-CJK source, filter skipped"
+        source = "metadata.json" if GLOSSARY_SOURCE_LANGUAGE_PATH else "environment"
+        print(f"[CJK Filter] Source language from {source}: {GLOSSARY_SOURCE_LANGUAGE} -> {status}")
+        _GLOSSARY_SOURCE_LANGUAGE_LOGGED = True
+
+    return GLOSSARY_SOURCE_LANGUAGE
+
+
 def _extract_raw_title_from_epub(epub_path: str) -> str:
     """Extract the raw untranslated title from the input EPUB."""
     if not epub_path or not os.path.exists(epub_path):
@@ -977,14 +1114,7 @@ def _extract_raw_title_from_epub(epub_path: str) -> str:
 
 def _extract_translated_title_from_metadata(output_path: str, epub_path: str) -> str:
     """Extract translated title from metadata.json in output directory."""
-    # metadata.json next to the output
-    meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
-    epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
-    candidates = []
-    if epub_base:
-        candidates.append(os.path.join(meta_dir, epub_base, "metadata.json"))
-
-    for meta_path in candidates:
+    for meta_path in _unique_metadata_candidates(output_path, epub_path):
         # print(f"[Metadata] Checking for translated book title at: {meta_path}")
         if os.path.exists(meta_path):
             try:
@@ -3346,6 +3476,10 @@ def _is_cjk_source_detected(raw_names):
     Returns True when the dominant script is CJK/Korean/Japanese.
     No hardcoded config dependency — purely content-driven.
     """
+    metadata_language = _get_glossary_source_language_from_metadata()
+    if metadata_language:
+        return _metadata_language_is_cjk(metadata_language)
+
     if not raw_names:
         return False
     # Sample up to 50 raw names for speed
@@ -5902,6 +6036,12 @@ def _extract_sdlxliff_chapters_for_glossary(sdlxliff_path, check_stop=None):
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
     global _skipped_chapters
+    global GLOSSARY_SOURCE_LANGUAGE, GLOSSARY_SOURCE_LANGUAGE_PATH
+    global _GLOSSARY_SOURCE_LANGUAGE_LOADED, _GLOSSARY_SOURCE_LANGUAGE_LOGGED
+    GLOSSARY_SOURCE_LANGUAGE = None
+    GLOSSARY_SOURCE_LANGUAGE_PATH = None
+    _GLOSSARY_SOURCE_LANGUAGE_LOADED = False
+    _GLOSSARY_SOURCE_LANGUAGE_LOGGED = False
     
     # Redirect print/logs to callback if provided
     if log_callback:
@@ -6150,6 +6290,7 @@ def main(log_callback=None, stop_callback=None):
     )
     _GLOSSARY_OUTPUT_FILE = os.path.join(glossary_dir, os.path.basename(args.output))
     args.output = _GLOSSARY_OUTPUT_FILE
+    _set_glossary_source_language_from_metadata(args.output, epub_path, log=False)
     progress_context = make_glossary_progress_context(
         progress_file=PROGRESS_FILE,
         output_file=_GLOSSARY_OUTPUT_FILE,

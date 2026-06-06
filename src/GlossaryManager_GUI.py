@@ -1859,6 +1859,10 @@ class GlossaryManagerMixin:
                     self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
                 if hasattr(self, 'glossary_top_p_var'):
                     self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+                if hasattr(self, 'glossary_min_p_var'):
+                    self.config['glossary_min_p'] = float(self.glossary_min_p_var)
+                if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+                    self.config['glossary_bypass_min_p_allowlist'] = bool(self.glossary_bypass_min_p_allowlist_var)
                 if hasattr(self, 'glossary_top_k_var'):
                     self.config['glossary_top_k'] = int(self.glossary_top_k_var)
                 if hasattr(self, 'glossary_frequency_penalty_var'):
@@ -5098,6 +5102,10 @@ Do not stop after the glossary."""
                 self.config['glossary_enable_anti_duplicate'] = bool(self.glossary_enable_anti_duplicate_var)
             if hasattr(self, 'glossary_top_p_var'):
                 self.config['glossary_top_p'] = float(self.glossary_top_p_var)
+            if hasattr(self, 'glossary_min_p_var'):
+                self.config['glossary_min_p'] = float(self.glossary_min_p_var)
+            if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+                self.config['glossary_bypass_min_p_allowlist'] = bool(self.glossary_bypass_min_p_allowlist_var)
             if hasattr(self, 'glossary_top_k_var'):
                 self.config['glossary_top_k'] = int(self.glossary_top_k_var)
             if hasattr(self, 'glossary_frequency_penalty_var'):
@@ -5220,7 +5228,7 @@ Do not stop after the glossary."""
         self.glossary_anti_duplicate_notebook.addTab(core_frame, "Core Parameters")
         
         # Top-P (Nucleus Sampling)
-        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False):
+        def _create_slider_row(parent_layout, label_text, var_holder, var_name, min_val, max_val, decimals=2, is_int=False, off_at_zero=False):
             """Helper to create a slider row with label and value display
             var_holder: object that holds the variable (typically self)
             var_name: string name of the attribute to set
@@ -5274,7 +5282,9 @@ Do not stop after the glossary."""
                     else:
                         actual_value = min_val + (value / slider.maximum()) * (max_val - min_val)
                         setattr(var_holder, var_name, actual_value)
-                        if decimals == 1:
+                        if off_at_zero and actual_value <= 0:
+                            value_lbl.setText("OFF")
+                        elif decimals == 1:
                             value_lbl.setText(f"{actual_value:.1f}" if actual_value > 0 else "OFF")
                         else:
                             value_lbl.setText(f"{actual_value:.2f}")
@@ -5291,6 +5301,31 @@ Do not stop after the glossary."""
         self.glossary_top_p_var = self.config.get('glossary_top_p', 1.0)
         top_p_slider, self.glossary_top_p_value_label = _create_slider_row(core_v, "Top-P (Nucleus Sampling):", self, 'glossary_top_p_var', 0.1, 1.0, decimals=2)
         
+        # Min-P (Relative Probability Cutoff)
+        self.glossary_min_p_var = self.config.get('glossary_min_p', 0.0)
+        min_p_slider, self.glossary_min_p_value_label = _create_slider_row(core_v, "Min-P (Relative Cutoff):", self, 'glossary_min_p_var', 0.0, 1.0, decimals=2, off_at_zero=True)
+
+        # Min-P allowlist bypass
+        self.glossary_bypass_min_p_allowlist_var = self.config.get('glossary_bypass_min_p_allowlist', False)
+        bypass_min_p_cb = self._create_styled_checkbox("Bypass Min-P Provider Allowlist")
+        try:
+            bypass_min_p_cb.setChecked(bool(self.glossary_bypass_min_p_allowlist_var))
+        except Exception:
+            pass
+        def _on_bypass_min_p_toggle(checked):
+            try:
+                self.glossary_bypass_min_p_allowlist_var = bool(checked)
+            except Exception:
+                pass
+        bypass_min_p_cb.toggled.connect(_on_bypass_min_p_toggle)
+        core_v.addWidget(bypass_min_p_cb)
+
+        bypass_min_p_desc = QLabel("Force-sends Min-P to providers that are not on the compatibility allowlist.")
+        bypass_min_p_desc.setStyleSheet("color: gray; font-size: 8pt;")
+        bypass_min_p_desc.setWordWrap(True)
+        bypass_min_p_desc.setContentsMargins(20, 0, 0, 8)
+        core_v.addWidget(bypass_min_p_desc)
+
         # Top-K (Vocabulary Limit)
         self.glossary_top_k_var = self.config.get('glossary_top_k', 0)
         top_k_slider, self.glossary_top_k_value_label = _create_slider_row(core_v, "Top-K (Vocabulary Limit):", self, 'glossary_top_k_var', 0, 100, is_int=True)
@@ -5504,6 +5539,10 @@ Do not stop after the glossary."""
             self.glossary_enable_anti_duplicate_var = False
         if hasattr(self, 'glossary_top_p_var'):
             self.glossary_top_p_var = 1.0
+        if hasattr(self, 'glossary_min_p_var'):
+            self.glossary_min_p_var = 0.0
+        if hasattr(self, 'glossary_bypass_min_p_allowlist_var'):
+            self.glossary_bypass_min_p_allowlist_var = False
         if hasattr(self, 'glossary_top_k_var'):
             self.glossary_top_k_var = 0
         if hasattr(self, 'glossary_frequency_penalty_var'):
