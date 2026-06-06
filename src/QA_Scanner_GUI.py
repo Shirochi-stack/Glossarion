@@ -2865,6 +2865,19 @@ class QAScannerMixin:
             check_potential_truncation_checkbox.setChecked(qa_settings.get('check_potential_truncation', False))
             detection_layout.addWidget(check_potential_truncation_checkbox)
 
+            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(
+                "Use SDLXLIFF subfolder for source -> output h1/p tag checks"
+            )
+            check_missing_beautifulsoup_tags_checkbox.setChecked(
+                qa_settings.get('check_missing_beautifulsoup_tags', False)
+            )
+            check_missing_beautifulsoup_tags_checkbox.setToolTip(
+                "Compares source and output <p> and <h1>-<h6> counts from matching SDLXLIFF sidecars. "
+                "Flags output files where those source wrappers were dropped. "
+                "Requires BeautifulSoup-mode SDLXLIFF sidecars."
+            )
+            detection_layout.addWidget(check_missing_beautifulsoup_tags_checkbox)
+
             scroll_layout.addSpacing(20)
             yield
 
@@ -3276,25 +3289,6 @@ class QAScannerMixin:
             check_missing_html_tag_checkbox = self._create_styled_checkbox("Check HTML structure and tag consistency")
             check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
             additional_layout.addWidget(check_missing_html_tag_checkbox)
-
-            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(
-                "Flag missing p/h1-h6 source tags (BeautifulSoup only)"
-            )
-            check_missing_beautifulsoup_tags_checkbox.setChecked(
-                qa_settings.get('check_missing_beautifulsoup_tags', False)
-            )
-            additional_layout.addWidget(check_missing_beautifulsoup_tags_checkbox)
-
-            missing_bs_tags_desc = QLabel(
-                "Compares source and output BeautifulSoup counts for <p> and <h1>-<h6> tags.\n"
-                "Flags output files where those source wrappers were dropped."
-            )
-            missing_bs_tags_desc.setFont(QFont('Arial', 9))
-            missing_bs_tags_desc.setStyleSheet("color: gray;")
-            missing_bs_tags_desc.setWordWrap(True)
-            missing_bs_tags_desc.setMaximumWidth(700)
-            missing_bs_tags_desc.setContentsMargins(20, 0, 0, 5)
-            additional_layout.addWidget(missing_bs_tags_desc)
 
             # Body tag check (separate, disabled by default)
             body_tag_widget = QWidget()

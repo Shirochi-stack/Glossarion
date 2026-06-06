@@ -157,10 +157,13 @@ class SDLXLIFFReviewDialog(QDialog):
         self._render_token = 0
         self._active_render_timer = None
         self._rows_rebuild_active = False
+        self._active_target_editor = None
+        self._first_show_opacity_guard = True
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
+        self.setWindowOpacity(0.0)
         self.resize(1500, 900)
         self.setAutoFillBackground(True)
         palette = self.palette()
@@ -237,6 +240,21 @@ class SDLXLIFFReviewDialog(QDialog):
         main_layout.addLayout(close_row)
 
         self._populate_piece_list()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._first_show_opacity_guard:
+            return
+        self._first_show_opacity_guard = False
+        try:
+            self.ensurePolished()
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            self._refresh_review_stream_geometry(final=True)
+        except Exception:
+            pass
+        QTimer.singleShot(35, lambda: self.setWindowOpacity(1.0))
 
     def _apply_translator_theme(self, parent):
         base_style = ""
@@ -719,16 +737,17 @@ class SDLXLIFFReviewDialog(QDialog):
             if current_norm and os.path.normcase(os.path.abspath(piece["path"])) == current_norm:
                 selected_row = row
 
-        self.piece_list.currentRowChanged.connect(self._request_render_piece)
+        self.piece_list.currentRowChanged.connect(self._render_piece)
         if self.pieces:
             previous_block = self.piece_list.blockSignals(True)
             self.piece_list.setCurrentRow(selected_row)
             self.piece_list.blockSignals(previous_block)
-            self._request_render_piece(selected_row)
+            self._render_piece(selected_row)
         else:
             self.header_label.setText("No SDLXLIFF review files found")
 
     def _clear_rows(self):
+        self._commit_active_target_editor()
         while self.rows_layout.count():
             item = self.rows_layout.takeAt(0)
             widget = item.widget()
@@ -736,11 +755,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
-
-    def _request_render_piece(self, row):
-        if row < 0 or row >= len(self.pieces):
-            return
-        QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
     def _set_rows_rebuild_active(self, active):
         self._rows_rebuild_active = bool(active)
@@ -864,7 +878,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _show_review_text_context_menu(self, widget, pos):
+    def _show_review_text_context_menu(self, widget, pos, edit_callback=None):
         selected = self._selected_text_for_widget(widget).strip()
         has_selection = bool(selected)
         target_lang = self._review_target_language()
@@ -888,6 +902,11 @@ class SDLXLIFFReviewDialog(QDialog):
         select_all_action.setShortcut("Ctrl+A")
         select_all_action.setEnabled(bool(self._all_text_for_widget(widget)))
         select_all_action.triggered.connect(lambda: self._select_all_review_text(widget))
+
+        if edit_callback is not None:
+            menu.addSeparator()
+            edit_action = menu.addAction("Edit Output")
+            edit_action.triggered.connect(edit_callback)
 
         menu.addSeparator()
         gt_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
@@ -915,7 +934,98 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         return editor
 
+    def _commit_active_target_editor(self):
+        active = self._active_target_editor
+        if not active:
+            return
+        editor = active.get("editor")
+        label = active.get("label")
+        text = ""
+        try:
+            text = editor.toPlainText() if editor is not None else ""
+        except Exception:
+            text = ""
+        try:
+            if label is not None:
+                label.setText(text if text else "[empty]")
+                label.setToolTip(text)
+                label.show()
+        except Exception:
+            pass
+        try:
+            if editor is not None:
+                editor.hide()
+                editor.setParent(None)
+                editor.deleteLater()
+        except Exception:
+            pass
+        self._active_target_editor = None
+        self._schedule_target_edit(active.get("piece_index", -1), active.get("row_index", -1), text)
+
+    def _begin_target_edit(self, container, label, piece_index, row_index, text, height):
+        self._commit_active_target_editor()
+        editor = self._target_editor(piece_index, row_index, text, editable=True, height=height)
+        try:
+            editor.textChanged.disconnect()
+        except Exception:
+            pass
+        layout = container.layout()
+        label.hide()
+        layout.addWidget(editor)
+        self._active_target_editor = {
+            "editor": editor,
+            "label": label,
+            "piece_index": piece_index,
+            "row_index": row_index,
+        }
+        original_focus_out = editor.focusOutEvent
+
+        def _focus_out(event):
+            try:
+                original_focus_out(event)
+            finally:
+                QTimer.singleShot(0, self._commit_active_target_editor)
+
+        editor.focusOutEvent = _focus_out
+        editor.setFocus(Qt.MouseFocusReason)
+        editor.selectAll()
+
+    def _target_display_widget(self, piece_index, row_index, text, editable=True, height=None):
+        container_height = max(30, int(height or 38))
+        container = QFrame()
+        container.setObjectName("SdlReviewTargetDisplay")
+        container.setFixedHeight(container_height)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        container.setStyleSheet(
+            f"QFrame#SdlReviewTargetDisplay {{ background-color: {self.THEME['panel_alt']}; "
+            f"border: 1px solid {self.THEME['border']}; border-radius: 3px; }}"
+        )
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(5, 4, 5, 4)
+        layout.setSpacing(0)
+        label = QLabel(str(text or "") if text else "[empty]")
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setContextMenuPolicy(Qt.CustomContextMenu)
+        label.setToolTip(str(text or ""))
+        label.setStyleSheet(f"color: {self.THEME['text']}; background: transparent; font-size: 10pt;")
+        layout.addWidget(label)
+
+        def _edit():
+            if editable:
+                self._begin_target_edit(container, label, piece_index, row_index, label.text() if label.text() != "[empty]" else "", container_height)
+
+        label.customContextMenuRequested.connect(
+            lambda pos, lbl=label: self._show_review_text_context_menu(lbl, pos, edit_callback=_edit if editable else None)
+        )
+        label.mouseDoubleClickEvent = lambda event: (_edit(), event.accept())
+        return container
+
     def _schedule_target_edit(self, piece_index, row_index, text):
+        if piece_index < 0 or row_index < 0:
+            return
         self._pending_target_edits[(piece_index, row_index)] = text
         self.save_status_label.setText("Unsaved")
         self._edit_save_timer.start(500)
@@ -1026,6 +1136,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def closeEvent(self, event):
         try:
+            self._commit_active_target_editor()
             if self._active_render_timer is not None:
                 self._active_render_timer.stop()
                 self._active_render_timer.deleteLater()
@@ -1124,7 +1235,7 @@ class SDLXLIFFReviewDialog(QDialog):
         source_label = self._text_label(source_text, missing=source_missing)
         source_label.setMaximumHeight(max(24, row_height - 14))
         source_label.setToolTip(source_text)
-        target_editor = self._target_editor(
+        target_widget = self._target_display_widget(
             piece["index"],
             idx,
             target_text,
@@ -1142,7 +1253,7 @@ class SDLXLIFFReviewDialog(QDialog):
         grid.addWidget(self._bar_widget(len(source_text), max_len, source_bar, align_right=True), 0, 2)
         grid.addWidget(dot, 0, 3)
         grid.addWidget(self._bar_widget(len(target_text), max_len, target_bar, align_right=False), 0, 4)
-        grid.addWidget(target_editor, 0, 5)
+        grid.addWidget(target_widget, 0, 5)
         self.rows_layout.addWidget(frame)
 
     def _render_piece(self, row):
@@ -1202,53 +1313,21 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             return
 
-        row_state = {"idx": 0}
-        batch_size = 28
-        timer = QTimer(self)
-
-        def _render_next_batch():
-            if render_token != self._render_token:
-                timer.stop()
-                timer.deleteLater()
-                if self._active_render_timer is timer:
-                    self._active_render_timer = None
-                return
-            try:
-                self._set_rows_rebuild_active(True)
-                start = row_state["idx"]
-                end = min(len(rows), start + batch_size)
-                for idx in range(start, end):
-                    self._add_review_row(piece, rows[idx], idx, max_len, colors)
-                row_state["idx"] = end
-            except Exception as exc:
-                timer.stop()
-                timer.deleteLater()
-                if render_token == self._render_token:
-                    error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
-                    error.setTextFormat(Qt.PlainText)
-                    error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
-                    self.rows_layout.addWidget(error)
-                    self.rows_layout.addStretch(1)
-                    self._finish_rows_rebuild(final=True)
-                if self._active_render_timer is timer:
-                    self._active_render_timer = None
-                return
-            if end >= len(rows):
-                timer.stop()
-                timer.deleteLater()
-                if render_token == self._render_token:
-                    self.rows_layout.addStretch(1)
-                    self._finish_rows_rebuild(final=True)
-                if self._active_render_timer is timer:
-                    self._active_render_timer = None
-            elif render_token == self._render_token:
-                self._finish_rows_rebuild(final=False)
-
-        timer.timeout.connect(_render_next_batch)
-        self._active_render_timer = timer
-        _render_next_batch()
-        if self._active_render_timer is timer and row_state["idx"] < len(rows):
-            timer.start(0)
+        try:
+            for idx, row_data in enumerate(rows):
+                self._add_review_row(piece, row_data, idx, max_len, colors)
+            if render_token == self._render_token:
+                self.rows_layout.addStretch(1)
+                self._finish_rows_rebuild(final=True)
+        except Exception as exc:
+            if render_token == self._render_token:
+                self._clear_rows()
+                error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
+                error.setTextFormat(Qt.PlainText)
+                error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                self.rows_layout.addWidget(error)
+                self.rows_layout.addStretch(1)
+                self._finish_rows_rebuild(final=True)
 
 
 class RetranslationMixin:
