@@ -168,6 +168,8 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdl_review_loading_original_pixmap = None
         self._sdl_review_loading_angle = 0
         self._review_loading_minimum_ms = 140
+        self._status_jump_indices = {}
+        self._highlighted_status_frame = None
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -513,14 +515,56 @@ class SDLXLIFFReviewDialog(QDialog):
                 frame for frame in page.findChildren(QFrame, "SdlReviewRow")
                 if frame.property("sdl_status") == status
             ]
-            frames.sort(key=lambda frame: frame.y())
+            frames.sort(key=lambda frame: int(frame.property("sdl_row_index") or 0))
             if not frames:
                 return
-            scrollbar = self.scroll.verticalScrollBar()
-            current_y = scrollbar.value()
-            target = next((frame for frame in frames if frame.y() > current_y + 8), frames[0])
+            try:
+                piece_row = self.piece_list.currentRow()
+            except Exception:
+                piece_row = -1
+            jump_key = (piece_row, status)
+            next_index = (int(self._status_jump_indices.get(jump_key, -1)) + 1) % len(frames)
+            self._status_jump_indices[jump_key] = next_index
+            target = frames[next_index]
+            self._highlight_review_row(target)
             self.scroll.ensureWidgetVisible(target, 0, 18)
-            scrollbar.setValue(max(0, min(scrollbar.maximum(), target.y() - 18)))
+            try:
+                scrollbar = self.scroll.verticalScrollBar()
+                scrollbar.setValue(max(0, min(scrollbar.maximum(), target.y() - 18)))
+            except Exception:
+                pass
+            QTimer.singleShot(0, lambda target=target: self.scroll.ensureWidgetVisible(target, 0, 18))
+        except Exception:
+            pass
+
+    def _clear_review_row_highlight(self):
+        frame = self._highlighted_status_frame
+        self._highlighted_status_frame = None
+        if frame is None:
+            return
+        try:
+            base_style = frame.property("sdl_base_style")
+            if base_style:
+                frame.setStyleSheet(str(base_style))
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+
+    def _highlight_review_row(self, frame):
+        self._clear_review_row_highlight()
+        if frame is None:
+            return
+        try:
+            base_style = str(frame.property("sdl_base_style") or frame.styleSheet() or "")
+            frame.setProperty("sdl_base_style", base_style)
+            frame.setStyleSheet(
+                base_style
+                + f"\nQFrame#SdlReviewRow {{ border: 3px solid {self.THEME['accent']}; }}"
+            )
+            frame.raise_()
+            frame.update()
+            self._highlighted_status_frame = frame
         except Exception:
             pass
 
@@ -534,8 +578,6 @@ class SDLXLIFFReviewDialog(QDialog):
         units = []
         for index, tag in enumerate(soup.find_all(self.TEXT_TAGS)):
             value = tag.get_text(" ", strip=True)
-            if not value:
-                continue
             units.append({
                 "index": index,
                 "tag": tag.name.lower(),
@@ -753,13 +795,25 @@ class SDLXLIFFReviewDialog(QDialog):
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_units = self._extract_text_units(source_html)
             target_units = self._extract_text_units(target_html)
+            source_by_index = {unit.get("index"): unit for unit in source_units}
+            target_by_index = {unit.get("index"): unit for unit in target_units}
+            row_indices = sorted(
+                idx for idx in set(source_by_index) | set(target_by_index)
+                if isinstance(idx, int)
+            )
             rows = []
-            max_count = max(len(source_units), len(target_units))
             red_count = 0
             yellow_count = 0
-            for row_idx in range(max_count):
-                src = source_units[row_idx] if row_idx < len(source_units) else None
-                tgt = target_units[row_idx] if row_idx < len(target_units) else None
+            for row_idx in row_indices:
+                src = source_by_index.get(row_idx)
+                tgt = target_by_index.get(row_idx)
+                if (
+                    src is not None
+                    and tgt is not None
+                    and not str(src.get("text", "") or "").strip()
+                    and not str(tgt.get("text", "") or "").strip()
+                ):
+                    continue
                 status, reason = self._row_status(
                     src.get("text") if src else "",
                     tgt.get("text") if tgt else "",
@@ -923,10 +977,21 @@ class SDLXLIFFReviewDialog(QDialog):
     def _show_review_loading_page(self):
         try:
             self.loading_label.setText("Loading SDLXLIFF...")
+            self.rows_widget = self.loading_page
+            self.rows_layout = self.loading_page.layout()
             if self.rows_stack.currentWidget() is not self.loading_page:
                 self.rows_stack.setCurrentWidget(self.loading_page)
+            self.loading_page.show()
+            self.loading_page.raise_()
             self.scroll.viewport().update()
             self.rows_stack.update()
+            self.rows_stack.repaint()
+            self._spin_review_loading_icon()
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents(QEventLoop.AllEvents, 20)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1361,9 +1426,9 @@ class SDLXLIFFReviewDialog(QDialog):
         frame.setProperty("sdl_row_index", idx)
         frame.setFixedHeight(row_height)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        frame.setStyleSheet(
-            f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
-        )
+        row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
+        frame.setProperty("sdl_base_style", row_style)
+        frame.setStyleSheet(row_style)
         grid = QGridLayout(frame)
         grid.setContentsMargins(10, 5, 10, 5)
         grid.setHorizontalSpacing(10)
@@ -1417,6 +1482,8 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         self._render_token += 1
+        self._clear_review_row_highlight()
+        self._status_jump_indices.clear()
         render_token = self._render_token
         self._cancel_active_review_render()
 
@@ -1543,7 +1610,23 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._active_render_row = None
                     self._active_render_page = None
 
-        QTimer.singleShot(self._review_loading_minimum_ms, _start_render_stream)
+        render_timer = QTimer(self)
+        render_timer.setSingleShot(True)
+
+        def _run_render_stream():
+            if self._active_render_timer is render_timer:
+                self._active_render_timer = None
+            try:
+                _start_render_stream()
+            finally:
+                try:
+                    render_timer.deleteLater()
+                except Exception:
+                    pass
+
+        render_timer.timeout.connect(_run_render_stream)
+        self._active_render_timer = render_timer
+        render_timer.start(self._review_loading_minimum_ms)
 
 
 class RetranslationMixin:
