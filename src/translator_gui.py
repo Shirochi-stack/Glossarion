@@ -19985,6 +19985,11 @@ Important rules:
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
             os.environ['TRANSLATE_SPECIAL_FILES'] = "1" if getattr(self, 'translate_special_files_var', False) else "0"
+            os.environ['REMOVE_DUPLICATE_H1_P'] = "1" if getattr(
+                self,
+                'remove_duplicate_h1_p_var',
+                self.config.get('remove_duplicate_h1_p', False),
+            ) else "0"
 
             # If user selected a CSS override file, pass it to EPUB converter
             css_override_path = getattr(self, 'epub_css_override_path_var', self.config.get('epub_css_override_path', ''))

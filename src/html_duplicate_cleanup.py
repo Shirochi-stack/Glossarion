@@ -1,5 +1,7 @@
 """Helpers for removing duplicate heading/paragraph title pairs in HTML."""
 
+import unicodedata
+
 from bs4 import Comment, NavigableString, Tag
 
 
@@ -26,6 +28,12 @@ _MEANINGFUL_EMPTY_TAGS = frozenset(
 
 def _tag_text(tag):
     return tag.get_text(strip=True).replace("\xa0", " ").strip()
+
+
+def _comparison_text(tag):
+    text = unicodedata.normalize("NFKC", _tag_text(tag))
+    text = " ".join(text.split())
+    return text.casefold()
 
 
 def _is_empty_html_tag(node):
@@ -81,7 +89,7 @@ def remove_duplicate_heading_paragraph_pairs(
         if check_next:
             next_sibling = _first_non_empty_sibling(heading, "next")
             if isinstance(next_sibling, Tag) and next_sibling.name == "p":
-                if heading_text == _tag_text(next_sibling):
+                if _comparison_text(heading) == _comparison_text(next_sibling):
                     next_sibling.decompose()
                     removed_any = True
                     continue
@@ -89,7 +97,7 @@ def remove_duplicate_heading_paragraph_pairs(
         if check_previous:
             prev_sibling = _first_non_empty_sibling(heading, "previous")
             if isinstance(prev_sibling, Tag) and prev_sibling.name == "p":
-                if heading_text == _tag_text(prev_sibling):
+                if _comparison_text(heading) == _comparison_text(prev_sibling):
                     prev_sibling.decompose()
                     removed_any = True
 
