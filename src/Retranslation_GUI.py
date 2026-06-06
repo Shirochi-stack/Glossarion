@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
-                                QSplitter, QPlainTextEdit, QStackedWidget)
+                                QSplitter, QPlainTextEdit, QStackedWidget, QComboBox)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
 import xml.etree.ElementTree as ET
@@ -149,6 +149,12 @@ class SDLXLIFFReviewDialog(QDialog):
         self.current_path = os.path.abspath(current_path) if current_path else ""
         parent_config = getattr(parent, "config", None)
         self._config = config if isinstance(config, dict) else (parent_config if isinstance(parent_config, dict) else {})
+        self._book_entries = self._discover_review_books(parent)
+        self._book_index = self._initial_review_book_index()
+        if self._book_entries:
+            current_book = self._book_entries[self._book_index]
+            self.output_dir = current_book.get("output_dir") or self.output_dir
+            self.current_path = current_book.get("current_path") or self.current_path
         self.pieces = self._load_pieces()
         self._pending_target_edits = {}
         self._edit_save_timer = QTimer(self)
@@ -161,6 +167,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._initial_piece_row = 0
         self._piece_pages = {}
         self._piece_render_complete = set()
+        self._piece_scroll_positions = {}
+        self._current_scroll_piece_row = None
+        self._restoring_review_scroll = False
         self._active_render_row = None
         self._active_render_page = None
         self._sdl_review_loading_icon_timer = None
@@ -170,6 +179,11 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_loading_minimum_ms = 140
         self._status_jump_indices = {}
         self._highlighted_status_frame = None
+        self._book_nav_combo = None
+        self._book_nav_prev = None
+        self._book_nav_next = None
+        self._book_nav_counter = None
+        self._book_nav_updating = False
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -189,6 +203,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
+
+        book_nav = self._create_review_book_navigation()
+        if book_nav is not None:
+            main_layout.addWidget(book_nav)
 
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter, 1)
@@ -236,12 +254,14 @@ class SDLXLIFFReviewDialog(QDialog):
         self.scroll.viewport().setStyleSheet(f"background-color: {self.THEME['bg']};")
         self.rows_stack = QStackedWidget()
         self.rows_stack.setObjectName("SdlReviewRowsStack")
+        self.rows_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._apply_review_widget_background(self.rows_stack)
         self.loading_page = self._create_review_loading_page()
         self.rows_stack.addWidget(self.loading_page)
         self.rows_widget = self.loading_page
         self.rows_layout = self.loading_page.layout()
         self.scroll.setWidget(self.rows_stack)
+        self.scroll.verticalScrollBar().valueChanged.connect(self._remember_current_review_scroll)
         detail_layout.addWidget(self.scroll, 1)
 
         close_row = QHBoxLayout()
@@ -270,6 +290,297 @@ class SDLXLIFFReviewDialog(QDialog):
             self._refresh_review_stream_geometry(final=True)
         except Exception:
             pass
+        if self.pieces:
+            QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+
+    def _candidate_epub_paths_from_context(self, parent):
+        candidates = []
+
+        def _add_many(values):
+            if not values:
+                return
+            for value in values:
+                try:
+                    path = str(value)
+                except Exception:
+                    continue
+                if path and path.lower().endswith(".epub") and os.path.isfile(path):
+                    candidates.append(path)
+
+        widget = parent
+        seen_widgets = set()
+        while widget is not None and id(widget) not in seen_widgets:
+            seen_widgets.add(id(widget))
+            _add_many(getattr(widget, "_epub_files_in_dialog", None))
+            _add_many(getattr(widget, "selected_files", None))
+            try:
+                cfg = getattr(widget, "config", None)
+                if isinstance(cfg, dict):
+                    _add_many(cfg.get("last_input_files"))
+                    _add_many(cfg.get("selected_files"))
+            except Exception:
+                pass
+            try:
+                widget = widget.parent()
+            except Exception:
+                widget = None
+
+        if isinstance(self._config, dict):
+            _add_many(self._config.get("last_input_files"))
+            _add_many(self._config.get("selected_files"))
+
+        seen = set()
+        resolved = []
+        for path in candidates:
+            try:
+                norm = os.path.normcase(os.path.abspath(path))
+            except Exception:
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            resolved.append(os.path.abspath(path))
+        return resolved
+
+    def _review_output_dirs_for_epub(self, epub_path):
+        base = os.path.splitext(os.path.basename(epub_path))[0]
+        candidates = []
+
+        def _add(path):
+            if path:
+                candidates.append(os.path.normpath(path))
+
+        override_dir = os.environ.get("OUTPUT_DIRECTORY") or os.environ.get("OUTPUT_DIR")
+        if not override_dir and isinstance(self._config, dict):
+            override_dir = self._config.get("output_directory")
+
+        if override_dir:
+            _add(os.path.join(override_dir, base))
+        else:
+            _add(base)
+
+        try:
+            current_parent = os.path.dirname(os.path.abspath(self.output_dir))
+            if current_parent:
+                _add(os.path.join(current_parent, base))
+        except Exception:
+            pass
+
+        try:
+            input_parent = os.path.dirname(os.path.abspath(epub_path))
+            _add(os.path.join(input_parent, base))
+        except Exception:
+            pass
+
+        if _IS_MACOS and candidates:
+            mac_candidates = []
+            for path in candidates:
+                if not os.path.isabs(path):
+                    mac_candidates.append(os.path.join(os.path.dirname(os.path.abspath(epub_path)), path))
+            candidates.extend(mac_candidates)
+
+        seen = set()
+        resolved = []
+        for path in candidates:
+            try:
+                norm = os.path.normcase(os.path.abspath(path))
+            except Exception:
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            resolved.append(path)
+        return resolved
+
+    def _sdlxliff_sidecar_paths_for_output_dir(self, output_dir):
+        sidecar_dir = os.path.join(output_dir or "", "SDLXLIFF")
+        paths = []
+        try:
+            if os.path.isdir(sidecar_dir):
+                for fname in os.listdir(sidecar_dir):
+                    if fname.lower().endswith(".sdlxliff"):
+                        paths.append(os.path.join(sidecar_dir, fname))
+        except Exception:
+            return []
+        return sorted(paths, key=lambda path: os.path.basename(path).lower())
+
+    def _discover_review_books(self, parent):
+        entries = []
+        seen_dirs = set()
+        initial_output_dir = os.path.abspath(self.output_dir) if self.output_dir else ""
+        initial_current_path = os.path.abspath(self.current_path) if self.current_path else ""
+
+        def _add_entry(output_dir, epub_path=None, current_path=None):
+            if not output_dir:
+                return
+            sidecars = self._sdlxliff_sidecar_paths_for_output_dir(output_dir)
+            if not sidecars:
+                return
+            try:
+                abs_dir = os.path.abspath(output_dir)
+                norm = os.path.normcase(abs_dir)
+            except Exception:
+                return
+            if norm in seen_dirs:
+                return
+            seen_dirs.add(norm)
+            label = os.path.splitext(os.path.basename(epub_path))[0] if epub_path else os.path.basename(abs_dir)
+            selected_path = current_path if current_path and os.path.isfile(current_path) else ""
+            entries.append({
+                "epub_path": epub_path or "",
+                "output_dir": output_dir,
+                "label": label or "SDLXLIFF",
+                "current_path": selected_path,
+            })
+
+        if initial_output_dir:
+            _add_entry(initial_output_dir, current_path=initial_current_path)
+
+        for epub_path in self._candidate_epub_paths_from_context(parent):
+            for output_dir in self._review_output_dirs_for_epub(epub_path):
+                current_path = ""
+                try:
+                    if initial_current_path:
+                        sidecar_root = os.path.join(os.path.abspath(output_dir), "SDLXLIFF")
+                        if os.path.commonpath([sidecar_root, initial_current_path]) == sidecar_root:
+                            current_path = initial_current_path
+                except Exception:
+                    current_path = ""
+                _add_entry(output_dir, epub_path=epub_path, current_path=current_path)
+
+        entries.sort(key=lambda entry: str(entry.get("label", "")).lower())
+        return entries
+
+    def _initial_review_book_index(self):
+        if not self._book_entries:
+            return 0
+        current_dir = os.path.normcase(os.path.abspath(self.output_dir)) if self.output_dir else ""
+        current_path = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
+        for index, entry in enumerate(self._book_entries):
+            try:
+                output_dir = os.path.normcase(os.path.abspath(entry.get("output_dir") or ""))
+                if current_dir and output_dir == current_dir:
+                    return index
+                if current_path:
+                    sidecar_dir = os.path.normcase(os.path.abspath(os.path.join(entry.get("output_dir") or "", "SDLXLIFF")))
+                    if os.path.commonpath([sidecar_dir, current_path]) == sidecar_dir:
+                        return index
+            except Exception:
+                continue
+        return 0
+
+    def _create_review_book_navigation(self):
+        if len(self._book_entries) <= 1:
+            return None
+
+        nav = QWidget()
+        nav.setObjectName("SdlReviewBookNav")
+        nav_layout = QHBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 0, 0, 4)
+        nav_layout.setSpacing(6)
+
+        button_style = (
+            "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
+            "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
+            "QPushButton:hover { background-color:#4a8fc4; }"
+            "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
+        )
+
+        self._book_nav_prev = QPushButton("◀")
+        self._book_nav_prev.setFixedWidth(46)
+        self._book_nav_prev.setStyleSheet(button_style)
+
+        self._book_nav_combo = QComboBox()
+        self._book_nav_combo.setStyleSheet(
+            "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
+            "font-size:11pt; padding:6px 10px; border:1px solid #5a9fd4; border-radius:4px; }"
+            "QComboBox::drop-down { border:none; }"
+            "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
+            "selection-background-color:#5a9fd4; }"
+        )
+
+        self._book_nav_counter = QLabel("1 / 1")
+        self._book_nav_counter.setStyleSheet(f"color:{self.THEME['muted']}; font-size:10pt; font-weight:bold;")
+        self._book_nav_counter.setFixedWidth(70)
+        self._book_nav_counter.setAlignment(Qt.AlignCenter)
+
+        self._book_nav_next = QPushButton("▶")
+        self._book_nav_next.setFixedWidth(46)
+        self._book_nav_next.setStyleSheet(button_style)
+
+        for entry in self._book_entries:
+            self._book_nav_combo.addItem(entry.get("label") or "SDLXLIFF")
+        self._book_nav_combo.setCurrentIndex(self._book_index)
+
+        nav_layout.addWidget(self._book_nav_prev)
+        nav_layout.addWidget(self._book_nav_combo, 1)
+        nav_layout.addWidget(self._book_nav_counter)
+        nav_layout.addWidget(self._book_nav_next)
+
+        self._book_nav_combo.currentIndexChanged.connect(self._switch_review_book)
+        self._book_nav_prev.clicked.connect(lambda: self._switch_review_book(self._book_index - 1))
+        self._book_nav_next.clicked.connect(lambda: self._switch_review_book(self._book_index + 1))
+        self._update_review_book_nav()
+        return nav
+
+    def _update_review_book_nav(self):
+        if not self._book_nav_combo:
+            return
+        total = len(self._book_entries)
+        index = max(0, min(self._book_index, total - 1)) if total else 0
+        self._book_nav_updating = True
+        try:
+            if self._book_nav_combo.currentIndex() != index:
+                self._book_nav_combo.setCurrentIndex(index)
+            if self._book_nav_prev:
+                self._book_nav_prev.setEnabled(index > 0)
+            if self._book_nav_next:
+                self._book_nav_next.setEnabled(index < total - 1)
+            if self._book_nav_counter:
+                self._book_nav_counter.setText(f"{index + 1} / {total}")
+        finally:
+            self._book_nav_updating = False
+
+    def _clear_cached_review_pages(self):
+        self._cancel_active_review_render()
+        for row, page in list(self._piece_pages.items()):
+            try:
+                self.rows_stack.removeWidget(page)
+            except Exception:
+                pass
+            try:
+                page.hide()
+                page.setParent(None)
+                page.deleteLater()
+            except Exception:
+                pass
+        self._piece_pages.clear()
+        self._piece_render_complete.clear()
+        self._piece_scroll_positions.clear()
+        self._current_scroll_piece_row = None
+        self._highlighted_status_frame = None
+        self._status_jump_indices.clear()
+
+    def _switch_review_book(self, index):
+        if self._book_nav_updating:
+            return
+        if index < 0 or index >= len(self._book_entries):
+            return
+        if index == self._book_index and self.pieces:
+            self._update_review_book_nav()
+            return
+
+        self._save_current_review_scroll()
+        self._render_token += 1
+        self._clear_cached_review_pages()
+        self._book_index = index
+        entry = self._book_entries[index]
+        self.output_dir = entry.get("output_dir") or self.output_dir
+        self.current_path = entry.get("current_path") or ""
+        self.pieces = self._load_pieces()
+        self._update_review_book_nav()
+        self._show_review_loading_page()
+        self._populate_piece_list()
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
 
@@ -926,6 +1237,10 @@ class SDLXLIFFReviewDialog(QDialog):
         return [piece for piece in pieces if piece is not None]
 
     def _populate_piece_list(self):
+        try:
+            self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
+        except Exception:
+            pass
         self.piece_list.clear()
         selected_row = 0
         current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
@@ -979,8 +1294,10 @@ class SDLXLIFFReviewDialog(QDialog):
             self.loading_label.setText("Loading SDLXLIFF...")
             self.rows_widget = self.loading_page
             self.rows_layout = self.loading_page.layout()
+            self._current_scroll_piece_row = None
             if self.rows_stack.currentWidget() is not self.loading_page:
                 self.rows_stack.setCurrentWidget(self.loading_page)
+            self._sync_review_scroll_range(self.loading_page)
             self.loading_page.show()
             self.loading_page.raise_()
             self.scroll.viewport().update()
@@ -1037,6 +1354,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _request_render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        self._save_current_review_scroll()
         QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
     def _set_rows_rebuild_active(self, active):
@@ -1062,6 +1380,74 @@ class SDLXLIFFReviewDialog(QDialog):
                 widget.update()
             except Exception:
                 pass
+
+    def _sync_review_scroll_range(self, page=None):
+        try:
+            page = page or self.rows_stack.currentWidget()
+            if page is None:
+                return
+            layout = page.layout()
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            page.updateGeometry()
+            viewport_height = max(1, self.scroll.viewport().height())
+            content_height = max(viewport_height, page.sizeHint().height(), page.minimumSizeHint().height())
+            self.rows_stack.setMinimumHeight(content_height)
+            self.rows_stack.setMaximumHeight(content_height)
+            self.rows_stack.updateGeometry()
+        except Exception:
+            pass
+
+    def _save_current_review_scroll(self):
+        row = self._current_scroll_piece_row
+        if row is None:
+            return
+        try:
+            page = self._piece_pages.get(row)
+            if page is None or self.rows_stack.currentWidget() is not page:
+                return
+            self._piece_scroll_positions[row] = self.scroll.verticalScrollBar().value()
+        except Exception:
+            pass
+
+    def _remember_current_review_scroll(self, value):
+        if self._restoring_review_scroll:
+            return
+        row = self._current_scroll_piece_row
+        if row is None:
+            return
+        try:
+            page = self._piece_pages.get(row)
+            if page is None or self.rows_stack.currentWidget() is not page:
+                return
+            self._piece_scroll_positions[row] = int(value)
+        except Exception:
+            pass
+
+    def _restore_review_scroll(self, row):
+        target_value = int(self._piece_scroll_positions.get(row, 0) or 0)
+
+        def _apply_saved_scroll():
+            try:
+                page = self._piece_pages.get(row)
+                if page is None or self.rows_stack.currentWidget() is not page:
+                    return
+                self._current_scroll_piece_row = row
+                self._sync_review_scroll_range()
+                bar = self.scroll.verticalScrollBar()
+                value = max(0, min(bar.maximum(), target_value))
+                self._restoring_review_scroll = True
+                try:
+                    bar.setValue(value)
+                finally:
+                    self._restoring_review_scroll = False
+            except Exception:
+                self._restoring_review_scroll = False
+
+        _apply_saved_scroll()
+        QTimer.singleShot(0, _apply_saved_scroll)
+        QTimer.singleShot(25, _apply_saved_scroll)
 
     def _tag_label(self, source_tag, target_tag, status):
         source_tag = str(source_tag or "").strip()
@@ -1346,6 +1732,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def closeEvent(self, event):
         try:
+            self._save_current_review_scroll()
             self._render_token += 1
             self._cancel_active_review_render()
             if self._sdl_review_loading_icon_timer is not None:
@@ -1358,6 +1745,16 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         super().closeEvent(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self._sync_review_scroll_range()
+            row = self._current_scroll_piece_row
+            if row is not None:
+                QTimer.singleShot(0, lambda row=row: self._restore_review_scroll(row))
+        except Exception:
+            pass
+
     def _refresh_review_stream_geometry(self, final=False):
         try:
             if self.rows_layout is not None:
@@ -1369,6 +1766,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self.rows_widget is not None:
                     self.rows_widget.adjustSize()
                 self.rows_stack.adjustSize()
+            self._sync_review_scroll_range()
             self.rows_stack.updateGeometry()
             self.scroll.updateGeometry()
             viewport = self.scroll.viewport()
@@ -1481,6 +1879,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
         except Exception:
             pass
+        self._save_current_review_scroll()
         self._render_token += 1
         self._clear_review_row_highlight()
         self._status_jump_indices.clear()
@@ -1504,6 +1903,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.rows_layout = cached_page.layout()
             self.rows_stack.setCurrentWidget(cached_page)
             self._finish_rows_rebuild(final=True)
+            self._restore_review_scroll(row)
             return
 
         if cached_page is not None:
@@ -1530,6 +1930,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._active_render_page = None
             self.rows_stack.setCurrentWidget(page)
             self._finish_rows_rebuild(final=True)
+            self._restore_review_scroll(row)
             return
 
         rows = piece.get("rows") or []
@@ -1551,6 +1952,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._active_render_page = None
             self.rows_stack.setCurrentWidget(page)
             self._finish_rows_rebuild(final=True)
+            self._restore_review_scroll(row)
             return
 
         row_state = {"idx": 0}
@@ -1592,6 +1994,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._piece_render_complete.add(row)
                 self.rows_stack.setCurrentWidget(page)
                 self._finish_rows_rebuild(final=True)
+                self._restore_review_scroll(row)
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
@@ -1606,6 +2009,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._piece_render_complete.add(row)
                     self.rows_stack.setCurrentWidget(page)
                     self._finish_rows_rebuild(final=True)
+                    self._restore_review_scroll(row)
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
