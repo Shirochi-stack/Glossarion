@@ -4172,8 +4172,10 @@ class ContentProcessor:
         Returns:
             Text with restored image tags
         """
-        if not original_html or not text:
+        if not original_html:
             return text
+        if text is None:
+            text = ""
             
         def log(message):
             if verbose:
