@@ -157,7 +157,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self._render_token = 0
         self._active_render_timer = None
         self._rows_rebuild_active = False
-        self._active_target_editor = None
         self._first_show_render_started = False
         self._initial_piece_row = 0
         self._piece_pages = {}
@@ -213,10 +212,17 @@ class SDLXLIFFReviewDialog(QDialog):
         self.header_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {self.THEME['accent']};")
         detail_layout.addWidget(self.header_label)
 
-        legend = QLabel("green ok   yellow density-off   red dropped/added/empty/untranslated      left = source   right = output   bar width ~= length")
-        legend.setTextFormat(Qt.PlainText)
-        legend.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt;")
-        detail_layout.addWidget(legend)
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(10)
+        legend_row.addWidget(self._legend_status_label("green ok", "green"))
+        legend_row.addWidget(self._legend_status_label("yellow density-off", "yellow"))
+        legend_row.addWidget(self._legend_status_label("red dropped/added/empty/untranslated", "red"))
+        legend_note = QLabel("left = source   right = output   bar width ~= length")
+        legend_note.setTextFormat(Qt.PlainText)
+        legend_note.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt; background: transparent;")
+        legend_row.addWidget(legend_note)
+        legend_row.addStretch(1)
+        detail_layout.addLayout(legend_row)
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("SdlReviewScroll")
@@ -473,6 +479,51 @@ class SDLXLIFFReviewDialog(QDialog):
                 target_parts.append(self._inner_xml_or_text(element))
         return "\n".join(source_parts), "\n".join(target_parts)
 
+    def _legend_status_label(self, text, status):
+        color = {
+            "green": self.THEME["success"],
+            "yellow": self.THEME["warning"],
+            "red": self.THEME["danger"],
+        }.get(status, self.THEME["muted"])
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setCursor(Qt.PointingHandCursor)
+        label.setToolTip(f"Jump to next {status} row")
+        label.setStyleSheet(
+            f"color: {color}; font-size: 9pt; font-weight: bold; "
+            "background: transparent; text-decoration: underline;"
+        )
+
+        def _jump(event, target_status=status):
+            self._jump_to_status(target_status)
+            try:
+                event.accept()
+            except Exception:
+                pass
+
+        label.mousePressEvent = _jump
+        return label
+
+    def _jump_to_status(self, status):
+        page = self.rows_widget
+        if page is None or page is self.loading_page:
+            return
+        try:
+            frames = [
+                frame for frame in page.findChildren(QFrame, "SdlReviewRow")
+                if frame.property("sdl_status") == status
+            ]
+            frames.sort(key=lambda frame: frame.y())
+            if not frames:
+                return
+            scrollbar = self.scroll.verticalScrollBar()
+            current_y = scrollbar.value()
+            target = next((frame for frame in frames if frame.y() > current_y + 8), frames[0])
+            self.scroll.ensureWidgetVisible(target, 0, 18)
+            scrollbar.setValue(max(0, min(scrollbar.maximum(), target.y() - 18)))
+        except Exception:
+            pass
+
     def _extract_text_units(self, html_text):
         try:
             from bs4 import BeautifulSoup
@@ -492,6 +543,10 @@ class SDLXLIFFReviewDialog(QDialog):
             })
         return units
 
+    @staticmethod
+    def _has_linguistic_letters(text):
+        return any(ch.isalpha() for ch in str(text or ""))
+
     def _row_status(self, source_text, target_text, source_missing=False, target_missing=False):
         source_text = str(source_text or "").strip()
         target_text = str(target_text or "").strip()
@@ -499,7 +554,7 @@ class SDLXLIFFReviewDialog(QDialog):
             return "red", "dropped/added"
         if not target_text:
             return "red", "empty"
-        if source_text and source_text == target_text:
+        if source_text and source_text == target_text and self._has_linguistic_letters(source_text):
             return "red", "untranslated"
         if source_text:
             source_len = len(source_text)
@@ -852,7 +907,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
 
     def _clear_layout(self, layout):
-        self._commit_active_target_editor()
         if layout is None:
             return
         while layout.count():
@@ -1089,11 +1143,17 @@ class SDLXLIFFReviewDialog(QDialog):
         editor = QPlainTextEdit(str(text or ""))
         editor.setObjectName("SdlReviewTargetEdit")
         editor.setFrameShape(QFrame.NoFrame)
+        editor.setFocusPolicy(Qt.StrongFocus)
         editor.setTabChangesFocus(True)
         editor_height = max(28, int(height or 38))
         editor.setFixedHeight(editor_height)
         editor.setReadOnly(not editable)
         editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        editor.setToolTip(str(text or ""))
+        try:
+            editor.viewport().setCursor(Qt.IBeamCursor)
+        except Exception:
+            pass
         editor.setContextMenuPolicy(Qt.CustomContextMenu)
         editor.customContextMenuRequested.connect(
             lambda pos, ed=editor: self._show_review_text_context_menu(ed, pos)
@@ -1104,94 +1164,9 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         return editor
 
-    def _commit_active_target_editor(self):
-        active = self._active_target_editor
-        if not active:
-            return
-        editor = active.get("editor")
-        label = active.get("label")
-        text = ""
-        try:
-            text = editor.toPlainText() if editor is not None else ""
-        except Exception:
-            text = ""
-        try:
-            if label is not None:
-                label.setText(text if text else "[empty]")
-                label.setToolTip(text)
-                label.show()
-        except Exception:
-            pass
-        try:
-            if editor is not None:
-                editor.hide()
-                editor.setParent(None)
-                editor.deleteLater()
-        except Exception:
-            pass
-        self._active_target_editor = None
-        self._schedule_target_edit(active.get("piece_index", -1), active.get("row_index", -1), text)
-
-    def _begin_target_edit(self, container, label, piece_index, row_index, text, height):
-        self._commit_active_target_editor()
-        editor = self._target_editor(piece_index, row_index, text, editable=True, height=height)
-        try:
-            editor.textChanged.disconnect()
-        except Exception:
-            pass
-        layout = container.layout()
-        label.hide()
-        layout.addWidget(editor)
-        self._active_target_editor = {
-            "editor": editor,
-            "label": label,
-            "piece_index": piece_index,
-            "row_index": row_index,
-        }
-        original_focus_out = editor.focusOutEvent
-
-        def _focus_out(event):
-            try:
-                original_focus_out(event)
-            finally:
-                QTimer.singleShot(0, self._commit_active_target_editor)
-
-        editor.focusOutEvent = _focus_out
-        editor.setFocus(Qt.MouseFocusReason)
-        editor.selectAll()
-
     def _target_display_widget(self, piece_index, row_index, text, editable=True, height=None):
         container_height = max(30, int(height or 38))
-        container = QFrame()
-        container.setObjectName("SdlReviewTargetDisplay")
-        container.setFixedHeight(container_height)
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        container.setStyleSheet(
-            f"QFrame#SdlReviewTargetDisplay {{ background-color: {self.THEME['panel_alt']}; "
-            f"border: 1px solid {self.THEME['border']}; border-radius: 3px; }}"
-        )
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(5, 4, 5, 4)
-        layout.setSpacing(0)
-        label = QLabel(str(text or "") if text else "[empty]")
-        label.setTextFormat(Qt.PlainText)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        label.setContextMenuPolicy(Qt.CustomContextMenu)
-        label.setToolTip(str(text or ""))
-        label.setStyleSheet(f"color: {self.THEME['text']}; background: transparent; font-size: 10pt;")
-        layout.addWidget(label)
-
-        def _edit():
-            if editable:
-                self._begin_target_edit(container, label, piece_index, row_index, label.text() if label.text() != "[empty]" else "", container_height)
-
-        label.customContextMenuRequested.connect(
-            lambda pos, lbl=label: self._show_review_text_context_menu(lbl, pos, edit_callback=_edit if editable else None)
-        )
-        label.mouseDoubleClickEvent = lambda event: (_edit(), event.accept())
-        return container
+        return self._target_editor(piece_index, row_index, text, editable=editable, height=container_height)
 
     def _schedule_target_edit(self, piece_index, row_index, text):
         if piece_index < 0 or row_index < 0:
@@ -1306,7 +1281,6 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def closeEvent(self, event):
         try:
-            self._commit_active_target_editor()
             self._render_token += 1
             self._cancel_active_review_render()
             if self._sdl_review_loading_icon_timer is not None:
@@ -1383,6 +1357,8 @@ class SDLXLIFFReviewDialog(QDialog):
         row_height = self._review_row_height(source_text, target_text)
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
+        frame.setProperty("sdl_status", row_data["status"])
+        frame.setProperty("sdl_row_index", idx)
         frame.setFixedHeight(row_height)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         frame.setStyleSheet(
@@ -1440,7 +1416,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
         except Exception:
             pass
-        self._commit_active_target_editor()
         self._render_token += 1
         render_token = self._render_token
         self._cancel_active_review_render()
