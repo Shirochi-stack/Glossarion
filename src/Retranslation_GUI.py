@@ -4636,9 +4636,9 @@ class RetranslationMixin:
             progress_entry = display_info.get('info', {}) or {}
             return _exact_output_path_for_file(display_info.get('output_file') or progress_entry.get('output_file'))
 
-        def _source_path_for_item(display_info):
+        def _source_candidates_for_item(display_info):
             progress_entry = display_info.get('info', {}) or {}
-            candidates = [
+            raw_candidates = [
                 display_info.get('original_filename'),
                 display_info.get('original_basename'),
                 display_info.get('key'),
@@ -4648,24 +4648,96 @@ class RetranslationMixin:
                 progress_entry.get('source_filename'),
                 progress_entry.get('filename'),
             ]
+            candidates = []
             seen = set()
-            for candidate in candidates:
+            for candidate in raw_candidates:
                 if not candidate:
                     continue
+                text = str(candidate).replace("\\", "/")
+                variants = [text, os.path.basename(text)]
+                stem, ext = os.path.splitext(text)
+                if stem and not ext:
+                    variants.extend([f"{text}.xhtml", f"{text}.html", f"{text}.htm"])
+                    base = os.path.basename(text)
+                    variants.extend([f"{base}.xhtml", f"{base}.html", f"{base}.htm"])
+                for variant in variants:
+                    if variant and variant not in seen:
+                        seen.add(variant)
+                        candidates.append(variant)
+            return candidates
+
+        def _source_path_for_item(display_info):
+            for candidate in _source_candidates_for_item(display_info):
                 text = str(candidate).replace("\\", "/")
                 variants = [text]
                 basename = os.path.basename(text)
                 if basename and basename != text:
                     variants.append(basename)
                 for variant in variants:
-                    if not variant or variant in seen:
-                        continue
-                    seen.add(variant)
                     path = variant if os.path.isabs(variant) else os.path.join(data['output_dir'], variant)
                     path = os.path.normpath(path)
                     if os.path.isfile(path):
                         return path
             return None
+
+        def _source_epub_candidates():
+            candidates = []
+            file_path = data.get('file_path')
+            if file_path:
+                candidates.append(file_path)
+            source_ref = os.path.join(data['output_dir'], "source_epub.txt")
+            try:
+                if os.path.isfile(source_ref):
+                    with open(source_ref, 'r', encoding='utf-8', errors='ignore') as f:
+                        ref = f.read().strip()
+                    if ref:
+                        candidates.append(ref)
+            except Exception:
+                pass
+            try:
+                for fname in os.listdir(data['output_dir']):
+                    if str(fname).lower().endswith(".epub"):
+                        candidates.append(os.path.join(data['output_dir'], fname))
+            except Exception:
+                pass
+            seen = set()
+            resolved = []
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                path = candidate if os.path.isabs(str(candidate)) else os.path.join(data['output_dir'], str(candidate))
+                path = os.path.normpath(path)
+                norm = os.path.normcase(os.path.abspath(path))
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                if os.path.isfile(path) and path.lower().endswith(".epub"):
+                    resolved.append(path)
+            return resolved
+
+        def _source_exists_in_epub(display_info):
+            candidates = _source_candidates_for_item(display_info)
+            if not candidates:
+                return False
+            candidate_names = {str(c).replace("\\", "/").lower().strip("/") for c in candidates if c}
+            candidate_basenames = {os.path.basename(str(c).replace("\\", "/")).lower() for c in candidates if c}
+            candidate_names.discard("")
+            candidate_basenames.discard("")
+            if not candidate_names and not candidate_basenames:
+                return False
+            for epub_path in _source_epub_candidates():
+                try:
+                    with zipfile.ZipFile(epub_path, 'r') as zf:
+                        for name in zf.namelist():
+                            normalized = str(name).replace("\\", "/").lower().strip("/")
+                            if normalized in candidate_names or os.path.basename(normalized) in candidate_basenames:
+                                return True
+                except Exception:
+                    continue
+            return False
+
+        def _source_exists_for_item(display_info):
+            return bool(_source_path_for_item(display_info) or _source_exists_in_epub(display_info))
 
         def _sdlxliff_review_path_for_item(display_info):
             progress_entry = display_info.get('info', {}) or {}
@@ -4679,9 +4751,8 @@ class RetranslationMixin:
             return path if os.path.isfile(path) else None
 
         def _open_sdlxliff_review_for_item(display_info):
-            source_path = _source_path_for_item(display_info)
             review_path = _sdlxliff_review_path_for_item(display_info)
-            if not source_path:
+            if not _source_exists_for_item(display_info):
                 self._show_message('error', "Source Missing", "The raw source file for this entry was not found.", parent=data.get('dialog', self))
                 return
             if not review_path:
@@ -4865,7 +4936,7 @@ class RetranslationMixin:
             )
             act_open = menu.addAction("📂 Open File")
             act_review_sdlxliff = None
-            if _source_path_for_item(display_info) and _sdlxliff_review_path_for_item(display_info):
+            if _source_exists_for_item(display_info) and _sdlxliff_review_path_for_item(display_info):
                 act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
             act_open_audio = None
             act_delete_audio = None
