@@ -8468,6 +8468,30 @@ def _create_processing_options_section(self, parent):
     empty_attr_bs_desc.setContentsMargins(20, 0, 0, 3)
     empty_attr_bs_desc.setTextFormat(Qt.RichText)
     bs_opts_v.addWidget(empty_attr_bs_desc)
+
+    # Output SDLXLIFF sidecar files for BeautifulSoup-mode HTML translations
+    output_sdlxliff_cb = self._create_styled_checkbox("Output sdlxliff")
+    try:
+        if not hasattr(self, 'output_sdlxliff_var'):
+            self.output_sdlxliff_var = self.config.get('output_sdlxliff', False)
+        output_sdlxliff_cb.setChecked(bool(self.output_sdlxliff_var))
+    except Exception:
+        pass
+    def _on_output_sdlxliff_toggle(checked):
+        try:
+            self.output_sdlxliff_var = bool(checked)
+            self.config['output_sdlxliff'] = self.output_sdlxliff_var
+            os.environ['OUTPUT_SDLXLIFF'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_sdlxliff_cb.toggled.connect(_on_output_sdlxliff_toggle)
+    output_sdlxliff_cb.setContentsMargins(0, 2, 0, 0)
+    bs_opts_v.addWidget(output_sdlxliff_cb)
+
+    output_sdlxliff_desc = QLabel("Writes an SDLXLIFF review sidecar for each BeautifulSoup-mode HTML output")
+    output_sdlxliff_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    output_sdlxliff_desc.setContentsMargins(20, 0, 0, 3)
+    bs_opts_v.addWidget(output_sdlxliff_desc)
     
     # Halgakos icon for BeautifulSoup mode
     halgakos_label = QLabel()

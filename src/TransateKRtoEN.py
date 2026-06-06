@@ -168,6 +168,85 @@ def _validate_sdlxliff_batch_output(chapter, text):
         return False, "ID_ORDER_MISMATCH"
     return True, None
 
+
+def _html_sdlxliff_enabled():
+    return str(os.getenv("OUTPUT_SDLXLIFF", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _html_sdlxliff_lang_code(value, default="und"):
+    value = str(value or "").strip()
+    if not value:
+        return default
+    try:
+        from sdlxliff_extractor import normalize_target_language_code
+        return normalize_target_language_code(value) or default
+    except Exception:
+        return value or default
+
+
+def _html_sdlxliff_source_text(chapter, fallback=""):
+    chapter = chapter if isinstance(chapter, dict) else {}
+    for key in ("original_html", "source_html", "raw_html", "body", "content"):
+        value = chapter.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return fallback if isinstance(fallback, str) else str(fallback or "")
+
+
+def _write_html_sdlxliff_sidecar(output_dir, output_filename, chapter, source_html, target_html):
+    if not _html_sdlxliff_enabled():
+        return None
+    if not output_dir or not output_filename:
+        return None
+    if not isinstance(target_html, str):
+        return None
+
+    chapter = chapter if isinstance(chapter, dict) else {}
+    if chapter.get("enhanced_extraction") or chapter.get("sdlxliff_batch") or chapter.get("sdlxliff_segment"):
+        return None
+
+    output_name = os.path.basename(str(output_filename).replace("\\", "/"))
+    if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+        return None
+
+    try:
+        import xml.etree.ElementTree as ET
+
+        xliff_ns = "urn:oasis:names:tc:xliff:document:1.2"
+        sdl_ns = "http://sdl.com/FileTypes/SdlXliff/1.0"
+        ET.register_namespace("", xliff_ns)
+        ET.register_namespace("sdl", sdl_ns)
+
+        source_name = (
+            chapter.get("original_basename")
+            or chapter.get("original_filename")
+            or chapter.get("filename")
+            or output_name
+        )
+        source_lang = _html_sdlxliff_lang_code(os.getenv("SOURCE_LANGUAGE") or os.getenv("SOURCE_LANGUAGE_CODE"), "und")
+        target_lang = _html_sdlxliff_lang_code(os.getenv("OUTPUT_LANGUAGE"), "und")
+
+        root = ET.Element(f"{{{xliff_ns}}}xliff", {"version": "1.2"})
+        file_el = ET.SubElement(root, f"{{{xliff_ns}}}file", {
+            "original": str(source_name),
+            "datatype": "html",
+            "source-language": source_lang,
+            "target-language": target_lang,
+        })
+        body_el = ET.SubElement(file_el, f"{{{xliff_ns}}}body")
+        trans_unit = ET.SubElement(body_el, f"{{{xliff_ns}}}trans-unit", {"id": "1"})
+        ET.SubElement(trans_unit, f"{{{xliff_ns}}}source").text = _html_sdlxliff_source_text(chapter, source_html)
+        ET.SubElement(trans_unit, f"{{{xliff_ns}}}target").text = target_html
+
+        sidecar_dir = os.path.join(output_dir, "SDLXLIFF")
+        os.makedirs(sidecar_dir, exist_ok=True)
+        sidecar_path = os.path.join(sidecar_dir, f"{output_name}.sdlxliff")
+        ET.ElementTree(root).write(sidecar_path, encoding="utf-8", xml_declaration=True)
+        return sidecar_path
+    except Exception as exc:
+        print(f"WARNING: Failed to write SDLXLIFF sidecar for {output_filename}: {exc}")
+        return None
+
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
 
@@ -7402,6 +7481,7 @@ class BatchTranslationProcessor:
                 # Original code for EPUB files
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
+                _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, chapter_body, cleaned)
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
 
@@ -8273,7 +8353,9 @@ class BatchTranslationProcessor:
                         # Save the section
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                             f.write(section_content)
-                        
+                        if not getattr(self, 'is_text_file', False) and not merged_truncated:
+                            _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, content, section_content)
+
                         saved_files.append((actual_num, fname, idx, chapter, content_hash))
                         print(f"      💾 Saved Chapter {actual_num}: {fname} ({len(section_content)} chars)")
                     
@@ -8352,6 +8434,7 @@ class BatchTranslationProcessor:
                     else:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                             f.write(cleaned_to_save)
+                        _write_html_sdlxliff_sidecar(self.out_dir, fname, parent_chapter, merged_content, cleaned_to_save)
                     print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
                 
                 with self.progress_lock:
@@ -23092,7 +23175,6 @@ def main(log_callback=None, stop_callback=None):
                     )
                     progress_manager.save()
                     continue
-
                 ok, issue = _validate_sdlxliff_batch_output(c, cleaned)
                 if not ok:
                     print(f"❌ SDLXLIFF batch {actual_num}: invalid JSON output ({issue})")
@@ -23248,6 +23330,7 @@ def main(log_callback=None, stop_callback=None):
                 # Track whether the underlying API response was truncated; if so mark qa_failed immediately
                 preserved_fr = locals().get("merged_finish_reason", finish_reason)
                 was_truncated = preserved_fr in ["length", "max_tokens"]
+
                 if was_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
                     qa_issues = ["TRUNCATED"]
@@ -23393,7 +23476,9 @@ def main(log_callback=None, stop_callback=None):
                         split_output_path = os.path.join(out, split_fname)
                         with open(split_output_path, 'w', encoding='utf-8') as f:
                             f.write(section_content)
-                        
+                        if not is_text_file and not was_truncated:
+                            _write_html_sdlxliff_sidecar(out, split_fname, g_chapter, g_chapter.get("body", ""), section_content)
+
                         # Verify file was written successfully
                         if os.path.exists(split_output_path):
                             saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
@@ -23446,6 +23531,9 @@ def main(log_callback=None, stop_callback=None):
                 
                 print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
                 
+                if not was_truncated and not (is_text_file and not is_pdf_file):
+                    _write_html_sdlxliff_sidecar(out, parent_fname, parent_chapter, merged_content, cleaned_to_save)
+
                 if was_truncated:
                     # For truncated merged responses, mark ALL chapters as qa_failed
                     qa_issues = ["TRUNCATED"]
@@ -23653,6 +23741,8 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     chapter_status = "completed"
 
+                if chapter_status == "completed":
+                    _write_html_sdlxliff_sidecar(out, fname, c, c.get("body", ""), cleaned)
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
                 # Clear any stale watchdog entries for this chapter
                 try:

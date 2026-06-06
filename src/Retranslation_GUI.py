@@ -4624,24 +4624,84 @@ class RetranslationMixin:
         listbox = data['listbox']
         listbox.setContextMenuPolicy(Qt.CustomContextMenu)
 
+        def _exact_output_path_for_file(output_file):
+            if not output_file:
+                return None, None
+            normalized = str(output_file).replace("\\", "/")
+            path = normalized if os.path.isabs(normalized) else os.path.join(data['output_dir'], normalized)
+            path = os.path.normpath(path)
+            return path if os.path.isfile(path) else None, path
+
+        def _exact_output_path_for_item(display_info):
+            progress_entry = display_info.get('info', {}) or {}
+            return _exact_output_path_for_file(display_info.get('output_file') or progress_entry.get('output_file'))
+
+        def _source_path_for_item(display_info):
+            progress_entry = display_info.get('info', {}) or {}
+            candidates = [
+                display_info.get('original_filename'),
+                display_info.get('original_basename'),
+                display_info.get('key'),
+                progress_entry.get('original_basename'),
+                progress_entry.get('original_filename'),
+                progress_entry.get('chapter_file'),
+                progress_entry.get('source_filename'),
+                progress_entry.get('filename'),
+            ]
+            seen = set()
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                text = str(candidate).replace("\\", "/")
+                variants = [text]
+                basename = os.path.basename(text)
+                if basename and basename != text:
+                    variants.append(basename)
+                for variant in variants:
+                    if not variant or variant in seen:
+                        continue
+                    seen.add(variant)
+                    path = variant if os.path.isabs(variant) else os.path.join(data['output_dir'], variant)
+                    path = os.path.normpath(path)
+                    if os.path.isfile(path):
+                        return path
+            return None
+
+        def _sdlxliff_review_path_for_item(display_info):
+            progress_entry = display_info.get('info', {}) or {}
+            output_file = display_info.get('output_file') or progress_entry.get('output_file')
+            if not output_file:
+                return None
+            output_name = os.path.basename(str(output_file).replace("\\", "/"))
+            if not output_name:
+                return None
+            path = os.path.join(data['output_dir'], "SDLXLIFF", f"{output_name}.sdlxliff")
+            return path if os.path.isfile(path) else None
+
+        def _open_sdlxliff_review_for_item(display_info):
+            source_path = _source_path_for_item(display_info)
+            review_path = _sdlxliff_review_path_for_item(display_info)
+            if not source_path:
+                self._show_message('error', "Source Missing", "The raw source file for this entry was not found.", parent=data.get('dialog', self))
+                return
+            if not review_path:
+                self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(review_path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+
         def _open_file_for_item(display_info):
             """Open the output file for a chapter. Accepts pre-extracted display_info dict."""
             output_file = display_info.get('output_file')
             if not output_file:
                 self._show_message('error', "File Missing", "No output file recorded for this entry.", parent=data.get('dialog', self))
                 return
-            resolved_file, path = self._resolve_existing_output_path(
-                data['output_dir'],
-                output_file,
-                display_info,
-                data.get('prog'),
-            )
-            if not path or not os.path.exists(path):
-                missing_path = os.path.join(data['output_dir'], output_file)
+            path, missing_path = _exact_output_path_for_item(display_info)
+            if not path:
                 self._show_message('error', "File Missing", f"File not found:\n{missing_path}", parent=data.get('dialog', self))
                 return
-            if resolved_file and resolved_file != output_file:
-                display_info['output_file'] = resolved_file
             try:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(path))
             except Exception as e:
@@ -4779,7 +4839,7 @@ class RetranslationMixin:
             
             # Determine file path for Notepad action
             _output_file = display_info.get('output_file')
-            qa_file_path = os.path.join(data['output_dir'], _output_file) if _output_file else None
+            qa_file_path, _missing_output_path = _exact_output_path_for_item(display_info)
             
             menu = QMenu(listbox)
             # Remove extra left gutter reserved for icons to avoid empty space
@@ -4804,6 +4864,9 @@ class RetranslationMixin:
                 "}"
             )
             act_open = menu.addAction("📂 Open File")
+            act_review_sdlxliff = None
+            if _source_path_for_item(display_info) and _sdlxliff_review_path_for_item(display_info):
+                act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
             act_open_audio = None
             act_delete_audio = None
             if _find_audio_file_for_item(display_info):
@@ -4833,6 +4896,8 @@ class RetranslationMixin:
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(display_info)
+            elif act_review_sdlxliff and chosen == act_review_sdlxliff:
+                _open_sdlxliff_review_for_item(display_info)
             elif act_open_audio and chosen == act_open_audio:
                 _open_audio_file_for_item(display_info)
             elif act_delete_audio and chosen == act_delete_audio:
@@ -4941,6 +5006,14 @@ class RetranslationMixin:
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
             elif act_notepad_qa and chosen == act_notepad_qa:
+                if not qa_file_path or not os.path.isfile(qa_file_path):
+                    self._show_message(
+                        'error',
+                        "File Missing",
+                        f"File not found:\n{_missing_output_path}",
+                        parent=data.get('dialog', self)
+                    )
+                    return
                 search_term = None
                 _line_num = 1
                 if qa_issues:

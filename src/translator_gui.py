@@ -2308,6 +2308,7 @@ Text to analyze:
         self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
+        self.output_sdlxliff_var = self.config.get('output_sdlxliff', False)
         _raw_ns = self.config.get('number_spacing_token_fix', '0')
         if isinstance(_raw_ns, bool):
             _raw_ns = '1' if _raw_ns else '0'
@@ -2316,6 +2317,7 @@ Text to analyze:
         os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_bs_var else '0'
+        os.environ['OUTPUT_SDLXLIFF'] = '1' if self.output_sdlxliff_var else '0'
         os.environ['NUMBER_SPACING_TOKEN_FIX'] = self.number_spacing_token_fix_var
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
@@ -18080,7 +18082,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ENHANCED_SINGLE_LINE_BREAK": "1" if getattr(self, 'enhanced_single_line_break_var', False) else "0",
             "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
-            
+            'OUTPUT_SDLXLIFF': '1' if getattr(self, 'output_sdlxliff_var', False) else '0',
+
             # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') or output_mode == 'vision' else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
@@ -26916,7 +26919,8 @@ Important rules:
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
-                
+                ('output_sdlxliff', ['output_sdlxliff_var'], False, bool),
+
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
