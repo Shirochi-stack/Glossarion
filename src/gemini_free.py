@@ -10,6 +10,7 @@ send_chat_completion(...) returns a dict with content/finish_reason/raw_response
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
 import json
 import os
@@ -43,7 +44,8 @@ DEFAULT_SUBCHUNK_PROMPT_CHARS = 15000
 DEFAULT_SUBCHUNK_URL_CHARS = 15500
 DEFAULT_SUBCHUNK_SAFETY_CHARS = 500
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
-DEFAULT_SUBCHUNK_TIMEOUT = 90
+DEFAULT_SUBCHUNK_TIMEOUT = 0
+DEFAULT_SUBCHUNK_START_DELAY = 1.0
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -343,6 +345,39 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _timeout_seconds(timeout: Optional[int], default: int = DEFAULT_TIMEOUT) -> Optional[int]:
+    try:
+        value = default if timeout is None else int(timeout)
+    except (TypeError, ValueError):
+        value = default
+    if value <= 0:
+        return None
+    return max(1, value)
+
+
+def _timeout_deadline(timeout: Optional[int], default: int = DEFAULT_TIMEOUT) -> Optional[float]:
+    seconds = _timeout_seconds(timeout, default)
+    if seconds is None:
+        return None
+    return time.time() + seconds
+
+
+def _deadline_expired(deadline: Optional[float]) -> bool:
+    return deadline is not None and time.time() >= deadline
+
+
+def _timeout_label(timeout: Optional[int], default: int = DEFAULT_TIMEOUT) -> str:
+    seconds = _timeout_seconds(timeout, default)
+    return "disabled" if seconds is None else f"{seconds}s"
+
+
 def _parse_headers(values: Optional[List[str]]) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     for value in values or []:
@@ -429,6 +464,33 @@ def _html_text_node_transport_enabled() -> bool:
     return os.getenv("GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _auto_token_limits() -> tuple[int, int]:
+    cores = max(1, int(os.cpu_count() or 1))
+    token_limit = min(4, max(1, cores // 2))
+    subprocess_limit = min(8, max(token_limit, cores))
+    return token_limit, subprocess_limit
+
+
+def _subchunk_concurrency_limit() -> int:
+    explicit = _env_int("GEMINI_FREE_SUBCHUNK_CONCURRENCY", 0)
+    if explicit > 0:
+        return max(1, explicit)
+
+    if _env_bool("AUTHND_TOKEN_CONCURRENCY_AUTO", False):
+        token_limit, subprocess_limit = _auto_token_limits()
+    else:
+        token_limit = max(1, _env_int("AUTHND_TOKEN_CONCURRENCY", 1))
+        subprocess_limit = max(1, _env_int("AUTHND_TOKEN_SUBPROCESS_CONCURRENCY", token_limit))
+    return max(1, min(token_limit, subprocess_limit))
+
+
 def _subchunk_prompt_chars() -> int:
     return max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
 
@@ -468,8 +530,26 @@ def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
 
 
 def _subchunk_timeout_seconds(request_timeout: int) -> int:
-    configured = max(30, _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT))
-    return max(30, min(max(30, int(request_timeout or DEFAULT_TIMEOUT)), configured))
+    del request_timeout
+    configured = _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT)
+    if configured <= 0:
+        return 0
+    return max(30, configured)
+
+
+def _subchunk_start_delay_seconds() -> float:
+    return max(0.0, _env_float("GEMINI_FREE_SUBCHUNK_START_DELAY", DEFAULT_SUBCHUNK_START_DELAY))
+
+
+def _sleep_with_cancel(seconds: float) -> None:
+    deadline = time.time() + max(0.0, float(seconds or 0.0))
+    while True:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
 
 
 def _split_user_instruction_prefix(text: str) -> tuple[str, str]:
@@ -1259,6 +1339,7 @@ def run_qtwebengine_request(
     profile = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
+    timeout_seconds = _timeout_seconds(timeout, 60)
 
     def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
         holder: Dict[str, Any] = {}
@@ -1283,7 +1364,8 @@ def run_qtwebengine_request(
 
         page.loadFinished.connect(_loaded)
         page.load(QUrl(bootstrap_url or _origin_url(url)))
-        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        if timeout_seconds is not None:
+            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
         load_loop.exec()
         if not load_state.get("ok"):
             raise RuntimeError(f"Qt WebEngine failed to load bootstrap page {bootstrap_url}")
@@ -1295,14 +1377,14 @@ def run_qtwebengine_request(
             "body": body,
             "credentials": credentials,
             "mode": mode,
-            "timeoutMs": max(1000, int(timeout * 1000)),
+            "timeoutMs": max(0, int((timeout_seconds or 0) * 1000)),
         }
         script = f"""
 (() => {{
   const request = {json.dumps(payload, ensure_ascii=False)};
   window.__geminiFreeRequestResult = {{pending: true}};
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), request.timeoutMs);
+  const timer = request.timeoutMs > 0 ? setTimeout(() => controller.abort(), request.timeoutMs) : null;
   (async () => {{
     try {{
       const init = {{
@@ -1352,7 +1434,7 @@ def run_qtwebengine_request(
         error: String(error && (error.stack || error.message || error))
       }};
     }} finally {{
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }}
   }})();
   return true;
@@ -1360,9 +1442,9 @@ def run_qtwebengine_request(
 """
         run_js(script, js_timeout_ms=10000)
 
-        deadline = time.time() + max(1, int(timeout))
+        deadline = _timeout_deadline(timeout, 60)
         last_result: Dict[str, Any] = {}
-        while time.time() < deadline:
+        while not _deadline_expired(deadline):
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
             raw = run_js("JSON.stringify(window.__geminiFreeRequestResult || {pending:true})", js_timeout_ms=5000)
@@ -1413,6 +1495,7 @@ def load_rendered_page_text(
     profile = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
+    timeout_seconds = _timeout_seconds(timeout)
 
     def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
         holder: Dict[str, Any] = {}
@@ -1437,7 +1520,8 @@ def load_rendered_page_text(
 
         page.loadFinished.connect(_loaded)
         page.load(QUrl(url))
-        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        if timeout_seconds is not None:
+            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
         load_loop.exec()
         if not load_state.get("ok"):
             raise RuntimeError(f"Qt WebEngine failed to load {url}")
@@ -1445,11 +1529,11 @@ def load_rendered_page_text(
         wait_ms = wait_after_load_ms
         if wait_ms is None:
             wait_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
-        deadline = time.time() + max(1, int(timeout))
+        deadline = _timeout_deadline(timeout)
         min_ready_at = time.time() + max(0, int(wait_ms)) / 1000.0
         last_result: Dict[str, Any] = {}
 
-        while time.time() < deadline:
+        while not _deadline_expired(deadline):
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
             raw = run_js(_page_snapshot_script(prompt), js_timeout_ms=5000)
@@ -1502,6 +1586,7 @@ def load_ai_mode_prompt_text(
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
     base_url = _build_search_base_url()
+    timeout_seconds = _timeout_seconds(timeout)
 
     def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
         holder: Dict[str, Any] = {}
@@ -1538,7 +1623,8 @@ def load_ai_mode_prompt_text(
 
         page.loadFinished.connect(_loaded)
         page.load(QUrl(base_url))
-        QTimer.singleShot(max(1000, int(timeout * 1000)), load_loop.quit)
+        if timeout_seconds is not None:
+            QTimer.singleShot(max(1000, int(timeout_seconds * 1000)), load_loop.quit)
         load_loop.exec()
         if not load_state.get("ok"):
             raise RuntimeError(f"Qt WebEngine failed to load {base_url}")
@@ -1637,7 +1723,8 @@ def load_ai_mode_prompt_text(
 })()
 """
         click_state: Dict[str, Any] = {}
-        click_deadline = time.time() + min(10, max(2, int(timeout)))
+        click_timeout = min(10, max(2, int(timeout_seconds or 10)))
+        click_deadline = time.time() + click_timeout
         while time.time() < click_deadline:
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
@@ -1653,13 +1740,13 @@ def load_ai_mode_prompt_text(
         if wait_after_ms is None:
             wait_after_ms = _env_int("GEMINI_FREE_WAIT_AFTER_LOAD_MS", 12000)
         stable_ms = _env_int("GEMINI_FREE_STABLE_MS", 2500)
-        deadline = time.time() + max(1, int(timeout))
+        deadline = _timeout_deadline(timeout)
         min_ready_at = time.time() + max(0, int(wait_after_ms)) / 1000.0
         last_result: Dict[str, Any] = {}
         last_answer = ""
         last_change_at = time.time()
 
-        while time.time() < deadline:
+        while not _deadline_expired(deadline):
             if _is_cancelled():
                 raise RuntimeError("stream cancelled")
             result = run_json(_page_snapshot_script(prompt), js_timeout_ms=5000)
@@ -1910,6 +1997,23 @@ def _send_chat_completion_qt(
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     should_split, prompt_chars, url_chars = _requires_adaptive_split(source_messages)
     if _adaptive_split_enabled() and should_split:
+        html_text_node_transport = _build_html_text_node_transport(source_messages)
+        if html_text_node_transport:
+            transport_prompt_chars, transport_url_chars = _message_budget_usage(html_text_node_transport["messages"])
+            _log(
+                log_fn,
+                f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
+                f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
+            )
+            return _send_chat_completion_qt_once(
+                messages=source_messages,
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                log_fn=log_fn,
+                user_agent=user_agent,
+            )
         _log(
             log_fn,
             f"🧩 Gemini Free: prompt exceeds single-request budget "
@@ -1971,9 +2075,11 @@ def _run_search_subprocess_once(
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
     wait_log_event: Optional[threading.Event] = None,
+    ephemeral_profile: bool = False,
 ) -> Dict[str, Any]:
     message_list = list(messages or [])
-    helper_timeout = max(30, int(timeout))
+    helper_timeout = _timeout_seconds(timeout)
+    helper_timeout_arg = 0 if helper_timeout is None else max(30, int(helper_timeout))
     temp_dir = tempfile.mkdtemp(prefix="glossarion_gemini_free_")
     prompt_path = os.path.join(temp_dir, "messages.json")
     try:
@@ -1989,7 +2095,7 @@ def _run_search_subprocess_once(
                 "--model",
                 model,
                 "--timeout",
-                str(helper_timeout),
+                str(helper_timeout_arg),
             ]
         else:
             cmd = [
@@ -2001,7 +2107,7 @@ def _run_search_subprocess_once(
                 "--model",
                 model,
                 "--timeout",
-                str(helper_timeout),
+                str(helper_timeout_arg),
             ]
         if max_tokens:
             cmd.extend(["--max-tokens", str(int(max_tokens))])
@@ -2010,6 +2116,8 @@ def _run_search_subprocess_once(
         env["GEMINI_FREE_HELPER"] = "1"
         env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
         env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+        if ephemeral_profile:
+            env["GEMINI_FREE_EPHEMERAL_PROFILE"] = "1"
 
         creationflags = 0
         if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -2027,7 +2135,7 @@ def _run_search_subprocess_once(
         )
         with _active_helper_lock:
             _active_helper_processes.add(proc)
-        deadline = time.time() + helper_timeout + 20
+        deadline = None if helper_timeout_arg <= 0 else time.time() + helper_timeout_arg + 20
         stdout = ""
         stderr = ""
         result_queue: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=1)
@@ -2060,9 +2168,9 @@ def _run_search_subprocess_once(
                 if _is_cancelled():
                     _terminate_process_tree(proc, kill=True)
                     raise RuntimeError("stream cancelled")
-                if time.time() >= deadline:
+                if _deadline_expired(deadline):
                     _terminate_process_tree(proc, kill=True)
-                    raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout}s")
+                    raise RuntimeError(f"Gemini Free helper timed out after {helper_timeout_arg}s")
                 if log_fn and not wait_log_printed and time.time() >= next_wait_log:
                     should_log_wait = wait_log_event is None or not wait_log_event.is_set()
                     if wait_log_event is not None:
@@ -2103,10 +2211,16 @@ def _run_search_subprocess_sequential(
 ) -> Dict[str, Any]:
     max_prompt_chars = int(split_metadata.get("target_prompt_chars") or _subchunk_prompt_chars())
     subchunk_timeout = _subchunk_timeout_seconds(timeout)
+    subchunk_timeout_label = _timeout_label(subchunk_timeout, DEFAULT_SUBCHUNK_TIMEOUT)
+    subchunk_concurrency = min(len(chunks), _subchunk_concurrency_limit())
+    parallel_helpers = subchunk_concurrency > 1
+    subchunk_start_delay = _subchunk_start_delay_seconds() if parallel_helpers else 0.0
     _log(
         log_fn,
         f"🧩 Gemini Free: adaptive subchunking {len(chunks)} browser requests "
-        f"(sequential helpers, subchunk timeout: {subchunk_timeout}s, "
+        f"({'parallel' if parallel_helpers else 'sequential'} helpers, "
+        f"concurrency: {subchunk_concurrency}, start delay: {subchunk_start_delay:g}s, "
+        f"subchunk timeout: {subchunk_timeout_label}, "
         f"target prompt chars: {max_prompt_chars}, "
         f"payload format: {split_metadata.get('payload_format')}, "
         f"splitter: {split_metadata.get('splitter')}, "
@@ -2118,14 +2232,16 @@ def _run_search_subprocess_sequential(
     )
 
     wait_log_event = threading.Event()
-    completed_results: List[Dict[str, Any]] = []
-    prompt_chars_total = 0
-    completion_chars_total = 0
+    chunk_jobs: List[tuple[int, List[Dict[str, Any]], int]] = []
     for index, chunk_messages in enumerate(chunks, start=1):
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
         chunk_prompt_chars = len(_messages_to_prompt(chunk_messages))
-        prompt_chars_total += chunk_prompt_chars
+        chunk_jobs.append((index, chunk_messages, chunk_prompt_chars))
+
+    def _run_chunk(index: int, chunk_messages: List[Dict[str, Any]], chunk_prompt_chars: int) -> Dict[str, Any]:
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
         chunk_started_at = time.time()
         _log(log_fn, f"🧩 Gemini Free: subchunk {index}/{len(chunks)} helper start ({chunk_prompt_chars:,} prompt chars)")
         try:
@@ -2136,26 +2252,51 @@ def _run_search_subprocess_sequential(
                 max_tokens=max_tokens,
                 log_fn=log_fn,
                 wait_log_event=wait_log_event,
+                ephemeral_profile=parallel_helpers,
             )
         except Exception as exc:
             elapsed = time.time() - chunk_started_at
             _log(log_fn, f"❌ Gemini Free: subchunk {index}/{len(chunks)} failed after {elapsed:.1f}s: {_short_error(exc)}")
             raise
         content = str(result.get("content") or "")
-        completion_chars_total += len(content)
         raw_response = dict(result.get("raw_response") or {})
         raw_response.pop("content", None)
         elapsed = time.time() - chunk_started_at
         _log(log_fn, f"✅ Gemini Free: subchunk {index}/{len(chunks)} complete ({len(content):,} chars, {elapsed:.1f}s)")
-        completed_results.append({
+        return {
             "index": index,
             "content": content,
             "prompt_chars": chunk_prompt_chars,
             "completion_chars": len(content),
             "raw_response": raw_response,
-        })
+        }
+
+    completed_results: List[Dict[str, Any]] = []
+    if subchunk_concurrency <= 1:
+        for index, chunk_messages, chunk_prompt_chars in chunk_jobs:
+            completed_results.append(_run_chunk(index, chunk_messages, chunk_prompt_chars))
+    else:
+        with ThreadPoolExecutor(max_workers=subchunk_concurrency, thread_name_prefix="GeminiFreeSubchunk") as executor:
+            future_map = {}
+            for job_position, (index, chunk_messages, chunk_prompt_chars) in enumerate(chunk_jobs):
+                if job_position > 0 and subchunk_start_delay > 0:
+                    _sleep_with_cancel(subchunk_start_delay)
+                if _is_cancelled():
+                    for pending in future_map:
+                        pending.cancel()
+                    raise RuntimeError("stream cancelled")
+                future_map[executor.submit(_run_chunk, index, chunk_messages, chunk_prompt_chars)] = index
+            for future in as_completed(future_map):
+                if _is_cancelled():
+                    for pending in future_map:
+                        pending.cancel()
+                    raise RuntimeError("stream cancelled")
+                completed_results.append(future.result())
 
     _log(log_fn, f"✅ Gemini Free: all {len(completed_results)}/{len(chunks)} subchunks complete; merging responses")
+    completed_results.sort(key=lambda result: int(result.get("index") or 0))
+    prompt_chars_total = sum(int(result.get("prompt_chars") or 0) for result in completed_results)
+    completion_chars_total = sum(int(result.get("completion_chars") or 0) for result in completed_results)
     contents = [str(result.get("content") or "") for result in completed_results]
     raw_parts = [
         {
@@ -2177,9 +2318,11 @@ def _run_search_subprocess_sequential(
         },
         "raw_response": {
             "model": _strip_search_prefix(model),
-            "submit_mode": "adaptive_split_sequential",
+            "submit_mode": "adaptive_split_parallel" if parallel_helpers else "adaptive_split_sequential",
             "subchunk_count": len(chunks),
-            "subchunk_sequential": True,
+            "subchunk_sequential": not parallel_helpers,
+            "subchunk_concurrency": subchunk_concurrency,
+            "subchunk_start_delay_seconds": subchunk_start_delay,
             "subchunk_timeout_seconds": subchunk_timeout,
             "subchunk_prompt_target_chars": max_prompt_chars,
             "subchunk_fixed_prompt_chars": split_metadata.get("fixed_prompt_chars"),
@@ -2206,6 +2349,22 @@ def _run_search_subprocess(
     message_list = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     should_split, prompt_chars, url_chars = _requires_adaptive_split(message_list)
     if _adaptive_split_enabled() and should_split:
+        html_text_node_transport = _build_html_text_node_transport(message_list)
+        if html_text_node_transport:
+            transport_prompt_chars, transport_url_chars = _message_budget_usage(html_text_node_transport["messages"])
+            _log(
+                log_fn,
+                f"🧩 Gemini Free: HTML text-node transport active; skipping raw HTML adaptive split "
+                f"({prompt_chars:,} -> {transport_prompt_chars:,} prompt chars, "
+                f"{url_chars:,} -> {transport_url_chars:,} URL chars)",
+            )
+            return _run_search_subprocess_once(
+                messages=message_list,
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                log_fn=log_fn,
+            )
         target_chars = _subchunk_prompt_chars()
         planned_chunks, split_metadata = _split_messages_for_search_budget(
             message_list,
