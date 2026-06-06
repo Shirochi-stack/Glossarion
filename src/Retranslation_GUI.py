@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QSplitter, QPlainTextEdit)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
-from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
+from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -156,11 +156,16 @@ class SDLXLIFFReviewDialog(QDialog):
         self._edit_save_timer.timeout.connect(self._flush_target_edits)
         self._render_token = 0
         self._active_render_timer = None
+        self._rows_rebuild_active = False
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
         self.resize(1500, 900)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor(self.THEME["bg"]))
+        self.setPalette(palette)
         self._apply_translator_theme(parent)
         try:
             if parent is not None and not parent.windowIcon().isNull():
@@ -203,8 +208,17 @@ class SDLXLIFFReviewDialog(QDialog):
         self.scroll = QScrollArea()
         self.scroll.setObjectName("SdlReviewScroll")
         self.scroll.setWidgetResizable(True)
+        self.scroll.viewport().setAutoFillBackground(True)
+        viewport_palette = self.scroll.viewport().palette()
+        viewport_palette.setColor(QPalette.Window, QColor(self.THEME["bg"]))
+        self.scroll.viewport().setPalette(viewport_palette)
+        self.scroll.viewport().setStyleSheet(f"background-color: {self.THEME['bg']};")
         self.rows_widget = QWidget()
         self.rows_widget.setObjectName("SdlReviewRows")
+        self.rows_widget.setAutoFillBackground(True)
+        rows_palette = self.rows_widget.palette()
+        rows_palette.setColor(QPalette.Window, QColor(self.THEME["bg"]))
+        self.rows_widget.setPalette(rows_palette)
         self.rows_layout = QVBoxLayout(self.rows_widget)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(4)
@@ -705,9 +719,12 @@ class SDLXLIFFReviewDialog(QDialog):
             if current_norm and os.path.normcase(os.path.abspath(piece["path"])) == current_norm:
                 selected_row = row
 
-        self.piece_list.currentRowChanged.connect(self._render_piece)
+        self.piece_list.currentRowChanged.connect(self._request_render_piece)
         if self.pieces:
+            previous_block = self.piece_list.blockSignals(True)
             self.piece_list.setCurrentRow(selected_row)
+            self.piece_list.blockSignals(previous_block)
+            self._request_render_piece(selected_row)
         else:
             self.header_label.setText("No SDLXLIFF review files found")
 
@@ -716,8 +733,32 @@ class SDLXLIFFReviewDialog(QDialog):
             item = self.rows_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
+
+    def _request_render_piece(self, row):
+        if row < 0 or row >= len(self.pieces):
+            return
+        QTimer.singleShot(0, lambda row=row: self._render_piece(row))
+
+    def _set_rows_rebuild_active(self, active):
+        self._rows_rebuild_active = bool(active)
+        enabled = not self._rows_rebuild_active
+        for widget in (self.rows_widget, self.scroll.viewport()):
+            try:
+                widget.setUpdatesEnabled(enabled)
+            except Exception:
+                pass
+
+    def _finish_rows_rebuild(self, final=True):
+        self._refresh_review_stream_geometry(final=final)
+        self._set_rows_rebuild_active(False)
+        for widget in (self.rows_widget, self.scroll.viewport(), self.scroll):
+            try:
+                widget.update()
+            except Exception:
+                pass
 
     def _tag_label(self, source_tag, target_tag, status):
         source_tag = str(source_tag or "").strip()
@@ -1107,6 +1148,11 @@ class SDLXLIFFReviewDialog(QDialog):
     def _render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        try:
+            if self.piece_list.currentRow() != row:
+                return
+        except Exception:
+            pass
         self._render_token += 1
         render_token = self._render_token
         if self._active_render_timer is not None:
@@ -1117,6 +1163,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             self._active_render_timer = None
 
+        self._set_rows_rebuild_active(True)
         piece = self.pieces[row]
         status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
         flagged = piece["red_count"] + piece["yellow_count"]
@@ -1135,6 +1182,7 @@ class SDLXLIFFReviewDialog(QDialog):
             error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
             self.rows_layout.addWidget(error)
             self.rows_layout.addStretch(1)
+            self._finish_rows_rebuild(final=True)
             return
 
         rows = piece.get("rows") or []
@@ -1151,6 +1199,7 @@ class SDLXLIFFReviewDialog(QDialog):
             empty.setStyleSheet(f"color: {self.THEME['muted']}; padding: 12px;")
             self.rows_layout.addWidget(empty)
             self.rows_layout.addStretch(1)
+            self._finish_rows_rebuild(final=True)
             return
 
         row_state = {"idx": 0}
@@ -1164,25 +1213,41 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self._active_render_timer is timer:
                     self._active_render_timer = None
                 return
-            start = row_state["idx"]
-            end = min(len(rows), start + batch_size)
-            for idx in range(start, end):
-                self._add_review_row(piece, rows[idx], idx, max_len, colors)
-            row_state["idx"] = end
-            self._refresh_review_stream_geometry(final=False)
+            try:
+                self._set_rows_rebuild_active(True)
+                start = row_state["idx"]
+                end = min(len(rows), start + batch_size)
+                for idx in range(start, end):
+                    self._add_review_row(piece, rows[idx], idx, max_len, colors)
+                row_state["idx"] = end
+            except Exception as exc:
+                timer.stop()
+                timer.deleteLater()
+                if render_token == self._render_token:
+                    error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
+                    error.setTextFormat(Qt.PlainText)
+                    error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                    self.rows_layout.addWidget(error)
+                    self.rows_layout.addStretch(1)
+                    self._finish_rows_rebuild(final=True)
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+                return
             if end >= len(rows):
                 timer.stop()
                 timer.deleteLater()
                 if render_token == self._render_token:
                     self.rows_layout.addStretch(1)
-                    self._refresh_review_stream_geometry(final=True)
+                    self._finish_rows_rebuild(final=True)
                 if self._active_render_timer is timer:
                     self._active_render_timer = None
+            elif render_token == self._render_token:
+                self._finish_rows_rebuild(final=False)
 
         timer.timeout.connect(_render_next_batch)
         self._active_render_timer = timer
         _render_next_batch()
-        if row_state["idx"] < len(rows):
+        if self._active_render_timer is timer and row_state["idx"] < len(rows):
             timer.start(0)
 
 

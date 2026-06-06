@@ -5021,6 +5021,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        beautifulsoup_tag_counts = _count_beautifulsoup_review_tags(content)
                         
                         # Count + sample of non-standard tag occurrences in the
                         # source (either angle-bracket or HTML-entity form).
@@ -5038,6 +5039,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'script': script_hint,
                             'spine_index': spine_index,
                             'has_headers': has_headers,
+                            'beautifulsoup_tag_counts': beautifulsoup_tag_counts,
                             'custom_tags_count': custom_tags_count,
                             'custom_tag_names': custom_tag_names,
                         }
@@ -5085,6 +5087,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         
                         # Check if source has header tags (h1-h6)
                         has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                        beautifulsoup_tag_counts = _count_beautifulsoup_review_tags(content)
                         
                         # Count + sample of non-standard tag occurrences used
                         # by the invalid-tag-mismatch check in the worker.
@@ -5095,6 +5098,7 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'word_count': word_count,
                             'small_file_word_count': small_file_word_count,
                             'has_headers': has_headers,
+                            'beautifulsoup_tag_counts': beautifulsoup_tag_counts,
                             'custom_tags_count': custom_tags_count,
                             'custom_tag_names': custom_tag_names,
                             'filename': os.path.basename(file_path),
@@ -5849,6 +5853,7 @@ STANDARD_HTML_TAGS = frozenset([
 ])
 
 _HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
+_BEAUTIFULSOUP_REVIEW_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p')
 
 
 def _strip_html_like_extensions(name):
@@ -5879,6 +5884,75 @@ def _strip_html_like_extensions(name):
                 changed = True
                 break
     return result
+
+
+def _source_match_basename(name):
+    if not isinstance(name, str):
+        name = str(name or '')
+    result = _strip_html_like_extensions(os.path.basename(name).lower())
+    if result.startswith('response_'):
+        result = result[9:]
+    return result
+
+
+def _find_source_metadata_entry(original_word_counts, filename, text_file_mode=False):
+    """Find source metadata by exact output/source basename, ignoring response_."""
+    if not isinstance(original_word_counts, dict) or not filename:
+        return None
+
+    clean_filename = os.path.basename(str(filename).lower())
+    if clean_filename.startswith('response_'):
+        clean_filename = clean_filename[9:]
+
+    if text_file_mode:
+        candidate = original_word_counts.get(clean_filename)
+        if isinstance(candidate, dict):
+            return candidate
+
+    search_basename = _source_match_basename(filename)
+    for key, value in original_word_counts.items():
+        if not isinstance(value, dict):
+            continue
+        candidates = [value.get('filename'), str(key)]
+        for candidate_name in candidates:
+            if _source_match_basename(candidate_name) == search_basename:
+                return value
+    return None
+
+
+def _count_beautifulsoup_review_tags(html_content):
+    """Count source/output review tags visible to BeautifulSoup."""
+    if not isinstance(html_content, str) or not html_content:
+        return {}
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        counts = {}
+        for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
+            count = len(soup.find_all(tag_name))
+            if count:
+                counts[tag_name] = count
+        return counts
+    except Exception:
+        return {}
+
+
+def _missing_beautifulsoup_tags_issue(source_counts, output_counts):
+    if not isinstance(source_counts, dict) or not source_counts:
+        return None
+    output_counts = output_counts if isinstance(output_counts, dict) else {}
+    missing_parts = []
+    total_missing = 0
+    total_source = 0
+    for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
+        source_count = _safe_int(source_counts.get(tag_name), 0)
+        output_count = _safe_int(output_counts.get(tag_name), 0)
+        total_source += source_count
+        if source_count > output_count:
+            total_missing += source_count - output_count
+            missing_parts.append(f"{tag_name}:{output_count}/{source_count}")
+    if not missing_parts:
+        return None
+    return f"missing_beautifulsoup_tags_{total_missing}_of_{total_source}: {', '.join(missing_parts)}"
 
 
 # Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
@@ -7492,6 +7566,28 @@ def process_html_file_batch(args):
                 issues.append(
                     f"all_text_in_{hdr_details['tag']}_{pct}pct"
                 )
+
+        # Source/output BeautifulSoup tag preservation check.
+        # This compares only the review tags used by the SDLXLIFF source ->
+        # output viewer (p + h1-h6), so it catches dropped paragraph/header
+        # wrappers without treating arbitrary HTML structure differences as
+        # translation failures.
+        check_missing_beautifulsoup_tags = qa_settings.get('check_missing_beautifulsoup_tags', False)
+        if (check_missing_beautifulsoup_tags
+                and original_word_counts
+                and filename.lower().endswith(_HTML_LIKE_EXTENSIONS)
+                and raw_file_content):
+            matched_source_entry = _find_source_metadata_entry(
+                original_word_counts,
+                filename,
+                text_file_mode=text_file_mode,
+            )
+            if matched_source_entry is not None:
+                source_tag_counts = matched_source_entry.get('beautifulsoup_tag_counts') or {}
+                output_tag_counts = _count_beautifulsoup_review_tags(raw_file_content)
+                missing_tag_issue = _missing_beautifulsoup_tags_issue(source_tag_counts, output_tag_counts)
+                if missing_tag_issue:
+                    issues.append(missing_tag_issue)
         
         # Invalid / custom HTML tag mismatch check.
         # Reuses the same source-file match the word counter already performed;
@@ -7937,6 +8033,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_missing_html_tag': True,
             'check_body_tag': False,
             'check_missing_header_tags': False,
+            'check_missing_beautifulsoup_tags': False,
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
@@ -7958,9 +8055,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # chapter actually had h1-h6 tags.
     check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
     check_missing_header_tags_setting = qa_settings.get('check_missing_header_tags', False)
+    check_missing_beautifulsoup_tags_setting = qa_settings.get('check_missing_beautifulsoup_tags', False)
     _need_source_word_counts = (
         check_word_count
         or check_invalid_tag_mismatch_setting
+        or check_missing_beautifulsoup_tags_setting
         or (check_missing_header_tags_setting and not text_file_mode)
     )
     
@@ -8118,8 +8217,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     # Check for word_count folder
                     word_count_folder = os.path.join(folder_path, 'word_count')
                     if os.path.exists(word_count_folder):
-                        # Load word counts from each chunk file (support both .txt and .html)
-                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.txt', '.html'))]
+                        # Load word counts from each chunk file (support both .txt and HTML-family files)
+                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))]
                         if chunk_files:
                             # Store as {filename: word_count} for easy lookup
                             original_word_counts = {}
@@ -8127,14 +8226,33 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 chunk_path = os.path.join(word_count_folder, chunk_file)
                                 with open(chunk_path, 'r', encoding='utf-8') as f:
                                     chunk_text = f.read()
+                                raw_chunk_text = chunk_text
+                                chunk_source_info = None
                                 if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
-                                    soup = BeautifulSoup(chunk_text, 'html.parser')
+                                    soup = BeautifulSoup(raw_chunk_text, 'html.parser')
+                                    has_headers = bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                                    beautifulsoup_tag_counts = _count_beautifulsoup_review_tags(raw_chunk_text)
+                                    custom_tags_count = _count_custom_tag_occurrences(raw_chunk_text)
+                                    custom_tag_names = _collect_custom_tag_names(raw_chunk_text)
                                     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
                                         tag.decompose()
                                     chunk_text = soup.get_text(separator=' ', strip=True)
                                 chunk_word_count = _count_small_file_words(chunk_text)
                                 # Store with filename as key
-                                original_word_counts[chunk_file] = chunk_word_count
+                                if chunk_file.lower().endswith(('.html', '.htm', '.xhtml')):
+                                    script_hint = detect_dominant_script(chunk_text)
+                                    chunk_source_info = {
+                                        'word_count': chunk_word_count,
+                                        'small_file_word_count': chunk_word_count,
+                                        'filename': chunk_file,
+                                        'has_headers': has_headers,
+                                        'beautifulsoup_tag_counts': beautifulsoup_tag_counts,
+                                        'custom_tags_count': custom_tags_count,
+                                        'custom_tag_names': custom_tag_names,
+                                        'is_cjk': script_hint in ['cjk', 'japanese', 'korean'],
+                                        'script': script_hint,
+                                    }
+                                original_word_counts[chunk_file] = chunk_source_info if chunk_source_info is not None else chunk_word_count
                             
                             log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
                             log(f"   Total source words: {_sum_source_word_counts(original_word_counts):,}")
@@ -8306,6 +8424,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Missing images check: {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
+    log(f"   ✓ Missing BeautifulSoup p/h tags check: {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")

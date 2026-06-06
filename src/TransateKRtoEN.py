@@ -170,7 +170,7 @@ def _validate_sdlxliff_batch_output(chapter, text):
 
 
 def _html_sdlxliff_enabled():
-    return str(os.getenv("OUTPUT_SDLXLIFF", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv("OUTPUT_SDLXLIFF", "1")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _html_sdlxliff_lang_code(value, default="und"):

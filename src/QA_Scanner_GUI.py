@@ -483,6 +483,7 @@ class QAScannerMixin:
                     'check_multiple_headers': True,
                     'warn_name_mismatch': True,
                     'check_missing_html_tag': True,
+                    'check_missing_beautifulsoup_tags': False,
                     'check_paragraph_structure': True,
                     'check_invalid_nesting': False,
                     'paragraph_threshold': 0.3,
@@ -3276,6 +3277,25 @@ class QAScannerMixin:
             check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
             additional_layout.addWidget(check_missing_html_tag_checkbox)
 
+            check_missing_beautifulsoup_tags_checkbox = self._create_styled_checkbox(
+                "Flag missing p/h1-h6 source tags (BeautifulSoup only)"
+            )
+            check_missing_beautifulsoup_tags_checkbox.setChecked(
+                qa_settings.get('check_missing_beautifulsoup_tags', False)
+            )
+            additional_layout.addWidget(check_missing_beautifulsoup_tags_checkbox)
+
+            missing_bs_tags_desc = QLabel(
+                "Compares source and output BeautifulSoup counts for <p> and <h1>-<h6> tags.\n"
+                "Flags output files where those source wrappers were dropped."
+            )
+            missing_bs_tags_desc.setFont(QFont('Arial', 9))
+            missing_bs_tags_desc.setStyleSheet("color: gray;")
+            missing_bs_tags_desc.setWordWrap(True)
+            missing_bs_tags_desc.setMaximumWidth(700)
+            missing_bs_tags_desc.setContentsMargins(20, 0, 0, 5)
+            additional_layout.addWidget(missing_bs_tags_desc)
+
             # Body tag check (separate, disabled by default)
             body_tag_widget = QWidget()
             body_tag_layout = QHBoxLayout(body_tag_widget)
@@ -4528,6 +4548,7 @@ class QAScannerMixin:
                         'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
                         'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
                         'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
+                        'check_missing_beautifulsoup_tags': (check_missing_beautifulsoup_tags_checkbox, lambda x: x.isChecked()),
                         'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
                         'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                         'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
@@ -4778,6 +4799,7 @@ class QAScannerMixin:
                             ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
                             ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
                             ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
+                            ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', False) else '0'),
                         ]
 
                         for env_key, env_value in qa_env_mappings:
@@ -4904,6 +4926,7 @@ class QAScannerMixin:
                     check_multiple_headers_checkbox.setChecked(True)
                     warn_mismatch_checkbox.setChecked(True)
                     check_missing_html_tag_checkbox.setChecked(True)
+                    check_missing_beautifulsoup_tags_checkbox.setChecked(False)
                     check_missing_header_tags_checkbox.setChecked(True)
                     check_all_text_in_header_checkbox.setChecked(True)
                     check_invalid_tag_mismatch_checkbox.setChecked(False)

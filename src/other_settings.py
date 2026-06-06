@@ -8473,7 +8473,7 @@ def _create_processing_options_section(self, parent):
     output_sdlxliff_cb = self._create_styled_checkbox("Output sdlxliff")
     try:
         if not hasattr(self, 'output_sdlxliff_var'):
-            self.output_sdlxliff_var = self.config.get('output_sdlxliff', False)
+            self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
         output_sdlxliff_cb.setChecked(bool(self.output_sdlxliff_var))
     except Exception:
         pass

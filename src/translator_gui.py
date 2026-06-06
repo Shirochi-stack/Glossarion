@@ -2308,7 +2308,7 @@ Text to analyze:
         self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
         self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
         self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
-        self.output_sdlxliff_var = self.config.get('output_sdlxliff', False)
+        self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
         _raw_ns = self.config.get('number_spacing_token_fix', '0')
         if isinstance(_raw_ns, bool):
             _raw_ns = '1' if _raw_ns else '0'
@@ -18082,7 +18082,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ENHANCED_SINGLE_LINE_BREAK": "1" if getattr(self, 'enhanced_single_line_break_var', False) else "0",
             "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
-            'OUTPUT_SDLXLIFF': '1' if getattr(self, 'output_sdlxliff_var', False) else '0',
+            'OUTPUT_SDLXLIFF': '1' if getattr(self, 'output_sdlxliff_var', True) else '0',
 
             # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') or output_mode == 'vision' else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
@@ -26919,7 +26919,7 @@ Important rules:
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
-                ('output_sdlxliff', ['output_sdlxliff_var'], False, bool),
+                ('output_sdlxliff', ['output_sdlxliff_var'], True, bool),
 
                 # Stop behavior
                 ('graceful_stop', ['graceful_stop_checkbox', 'graceful_stop_var'], False, bool),
@@ -27173,7 +27173,7 @@ Important rules:
             # Set defaults for settings that might not exist yet
             self.config.setdefault('glossary_auto_backup', True)
             self.config.setdefault('glossary_max_backups', 50)
-            default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
+            default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
             self.config.setdefault('save_partial_results', True)
@@ -27744,6 +27744,7 @@ Important rules:
                 ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
                 ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
                 ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
+                ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', False) else '0'),
                 ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', 1))),
             ]
             
