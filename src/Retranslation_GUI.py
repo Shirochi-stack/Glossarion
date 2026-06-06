@@ -1891,23 +1891,48 @@ class RetranslationMixin:
         loading_layout.addStretch(1)
 
         try:
-            from spinning import animate_icon, create_icon_label
+            try:
+                from spinning import create_icon_label
+            except Exception:
+                from .spinning import create_icon_label
             loading_icon = create_icon_label(52, base_dir)
             loading_icon.setFixedSize(52, 52)
             loading_layout.addWidget(loading_icon, 0, Qt.AlignCenter)
 
+            dialog._loading_icon_label = loading_icon
+            dialog._loading_icon_angle = 0
+            pixmap = loading_icon.pixmap()
+            dialog._loading_icon_original_pixmap = pixmap.copy() if pixmap and not pixmap.isNull() else None
+
             spin_timer = QTimer(dialog)
 
             def _spin_loading_icon():
+                icon = getattr(dialog, '_loading_icon_label', None)
+                original = getattr(dialog, '_loading_icon_original_pixmap', None)
+                if icon is None or original is None or original.isNull():
+                    return
                 try:
-                    animate_icon(loading_icon)
+                    dialog._loading_icon_angle = (getattr(dialog, '_loading_icon_angle', 0) + 24) % 360
+                    rotated = original.transformed(QTransform().rotate(dialog._loading_icon_angle), Qt.SmoothTransformation)
+                    if rotated.isNull():
+                        return
+                    icon.setPixmap(rotated.scaled(
+                        icon.size().width(),
+                        icon.size().height(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    ))
+                    icon.update()
                 except RuntimeError:
                     spin_timer.stop()
+                except Exception:
+                    pass
 
             spin_timer.timeout.connect(_spin_loading_icon)
-            spin_timer.start(540)
+            spin_timer.start(45)
             QTimer.singleShot(0, _spin_loading_icon)
             dialog._loading_icon_timer = spin_timer
+            dialog._advance_loading_icon = _spin_loading_icon
         except Exception:
             pass
 
@@ -3415,9 +3440,16 @@ class RetranslationMixin:
         if _glossary_refinement_settings_enabled():
             glossary_progress_btn.setVisible(True)
         
-        def _build_gp_panel(fp, gp_path, parent_widget):
+        def _build_gp_panel(fp, gp_path, parent_widget, pump_loading=None):
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
             from PySide6.QtWidgets import QStackedWidget, QComboBox
+
+            def _pump_loading_frame():
+                if callable(pump_loading):
+                    try:
+                        pump_loading()
+                    except Exception:
+                        pass
             
             def _gp_load_progress_dict(path):
                 try:
@@ -3463,6 +3495,7 @@ class RetranslationMixin:
                     return default
 
             gp_data = _gp_load_progress_dict(gp_path)
+            _pump_loading_frame()
 
             completed_indices = _gp_int_list(gp_data.get('completed', []))
             failed_indices = _gp_int_list(gp_data.get('failed', []))
@@ -3538,23 +3571,29 @@ class RetranslationMixin:
                 cmap = panel_state.get('chapter_map') or {}
                 # filename key -> chapter index (first wins)
                 fk_to_ci = {}
-                for ci, mapped_name in cmap.items():
+                for lookup_idx, (ci, mapped_name) in enumerate(cmap.items()):
                     for key in _gp_filename_keys(mapped_name):
                         fk_to_ci.setdefault(key, ci)
+                    if lookup_idx and lookup_idx % 200 == 0:
+                        _pump_loading_frame()
                 panel_state['_fk_to_ci'] = fk_to_ci
                 # actual_num (from filename) -> list of chapter indices
                 anum_to_ci = {}
-                for ci, fname in cmap.items():
+                for lookup_idx, (ci, fname) in enumerate(cmap.items()):
                     num = _gp_filename_chapter_num(fname)
                     if num is not None:
                         anum_to_ci.setdefault(num, []).append(ci)
+                    if lookup_idx and lookup_idx % 200 == 0:
+                        _pump_loading_frame()
                 panel_state['_anum_to_ci'] = anum_to_ci
                 # auto-completed (cover pages) — cached set
                 auto_comp = set()
-                for ci, fname in cmap.items():
+                for lookup_idx, (ci, fname) in enumerate(cmap.items()):
                     stem = os.path.splitext(os.path.basename(str(fname or "")))[0].lower()
                     if stem == 'cover':
                         auto_comp.add(ci)
+                    if lookup_idx and lookup_idx % 200 == 0:
+                        _pump_loading_frame()
                 panel_state['_auto_completed'] = auto_comp
 
             def _gp_auto_completed_indices():
@@ -3913,18 +3952,22 @@ class RetranslationMixin:
                         
                         id_to_href = {}
                         html_types = {'application/xhtml+xml', 'text/html', 'application/html+xml'}
-                        for item in opf_xml.findall('.//opf:manifest/opf:item', opf_ns):
+                        for manifest_idx, item in enumerate(opf_xml.findall('.//opf:manifest/opf:item', opf_ns)):
                             mid = item.get('id', '')
                             mtype = item.get('media-type', '')
                             href = item.get('href', '')
                             if mtype in html_types:
                                 id_to_href[mid] = href
+                            if manifest_idx and manifest_idx % 200 == 0:
+                                _pump_loading_frame()
                         
                         spine_hrefs = []
-                        for itemref in opf_xml.findall('.//opf:spine/opf:itemref', opf_ns):
+                        for spine_ref_idx, itemref in enumerate(opf_xml.findall('.//opf:spine/opf:itemref', opf_ns)):
                             idref = itemref.get('idref', '')
                             if idref in id_to_href:
                                 spine_hrefs.append(id_to_href[idref])
+                            if spine_ref_idx and spine_ref_idx % 200 == 0:
+                                _pump_loading_frame()
                         
                         _kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
                         special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
@@ -3953,6 +3996,8 @@ class RetranslationMixin:
                             cmap[ci] = basename
                             spine_index_map[ci] = opf_pos
                             ci += 1
+                            if opf_pos % 200 == 0:
+                                _pump_loading_frame()
                         return cmap, ci, spine_index_map
                 except Exception:
                     return cmap, 0, spine_index_map
@@ -3960,6 +4005,7 @@ class RetranslationMixin:
             # Mutable state so refresh can update chapter_map when toggle changes
             _ts_init = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
             _cmap_init, _total_init, _spine_idx_init = _read_spine_map(fp, _ts_init)
+            _pump_loading_frame()
             
             if _total_init == 0:
                 _total_init = _gp_safe_int(gp_data.get('chapter_count'), 0)
@@ -4001,6 +4047,7 @@ class RetranslationMixin:
             
             # Build O(1) reverse lookups from chapter_map
             _rebuild_reverse_lookups()
+            _pump_loading_frame()
             
             # Track file mtime for dirty-checking on refresh
             try:
@@ -4080,6 +4127,7 @@ class RetranslationMixin:
             
             gp_stats_layout.addStretch()
             p_layout.addWidget(gp_stats_frame)
+            _pump_loading_frame()
             
             # Chapter list
             gp_listbox = QListWidget()
@@ -4692,17 +4740,45 @@ class RetranslationMixin:
                 else:
                     gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {n_files} files")
                 gp_dialog.setWindowModality(Qt.NonModal)
-                gp_width, gp_height = self._get_dialog_size(0.35, 0.45)
-                gp_dialog.resize(gp_width, gp_height)
-                
+                gp_title_text = gp_dialog.windowTitle()
                 try:
-                    ss = dialog.styleSheet()
-                    if ss:
-                        gp_dialog.setStyleSheet(ss)
+                    gp_dialog.deleteLater()
                 except Exception:
                     pass
-                
-                gp_main_layout = QVBoxLayout(gp_dialog)
+                gp_dialog, gp_main_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog(
+                    gp_title_text,
+                    width_ratio=0.35,
+                    height_ratio=0.45,
+                )
+                gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+                gp_dialog.setWindowModality(Qt.NonModal)
+                loading_label.setText("Loading glossary progress...")
+                # Cache and show the shell before building the heavier panels.
+                dialog._glossary_progress_dialog = gp_dialog
+                dialog._gp_refresh_funcs = []
+                gp_dialog.show()
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents(QEventLoop.AllEvents, 50)
+                except Exception:
+                    pass
+
+                def _pump_gp_loading():
+                    try:
+                        advance = getattr(gp_dialog, '_advance_loading_icon', None)
+                        if callable(advance):
+                            advance()
+                        from PySide6.QtWidgets import QApplication
+                        QApplication.processEvents(QEventLoop.AllEvents, 15)
+                    except Exception:
+                        pass
+
+                gp_content = QWidget(gp_dialog)
+                gp_content.hide()
+                gp_content_layout = QVBoxLayout(gp_content)
+                gp_content_layout.setContentsMargins(0, 0, 0, 0)
+                gp_content_layout.setSpacing(6)
+                gp_main_layout.addWidget(gp_content)
                 
                 # Title + note
                 gp_title = QLabel("Glossary Extraction Progress")
@@ -4710,12 +4786,13 @@ class RetranslationMixin:
                 gp_title_font.setBold(True)
                 gp_title.setFont(gp_title_font)
                 gp_title.setStyleSheet("color: #52b788;")
-                gp_main_layout.addWidget(gp_title)
+                gp_content_layout.addWidget(gp_title)
                 
                 gp_note = QLabel("ℹ️ Tracks Balanced / Full auto glossary modes (Extract Glossary logic)")
                 gp_note.setStyleSheet("color: #7a8a9e; font-size: 8pt; font-style: italic;")
                 gp_note.setWordWrap(True)
-                gp_main_layout.addWidget(gp_note)
+                gp_content_layout.addWidget(gp_note)
+                _pump_gp_loading()
                 
                 # Build panels and collect refresh functions
                 all_refresh_funcs = []
@@ -4808,11 +4885,12 @@ class RetranslationMixin:
                     # Single file — no tabs needed
                     fp, gp = all_file_entries[0]
                     if gp:
-                        panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog)
+                        panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog, pump_loading=_pump_gp_loading)
                     else:
                         panel, refresh_fn = _build_gp_empty_panel(fp, gp_dialog)
-                    gp_main_layout.addWidget(panel)
+                    gp_content_layout.addWidget(panel)
                     all_refresh_funcs.append(refresh_fn)
+                    _pump_gp_loading()
                 
                 elif n_files <= 3:
                     # Tabs for ≤3 files
@@ -4844,12 +4922,13 @@ class RetranslationMixin:
                     for fp, gp in all_file_entries:
                         epub_base = os.path.splitext(os.path.basename(fp))[0]
                         if gp:
-                            panel, refresh_fn = _build_gp_panel(fp, gp, notebook)
+                            panel, refresh_fn = _build_gp_panel(fp, gp, notebook, pump_loading=_pump_gp_loading)
                         else:
                             panel, refresh_fn = _build_gp_empty_panel(fp, notebook)
                         notebook.addTab(panel, epub_base)
                         all_refresh_funcs.append(refresh_fn)
-                    gp_main_layout.addWidget(notebook)
+                        _pump_gp_loading()
+                    gp_content_layout.addWidget(notebook)
                 
                 else:
                     # Dropdown navigation for >3 files
@@ -4889,19 +4968,20 @@ class RetranslationMixin:
                     nav_row.addWidget(combo, stretch=1)
                     nav_row.addWidget(nav_counter)
                     nav_row.addWidget(nav_next)
-                    gp_main_layout.addLayout(nav_row)
+                    gp_content_layout.addLayout(nav_row)
                     
                     stack = QStackedWidget()
                     
                     for fp, gp in all_file_entries:
                         epub_base = os.path.splitext(os.path.basename(fp))[0]
                         if gp:
-                            panel, refresh_fn = _build_gp_panel(fp, gp, stack)
+                            panel, refresh_fn = _build_gp_panel(fp, gp, stack, pump_loading=_pump_gp_loading)
                         else:
                             panel, refresh_fn = _build_gp_empty_panel(fp, stack)
                         stack.addWidget(panel)
                         combo.addItem(epub_base)
                         all_refresh_funcs.append(refresh_fn)
+                        _pump_gp_loading()
                     
                     def _update_nav():
                         idx = combo.currentIndex()
@@ -4916,7 +4996,7 @@ class RetranslationMixin:
                     nav_next.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() + 1))
                     _update_nav()
                     
-                    gp_main_layout.addWidget(stack)
+                    gp_content_layout.addWidget(stack)
                 
                 # Close button
                 close_btn = QPushButton("Close")
@@ -4926,7 +5006,27 @@ class RetranslationMixin:
                     "QPushButton:hover { background-color: #666; }"
                 )
                 close_btn.clicked.connect(gp_dialog.hide)
-                gp_main_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+                gp_content_layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+
+                try:
+                    loading_timer = getattr(gp_dialog, '_loading_icon_timer', None)
+                    if loading_timer is not None:
+                        loading_timer.stop()
+                except Exception:
+                    pass
+                try:
+                    gp_main_layout.removeWidget(loading_widget)
+                    loading_widget.hide()
+                    loading_widget.setParent(None)
+                    loading_widget.deleteLater()
+                except Exception:
+                    pass
+                gp_content.show()
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents(QEventLoop.AllEvents, 50)
+                except Exception:
+                    pass
                 
                 # Auto-refresh timer (2s) — calls all panel refresh functions
                 def _gp_refresh_all():
