@@ -158,14 +158,15 @@ class SDLXLIFFReviewDialog(QDialog):
         self._active_render_timer = None
         self._rows_rebuild_active = False
         self._active_target_editor = None
-        self._first_show_opacity_guard = True
+        self._first_show_render_started = False
+        self._initial_piece_row = 0
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
-        self.setWindowOpacity(0.0)
         self.resize(1500, 900)
         self.setAutoFillBackground(True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor(self.THEME["bg"]))
         self.setPalette(palette)
@@ -243,9 +244,9 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._first_show_opacity_guard:
+        if self._first_show_render_started:
             return
-        self._first_show_opacity_guard = False
+        self._first_show_render_started = True
         try:
             self.ensurePolished()
             layout = self.layout()
@@ -254,7 +255,8 @@ class SDLXLIFFReviewDialog(QDialog):
             self._refresh_review_stream_geometry(final=True)
         except Exception:
             pass
-        QTimer.singleShot(35, lambda: self.setWindowOpacity(1.0))
+        if self.pieces:
+            QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
 
     def _apply_translator_theme(self, parent):
         base_style = ""
@@ -737,12 +739,12 @@ class SDLXLIFFReviewDialog(QDialog):
             if current_norm and os.path.normcase(os.path.abspath(piece["path"])) == current_norm:
                 selected_row = row
 
-        self.piece_list.currentRowChanged.connect(self._render_piece)
+        self.piece_list.currentRowChanged.connect(self._request_render_piece)
         if self.pieces:
             previous_block = self.piece_list.blockSignals(True)
             self.piece_list.setCurrentRow(selected_row)
             self.piece_list.blockSignals(previous_block)
-            self._render_piece(selected_row)
+            self._initial_piece_row = selected_row
         else:
             self.header_label.setText("No SDLXLIFF review files found")
 
@@ -755,6 +757,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
+
+    def _request_render_piece(self, row):
+        if row < 0 or row >= len(self.pieces):
+            return
+        QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
     def _set_rows_rebuild_active(self, active):
         self._rows_rebuild_active = bool(active)
@@ -1313,21 +1320,54 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             return
 
-        try:
-            for idx, row_data in enumerate(rows):
-                self._add_review_row(piece, row_data, idx, max_len, colors)
-            if render_token == self._render_token:
-                self.rows_layout.addStretch(1)
-                self._finish_rows_rebuild(final=True)
-        except Exception as exc:
-            if render_token == self._render_token:
-                self._clear_rows()
-                error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
-                error.setTextFormat(Qt.PlainText)
-                error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
-                self.rows_layout.addWidget(error)
-                self.rows_layout.addStretch(1)
-                self._finish_rows_rebuild(final=True)
+        row_state = {"idx": 0}
+        batch_size = 96
+        timer = QTimer(self)
+
+        def _render_next_batch():
+            if render_token != self._render_token:
+                timer.stop()
+                timer.deleteLater()
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+                return
+            try:
+                self._set_rows_rebuild_active(True)
+                start = row_state["idx"]
+                end = min(len(rows), start + batch_size)
+                for idx in range(start, end):
+                    self._add_review_row(piece, rows[idx], idx, max_len, colors)
+                row_state["idx"] = end
+            except Exception as exc:
+                timer.stop()
+                timer.deleteLater()
+                if render_token == self._render_token:
+                    self._clear_rows()
+                    error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
+                    error.setTextFormat(Qt.PlainText)
+                    error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                    self.rows_layout.addWidget(error)
+                    self.rows_layout.addStretch(1)
+                    self._finish_rows_rebuild(final=True)
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+                return
+            if end >= len(rows):
+                timer.stop()
+                timer.deleteLater()
+                if render_token == self._render_token:
+                    self.rows_layout.addStretch(1)
+                    self._finish_rows_rebuild(final=True)
+                if self._active_render_timer is timer:
+                    self._active_render_timer = None
+            elif render_token == self._render_token:
+                self._finish_rows_rebuild(final=False)
+
+        timer.timeout.connect(_render_next_batch)
+        self._active_render_timer = timer
+        _render_next_batch()
+        if self._active_render_timer is timer and row_state["idx"] < len(rows):
+            timer.start(1)
 
 
 class RetranslationMixin:

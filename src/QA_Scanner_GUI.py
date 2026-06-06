@@ -2872,7 +2872,7 @@ class QAScannerMixin:
                 qa_settings.get('check_missing_beautifulsoup_tags', False)
             )
             check_missing_beautifulsoup_tags_checkbox.setToolTip(
-                "Compares source and output <p> and <h1>-<h6> counts from matching SDLXLIFF sidecars. "
+                "Compares source and output p and h1-h6 tag counts from matching SDLXLIFF sidecars. "
                 "Flags output files where those source wrappers were dropped. "
                 "Requires BeautifulSoup-mode SDLXLIFF sidecars."
             )
