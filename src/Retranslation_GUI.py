@@ -149,6 +149,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self.current_path = os.path.abspath(current_path) if current_path else ""
         parent_config = getattr(parent, "config", None)
         self._config = config if isinstance(config, dict) else (parent_config if isinstance(parent_config, dict) else {})
+        self._context_parent = parent
         self._book_entries = self._discover_review_books(parent)
         self._book_index = self._initial_review_book_index()
         if self._book_entries:
@@ -184,6 +185,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._book_nav_next = None
         self._book_nav_counter = None
         self._book_nav_updating = False
+        self._last_review_signature = None
+        self._auto_refresh_timer = None
+        self._refreshing_review_data = False
 
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -280,6 +284,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         if self._first_show_render_started:
+            self._start_review_auto_refresh()
             return
         self._first_show_render_started = True
         try:
@@ -292,6 +297,106 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+
+    def _current_review_signature(self):
+        dirs = []
+        if self._book_entries:
+            dirs.extend(entry.get("output_dir") for entry in self._book_entries if entry.get("output_dir"))
+        elif self.output_dir:
+            dirs.append(self.output_dir)
+        seen = set()
+        signature = []
+        for output_dir in dirs:
+            try:
+                norm_dir = os.path.normcase(os.path.abspath(output_dir))
+            except Exception:
+                continue
+            if norm_dir in seen:
+                continue
+            seen.add(norm_dir)
+            for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
+                try:
+                    stat = os.stat(path)
+                    signature.append((os.path.normcase(os.path.abspath(path)), stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))))
+                except Exception:
+                    signature.append((os.path.normcase(os.path.abspath(path)), -1, -1))
+        return tuple(sorted(signature))
+
+    def _start_review_auto_refresh(self):
+        try:
+            if self._auto_refresh_timer is not None:
+                if not self._auto_refresh_timer.isActive():
+                    self._auto_refresh_timer.start()
+                return
+            timer = QTimer(self)
+            timer.setInterval(2000)
+            timer.timeout.connect(self._silent_review_refresh)
+            timer.start()
+            self._auto_refresh_timer = timer
+        except Exception:
+            pass
+
+    def _silent_review_refresh(self):
+        try:
+            if not self.isVisible() or self._refreshing_review_data:
+                return
+            if self._active_render_timer is not None or self._active_render_page is not None:
+                return
+            if self._edit_save_timer.isActive() or self._pending_target_edits:
+                return
+            try:
+                from PySide6.QtWidgets import QApplication
+                focus = QApplication.focusWidget()
+                if focus is not None and focus.window() is self and isinstance(focus, QPlainTextEdit):
+                    return
+            except Exception:
+                pass
+            signature = self._current_review_signature()
+            if signature != self._last_review_signature:
+                self.refresh_review_data(force=True, signature=signature)
+        except Exception:
+            pass
+
+    def refresh_review_data(self, force=False, current_path=None, signature=None):
+        if self._refreshing_review_data:
+            return
+        try:
+            if not force and signature is None:
+                signature = self._current_review_signature()
+                if signature == self._last_review_signature:
+                    return
+            self._refreshing_review_data = True
+            self._save_current_review_scroll()
+            self._flush_target_edits()
+            selected_path = os.path.abspath(current_path or self.current_path or "")
+            try:
+                row = self.piece_list.currentRow()
+                if 0 <= row < len(self.pieces):
+                    selected_path = os.path.abspath(self.pieces[row].get("path") or selected_path)
+            except Exception:
+                pass
+            self.current_path = selected_path if selected_path and os.path.isfile(selected_path) else self.current_path
+            self._render_token += 1
+            self._clear_cached_review_pages()
+            self.pieces = self._load_pieces()
+            self._populate_piece_list()
+            self._last_review_signature = signature if signature is not None else self._current_review_signature()
+            if self.pieces and self.isVisible():
+                QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+        except Exception:
+            pass
+        finally:
+            self._refreshing_review_data = False
+
+    def reopen_for_path(self, output_dir=None, current_path=None):
+        if output_dir:
+            self.output_dir = output_dir
+        if current_path:
+            self.current_path = os.path.abspath(current_path)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.refresh_review_data(force=True, current_path=self.current_path)
 
     def _candidate_epub_paths_from_context(self, parent):
         candidates = []
@@ -581,6 +686,8 @@ class SDLXLIFFReviewDialog(QDialog):
         self._update_review_book_nav()
         self._show_review_loading_page()
         self._populate_piece_list()
+        self._last_review_signature = self._current_review_signature()
+        self._start_review_auto_refresh()
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
 
@@ -914,12 +1021,12 @@ class SDLXLIFFReviewDialog(QDialog):
             target_len = len(target_text)
             ratio = target_len / max(1, source_len)
             if source_len < 12:
-                if target_len > 120:
+                if target_len > 180:
                     return "yellow", f"density-off ({ratio:.1f}x)"
             elif source_len < 30:
-                if target_len > max(140, source_len * 6) or target_len < max(2, int(source_len * 0.15)):
+                if target_len > max(220, source_len * 8) or target_len < max(2, int(source_len * 0.10)):
                     return "yellow", f"density-off ({ratio:.1f}x)"
-            elif ratio < 0.25 or ratio > 3.5:
+            elif ratio < 0.12 or ratio > 6.0:
                 return "yellow", f"density-off ({ratio:.1f}x)"
         return "green", "ok"
 
@@ -1704,6 +1811,10 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         tree.write(sidecar_path, encoding="utf-8", xml_declaration=True)
+        try:
+            self._last_review_signature = self._current_review_signature()
+        except Exception:
+            pass
 
         output_path = self._output_path_for_piece(piece)
         if output_path:
@@ -1733,17 +1844,16 @@ class SDLXLIFFReviewDialog(QDialog):
     def closeEvent(self, event):
         try:
             self._save_current_review_scroll()
-            self._render_token += 1
-            self._cancel_active_review_render()
-            if self._sdl_review_loading_icon_timer is not None:
-                self._sdl_review_loading_icon_timer.stop()
-                self._sdl_review_loading_icon_timer = None
             if self._edit_save_timer.isActive():
                 self._edit_save_timer.stop()
             self._flush_target_edits()
         except Exception:
             pass
-        super().closeEvent(event)
+        try:
+            event.ignore()
+        except Exception:
+            pass
+        self.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3871,21 +3981,43 @@ class RetranslationMixin:
             profile_lower = _current_profile_name().strip().lower()
             return "_html2text" not in profile_lower and "html2text" not in profile_lower
 
+        def _text_analysis_extraction_method():
+            try:
+                enhanced_radio = getattr(self, "enhanced_extraction_radio", None)
+                standard_radio = getattr(self, "standard_extraction_radio", None)
+                if enhanced_radio is not None and enhanced_radio.isChecked():
+                    return "enhanced"
+                if standard_radio is not None and standard_radio.isChecked():
+                    return "standard"
+            except Exception:
+                pass
+
+            for source in (
+                lambda: getattr(self, "text_extraction_method_var", None),
+                lambda: getattr(self, "config", {}).get("text_extraction_method"),
+                lambda: os.environ.get("TEXT_EXTRACTION_METHOD"),
+            ):
+                try:
+                    value = source()
+                except Exception:
+                    value = None
+                value = str(value or "").strip().lower()
+                if value:
+                    return value
+
+            profile_lower = _current_profile_name().strip().lower()
+            if "_html2text" in profile_lower or "html2text" in profile_lower:
+                return "enhanced"
+            if "_beautifulsoup" in profile_lower or "beautifulsoup" in profile_lower:
+                return "standard"
+            return ""
+
         def _text_analysis_is_beautifulsoup_mode():
             if not _text_analysis_profile_allowed():
                 return False
-            profile_lower = _current_profile_name().strip().lower()
-            if "_beautifulsoup" in profile_lower or "beautifulsoup" in profile_lower:
-                return True
-            try:
-                method = str(getattr(self, "text_extraction_method_var", "") or "").strip().lower()
-            except Exception:
-                method = ""
-            if not method:
-                try:
-                    method = str(getattr(self, "config", {}).get("text_extraction_method", "standard") or "standard").strip().lower()
-                except Exception:
-                    method = "standard"
+            method = _text_analysis_extraction_method()
+            if method in ("enhanced", "html2text", "markdown"):
+                return False
             return method == "standard"
 
         def _text_analysis_sidecars():
@@ -3933,6 +4065,50 @@ class RetranslationMixin:
             except Exception:
                 text_analysis_btn.setVisible(False)
 
+        def _open_or_reuse_sdlxliff_review(_output_dir, _review_path, _parent):
+            cache_owner = _parent or dialog or self
+            try:
+                key = os.path.normcase(os.path.abspath(_output_dir))
+            except Exception:
+                key = str(_output_dir or "")
+            cache = getattr(cache_owner, "_sdlxliff_review_dialog_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                setattr(cache_owner, "_sdlxliff_review_dialog_cache", cache)
+
+            review_dialog = cache.get(key)
+            if review_dialog is not None:
+                try:
+                    review_dialog.isVisible()
+                except RuntimeError:
+                    review_dialog = None
+                    cache.pop(key, None)
+
+            if review_dialog is None:
+                review_dialog = SDLXLIFFReviewDialog(
+                    _output_dir,
+                    _review_path,
+                    _parent or dialog,
+                    config=getattr(self, 'config', {}),
+                )
+                review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+                cache[key] = review_dialog
+
+                def _forget_dialog():
+                    try:
+                        cache.pop(key, None)
+                    except Exception:
+                        pass
+
+                review_dialog.destroyed.connect(_forget_dialog)
+            else:
+                review_dialog.reopen_for_path(_output_dir, _review_path)
+
+            review_dialog.show()
+            review_dialog.raise_()
+            review_dialog.activateWindow()
+            return review_dialog
+
         def _show_text_analysis():
             sidecars = _text_analysis_sidecars()
             if not sidecars:
@@ -3944,31 +4120,24 @@ class RetranslationMixin:
                 )
                 return
             try:
-                review_dialog = SDLXLIFFReviewDialog(
-                    output_dir,
-                    sidecars[0],
-                    dialog,
-                    config=getattr(self, 'config', {}),
-                )
-                dialogs = getattr(self, '_sdlxliff_review_dialogs', [])
-                dialogs.append(review_dialog)
-                self._sdlxliff_review_dialogs = dialogs
-
-                def _forget_dialog():
-                    try:
-                        self._sdlxliff_review_dialogs.remove(review_dialog)
-                    except Exception:
-                        pass
-
-                review_dialog.destroyed.connect(_forget_dialog)
-                review_dialog.show()
-                review_dialog.raise_()
-                review_dialog.activateWindow()
+                _open_or_reuse_sdlxliff_review(output_dir, sidecars[0], dialog)
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=dialog)
 
         text_analysis_btn.clicked.connect(_show_text_analysis)
         _update_text_analysis_button()
+        try:
+            if hasattr(self, "profile_menu") and self.profile_menu is not None:
+                self.profile_menu.currentTextChanged.connect(lambda *_: QTimer.singleShot(0, _update_text_analysis_button))
+        except Exception:
+            pass
+        for _radio_name in ("standard_extraction_radio", "enhanced_extraction_radio"):
+            try:
+                _radio = getattr(self, _radio_name, None)
+                if _radio is not None:
+                    _radio.toggled.connect(lambda *_: QTimer.singleShot(0, _update_text_analysis_button))
+            except Exception:
+                pass
 
         def _bool_setting(value):
             if isinstance(value, str):
@@ -6910,26 +7079,7 @@ class RetranslationMixin:
                 self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
                 return
             try:
-                dialog = SDLXLIFFReviewDialog(
-                    data['output_dir'],
-                    review_path,
-                    data.get('dialog', self),
-                    config=getattr(self, 'config', {}),
-                )
-                dialogs = getattr(self, '_sdlxliff_review_dialogs', [])
-                dialogs.append(dialog)
-                self._sdlxliff_review_dialogs = dialogs
-
-                def _forget_dialog():
-                    try:
-                        self._sdlxliff_review_dialogs.remove(dialog)
-                    except Exception:
-                        pass
-
-                dialog.destroyed.connect(_forget_dialog)
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
+                _open_or_reuse_sdlxliff_review(data['output_dir'], review_path, data.get('dialog', self))
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 
@@ -9589,7 +9739,7 @@ class RetranslationMixin:
                 notebook = QTabWidget()
                 notebook.setStyleSheet("""
                     QTabWidget::pane {
-                        border: 2px solid #5a9fd4;
+                        border: 2px solid transparent;
                         border-radius: 4px;
                         background-color: #2d2d2d;
                     }
