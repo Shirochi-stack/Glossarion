@@ -32,7 +32,8 @@ PM = _LazyPM()
 
 from bs4 import BeautifulSoup
 try:
-    from bs4 import XMLParsedAsHTMLWarning
+    from bs4 import MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
+    warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
     warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 except ImportError:
     pass
@@ -2198,13 +2199,6 @@ def _print_extraction_summary( chapters, detected_language, extraction_mode, h1_
     merged_count = sum(1 for c in chapters if c.get('was_merged', False))
     if merged_count > 0:
         print(f"   • Merged chapters: {merged_count}")
-    
-    # Check for missing chapters (only for integer sequences)
-    expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
-    actual_chapters = set(c['num'] for c in chapters)
-    missing = expected_chapters - actual_chapters
-    if missing:
-        print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
     
     if extraction_mode == "smart":
         method_stats = Counter(c['detection_method'] for c in chapters)
