@@ -845,7 +845,7 @@ class SplashManager(QObject):
                 "loader": self._preload_epub_webengine,
                 "display": "EPUB Library",
                 "loading": "Loading EPUB Library...",
-                "loaded": "EPUB Library loaded",
+                "loaded": "📚 EPUB Library loaded",
                 "required": ("EpubLibraryDialog",),
                 "result": lambda mod: mod.EpubLibraryDialog,
                 "optional": True,
