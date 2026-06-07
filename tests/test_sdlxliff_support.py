@@ -550,6 +550,7 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "SdlReviewSourceText" in source
     assert "SdlReviewMachineTranslation" in source
     assert "SdlReviewMachineTranslationPending" in source
+    assert "QListWidget#SdlReviewPieceList::item:hover:!selected" in source
     assert "border: 1px dashed #8a6f2a" in source
     assert "padding: 5px 8px; font-size: 8pt" in source
     assert "border-left: 3px solid #5aa7d8" in source

@@ -824,8 +824,16 @@ class SDLXLIFFReviewDialog(QDialog):
                 padding: 7px 8px;
                 border-radius: 3px;
             }}
+            QListWidget#SdlReviewPieceList::item:hover:!selected {{
+                background-color: #334155;
+                border: 1px solid #5a6f8c;
+            }}
             QListWidget#SdlReviewPieceList::item:selected {{
                 background-color: {self.THEME['accent']};
+                color: {self.THEME['text']};
+            }}
+            QListWidget#SdlReviewPieceList::item:selected:hover {{
+                background-color: #6cb4e8;
                 color: {self.THEME['text']};
             }}
             QScrollArea#SdlReviewScroll {{
