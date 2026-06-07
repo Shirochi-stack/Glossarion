@@ -19,8 +19,6 @@ import tempfile
 import platform
 import traceback
 import time
-import copy
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -3953,94 +3951,6 @@ class _DualScannerThread(QThread):
         self.finished.emit(in_progress, completed)
 
 
-_LIBRARY_SCAN_CACHE_LOCK = threading.RLock()
-_LIBRARY_SCAN_CACHE: dict[tuple, tuple[float, list[dict], list[dict]]] = {}
-_LIBRARY_SCAN_CACHE_PENDING: set[tuple] = set()
-
-
-def _library_scan_cache_key(config: dict | None = None) -> tuple:
-    cfg = config or {}
-
-    def _norm(path: str) -> str:
-        try:
-            return os.path.normcase(os.path.normpath(os.path.abspath(path)))
-        except Exception:
-            return str(path or "")
-
-    try:
-        output_roots = tuple(_norm(p) for p in _resolve_output_roots(cfg))
-    except Exception:
-        output_roots = ()
-    return (
-        output_roots,
-        _norm(get_library_translated_dir()),
-        _norm(get_library_raw_dir()),
-        os.environ.get("OUTPUT_DIRECTORY", "") or "",
-        str(cfg.get("output_directory", "") or ""),
-        _special_file_settings_signature(cfg),
-    )
-
-
-def _run_dual_scan_blocking(config: dict | None = None) -> tuple[list[dict], list[dict]]:
-    result: list[tuple[list[dict], list[dict]]] = []
-    scanner = _DualScannerThread(config or {})
-    scanner.finished.connect(lambda in_progress, completed: result.append((in_progress, completed)))
-    try:
-        scanner.run()
-    finally:
-        try:
-            scanner.finished.disconnect()
-        except Exception:
-            pass
-    return result[-1] if result else ([], [])
-
-
-def prewarm_library_scan_cache(config: dict | None = None) -> bool:
-    """Warm the first Library scan off the UI thread for frozen startup."""
-    key = _library_scan_cache_key(config)
-    with _LIBRARY_SCAN_CACHE_LOCK:
-        if key in _LIBRARY_SCAN_CACHE or key in _LIBRARY_SCAN_CACHE_PENDING:
-            return False
-        _LIBRARY_SCAN_CACHE_PENDING.add(key)
-    try:
-        in_progress, completed = _run_dual_scan_blocking(config)
-        with _LIBRARY_SCAN_CACHE_LOCK:
-            _LIBRARY_SCAN_CACHE[key] = (
-                time.time(),
-                copy.deepcopy(in_progress),
-                copy.deepcopy(completed),
-            )
-        return True
-    except Exception:
-        logger.debug("Library scan prewarm failed: %s", traceback.format_exc())
-        return False
-    finally:
-        with _LIBRARY_SCAN_CACHE_LOCK:
-            _LIBRARY_SCAN_CACHE_PENDING.discard(key)
-
-
-def take_library_scan_cache(
-    config: dict | None = None,
-    *,
-    max_age_s: float = 90.0,
-) -> tuple[list[dict], list[dict]] | None:
-    key = _library_scan_cache_key(config)
-    with _LIBRARY_SCAN_CACHE_LOCK:
-        cached = _LIBRARY_SCAN_CACHE.pop(key, None)
-    if not cached:
-        return None
-    ts, in_progress, completed = cached
-    if max_age_s >= 0 and (time.time() - ts) > max_age_s:
-        return None
-    return copy.deepcopy(in_progress), copy.deepcopy(completed)
-
-
-def is_library_scan_cache_pending(config: dict | None = None) -> bool:
-    key = _library_scan_cache_key(config)
-    with _LIBRARY_SCAN_CACHE_LOCK:
-        return key in _LIBRARY_SCAN_CACHE_PENDING
-
-
 class _LibraryDeleteThread(QThread):
     """Delete top-level library targets off the UI thread.
 
@@ -6397,54 +6307,6 @@ class EpubLibraryDialog(QDialog):
                 geo.x() + max(0, (geo.width() - self.width()) // 2),
                 geo.y() + max(0, (geo.height() - self.height()) // 2),
             )
-        except Exception:
-            pass
-
-    def prewarm_flash_cards(self) -> None:
-        """Keep the library offscreen during scan so flash cards pre-render."""
-        if getattr(self, "_hidden_prewarm_active", False):
-            return
-        if getattr(self, "_library_flash_cards_prewarmed", False):
-            self._warm_library_widgets()
-            return
-        self._hidden_prewarm_active = True
-        self._hide_after_initial_prewarm = False
-        self._hidden_prewarm_old_opacity = self.windowOpacity()
-        self.setAttribute(Qt.WA_DontShowOnScreen, True)
-        self.setWindowOpacity(0.0)
-        self.move(-20000, -20000)
-        self.show()
-        self._fade_native_window_seen = True
-        self._warm_library_widgets()
-        scan_started = False
-        if not getattr(self, "_initial_scan_started", False):
-            self._hide_after_initial_prewarm = True
-            self._load_books()
-            scan_started = getattr(self, "_scanner_thread", None) is not None
-        if scan_started or (self._scanner_thread and self._scanner_thread.isRunning()):
-            self._hide_after_initial_prewarm = True
-        else:
-            self._finish_hidden_prewarm(hide=True)
-
-    def _finish_hidden_prewarm(self, hide: bool = True) -> None:
-        if not getattr(self, "_hidden_prewarm_active", False):
-            return
-        self._warm_library_widgets()
-        old_opacity = getattr(self, "_hidden_prewarm_old_opacity", 1.0)
-        if hide:
-            self.hide()
-        self._center_on_screen()
-        self.setWindowOpacity(old_opacity)
-        self._hidden_prewarm_active = False
-        self._hide_after_initial_prewarm = False
-        self._library_flash_cards_prewarmed = True
-
-    def cancel_hidden_prewarm_for_visible_show(self) -> None:
-        """Restore an offscreen prewarm window before the user opens it."""
-        if getattr(self, "_hidden_prewarm_active", False):
-            self._finish_hidden_prewarm(hide=False)
-        try:
-            self.setWindowOpacity(1.0)
         except Exception:
             pass
 
@@ -9031,8 +8893,7 @@ class EpubLibraryDialog(QDialog):
 
     def _auto_refresh(self):
         """Lightweight auto-refresh: only reload if either tab changed."""
-        if (not self.isVisible()
-                or getattr(self, "_hidden_prewarm_active", False)):
+        if not self.isVisible():
             return
         if (self._delete_thread is not None
                 and self._delete_thread.isRunning()):
@@ -9109,54 +8970,20 @@ class EpubLibraryDialog(QDialog):
             return
         self._show_loading()
         self._initial_scan_started = True
-        cached_scan = take_library_scan_cache(self._config)
-        if cached_scan is not None:
-            in_progress, completed = cached_scan
-            QTimer.singleShot(
-                0, lambda: self._on_initial_scan_done(in_progress, completed))
-            return
-        if is_library_scan_cache_pending(self._config):
-            wait_started = getattr(self, "_scan_cache_wait_started", 0.0) or 0.0
-            if not wait_started:
-                self._scan_cache_wait_started = time.perf_counter()
-                wait_started = self._scan_cache_wait_started
-            if time.perf_counter() - wait_started < 8.0:
-                QTimer.singleShot(100, self._load_books)
-                return
-        self._scan_cache_wait_started = 0.0
         self._scanner_thread = _DualScannerThread(self._config, self)
         self._scanner_thread.finished.connect(self._on_initial_scan_done)
         self._scanner_thread.start()
 
     def _on_initial_scan_done(self, in_progress: list[dict], completed: list[dict]):
-        self._scan_cache_wait_started = 0.0
         self._in_progress_books = in_progress
         self._completed_books = completed
         self._set_loading_text("Loading books\u2026")
         self._pump_loading_events()
         self._refresh_view()
         self._update_organize_counts()
-        try:
-            raw_limit = os.environ.get("GLOSSARION_EPUB_DETAILS_PREWARM_LIMIT", "4")
-            details_limit = max(0, int(raw_limit))
-        except (TypeError, ValueError):
-            details_limit = 4
-        if details_limit:
-            try:
-                if getattr(self, "_current_tab", 0) == 1:
-                    candidates = list(completed) + list(in_progress)
-                else:
-                    candidates = list(in_progress) + list(completed)
-                prewarm_book_details_cache(
-                    candidates, self._config, limit=details_limit)
-            except Exception:
-                logger.debug("Book details prewarm scheduling failed: %s",
-                             traceback.format_exc())
 
         def _finish_initial_render():
             self._hide_loading()
-            if getattr(self, "_hide_after_initial_prewarm", False):
-                self._finish_hidden_prewarm(hide=True)
 
         QTimer.singleShot(0, _finish_initial_render)
         # Schedule deferred re-layouts so the grid sees the scroll
@@ -11107,16 +10934,15 @@ class EpubLibraryDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._reposition_overlays()
-        if not getattr(self, "_hidden_prewarm_active", False):
-            if not getattr(self, "_initial_scan_started", False):
-                QTimer.singleShot(0, self._load_books)
-            else:
-                QTimer.singleShot(0, self._auto_refresh)
-            try:
-                if not self._auto_refresh_timer.isActive():
-                    self._auto_refresh_timer.start()
-            except Exception:
-                pass
+        if not getattr(self, "_initial_scan_started", False):
+            QTimer.singleShot(0, self._load_books)
+        else:
+            QTimer.singleShot(0, self._auto_refresh)
+        try:
+            if not self._auto_refresh_timer.isActive():
+                self._auto_refresh_timer.start()
+        except Exception:
+            pass
         if self._ip_cards or self._comp_cards:
             self._schedule_grid_reflow()
 
@@ -11661,73 +11487,6 @@ def _read_translated_chapter_title(path: str) -> str:
     return ""
 
 
-_BOOK_DETAILS_CACHE_LOCK = threading.RLock()
-_BOOK_DETAILS_CACHE: dict[tuple, tuple[float, dict]] = {}
-_BOOK_DETAILS_PREFETCHING: set[tuple] = set()
-_BOOK_DETAILS_CACHE_LIMIT = 24
-
-
-def _path_signature(path: str) -> tuple:
-    if not path:
-        return ("", 0.0, 0)
-    try:
-        stat = os.stat(path)
-        return (
-            os.path.normcase(os.path.normpath(os.path.abspath(path))),
-            float(stat.st_mtime),
-            int(stat.st_size),
-        )
-    except Exception:
-        try:
-            return (os.path.normcase(os.path.normpath(os.path.abspath(path))), 0.0, 0)
-        except Exception:
-            return (str(path or ""), 0.0, 0)
-
-
-def _book_details_cache_key(book: dict, config: dict | None = None) -> tuple:
-    cfg = config or {}
-    output_folder = book.get("output_folder") or ""
-    progress_file = book.get("progress_file") or ""
-    if output_folder and not progress_file:
-        progress_file = os.path.join(output_folder, "translation_progress.json")
-    metadata_file = os.path.join(output_folder, "metadata.json") if output_folder else ""
-    pointer_file = os.path.join(output_folder, "source_epub.txt") if output_folder else ""
-    return (
-        _path_signature(book.get("path", "") or ""),
-        _path_signature(book.get("raw_source_path", "") or ""),
-        _path_signature(progress_file),
-        _path_signature(metadata_file),
-        _path_signature(pointer_file),
-        str(book.get("type", "epub") or "epub"),
-        bool(book.get("in_library", False)),
-        bool(book.get("is_in_progress", False)),
-        _special_file_settings_signature(cfg),
-    )
-
-
-def _get_book_details_cache(book: dict, config: dict | None = None, max_age_s: float = 120.0) -> dict | None:
-    key = _book_details_cache_key(book, config)
-    with _BOOK_DETAILS_CACHE_LOCK:
-        cached = _BOOK_DETAILS_CACHE.get(key)
-    if not cached:
-        return None
-    ts, payload = cached
-    if max_age_s >= 0 and (time.time() - ts) > max_age_s:
-        with _BOOK_DETAILS_CACHE_LOCK:
-            _BOOK_DETAILS_CACHE.pop(key, None)
-        return None
-    return copy.deepcopy(payload)
-
-
-def _store_book_details_cache(book: dict, config: dict | None, payload: dict) -> None:
-    key = _book_details_cache_key(book, config)
-    with _BOOK_DETAILS_CACHE_LOCK:
-        _BOOK_DETAILS_CACHE[key] = (time.time(), copy.deepcopy(payload))
-        while len(_BOOK_DETAILS_CACHE) > _BOOK_DETAILS_CACHE_LIMIT:
-            oldest = min(_BOOK_DETAILS_CACHE, key=lambda k: _BOOK_DETAILS_CACHE[k][0])
-            _BOOK_DETAILS_CACHE.pop(oldest, None)
-
-
 class _BookDetailsLoader(QThread):
     """Parse EPUB metadata + TOC + translation status off the UI thread.
 
@@ -11746,19 +11505,11 @@ class _BookDetailsLoader(QThread):
     done = Signal(dict)
     error = Signal(str)
 
-    def __init__(
-        self,
-        book: dict,
-        config: dict | None = None,
-        parent=None,
-        *,
-        use_cache: bool = True,
-    ):
+    def __init__(self, book: dict, config: dict | None = None, parent=None):
         super().__init__(parent)
         self._book = book
         self._config = config or {}
         self._cancelled = False
-        self._use_cache = use_cache
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -11776,19 +11527,6 @@ class _BookDetailsLoader(QThread):
         if self._should_stop():
             return
         try:
-            if self._use_cache:
-                cached = _get_book_details_cache(self._book, self._config)
-                if cached is not None:
-                    if not self._should_stop():
-                        self.preview_ready.emit({
-                            "details": cached.get("details", {}),
-                            "cover": cached.get("cover", ""),
-                            "metadata_json": cached.get("metadata_json", {}),
-                        })
-                    if not self._should_stop():
-                        self.done.emit(cached)
-                    return
-
             book_path = self._book.get("path", "") or ""
             book_type = self._book.get("type", "epub")
             progress_file = self._book.get("progress_file")
@@ -12100,66 +11838,17 @@ class _BookDetailsLoader(QThread):
             # metadata_json was loaded in Phase 1 above.
 
             if not self._should_stop():
-                payload = {
+                self.done.emit({
                     "details": details,
                     "cover": cover or "",
                     "chapters_info": chapters_info,
                     "metadata_json": metadata_json or {},
                     "progress": prog or {},
-                }
-                _store_book_details_cache(self._book, self._config, payload)
-                self.done.emit(payload)
+                })
         except Exception as exc:
             if not self._should_stop():
                 logger.error("Book details load error: %s\n%s", exc, traceback.format_exc())
                 self.error.emit(f"{exc}")
-
-
-def prewarm_book_details_cache(
-    books: list[dict],
-    config: dict | None = None,
-    *,
-    limit: int = 4,
-) -> int:
-    """Prefetch a few Book Details payloads without touching visible widgets."""
-    if not books or limit <= 0:
-        return 0
-    selected: list[tuple[dict, tuple]] = []
-    for book in books:
-        if len(selected) >= limit:
-            break
-        if not isinstance(book, dict):
-            continue
-        if book.get("type", "epub") not in ("epub", "in_progress"):
-            continue
-        key = _book_details_cache_key(book, config)
-        with _BOOK_DETAILS_CACHE_LOCK:
-            if key in _BOOK_DETAILS_CACHE or key in _BOOK_DETAILS_PREFETCHING:
-                continue
-            _BOOK_DETAILS_PREFETCHING.add(key)
-        selected.append((copy.deepcopy(book), key))
-    if not selected:
-        return 0
-
-    cfg = copy.deepcopy(config or {})
-
-    def _worker() -> None:
-        for book, key in selected:
-            try:
-                loader = _BookDetailsLoader(book, cfg, None, use_cache=False)
-                loader.run()
-            except Exception:
-                logger.debug("Book details prewarm failed: %s", traceback.format_exc())
-            finally:
-                with _BOOK_DETAILS_CACHE_LOCK:
-                    _BOOK_DETAILS_PREFETCHING.discard(key)
-
-    threading.Thread(
-        target=_worker,
-        name="BookDetailsPrewarm",
-        daemon=True,
-    ).start()
-    return len(selected)
 
 
 _CHAPTER_PRIMARY_STYLES = {
@@ -13082,15 +12771,6 @@ class BookDetailsDialog(QDialog):
         # background. Replaced in :meth:`_on_details_ready` with real rows.
         self._show_chapter_placeholder()
         self._is_auto_refreshing = False
-        cached = _get_book_details_cache(self._book, self._config)
-        if cached is not None:
-            self._on_preview_ready({
-                "details": cached.get("details", {}),
-                "cover": cached.get("cover", ""),
-                "metadata_json": cached.get("metadata_json", {}),
-            })
-            self._on_details_ready(cached)
-            return
         self._loader = _BookDetailsLoader(self._book, self._config, self)
         # ``preview_ready`` fires first with cover + metadata so the hero
         # paints immediately; ``done`` follows with the full chapter list.
@@ -13121,8 +12801,7 @@ class BookDetailsDialog(QDialog):
             except Exception:
                 pass
         self._is_auto_refreshing = True
-        self._loader = _BookDetailsLoader(
-            self._book, self._config, self, use_cache=False)
+        self._loader = _BookDetailsLoader(self._book, self._config, self)
         # Only subscribe to ``done`` — ``preview_ready`` is only useful
         # for the initial paint and would re-flash the cover + synopsis
         # with every tick otherwise.

@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 
 import pytest
@@ -19,6 +20,29 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class SlowInterruptClient:
+    def __init__(self, sleep_seconds=0.6):
+        self.sleep_seconds = sleep_seconds
+        self.cancel_calls = 0
+        self._cancelled = False
+        self._in_cleanup = False
+        self.tls = types.SimpleNamespace(local_cancel_check=None)
+
+    def _get_thread_local_client(self):
+        return self.tls
+
+    def is_globally_cancelled(self):
+        return False
+
+    def cancel_current_operation(self):
+        self.cancel_calls += 1
+        self._cancelled = True
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        time.sleep(self.sleep_seconds)
+        return "late result"
 
 
 @pytest.mark.parametrize(
@@ -100,6 +124,56 @@ def test_google_free_translate_co_in_uses_dropdown_target(monkeypatch):
 
     assert result["translatedText"] == "Xin chao"
     assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+
+
+def test_send_with_interrupt_timeout_does_not_mark_user_cancel(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+
+    client = SlowInterruptClient()
+
+    with pytest.raises(UnifiedClientError, match="timed out"):
+        send_with_interrupt(
+            [{"role": "user", "content": "hello"}],
+            client,
+            temperature=0.0,
+            max_tokens=8,
+            stop_check_fn=lambda: False,
+            chunk_timeout=0.01,
+            context="translation",
+        )
+
+    assert client.cancel_calls == 0
+    assert client._cancelled is False
+
+
+def test_send_with_interrupt_user_stop_marks_client_cancel(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+    from unified_api_client import UnifiedClientError
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "1")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.delenv("GRACEFUL_STOP", raising=False)
+
+    client = SlowInterruptClient()
+
+    with pytest.raises(UnifiedClientError, match="Translation stopped by user"):
+        send_with_interrupt(
+            [{"role": "user", "content": "hello"}],
+            client,
+            temperature=0.0,
+            max_tokens=8,
+            stop_check_fn=lambda: True,
+            chunk_timeout=10,
+            context="translation",
+        )
+
+    assert client.cancel_calls == 1
+    assert client._cancelled is True
 
 
 def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
