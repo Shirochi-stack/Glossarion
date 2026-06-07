@@ -537,6 +537,8 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_start_tooltip_translation" in source
     assert "_translate_single_row_tooltip" in source
     assert "_refresh_visible_review_row_source_preview" in source
+    assert "_refresh_visible_review_row_source_previews" in source
+    assert "visible_only=True" in source
     assert "Google Translate \\u2192" in source
     assert "_open_google_translate" not in source
     assert "Translate tooltip" not in source

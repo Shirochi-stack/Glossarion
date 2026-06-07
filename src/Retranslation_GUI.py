@@ -1891,7 +1891,37 @@ class SDLXLIFFReviewDialog(QDialog):
             return None
         return None
 
-    def _refresh_visible_review_row_source_preview(self, piece_index, row_index):
+    def _review_row_frames_by_index(self, piece_index):
+        frames = {}
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return frames
+            page = self._piece_pages.get(piece_index)
+            if page is None and self.piece_list.currentRow() == piece_index:
+                page = self.rows_widget
+            if page is None:
+                return frames
+            for candidate in page.findChildren(QFrame, "SdlReviewRow"):
+                try:
+                    frames[int(candidate.property("sdl_row_index") or -1)] = candidate
+                except Exception:
+                    continue
+        except Exception:
+            return frames
+        frames.pop(-1, None)
+        return frames
+
+    def _review_row_frame_is_near_viewport(self, frame, margin=180):
+        try:
+            top = int(frame.y())
+            bottom = top + int(frame.height())
+            visible_top = int(self.scroll.verticalScrollBar().value())
+            visible_bottom = visible_top + int(self.scroll.viewport().height())
+            return bottom >= visible_top - margin and top <= visible_bottom + margin
+        except Exception:
+            return True
+
+    def _refresh_visible_review_row_source_preview(self, piece_index, row_index, frame=None, sync_geometry=True):
         try:
             if piece_index < 0 or piece_index >= len(self.pieces):
                 return False
@@ -1900,7 +1930,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if row_index < 0 or row_index >= len(rows):
                 return False
             row_data = rows[row_index]
-            frame = self._review_row_frame(piece_index, row_index)
+            frame = frame or self._review_row_frame(piece_index, row_index)
             if frame is None:
                 return False
             grid = frame.layout()
@@ -1957,8 +1987,34 @@ class SDLXLIFFReviewDialog(QDialog):
                 grid.activate()
             except Exception:
                 pass
-            self._refresh_review_stream_geometry(final=False)
+            if sync_geometry:
+                self._refresh_review_stream_geometry(final=False)
             return True
+        except Exception:
+            return False
+
+    def _refresh_visible_review_row_source_previews(self, piece_index, row_indices, visible_only=False):
+        try:
+            frames = self._review_row_frames_by_index(piece_index)
+            if not frames:
+                return False
+            refreshed = False
+            for row_index in sorted(set(row_indices or [])):
+                frame = frames.get(row_index)
+                if frame is None:
+                    continue
+                if visible_only and not self._review_row_frame_is_near_viewport(frame):
+                    continue
+                if self._refresh_visible_review_row_source_preview(
+                    piece_index,
+                    row_index,
+                    frame=frame,
+                    sync_geometry=False,
+                ):
+                    refreshed = True
+            if refreshed:
+                self._refresh_review_stream_geometry(final=False)
+            return refreshed
         except Exception:
             return False
 
@@ -2108,10 +2164,12 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             piece = self.pieces[row]
             rows = piece.get("rows") or []
+            pending_rows = []
             for row_idx, _key, _source_text, _tag_name in work:
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["tooltip_translation_pending"] = True
-                    self._refresh_visible_review_row_source_preview(row, row_idx)
+                    pending_rows.append(row_idx)
+            self._refresh_visible_review_row_source_previews(row, pending_rows, visible_only=True)
         except Exception:
             pass
 
@@ -2201,8 +2259,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._set_row_tooltip_translation(piece, row_data, translations[key])
                     changed_rows.add(row_index)
             if changed_rows:
-                for row_index in sorted(changed_rows):
-                    self._refresh_visible_review_row_source_preview(row, row_index)
+                self._refresh_visible_review_row_source_previews(row, changed_rows, visible_only=False)
         if error and not translations:
             try:
                 self.save_status_label.setText(f"Tooltip translation failed: {error}")
