@@ -12,6 +12,8 @@ from lxml import etree
 
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
+from TransateKRtoEN import _write_html_sdlxliff_sidecar
+from Retranslation_GUI import SDLXLIFFReviewDialog
 
 
 SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>
@@ -308,6 +310,53 @@ def test_sdlxliff_worker_smoke_writes_manifest_and_chapters(tmp_path):
     assert (out / "sdlxliff_manifest.json").exists()
 
 
+def test_html2text_output_writes_sdlxliff_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "1")
+    monkeypatch.setenv("SOURCE_LANGUAGE", "Japanese")
+    monkeypatch.setenv("OUTPUT_LANGUAGE", "English")
+    source_html = "<html><body><h1>Source title</h1><p>Source body</p></body></html>"
+    target_html = "<html><body><h1>Target title</h1><p>Target body</p></body></html>"
+    chapter = {
+        "enhanced_extraction": True,
+        "original_html": source_html,
+        "original_filename": "chapter001.xhtml",
+    }
+
+    sidecar_path = _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        "response_chapter001.html",
+        chapter,
+        "",
+        target_html,
+    )
+
+    assert sidecar_path == str(tmp_path / "SDLXLIFF" / "response_chapter001.html.sdlxliff")
+    tree = etree.parse(sidecar_path)
+    file_elem = tree.xpath("//*[local-name()='file']")[0]
+    source_elem = tree.xpath("//*[local-name()='source']")[0]
+    target_elem = tree.xpath("//*[local-name()='target']")[0]
+    assert file_elem.get("original") == "chapter001.xhtml"
+    assert file_elem.get("source-language") == "ja-JP"
+    assert file_elem.get("target-language") == "en-US"
+    assert _visible_text(source_elem) == source_html
+    assert _visible_text(target_elem) == target_html
+
+
+def test_html_sdlxliff_sidecar_respects_output_toggle(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+
+    sidecar_path = _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        "response_chapter001.html",
+        {"enhanced_extraction": True, "original_html": "<p>Source</p>"},
+        "<p>Fallback</p>",
+        "<p>Target</p>",
+    )
+
+    assert sidecar_path is None
+    assert not (tmp_path / "SDLXLIFF").exists()
+
+
 def test_sdlxliff_prompt_profile_is_bootstrapped_and_mirrored():
     gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
     app_source = (SRC / "app.py").read_text(encoding="utf-8")
@@ -329,3 +378,142 @@ def test_sdlxliff_prompt_profile_is_bootstrapped_and_mirrored():
     assert '"SDLXLIFF Editing":' not in discord_source
     assert "You are editing SDLXLIFF JSON batch records" in discord_source
     assert "No markdown fences" in discord_source
+
+
+def test_sdlxliff_and_empty_attribute_settings_are_single_global_toggles():
+    settings_source = (SRC / "other_settings.py").read_text(encoding="utf-8")
+    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+
+    assert "Fix Empty Attribute Tags (BeautifulSoup) - LLM Token Fix" not in settings_source
+    assert settings_source.count("Fix Empty Attribute Tags (Extraction) - LLM Token Fix") == 1
+    assert settings_source.index("Fix Empty Attribute Tags (EPUB) - LLM Token Fix") < settings_source.index("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
+    assert settings_source.index("Number Spacing Tokenization Fix") < settings_source.index("Output SDLXLIFF")
+    assert settings_source.index("Output SDLXLIFF") < settings_source.index("Skip Thinking for Lightweight Tasks")
+    assert "fix_empty_attr_tags_bs_var = self.fix_empty_attr_tags_extract_var" in gui_source
+
+
+def test_sdlxliff_review_button_is_not_extraction_mode_gated():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+
+    assert "Review source -> output" in source
+    assert "text_analysis_btn.setVisible(True)" in source
+    assert "text_analysis_btn.setEnabled(True)" in source
+    assert "No BeautifulSoup SDLXLIFF sidecars" not in source
+    assert "Text Analysis is available for BeautifulSoup outputs" not in source
+    assert "_text_analysis_is_beautifulsoup_mode" not in source
+    assert "_text_analysis_profile_allowed" not in source
+
+
+def test_sdlxliff_review_ignores_empty_source_paragraphs_for_alignment(tmp_path):
+    sidecar = tmp_path / "response_chapter_notice0004.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<h1>Notice: Cover completed in source language!</h1>"
+        "<p></p>"
+        "<p>Child version cover complete source text.</p>"
+        "<p>Adult version cover next-time source text.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<h1>Notice: Cover completed!</h1>"
+        "<p>Cover completed for the child version of the three slaves!</p>"
+        "<p>Next time, I will return with the adult version cover.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_notice0004.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_notice0004.html"})
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert piece["mismatch"] is False
+    assert piece["red_count"] == 0
+    assert [row["source"] for row in piece["rows"]] == [
+        "Notice: Cover completed in source language!",
+        "Child version cover complete source text.",
+        "Adult version cover next-time source text.",
+    ]
+    assert [row["target"] for row in piece["rows"]] == [
+        "Notice: Cover completed!",
+        "Cover completed for the child version of the three slaves!",
+        "Next time, I will return with the adult version cover.",
+    ]
+    assert all(row["source"] for row in piece["rows"])
+
+
+def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):
+    sidecar = tmp_path / "response_chapter_heading.html.sdlxliff"
+    source_html = "<html><body><h1>Source heading</h1><p>Source body</p></body></html>"
+    target_html = "<html><body><h2>Translated heading</h2><p>Translated body</p></body></html>"
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_heading.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_heading.html"})
+
+    assert piece["mismatch"] is False
+    assert piece["red_count"] == 0
+    assert piece["yellow_count"] == 1
+    assert piece["rows"][0]["source_tag"] == "h1"
+    assert piece["rows"][0]["target_tag"] == "h2"
+    assert piece["rows"][0]["status"] == "yellow"
+    assert piece["rows"][0]["reason"] == "heading level changed"
+
+
+def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
+    sidecar = tmp_path / "response_chapter_heading_to_p.html.sdlxliff"
+    source_html = "<html><body><h1>Source heading</h1></body></html>"
+    target_html = "<html><body><p>Translated heading</p></body></html>"
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_heading.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_heading_to_p.html"})
+
+    assert piece["mismatch"] is True
+    assert piece["red_count"] == 1
+    assert piece["yellow_count"] == 0
+    assert piece["rows"][0]["status"] == "red"
+    assert piece["rows"][0]["reason"] == "tag mismatch"

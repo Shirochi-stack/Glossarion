@@ -244,7 +244,7 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_row = QHBoxLayout()
         legend_row.setSpacing(10)
         legend_row.addWidget(self._legend_status_label("green ok", "green"))
-        legend_row.addWidget(self._legend_status_label("yellow density-off", "yellow"))
+        legend_row.addWidget(self._legend_status_label("yellow density/tag-level", "yellow"))
         legend_row.addWidget(self._legend_status_label("red dropped/added/empty/untranslated", "red"))
         legend_note = QLabel("left = source   right = output   bar width ~= length")
         legend_note.setTextFormat(Qt.PlainText)
@@ -1055,6 +1055,16 @@ class SDLXLIFFReviewDialog(QDialog):
             return 0
 
     @staticmethod
+    def _non_empty_text_units(units):
+        try:
+            return [
+                unit for unit in (units or [])
+                if str(unit.get("text", "") or "").strip()
+            ]
+        except Exception:
+            return []
+
+    @staticmethod
     def _has_linguistic_letters(text):
         return any(ch.isalpha() for ch in str(text or ""))
 
@@ -1080,6 +1090,19 @@ class SDLXLIFFReviewDialog(QDialog):
             elif ratio < 0.12 or ratio > 6.0:
                 return "yellow", f"density-off ({ratio:.1f}x)"
         return "green", "ok"
+
+    @staticmethod
+    def _heading_tag_level_changed(source_tag, target_tag):
+        source_tag = str(source_tag or "").strip().lower()
+        target_tag = str(target_tag or "").strip().lower()
+        if source_tag == target_tag:
+            return False
+        return bool(re.fullmatch(r"h[1-6]", source_tag) and re.fullmatch(r"h[1-6]", target_tag))
+
+    def _tag_mismatch_status(self, source_tag, target_tag):
+        if self._heading_tag_level_changed(source_tag, target_tag):
+            return "yellow", "heading level changed"
+        return "red", "tag mismatch"
 
     @staticmethod
     def _canonical_basename(name):
@@ -1264,25 +1287,14 @@ class SDLXLIFFReviewDialog(QDialog):
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_units = self._extract_text_units(source_html)
             target_units = self._extract_text_units(target_html)
-            source_by_index = {unit.get("index"): unit for unit in source_units}
-            target_by_index = {unit.get("index"): unit for unit in target_units}
-            row_indices = sorted(
-                idx for idx in set(source_by_index) | set(target_by_index)
-                if isinstance(idx, int)
-            )
+            source_review_units = self._non_empty_text_units(source_units)
+            target_review_units = self._non_empty_text_units(target_units)
             rows = []
             red_count = 0
             yellow_count = 0
-            for row_idx in row_indices:
-                src = source_by_index.get(row_idx)
-                tgt = target_by_index.get(row_idx)
-                if (
-                    src is not None
-                    and tgt is not None
-                    and not str(src.get("text", "") or "").strip()
-                    and not str(tgt.get("text", "") or "").strip()
-                ):
-                    continue
+            for row_idx in range(max(len(source_review_units), len(target_review_units))):
+                src = source_review_units[row_idx] if row_idx < len(source_review_units) else None
+                tgt = target_review_units[row_idx] if row_idx < len(target_review_units) else None
                 status, reason = self._row_status(
                     src.get("text") if src else "",
                     tgt.get("text") if tgt else "",
@@ -1290,7 +1302,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     target_missing=tgt is None,
                 )
                 if src is not None and tgt is not None and src.get("tag") != tgt.get("tag"):
-                    status, reason = "red", "tag mismatch"
+                    status, reason = self._tag_mismatch_status(src.get("tag"), tgt.get("tag"))
                 if status == "red":
                     red_count += 1
                 elif status == "yellow":
@@ -1306,8 +1318,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     "status": status,
                     "reason": reason,
                 })
-            source_count = self._non_empty_text_unit_count(source_units)
-            target_count = self._non_empty_text_unit_count(target_units)
+            source_count = len(source_review_units)
+            target_count = len(target_review_units)
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             return {
                 "path": path,
@@ -1980,7 +1992,7 @@ class SDLXLIFFReviewDialog(QDialog):
         row_data["target"] = str(text or "")
         status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
         if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
-            status, reason = "red", "tag mismatch"
+            status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
         row_data["status"] = status
         row_data["reason"] = reason
         return True
@@ -4176,84 +4188,7 @@ class RetranslationMixin:
                 paths = []
             return sorted(paths, key=lambda path: os.path.basename(path).lower())
 
-        def _current_profile_name():
-            try:
-                if hasattr(self, "profile_menu") and self.profile_menu is not None:
-                    name = self.profile_menu.currentText()
-                    if name:
-                        return str(name)
-            except Exception:
-                pass
-            try:
-                if getattr(self, "profile_var", None):
-                    return str(self.profile_var)
-            except Exception:
-                pass
-            try:
-                return str(getattr(self, "config", {}).get("active_profile") or "")
-            except Exception:
-                return ""
-
-        def _text_analysis_profile_allowed():
-            profile_lower = _current_profile_name().strip().lower()
-            return "_html2text" not in profile_lower and "html2text" not in profile_lower
-
-        def _normalize_text_analysis_method(value):
-            value = str(value or "").strip().lower()
-            if not value:
-                return ""
-            if value in ("standard", "beautifulsoup", "beautiful_soup", "bs4"):
-                return "standard"
-            if value in ("enhanced", "html2text", "markdown", "md"):
-                return "enhanced" if value != "markdown" else "markdown"
-            if "html2text" in value:
-                return "enhanced"
-            if "beautifulsoup" in value or "beautiful_soup" in value:
-                return "standard"
-            return value
-
-        def _text_analysis_extraction_method():
-            for source in (
-                lambda: getattr(self, "text_extraction_method_var", None),
-                lambda: getattr(self, "config", {}).get("text_extraction_method"),
-                lambda: os.environ.get("TEXT_EXTRACTION_METHOD"),
-            ):
-                try:
-                    value = source()
-                except Exception:
-                    value = None
-                method = _normalize_text_analysis_method(value)
-                if method:
-                    return method
-
-            try:
-                enhanced_radio = getattr(self, "enhanced_extraction_radio", None)
-                standard_radio = getattr(self, "standard_extraction_radio", None)
-                if enhanced_radio is not None and enhanced_radio.isChecked():
-                    return "enhanced"
-                if standard_radio is not None and standard_radio.isChecked():
-                    return "standard"
-            except Exception:
-                pass
-
-            profile_lower = _current_profile_name().strip().lower()
-            if "_html2text" in profile_lower or "html2text" in profile_lower:
-                return "enhanced"
-            if "_beautifulsoup" in profile_lower or "beautifulsoup" in profile_lower:
-                return "standard"
-            return ""
-
-        def _text_analysis_is_beautifulsoup_mode():
-            if not _text_analysis_profile_allowed():
-                return False
-            method = _text_analysis_extraction_method()
-            if method in ("enhanced", "html2text", "markdown"):
-                return False
-            return method == "standard"
-
         def _text_analysis_sidecars():
-            if not _text_analysis_is_beautifulsoup_mode():
-                return []
             return _sdlxliff_sidecar_paths_for_output_dir(output_dir)
 
         text_analysis_btn = QPushButton("🔍 Review source -> output")
@@ -4273,14 +4208,14 @@ class RetranslationMixin:
                 border-color: #7bb3e0;
             }
         """)
-        text_analysis_btn.setVisible(False)
+        text_analysis_btn.setVisible(True)
 
         def _update_text_analysis_button():
             try:
                 sidecars = _text_analysis_sidecars()
-                visible = bool(sidecars)
-                text_analysis_btn.setVisible(visible)
-                if visible:
+                text_analysis_btn.setVisible(True)
+                text_analysis_btn.setEnabled(True)
+                if sidecars:
                     if len(sidecars) == 1:
                         text_analysis_btn.setToolTip(f"Review source/output text analysis\n{sidecars[0]}")
                     else:
@@ -4289,12 +4224,13 @@ class RetranslationMixin:
                         )
                 else:
                     text_analysis_btn.setToolTip(
-                        "Text Analysis is available for BeautifulSoup outputs with SDLXLIFF sidecars."
+                        "Review source/output text analysis. No SDLXLIFF sidecars were found for this output folder yet."
                     )
             except RuntimeError:
                 pass
             except Exception:
-                text_analysis_btn.setVisible(False)
+                text_analysis_btn.setVisible(True)
+                text_analysis_btn.setEnabled(True)
 
         def _show_text_analysis():
             sidecars = _text_analysis_sidecars()
@@ -4302,7 +4238,7 @@ class RetranslationMixin:
                 self._show_message(
                     'info',
                     "Text Analysis Unavailable",
-                    "No BeautifulSoup SDLXLIFF sidecars were found for this output folder.",
+                    "No SDLXLIFF sidecars were found for this output folder.",
                     parent=dialog,
                 )
                 return
