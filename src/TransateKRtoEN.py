@@ -204,7 +204,7 @@ def _write_html_sdlxliff_sidecar(output_dir, output_filename, chapter, source_ht
         return None
 
     chapter = chapter if isinstance(chapter, dict) else {}
-    if chapter.get("enhanced_extraction") or chapter.get("sdlxliff_batch") or chapter.get("sdlxliff_segment"):
+    if chapter.get("sdlxliff_batch") or chapter.get("sdlxliff_segment"):
         return None
 
     output_name = os.path.basename(str(output_filename).replace("\\", "/"))
@@ -7358,15 +7358,10 @@ class BatchTranslationProcessor:
             # CRITICAL: Unescape img tags that were converted to HTML entities (applies to ALL HTML)
             # Pattern matches: &lt;img ... /&gt; where the tag ends with /
             # Post-process: Fix empty attribute tags (LLM Token Fix).
-            # The BS toggle handles BS-mode output; the EXTRACT toggle also
-            # runs the same helper on html2text/enhanced-mode output so LLM
-            # hallucinations like <a a="" b=""></a> emitted by the model are
-            # cleaned regardless of which extractor fed the prompt. The two
-            # branches are mutually exclusive on the ``enhanced_extraction``
-            # flag so both toggles remain independent.
-            if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
-                cleaned = _fix_empty_attr_tags_bs(cleaned)
-            elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and chapter.get('enhanced_extraction', False):
+            # The extraction toggle now applies to both BeautifulSoup and
+            # html2text output; FIX_EMPTY_ATTR_TAGS_BS is mirrored only for
+            # compatibility with older config/env consumers.
+            if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0')) == '1':
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
 
             if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not chapter.get('enhanced_extraction', False):
@@ -8105,16 +8100,13 @@ class BatchTranslationProcessor:
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
                 
                 # Post-process: Fix empty attribute tags (LLM Token Fix).
-                # Mirror the per-chapter logic: BS toggle handles all-BS
-                # merged groups; EXTRACT toggle handles merged groups where
-                # at least one chapter was extracted in enhanced mode.
+                # Mirror the per-chapter logic: one extraction toggle handles
+                # both BeautifulSoup and html2text merged groups.
                 try:
                     enhanced_group_check = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
                 except Exception:
                     enhanced_group_check = False
-                if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not enhanced_group_check:
-                    cleaned = _fix_empty_attr_tags_bs(cleaned)
-                elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and enhanced_group_check:
+                if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0')) == '1':
                     cleaned = _fix_empty_attr_tags_bs(cleaned)
 
                 if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not enhanced_group_check:
@@ -23529,13 +23521,9 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             # Post-process: Fix empty attribute tags (LLM Token Fix).
-            # BS toggle handles BS-mode output; EXTRACT toggle runs the same
-            # helper on html2text/enhanced-mode output so LLM hallucinations
-            # emitted by the model get cleaned here too. The two branches
-            # stay mutually exclusive on the ``enhanced_extraction`` flag.
-            if os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0') == '1' and not c.get('enhanced_extraction', False):
-                cleaned = _fix_empty_attr_tags_bs(cleaned)
-            elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and c.get('enhanced_extraction', False):
+            # One extraction toggle handles both BeautifulSoup and html2text
+            # output; FIX_EMPTY_ATTR_TAGS_BS remains as a compatibility alias.
+            if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', os.getenv('FIX_EMPTY_ATTR_TAGS_BS', '0')) == '1':
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
 
             if os.getenv('FIX_STRAY_P_GT_BS', '0') == '1' and not c.get('enhanced_extraction', False):

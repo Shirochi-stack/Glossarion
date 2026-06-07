@@ -2278,7 +2278,7 @@ Text to analyze:
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
-        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', True)
         self.use_title_var = self.config.get('use_title', False)
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
@@ -2295,10 +2295,16 @@ Text to analyze:
         
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
-        # Fix Empty Attribute Tags toggles (persisted in config)
+        # Fix Empty Attribute Tags toggles (persisted in config). The extraction
+        # fix is now canonical for both BeautifulSoup and html2text; keep the
+        # old BS flag mirrored for compatibility with older code paths/configs.
         self.fix_empty_attr_tags_epub_var = self.config.get('fix_empty_attr_tags_epub', False)
-        self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
-        self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
+        self.fix_empty_attr_tags_extract_var = bool(
+            self.config.get('fix_empty_attr_tags_extract', False)
+            or self.config.get('fix_empty_attr_tags_bs', False)
+        )
+        self.fix_empty_attr_tags_bs_var = self.fix_empty_attr_tags_extract_var
+        self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
         self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
         self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
         self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
@@ -2309,7 +2315,7 @@ Text to analyze:
         # Sync environment on startup for downstream components
         os.environ['FIX_EMPTY_ATTR_TAGS_EPUB'] = '1' if self.fix_empty_attr_tags_epub_var else '0'
         os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
-        os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_bs_var else '0'
+        os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if self.fix_empty_attr_tags_extract_var else '0'
         os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.fix_stray_p_gt_epub_var else '0'
         os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.fix_stray_p_gt_bs_var else '0'
         os.environ['OUTPUT_SDLXLIFF'] = '1' if self.output_sdlxliff_var else '0'
@@ -4329,7 +4335,7 @@ Recent translations to summarize:
             self.toggle_token_btn.setText("Enable Input Token Limit")
             self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")  # success-outline
             if hasattr(self, 'generate_review_btn'):
-                self.generate_review_btn.setEnabled(False)
+                self.generate_review_btn.setEnabled(True)
         
         # Initial review indicator check (deferred so selected_files is populated)
         QTimer.singleShot(500, lambda: self._update_review_indicator() if hasattr(self, '_update_review_indicator') else None)
@@ -9023,11 +9029,8 @@ Recent translations to summarize:
             text = self.token_limit_entry.text()
             digits = text.replace(',', '').strip()
 
-            # Disable Generate Review when field is empty or non-numeric
             if hasattr(self, 'generate_review_btn'):
-                has_valid_value = digits.isdigit() and int(digits) > 0
-                not_busy = not self._is_any_process_running()
-                self.generate_review_btn.setEnabled(has_valid_value and not_busy)
+                self.generate_review_btn.setEnabled(True)
 
             if not digits.isdigit():
                 return
@@ -9053,7 +9056,7 @@ Recent translations to summarize:
             "padding: 4px 10px; border-radius: 3px; font-size: 9pt; }"
             "QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }"
         )
-        self.generate_review_btn.setEnabled(not self.token_limit_disabled)
+        self.generate_review_btn.setEnabled(True)
         self.generate_review_btn.clicked.connect(self._open_review_dialog)
         token_limit_layout.addWidget(self.generate_review_btn)
         
@@ -15097,7 +15100,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set essential environment variables from current config before translation
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', True) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
-                os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', False) else '0'
+                os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', True) else '0'
                 os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.config.get('fix_stray_p_gt_epub', False) else '0'
@@ -18287,7 +18290,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
-            'ALLOW_AI_MARKDOWN_HEADERS': "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0",
+            'ALLOW_AI_MARKDOWN_HEADERS': "1" if getattr(self, 'allow_ai_markdown_headers_var', True) else "0",
             'METADATA_SYSTEM_PROMPT': self.config.get('metadata_system_prompt', '').replace('{target_lang}', self.config.get('output_language', 'English')),
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
             'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
@@ -20092,7 +20095,7 @@ Important rules:
             os.environ['PARTIAL_B2_ENTRIES_PER_REQUEST'] = str(getattr(self, 'partial_b2_entries_per_request_var', self.config.get('partial_b2_entries_per_request', '-1')))
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
-            os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0"
+            os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = "1" if getattr(self, 'allow_ai_markdown_headers_var', True) else "0"
             # Set Chapter Headers prompts from config - replace {target_lang} with output language
             output_lang = self.config.get('output_language', 'English')
             batch_header_system_prompt = self.config.get('batch_header_system_prompt',
@@ -20218,9 +20221,8 @@ Important rules:
            self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
            self.token_limit_disabled = True
-           # Disable Generate Review button when token limit is off
            if hasattr(self, 'generate_review_btn'):
-               self.generate_review_btn.setEnabled(False)
+               self.generate_review_btn.setEnabled(True)
        else:
            self.token_limit_entry.setEnabled(True)
            if not self.token_limit_entry.text().replace(',', '').strip():
@@ -20229,9 +20231,8 @@ Important rules:
            self.toggle_token_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; font-weight: bold; } QPushButton:disabled { background-color: #3a3a3a; color: #6a6a6a; border: 1px solid #4a4a4a; }")
            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.text()} tokens (applies to both translation and glossary extraction)")
            self.token_limit_disabled = False
-           # Re-enable Generate Review button only if no process is running
            if hasattr(self, 'generate_review_btn'):
-               self.generate_review_btn.setEnabled(not self._is_any_process_running())
+               self.generate_review_btn.setEnabled(True)
 
     def _open_review_dialog(self):
        """Open the review generation dialog for the currently selected file."""
@@ -20636,11 +20637,10 @@ Important rules:
                if getattr(self, 'qa_spinner', None):
                    self.qa_spinner.stop()
 
-       # Generate Review button — disable while any task is running
+       # Keep the review button visible/clickable; the click handler owns
+       # validation and warning feedback.
        if hasattr(self, 'generate_review_btn'):
-           token_limit_enabled = not getattr(self, 'token_limit_disabled', False)
-           can_review = token_limit_enabled and not any_process_running
-           self.generate_review_btn.setEnabled(can_review)
+           self.generate_review_btn.setEnabled(True)
 
        # Review dialog's Start Review / Review All buttons
        review_dlg = getattr(self, '_review_dialog', None)
@@ -26802,7 +26802,7 @@ Important rules:
                 ('update_html_headers', ['update_html_headers_var'], False, bool),
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
-                ('allow_ai_markdown_headers', ['allow_ai_markdown_headers_var'], False, bool),
+                ('allow_ai_markdown_headers', ['allow_ai_markdown_headers_var'], True, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
                 ('vision_ocr_skip_translation', ['vision_ocr_skip_translation_var'], False, bool),
@@ -28325,7 +28325,7 @@ Important rules:
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
-                ('ALLOW_AI_MARKDOWN_HEADERS', '1' if getattr(self, 'allow_ai_markdown_headers_var', False) else '0'),
+                ('ALLOW_AI_MARKDOWN_HEADERS', '1' if getattr(self, 'allow_ai_markdown_headers_var', True) else '0'),
                 ('USE_TITLE', '1' if getattr(self, 'use_title_var', False) else '0'),
 
                 # Extraction mode

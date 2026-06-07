@@ -8465,11 +8465,43 @@ def _create_processing_options_section(self, parent):
     empty_attr_epub_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(empty_attr_epub_cb)
     
-    empty_attr_epub_desc = QLabel("Escapes tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt; so they render as &lt;tag attr&gt;.")
+    empty_attr_epub_desc = QLabel("During EPUB conversion, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
     empty_attr_epub_desc.setStyleSheet("color: gray; font-size: 10pt;")
     empty_attr_epub_desc.setContentsMargins(20, 0, 0, 5)
     empty_attr_epub_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(empty_attr_epub_desc)
+
+    # Fix Empty Attribute Tags (Extraction) - shared BeautifulSoup/html2text LLM token fix
+    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
+    try:
+        if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
+            self.fix_empty_attr_tags_extract_var = bool(
+                self.config.get('fix_empty_attr_tags_extract', False)
+                or self.config.get('fix_empty_attr_tags_bs', False)
+            )
+        self.fix_empty_attr_tags_bs_var = bool(self.fix_empty_attr_tags_extract_var)
+        self.config['fix_empty_attr_tags_extract'] = bool(self.fix_empty_attr_tags_extract_var)
+        empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
+    except Exception:
+        pass
+    def _on_empty_attr_extract_toggle(checked):
+        try:
+            self.fix_empty_attr_tags_extract_var = bool(checked)
+            self.fix_empty_attr_tags_bs_var = bool(checked)
+            self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
+            os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if checked else '0'
+            os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    empty_attr_extract_cb.toggled.connect(_on_empty_attr_extract_toggle)
+    empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(empty_attr_extract_cb)
+
+    empty_attr_extract_desc = QLabel("During extraction cleanup, converts hallucinated empty-attribute tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>to visible text &lt;tag attr&gt;.")
+    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 5)
+    empty_attr_extract_desc.setTextFormat(Qt.RichText)
+    left_v.addWidget(empty_attr_extract_desc)
 
     # Fix stray p&gt; text artifacts (EPUB)
     stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix")
@@ -8533,6 +8565,30 @@ def _create_processing_options_section(self, parent):
     number_spacing_desc.setStyleSheet("color: gray; font-size: 10pt;")
     number_spacing_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(number_spacing_desc)
+
+    # Output SDLXLIFF sidecar files for HTML translations
+    output_sdlxliff_cb = self._create_styled_checkbox("Output SDLXLIFF")
+    try:
+        if not hasattr(self, 'output_sdlxliff_var'):
+            self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
+        output_sdlxliff_cb.setChecked(bool(self.output_sdlxliff_var))
+    except Exception:
+        pass
+    def _on_output_sdlxliff_toggle(checked):
+        try:
+            self.output_sdlxliff_var = bool(checked)
+            self.config['output_sdlxliff'] = self.output_sdlxliff_var
+            os.environ['OUTPUT_SDLXLIFF'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_sdlxliff_cb.toggled.connect(_on_output_sdlxliff_toggle)
+    output_sdlxliff_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(output_sdlxliff_cb)
+
+    output_sdlxliff_desc = QLabel("Writes an SDLXLIFF review sidecar for each HTML output.")
+    output_sdlxliff_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_sdlxliff_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_sdlxliff_desc)
 
     # Skip Thinking for Lightweight Tasks
     skip_thinking_title = QLabel("Skip Thinking for Lightweight Tasks")
@@ -8656,33 +8712,6 @@ def _create_processing_options_section(self, parent):
     think_slider_h.addStretch()
     left_v.addLayout(think_slider_h)
 
-    # Fix Empty Attribute Tags (Extraction) - html2text-specific LLM token fix
-    empty_attr_extract_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (Extraction) - LLM Token Fix")
-    try:
-        # Default to config value (fallback False)
-        if not hasattr(self, 'fix_empty_attr_tags_extract_var'):
-            self.fix_empty_attr_tags_extract_var = self.config.get('fix_empty_attr_tags_extract', False)
-        empty_attr_extract_cb.setChecked(bool(self.fix_empty_attr_tags_extract_var))
-    except Exception:
-        pass
-    def _on_empty_attr_extract_toggle(checked):
-        try:
-            self.fix_empty_attr_tags_extract_var = bool(checked)
-            self.config['fix_empty_attr_tags_extract'] = self.fix_empty_attr_tags_extract_var
-            os.environ['FIX_EMPTY_ATTR_TAGS_EXTRACT'] = '1' if checked else '0'
-        except Exception:
-            pass
-    empty_attr_extract_cb.toggled.connect(_on_empty_attr_extract_toggle)
-    empty_attr_extract_cb.setContentsMargins(0, 2, 0, 0)
-    
-    empty_attr_extract_desc = QLabel("LLM Post-Process Fix: Preserves hallucinated tags like &lt;tag attr=\"\"&gt;&lt;/tag&gt;<br>by converting them to visible text &lt;tag attr&gt;")
-    empty_attr_extract_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    empty_attr_extract_desc.setContentsMargins(20, 0, 0, 3)
-    empty_attr_extract_desc.setTextFormat(Qt.RichText)
-    # left_v.addWidget(empty_attr_extract_desc)
-    
-    
-
     left_v.addStretch()
     columns_h.addWidget(left_column)
     
@@ -8761,7 +8790,7 @@ def _create_processing_options_section(self, parent):
         self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
 
     if not hasattr(self, 'allow_ai_markdown_headers_var'):
-        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', True)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
@@ -8801,31 +8830,6 @@ def _create_processing_options_section(self, parent):
     bs_opts_v = QVBoxLayout(self.bs_options_frame)
     bs_opts_v.setContentsMargins(20, 5, 0, 0)
     
-    # Fix Empty Attribute Tags (BeautifulSoup) - standard mode LLM token fix
-    empty_attr_bs_cb = self._create_styled_checkbox("Fix Empty Attribute Tags (BeautifulSoup) - LLM Token Fix")
-    try:
-        if not hasattr(self, 'fix_empty_attr_tags_bs_var'):
-            self.fix_empty_attr_tags_bs_var = self.config.get('fix_empty_attr_tags_bs', False)
-        empty_attr_bs_cb.setChecked(bool(self.fix_empty_attr_tags_bs_var))
-    except Exception:
-        pass
-    def _on_empty_attr_bs_toggle(checked):
-        try:
-            self.fix_empty_attr_tags_bs_var = bool(checked)
-            self.config['fix_empty_attr_tags_bs'] = self.fix_empty_attr_tags_bs_var
-            os.environ['FIX_EMPTY_ATTR_TAGS_BS'] = '1' if checked else '0'
-        except Exception:
-            pass
-    empty_attr_bs_cb.toggled.connect(_on_empty_attr_bs_toggle)
-    empty_attr_bs_cb.setContentsMargins(0, 2, 0, 0)
-    bs_opts_v.addWidget(empty_attr_bs_cb)
-    
-    empty_attr_bs_desc = QLabel("Escapes hallucinated tags like &lt;tag attr=\"\"&gt; to visible text (Standard mode)")
-    empty_attr_bs_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    empty_attr_bs_desc.setContentsMargins(20, 0, 0, 3)
-    empty_attr_bs_desc.setTextFormat(Qt.RichText)
-    bs_opts_v.addWidget(empty_attr_bs_desc)
-
     # Fix stray p&gt; text artifacts (BeautifulSoup)
     stray_p_gt_bs_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (BeautifulSoup) - Gemma Token Fix")
     try:
@@ -8851,30 +8855,6 @@ def _create_processing_options_section(self, parent):
     stray_p_gt_bs_desc.setTextFormat(Qt.RichText)
     bs_opts_v.addWidget(stray_p_gt_bs_desc)
 
-    # Output SDLXLIFF sidecar files for BeautifulSoup-mode HTML translations
-    output_sdlxliff_cb = self._create_styled_checkbox("Output sdlxliff")
-    try:
-        if not hasattr(self, 'output_sdlxliff_var'):
-            self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
-        output_sdlxliff_cb.setChecked(bool(self.output_sdlxliff_var))
-    except Exception:
-        pass
-    def _on_output_sdlxliff_toggle(checked):
-        try:
-            self.output_sdlxliff_var = bool(checked)
-            self.config['output_sdlxliff'] = self.output_sdlxliff_var
-            os.environ['OUTPUT_SDLXLIFF'] = '1' if checked else '0'
-        except Exception:
-            pass
-    output_sdlxliff_cb.toggled.connect(_on_output_sdlxliff_toggle)
-    output_sdlxliff_cb.setContentsMargins(0, 2, 0, 0)
-    bs_opts_v.addWidget(output_sdlxliff_cb)
-
-    output_sdlxliff_desc = QLabel("Writes an SDLXLIFF review sidecar for each BeautifulSoup-mode HTML output")
-    output_sdlxliff_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    output_sdlxliff_desc.setContentsMargins(20, 0, 0, 3)
-    bs_opts_v.addWidget(output_sdlxliff_desc)
-    
     # Halgakos icon for BeautifulSoup mode
     halgakos_label = QLabel()
     _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -9032,10 +9012,6 @@ def _create_processing_options_section(self, parent):
     escape_snob_desc.setStyleSheet("color: gray; font-size: 8pt;")
     escape_snob_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(escape_snob_desc)
-    
-    # Fix Empty Attribute Tags (Extraction) — html2text-specific LLM token fix
-    enhanced_opts_v.addWidget(empty_attr_extract_cb)
-    enhanced_opts_v.addWidget(empty_attr_extract_desc)
     
     # Markdown2 converter option
     markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")
