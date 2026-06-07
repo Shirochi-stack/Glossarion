@@ -328,9 +328,163 @@ def _terminate_psutil_children(timeout: float = 1.5) -> int:
         return 0
 
 
+def _parse_pid_lines(output) -> list[int]:
+    pids = []
+    try:
+        text = output if isinstance(output, str) else (output or b"").decode(errors="ignore")
+    except Exception:
+        text = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.isdigit():
+            continue
+        try:
+            pid = int(line)
+        except Exception:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def _run_pid_query_command(args, timeout: float):
+    proc = None
+    try:
+        proc = popen_no_window(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        stdout, _stderr = proc.communicate(timeout=timeout)
+        return stdout or "", getattr(proc, "pid", None)
+    except subprocess.TimeoutExpired:
+        try:
+            terminate_subprocess_tree(proc, kill=True, timeout=0.5)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return "", getattr(proc, "pid", None) if proc is not None else None
+
+
+def _windows_direct_child_pids(parent_pid: int, timeout: float = 0.8) -> list[int]:
+    if os.name != "nt" or not parent_pid:
+        return []
+
+    # WMIC is fast when available. Newer Windows images may not include it, so
+    # keep PowerShell/CIM as a fallback.
+    try:
+        stdout, query_pid = _run_pid_query_command(
+            [
+                "wmic",
+                "process",
+                "where",
+                f"(ParentProcessId={int(parent_pid)})",
+                "get",
+                "ProcessId",
+                "/value",
+            ],
+            timeout=timeout,
+        )
+        pids = []
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line.lower().startswith("processid="):
+                continue
+            value = line.split("=", 1)[1].strip()
+            if value.isdigit():
+                pid = int(value)
+                if pid != query_pid and pid != parent_pid:
+                    pids.append(pid)
+        if pids:
+            return pids
+    except Exception:
+        pass
+
+    try:
+        stdout, query_pid = _run_pid_query_command(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process "
+                    f"-Filter 'ParentProcessId={int(parent_pid)}' "
+                    "| ForEach-Object { $_.ProcessId }"
+                ),
+            ],
+            timeout=timeout,
+        )
+        return [
+            pid for pid in _parse_pid_lines(stdout)
+            if pid != query_pid and pid != parent_pid
+        ]
+    except Exception:
+        return []
+
+
+def _terminate_windows_descendants(timeout: float = 1.5) -> int:
+    """Native Windows descendant sweep used when psutil is unavailable/misses."""
+    if os.name != "nt":
+        return 0
+
+    root_pid = os.getpid()
+    seen = {root_pid}
+    queue = [root_pid]
+    descendants = []
+    deadline = time.monotonic() + max(0.2, float(timeout or 0.2))
+
+    while queue and time.monotonic() < deadline:
+        parent_pid = queue.pop(0)
+        child_pids = _windows_direct_child_pids(parent_pid, timeout=0.6)
+        for child_pid in child_pids:
+            if child_pid in seen:
+                continue
+            seen.add(child_pid)
+            descendants.append(child_pid)
+            queue.append(child_pid)
+
+    # Kill deepest children first, then direct children. taskkill /T on each PID
+    # handles races where a child spawned another child after enumeration.
+    for pid in reversed(descendants):
+        try:
+            _taskkill_pid_tree(pid, force=True, timeout=min(1.0, max(0.2, timeout)))
+        except Exception:
+            pass
+
+    return len(descendants)
+
+
 def terminate_current_process_children(timeout: float = 1.5) -> int:
     """Terminate descendants of this process; returns the initial child count."""
-    return _terminate_psutil_children(timeout=timeout)
+    count = _terminate_psutil_children(timeout=timeout)
+    try:
+        count = max(count, _terminate_windows_descendants(timeout=timeout))
+    except Exception:
+        pass
+    return count
+
+
+def _terminate_all_children_for_shutdown(timeout: float = 1.5) -> int:
+    """Terminate Python and native child processes before one-file cleanup."""
+    count = 0
+    try:
+        _terminate_multiprocessing_children(timeout=timeout)
+    except Exception:
+        pass
+    try:
+        count = max(count, _terminate_psutil_children(timeout=timeout))
+    except Exception:
+        pass
+    try:
+        count = max(count, _terminate_windows_descendants(timeout=timeout))
+    except Exception:
+        pass
+    return count
 
 
 def _taskkill_self_tree() -> None:
@@ -980,25 +1134,9 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     else:
         print("[CLOSE] Skipping duplicate Qt shutdown event drain")
     # Kill descendants first so their handles to _MEIPASS drop before the
-    # bootloader tries to rmtree it after we return. These two scanners overlap
-    # but wait on different APIs, so run them together and ignore races.
-    try:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=2,
-            thread_name_prefix="shutdown-child-sweep",
-        ) as pool:
-            futures = [
-                pool.submit(_terminate_multiprocessing_children),
-                pool.submit(_terminate_psutil_children),
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()
-                except Exception:
-                    pass
-    except Exception:
-        _terminate_multiprocessing_children()
-        _terminate_psutil_children()
+    # bootloader tries to rmtree it after we return. The helper includes a
+    # native Windows fallback for Lite builds where psutil is missing/broken.
+    _terminate_all_children_for_shutdown(timeout=1.5)
     _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
     # Disabled by default. Killing our own process tree with taskkill can
     # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and
