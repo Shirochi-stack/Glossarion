@@ -10,7 +10,7 @@ import re
 import html as html_lib
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
@@ -146,6 +146,7 @@ class SDLXLIFFReviewDialog(QDialog):
     }
     REVIEW_ROW_MIN_HEIGHT = 96
     REVIEW_ROW_MAX_HEIGHT = 220
+    TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
 
     def __init__(self, output_dir, current_path=None, parent=None, config=None):
         super().__init__(parent)
@@ -252,7 +253,7 @@ class SDLXLIFFReviewDialog(QDialog):
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(8)
         header_row.addWidget(self.header_label, 1)
-        self.translate_tooltips_btn = QPushButton("Translate Tool Tips")
+        self.translate_tooltips_btn = QPushButton(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT)
         self.translate_tooltips_btn.setCursor(Qt.PointingHandCursor)
         self.translate_tooltips_btn.setToolTip("Translate source-row tooltips with google-translate-free.")
         self.translate_tooltips_btn.setStyleSheet(
@@ -1984,7 +1985,10 @@ class SDLXLIFFReviewDialog(QDialog):
         if not work:
             try:
                 self.translate_tooltips_btn.setText(ready_text)
-                QTimer.singleShot(1200, lambda: self.translate_tooltips_btn.setText("Translate Tool Tips"))
+                QTimer.singleShot(
+                    1200,
+                    lambda: self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT),
+                )
             except Exception:
                 pass
             return False
@@ -2069,7 +2073,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_running = False
         try:
             self.translate_tooltips_btn.setEnabled(True)
-            self.translate_tooltips_btn.setText("Translate Tool Tips")
+            self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT)
         except Exception:
             pass
         if 0 <= row < len(self.pieces):
@@ -2136,24 +2140,12 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _open_google_translate(self, text, target_code):
-        text = str(text or "").strip()
-        if not text:
-            return
-        encoded = quote(text, safe="")
-        url = f"https://translate.google.com/?sl=auto&tl={target_code}&text={encoded}&op=translate"
-        try:
-            QDesktopServices.openUrl(QUrl(url))
-        except Exception:
-            pass
-
     def _show_review_text_context_menu(
         self,
         widget,
         pos,
         edit_callback=None,
         translate_tooltip_callback=None,
-        tooltip_is_translated=False,
         inject_machine_translation_callback=None,
     ):
         selected = self._selected_text_for_widget(widget).strip()
@@ -2167,7 +2159,6 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 clipboard_text = ""
         target_lang = self._review_target_language()
-        target_code = self._review_target_language_code()
 
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -2201,8 +2192,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         if translate_tooltip_callback is not None:
             menu.addSeparator()
-            tooltip_action_text = "\U0001fa84  Retranslate tooltip" if tooltip_is_translated else "\U0001fa84  Translate tooltip"
-            tooltip_action = menu.addAction(tooltip_action_text)
+            tooltip_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
             tooltip_action.setEnabled(not self._tooltip_translation_running and bool(self._all_text_for_widget(widget).strip()))
             tooltip_action.triggered.connect(lambda _checked=False: translate_tooltip_callback())
 
@@ -2211,11 +2201,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 menu.addSeparator()
             inject_action = menu.addAction("\U0001f4e5  Inject Machine Translation")
             inject_action.triggered.connect(lambda _checked=False: inject_machine_translation_callback())
-
-        menu.addSeparator()
-        gt_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
-        gt_action.setEnabled(has_selection)
-        gt_action.triggered.connect(lambda: self._open_google_translate(selected, target_code))
 
         menu.exec(widget.mapToGlobal(pos))
 
@@ -2465,7 +2450,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 lbl,
                 pos,
                 translate_tooltip_callback=translate_tooltip_callback,
-                tooltip_is_translated=bool(str(tooltip_translation or "").strip()),
                 inject_machine_translation_callback=inject_machine_translation_callback,
             )
         )
@@ -2866,9 +2850,9 @@ class RetranslationMixin:
         except Exception:
             pass
         try:
-            return bool(getattr(self, 'config', {}).get(self._RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY, False))
+            return bool(getattr(self, 'config', {}).get(self._RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY, True))
         except Exception:
-            return False
+            return True
 
     def _persist_retranslation_show_model_info_state(self, enabled):
         """Persist the Show Model Info preference across app sessions."""
