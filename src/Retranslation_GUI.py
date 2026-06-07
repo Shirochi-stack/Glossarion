@@ -226,6 +226,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdl_review_loading_original_pixmap = None
         self._sdl_review_loading_angle = 0
         self._review_loading_minimum_ms = 10
+        self._review_dirty_preview_refresh_queued = False
         self._status_jump_indices = {}
         self._highlighted_status_frame = None
         self._book_nav_combo = None
@@ -234,6 +235,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._book_nav_counter = None
         self._book_nav_updating = False
         self._last_review_signature = None
+        self._last_machine_translation_signature = None
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
         self._review_data_loaded = False
@@ -247,6 +249,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         try:
             self._last_review_signature = self._current_review_signature()
+            self._last_machine_translation_signature = self._current_machine_translation_signature()
         except Exception:
             pass
 
@@ -409,13 +412,24 @@ class SDLXLIFFReviewDialog(QDialog):
         QTimer.singleShot(max(0, int(delay_ms)), _run_refresh)
 
     def _current_review_signature(self):
+        signature = []
+        for output_dir in self._review_output_dirs():
+            for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
+                try:
+                    stat = os.stat(path)
+                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))))
+                except Exception:
+                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), -1, -1))
+        return tuple(sorted(signature))
+
+    def _review_output_dirs(self):
         dirs = []
         if self._book_entries:
             dirs.extend(entry.get("output_dir") for entry in self._book_entries if entry.get("output_dir"))
         elif self.output_dir:
             dirs.append(self.output_dir)
         seen = set()
-        signature = []
+        output_dirs = []
         for output_dir in dirs:
             try:
                 norm_dir = os.path.normcase(os.path.abspath(output_dir))
@@ -424,12 +438,12 @@ class SDLXLIFFReviewDialog(QDialog):
             if norm_dir in seen:
                 continue
             seen.add(norm_dir)
-            for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
-                try:
-                    stat = os.stat(path)
-                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))))
-                except Exception:
-                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), -1, -1))
+            output_dirs.append(output_dir)
+        return output_dirs
+
+    def _current_machine_translation_signature(self):
+        signature = []
+        for output_dir in self._review_output_dirs():
             mt_dir = os.path.join(output_dir, "SDLXLIFF", _MACHINE_TRANSLATION_DIR)
             try:
                 mt_dir_norm = os.path.normcase(os.path.abspath(mt_dir))
@@ -697,8 +711,10 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
             signature = self._current_review_signature()
+            mt_signature = self._current_machine_translation_signature()
             autogen_signature = self._current_review_autogen_signature()
             sidecar_changed = signature != self._last_review_signature
+            mt_changed = mt_signature != self._last_machine_translation_signature
             autogen_changed = autogen_signature != self._last_autogen_signature
             if sidecar_changed or autogen_changed:
                 self.refresh_review_data(
@@ -706,6 +722,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     signature=signature,
                     seamless=True,
                 )
+            elif mt_changed:
+                if self._tooltip_translation_running:
+                    self._last_machine_translation_signature = mt_signature
+                else:
+                    self._reload_machine_translation_previews(signature=mt_signature)
         except Exception:
             pass
 
@@ -756,6 +777,10 @@ class SDLXLIFFReviewDialog(QDialog):
             self._review_data_loaded = True
             self._populate_piece_list()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
+            try:
+                self._last_machine_translation_signature = self._current_machine_translation_signature()
+            except Exception:
+                pass
             try:
                 self._last_autogen_signature = self._current_review_autogen_signature()
             except Exception:
@@ -2363,6 +2388,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if page is None or self.rows_stack.currentWidget() is not page:
                 return
             self._piece_scroll_positions[row] = int(value)
+            self._queue_refresh_current_visible_dirty_source_previews()
         except Exception:
             pass
 
@@ -2614,9 +2640,155 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             if sync_geometry:
                 self._refresh_review_stream_geometry(final=False)
+            row_data.pop("_source_preview_dirty", None)
             return True
         except Exception:
             return False
+
+    def _patch_review_row_machine_translation_preview(self, piece_index, row_index, frame=None, sync_geometry=True):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return False
+            piece = self.pieces[piece_index]
+            rows = piece.get("rows") or []
+            if row_index < 0 or row_index >= len(rows):
+                return False
+            row_data = rows[row_index]
+            frame = frame or self._review_row_frame(piece_index, row_index)
+            if frame is None:
+                return False
+            grid = frame.layout()
+            if not isinstance(grid, QGridLayout):
+                return False
+            source_item = grid.itemAtPosition(0, 1)
+            source_widget = source_item.widget() if source_item is not None else None
+            if source_widget is None or source_widget.objectName() != "SdlReviewSourceText":
+                return False
+            translated_label = source_widget.findChild(QLabel, "SdlReviewMachineTranslationPending")
+            if translated_label is None:
+                translated_label = source_widget.findChild(QLabel, "SdlReviewMachineTranslation")
+            if translated_label is None:
+                return False
+
+            target_item = grid.itemAtPosition(0, 5)
+            target_widget = target_item.widget() if target_item is not None else None
+            source_text = row_data.get("source", "")
+            target_text = row_data.get("target", "")
+            tooltip_translation = self._row_tooltip_translation(piece, row_data)
+            tooltip_pending = bool(row_data.get("tooltip_translation_pending"))
+            preview_text = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else tooltip_translation
+            if not str(preview_text or "").strip():
+                return False
+            translated_label.setObjectName(
+                "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"
+            )
+            translated_label.setText(preview_text if tooltip_pending else f"MT: {preview_text}")
+            if tooltip_pending:
+                translated_label.setToolTip("Google Translate preview is being generated.")
+                translated_label.setStyleSheet(
+                    "QLabel#SdlReviewMachineTranslationPending { "
+                    "color: #d8c99b; background: rgba(54, 45, 23, 180); "
+                    "border: 1px dashed #8a6f2a; border-left: 3px solid #d39e00; "
+                    "border-radius: 4px; padding: 5px 8px; font-size: 8pt; "
+                    "}"
+                )
+            else:
+                translated_label.setToolTip(self._wrapped_tooltip(tooltip_translation))
+                translated_label.setStyleSheet(
+                    "QLabel#SdlReviewMachineTranslation { "
+                    "color: #b6c7dc; background: rgba(23, 37, 54, 185); "
+                    "border: 1px solid #37536d; border-left: 3px solid #5aa7d8; "
+                    "border-radius: 4px; padding: 3px 7px; font-size: 7pt; "
+                    "}"
+                )
+
+            target_editable = bool(row_data.get("source_tag")) or bool(row_data.get("target_tag"))
+            inject_callback = (
+                lambda pi=piece_index, ri=row_index, text=tooltip_translation, ed=target_widget:
+                    self._inject_machine_translation_to_target(pi, ri, text, ed)
+            ) if tooltip_translation and target_editable and not tooltip_pending else None
+            try:
+                translated_label.customContextMenuRequested.disconnect()
+            except Exception:
+                pass
+            translated_label.customContextMenuRequested.connect(
+                lambda pos, lbl=translated_label, cb=inject_callback: self._show_review_text_context_menu(
+                    lbl,
+                    pos,
+                    inject_machine_translation_callback=cb,
+                )
+            )
+
+            row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
+            source_widget.setMaximumHeight(max(24, row_height - 14))
+            frame.setFixedHeight(row_height)
+            if target_widget is not None:
+                try:
+                    target_widget.setFixedHeight(max(30, row_height - 14))
+                except Exception:
+                    pass
+            frame.updateGeometry()
+            frame.update()
+            try:
+                grid.invalidate()
+                grid.activate()
+            except Exception:
+                pass
+            if sync_geometry:
+                self._refresh_review_stream_geometry(final=False)
+            row_data.pop("_source_preview_dirty", None)
+            return True
+        except Exception:
+            return False
+
+    def _update_review_row_source_previews(self, piece_index, row_indices, visible_only=True):
+        try:
+            frames = self._review_row_frames_by_index(piece_index)
+            if not frames:
+                return False
+            refreshed = False
+            for row_index in sorted(set(row_indices or [])):
+                frame = frames.get(row_index)
+                if frame is None:
+                    continue
+                if visible_only and not self._review_row_frame_is_near_viewport(frame):
+                    continue
+                if self._patch_review_row_machine_translation_preview(
+                    piece_index,
+                    row_index,
+                    frame=frame,
+                    sync_geometry=False,
+                ) or self._refresh_visible_review_row_source_preview(
+                    piece_index,
+                    row_index,
+                    frame=frame,
+                    sync_geometry=False,
+                ):
+                    refreshed = True
+            if refreshed:
+                self._refresh_review_stream_geometry(final=False)
+            return refreshed
+        except Exception:
+            return False
+
+    def _queue_refresh_current_visible_dirty_source_previews(self):
+        if self._review_dirty_preview_refresh_queued:
+            return
+        self._review_dirty_preview_refresh_queued = True
+        QTimer.singleShot(0, self._refresh_current_visible_dirty_source_previews)
+
+    def _refresh_current_visible_dirty_source_previews(self):
+        self._review_dirty_preview_refresh_queued = False
+        try:
+            piece_index = self._current_piece_row()
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            rows = self.pieces[piece_index].get("rows") or []
+            dirty_rows = [idx for idx, row_data in enumerate(rows) if row_data.get("_source_preview_dirty")]
+            if dirty_rows:
+                self._update_review_row_source_previews(piece_index, dirty_rows, visible_only=True)
+        except Exception:
+            pass
 
     def _refresh_visible_review_row_source_previews(self, piece_index, row_indices, visible_only=False):
         try:
@@ -2728,6 +2900,41 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             row_data["tooltip_translation"] = translated
 
+    def _reload_machine_translation_previews(self, signature=None):
+        changed_by_piece = {}
+        try:
+            for piece_index, piece in enumerate(self.pieces or []):
+                rows = piece.get("rows") or []
+                if not rows:
+                    continue
+                before = [str(row_data.get("tooltip_translation") or "") for row_data in rows]
+                for row_data in rows:
+                    row_data.pop("tooltip_translation", None)
+                self._load_machine_translation_file_for_piece(piece)
+                changed_rows = []
+                for row_index, row_data in enumerate(rows):
+                    after = str(row_data.get("tooltip_translation") or "")
+                    if before[row_index] != after:
+                        row_data["_source_preview_dirty"] = True
+                        changed_rows.append(row_index)
+                if changed_rows:
+                    changed_by_piece[piece_index] = changed_rows
+
+            current_row = self._current_piece_row()
+            for piece_index, changed_rows in changed_by_piece.items():
+                if piece_index == current_row:
+                    self._update_review_row_source_previews(piece_index, changed_rows, visible_only=True)
+                else:
+                    self._discard_piece_page(piece_index)
+        except Exception:
+            pass
+        try:
+            self._last_machine_translation_signature = (
+                signature if signature is not None else self._current_machine_translation_signature()
+            )
+        except Exception:
+            pass
+
     def _write_machine_translation_entry(self, piece, row_data, translated):
         translated = str(translated or "").strip()
         if not translated:
@@ -2801,6 +3008,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not translated:
             return
         row_data["tooltip_translation"] = translated
+        row_data["_source_preview_dirty"] = True
         self._write_machine_translation_entry(piece, row_data, translated)
 
     @staticmethod
@@ -2988,9 +3196,10 @@ class SDLXLIFFReviewDialog(QDialog):
             for row_idx, _key, _source_text, _tag_name in work:
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["tooltip_translation_pending"] = True
+                    rows[row_idx]["_source_preview_dirty"] = True
                     pending_rows.append(row_idx)
             if refresh and pending_rows:
-                self._refresh_visible_review_row_source_previews(piece_index, pending_rows, visible_only=False)
+                self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)
         except Exception:
             pass
 
@@ -3183,9 +3392,14 @@ class SDLXLIFFReviewDialog(QDialog):
                     changed_rows.add(row_index)
             if changed_rows:
                 if row == self._current_piece_row():
-                    self._refresh_visible_review_row_source_previews(row, changed_rows, visible_only=False)
+                    self._update_review_row_source_previews(row, changed_rows, visible_only=True)
                 else:
                     self._discard_piece_page(row)
+            if translations:
+                try:
+                    self._last_machine_translation_signature = self._current_machine_translation_signature()
+                except Exception:
+                    pass
         if batch_active:
             return
         if error and not translations:
