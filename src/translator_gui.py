@@ -25622,6 +25622,115 @@ Important rules:
 
         return int(assigned)
 
+    def _glossary_dir_signature(self, glossary_dir: str):
+        """Return a shallow change signature for a Glossary directory."""
+        try:
+            root = os.path.abspath(glossary_dir)
+            st = os.stat(root)
+            child_dirs = []
+            try:
+                with os.scandir(root) as entries:
+                    for entry in entries:
+                        try:
+                            if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            entry_st = entry.stat(follow_symlinks=False)
+                            child_dirs.append((entry.name.casefold(), entry_st.st_mtime_ns, entry_st.st_size))
+                        except Exception:
+                            child_dirs.append((getattr(entry, "name", "").casefold(), None, None))
+            except Exception:
+                child_dirs = []
+            child_dirs.sort()
+            return (os.path.normcase(root), st.st_mtime_ns, st.st_size, tuple(child_dirs))
+        except Exception:
+            return None
+
+    def _get_glossary_dir_candidates(self, glossary_dir: str, ext_priority):
+        """Return cached glossary file candidates for auto-mapping.
+
+        The periodic auto-map timer calls this path on the GUI thread. Keep the
+        observable matching behavior the same, but avoid re-walking unchanged
+        Glossary folders every two seconds.
+        """
+        if not glossary_dir or not os.path.isdir(glossary_dir):
+            return []
+
+        try:
+            glossary_dir = os.path.abspath(glossary_dir)
+            cache_key = os.path.normcase(glossary_dir)
+        except Exception:
+            cache_key = glossary_dir
+
+        ext_priority = tuple(ext_priority)
+        signature = self._glossary_dir_signature(glossary_dir)
+        try:
+            cache = getattr(self, '_glossary_dir_candidate_cache', None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._glossary_dir_candidate_cache = cache
+            cached = cache.get(cache_key)
+            if (
+                signature is not None
+                and cached
+                and cached.get('signature') == signature
+                and cached.get('ext_priority') == ext_priority
+            ):
+                return list(cached.get('candidates') or [])
+        except Exception:
+            cache = {}
+
+        try:
+            from glossary_paths import migrate_all_legacy_glossary_files
+            migrate_all_legacy_glossary_files(glossary_dir)
+        except Exception:
+            pass
+
+        candidates = []
+        try:
+            for root, dirs, files_in_root in os.walk(glossary_dir):
+                if root != glossary_dir:
+                    dirs[:] = []
+                for fn in files_in_root:
+                    full = os.path.join(root, fn)
+                    if not os.path.isfile(full):
+                        continue
+
+                    stem, ext = os.path.splitext(fn)
+                    stem_cf = stem.casefold()
+                    ext_l = ext.lower()
+                    if ext_l not in ext_priority:
+                        continue
+
+                    # Skip progress/metadata helpers
+                    if (
+                        stem_cf.endswith('_glossary_progress')
+                        or stem_cf.endswith('glossary_progress')
+                        or '_progress' in stem_cf
+                        or stem_cf.endswith('_gender_tracker')
+                        or stem_cf.endswith('_glossary_history')
+                    ):
+                        continue
+
+                    candidates.append((stem_cf, ext_priority.index(ext_l), full))
+        except Exception:
+            return []
+
+        try:
+            signature = self._glossary_dir_signature(glossary_dir) or signature
+            if signature is not None:
+                cache[cache_key] = {
+                    'signature': signature,
+                    'ext_priority': ext_priority,
+                    'candidates': list(candidates),
+                }
+                if len(cache) > 12:
+                    for key in list(cache.keys())[:-12]:
+                        cache.pop(key, None)
+        except Exception:
+            pass
+
+        return list(candidates)
+
     def _guess_glossary_for_input_file(self, input_path: str):
         """Auto-detect a glossary for an input file.
 
@@ -25661,44 +25770,15 @@ Important rules:
                 if not glossary_dir or not os.path.isdir(glossary_dir):
                     return None
 
-                try:
-                    from glossary_paths import migrate_all_legacy_glossary_files
-                    migrate_all_legacy_glossary_files(glossary_dir)
-                except Exception:
-                    pass
-
                 direct_matches = []
                 fuzzy_candidates = []
 
                 try:
-                    for root, dirs, files_in_root in os.walk(glossary_dir):
-                        if root != glossary_dir:
-                            dirs[:] = []
-                        for fn in files_in_root:
-                            full = os.path.join(root, fn)
-                            if not os.path.isfile(full):
-                                continue
-
-                            stem, ext = os.path.splitext(fn)
-                            stem_cf = stem.casefold()
-                            ext_l = ext.lower()
-                            if ext_l not in ext_priority:
-                                continue
-
-                            # Skip progress/metadata helpers
-                            if (
-                                stem_cf.endswith('_glossary_progress')
-                                or stem_cf.endswith('glossary_progress')
-                                or '_progress' in stem_cf
-                                or stem_cf.endswith('_gender_tracker')
-                                or stem_cf.endswith('_glossary_history')
-                            ):
-                                continue
-
-                            if stem_cf in preferred_stems:
-                                direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
-                            elif _fuzzy_enabled:
-                                fuzzy_candidates.append((stem_cf, ext_priority.index(ext_l), full))
+                    for stem_cf, ext_rank, full in self._get_glossary_dir_candidates(glossary_dir, ext_priority):
+                        if stem_cf in preferred_stems:
+                            direct_matches.append((preferred_stems.index(stem_cf), ext_rank, full))
+                        elif _fuzzy_enabled:
+                            fuzzy_candidates.append((stem_cf, ext_rank, full))
                 except Exception:
                     return None
 
