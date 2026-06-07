@@ -13,7 +13,7 @@ from lxml import etree
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from TransateKRtoEN import _write_html_sdlxliff_sidecar
-from Retranslation_GUI import SDLXLIFFReviewDialog
+from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
     _missing_beautifulsoup_tags_issue,
@@ -527,7 +527,7 @@ def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
 def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
 
-    assert "Translate Tool Tips" in source
+    assert "🌐 Generate Google Translate Preview" in source
     assert "google-translate-free" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
     assert 'name="sdlxliff-tooltip-google-translate-free"' in source
@@ -536,18 +536,32 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert 'data-sdl-tip="' in source
     assert "_start_tooltip_translation" in source
     assert "_translate_single_row_tooltip" in source
-    assert "Translate tooltip" in source
-    assert "Retranslate tooltip" in source
+    assert "_refresh_visible_review_row_source_preview" in source
+    assert "Google Translate \\u2192" in source
+    assert "_open_google_translate" not in source
+    assert "Translate tooltip" not in source
+    assert "Retranslate tooltip" not in source
     assert "Inject Machine Translation" in source
     assert "inject_machine_translation_callback" in source
+    assert "tooltip_translation_pending" in source
+    assert "⏳ Translating with Google Translate..." in source
     assert "SdlReviewSourceText" in source
     assert "SdlReviewMachineTranslation" in source
+    assert "SdlReviewMachineTranslationPending" in source
+    assert "border: 1px dashed #8a6f2a" in source
+    assert "padding: 5px 8px; font-size: 8pt" in source
     assert "border-left: 3px solid #5aa7d8" in source
     assert "background: rgba(23, 37, 54, 185)" in source
     assert "font-size: 7pt" in source
     assert "Google tooltip:" not in source
     assert "Copy translated tooltip" not in source
     assert "Inject tooltip translation into output" not in source
+    apply_start = source.index("def _apply_tooltip_translations")
+    apply_end = source.index("def _selected_text_for_widget")
+    apply_body = source[apply_start:apply_end]
+    assert "_refresh_visible_review_row_source_preview" in apply_body
+    assert "_discard_piece_page" not in apply_body
+    assert "_render_piece" not in apply_body
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
@@ -591,6 +605,18 @@ def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
     assert piece["yellow_count"] == 0
     assert piece["mismatch"] is True
     assert piece["count_ratio"] == 0.5
+
+
+def test_retranslation_show_model_info_defaults_on_but_respects_saved_false():
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    mixin.config = {}
+    mixin._retranslation_dialog_cache = {}
+
+    assert mixin._get_retranslation_show_model_info_state() is True
+
+    mixin.config = {mixin._RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY: False}
+
+    assert mixin._get_retranslation_show_model_info_state() is False
 
 
 def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
