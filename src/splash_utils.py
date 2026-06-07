@@ -751,6 +751,15 @@ class SplashManager(QObject):
         except Exception:
             pass
 
+    def _preload_epub_webengine(self):
+        """Warm EPUB Library/WebEngine imports while the splash is still visible."""
+        try:
+            importlib.import_module("PySide6.QtWebEngineCore")
+            importlib.import_module("PySide6.QtWebEngineWidgets")
+        except Exception:
+            pass
+        return importlib.import_module("epub_library")
+
     def _is_startup_module_available(self, module_name):
         try:
             return importlib.util.find_spec(module_name) is not None
@@ -830,6 +839,17 @@ class SplashManager(QObject):
                 "result": lambda mod: mod.scan_html_folder,
             },
         ]
+        if os.environ.get("GLOSSARION_PRELOAD_EPUB_LIBRARY", "1").strip().lower() not in ("0", "false", "no", "off"):
+            specs.append({
+                "key": "epub_library",
+                "loader": self._preload_epub_webengine,
+                "display": "EPUB Library",
+                "loading": "Loading EPUB Library...",
+                "loaded": "EPUB Library loaded",
+                "required": ("EpubLibraryDialog",),
+                "result": lambda mod: mod.EpubLibraryDialog,
+                "optional": True,
+            })
         results["manga_available"] = manga_available
         if manga_available:
             specs.append({
@@ -844,10 +864,12 @@ class SplashManager(QObject):
             })
 
         def _load_spec(spec):
-            module = importlib.import_module(spec["module"])
+            loader = spec.get("loader")
+            module = loader() if callable(loader) else importlib.import_module(spec["module"])
             missing = [name for name in spec["required"] if not hasattr(module, name)]
             if missing:
-                raise ImportError(f"{spec['module']} missing required attribute(s): {', '.join(missing)}")
+                module_name = spec.get("module") or spec.get("display") or spec.get("key") or "startup module"
+                raise ImportError(f"{module_name} missing required attribute(s): {', '.join(missing)}")
             return spec["key"], spec["result"](module), spec["loaded"]
 
         if os.environ.get("GLOSSARION_SERIAL_SPLASH_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
