@@ -877,6 +877,45 @@ def test_sdlxliff_review_spine_positions_include_relative_epub_paths(tmp_path):
     assert positions["piece_0001"] == 0
 
 
+def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path):
+    source = """
+<html><body>
+  <div class="u">The Girl With the Magitek Armor</div>
+  <div class="u"></div>
+  <div class="u"><em>Final Fantasy 6- The Novel</em></div>
+  <div class="u">Written by me: Celes Chere</div>
+</body></html>
+"""
+    target = """
+<html><body>
+  <p>Translated armor title</p>
+  <p><em>Translated novel subtitle</em></p>
+  <p>Translated author line</p>
+</body></html>
+"""
+    _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        "response_piece_0002.html",
+        {"original_basename": "piece_0002.xhtml"},
+        source,
+        target,
+    )
+    sidecar = tmp_path / "SDLXLIFF" / "response_piece_0002.html.sdlxliff"
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_piece_0002.html", "display_position": 2})
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert [row["source_tag"] for row in piece["rows"]] == ["p", "p", "p"]
+    assert [row["source"] for row in piece["rows"]] == [
+        "The Girl With the Magitek Armor",
+        "Final Fantasy 6- The Novel",
+        "Written by me: Celes Chere",
+    ]
+    assert piece["red_count"] == 0
+
+
 def test_sdlxliff_review_regenerates_sidecar_when_source_column_is_empty(tmp_path, monkeypatch):
     output_dir = tmp_path / "Moved Novel"
     moved_dir = tmp_path / "new location"

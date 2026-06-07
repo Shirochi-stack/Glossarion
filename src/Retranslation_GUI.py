@@ -1381,11 +1381,29 @@ class SDLXLIFFReviewDialog(QDialog):
         text = html_lib.unescape(str(html_text or ""))
         soup = BeautifulSoup(text, "html.parser")
         units = []
-        for index, tag in enumerate(soup.find_all(self.TEXT_TAGS)):
+        text_tags = set(self.TEXT_TAGS)
+
+        def _is_text_unit(tag):
+            name = str(getattr(tag, "name", "") or "").lower()
+            if name in text_tags:
+                return True
+            if name != "div":
+                return False
+            classes = tag.get("class") or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            if "u" not in {str(cls).lower() for cls in classes}:
+                return False
+            return not tag.find(self.TEXT_TAGS)
+
+        for index, tag in enumerate(soup.find_all(_is_text_unit)):
             value = tag.get_text(" ", strip=True)
+            tag_name = tag.name.lower()
+            if tag_name == "div":
+                tag_name = "p"
             units.append({
                 "index": index,
-                "tag": tag.name.lower(),
+                "tag": tag_name,
                 "text": value,
             })
         return units
