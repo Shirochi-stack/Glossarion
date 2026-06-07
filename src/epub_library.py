@@ -6167,6 +6167,10 @@ class EpubLibraryDialog(QDialog):
     # after the raw was moved into Library/Raw.
     files_reorganized = Signal(list)
 
+    _CARD_STREAM_BATCH_SIZE = 2
+    _CARD_STREAM_TICK_MS = 16
+    _CARD_STREAM_FRAME_BUDGET_SEC = 0.007
+
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("\U0001f4da Glossarion Library")
@@ -6209,6 +6213,9 @@ class EpubLibraryDialog(QDialog):
         # resolved to no cover (empty string) are cached too so the
         # loader doesn't re-run for known-failing books either.
         self._cover_path_cache: dict[str, str] = {}
+        self._card_stream_generation: dict[str, int] = {}
+        self._card_stream_states: dict[str, dict] = {}
+        self._card_stream_timers: dict[str, QTimer] = {}
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
@@ -9025,6 +9032,172 @@ class EpubLibraryDialog(QDialog):
             len(book.get("compiled_conflicts") or []),
         )
 
+    def _stop_card_stream(self, stream_key: str | None = None) -> None:
+        keys = (
+            [stream_key]
+            if stream_key
+            else list(getattr(self, "_card_stream_timers", {}).keys())
+        )
+        for key in keys:
+            timer = getattr(self, "_card_stream_timers", {}).get(key)
+            if timer is not None and timer.isActive():
+                timer.stop()
+            getattr(self, "_card_stream_states", {}).pop(key, None)
+
+    def _card_stream_timer(self, stream_key: str) -> QTimer:
+        timers = getattr(self, "_card_stream_timers", None)
+        if timers is None:
+            self._card_stream_timers = {}
+            timers = self._card_stream_timers
+        timer = timers.get(stream_key)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(False)
+            timer.setInterval(self._CARD_STREAM_TICK_MS)
+            timer.timeout.connect(
+                lambda key=stream_key: self._populate_card_grid_batch_tick(key))
+            timers[stream_key] = timer
+        return timer
+
+    def _add_streamed_card(self, state: dict, idx: int, book: dict) -> None:
+        path = book.get("path", "") or ""
+        card_cache = state["card_cache"]
+        selected_paths = state["selected_paths"]
+        preset_key = state["preset_key"]
+        show_raw_title = state["show_raw_title"]
+        sig = self._card_signature(book)
+        cached = card_cache.get(path)
+        reuse = bool(
+            cached
+            and cached[1] == sig
+            and cached[2] == preset_key
+            and cached[3] == show_raw_title
+        )
+        if reuse:
+            card = cached[0]
+            try:
+                card.book = book
+            except Exception:
+                pass
+        else:
+            if cached:
+                try:
+                    cached[0].setParent(None)
+                    cached[0].deleteLater()
+                except Exception:
+                    pass
+            card = _BookCard(
+                book, preset=state["preset"], show_raw_title=show_raw_title)
+            card.clicked.connect(self._on_card_clicked)
+            card.context_menu_requested.connect(self._show_context_menu)
+            card.select_requested.connect(self._on_card_select_requested)
+            self._install_library_drop_target(card, recursive=True)
+            cached_cover = self._cover_path_cache.get(path)
+            run_loader = False
+            if cached_cover is not None:
+                if cached_cover and cached_cover != "_none_" and os.path.isfile(cached_cover):
+                    card.set_cover(cached_cover)
+                elif cached_cover == "" and book.get("type", "epub") in ("epub", "in_progress"):
+                    self._cover_path_cache[path] = "_none_"
+                    run_loader = True
+            else:
+                run_loader = True
+            if run_loader and path:
+                loader = _CoverLoader(
+                    path,
+                    file_type=book.get("type", "epub"),
+                    config=self._config,
+                    original_path=book.get("original_path"),
+                    raw_source_path=book.get("raw_source_path"),
+                    parent=self,
+                )
+                loader.finished.connect(self._on_cover_loaded)
+                self._cover_threads.append(loader)
+                loader.start()
+        card_cache[path] = (card, sig, preset_key, show_raw_title)
+        card.set_selected(path in selected_paths)
+        state["card_list"].append(card)
+        row, col = divmod(idx, state["cols"])
+        state["grid_layout"].addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
+        card.show()
+
+    def _populate_card_grid_batch_tick(self, stream_key: str) -> None:
+        state = getattr(self, "_card_stream_states", {}).get(stream_key)
+        if not state:
+            timer = getattr(self, "_card_stream_timers", {}).get(stream_key)
+            if timer is not None:
+                timer.stop()
+            return
+        if state.get("generation") != self._card_stream_generation.get(stream_key):
+            self._stop_card_stream(stream_key)
+            return
+        books = state["books"]
+        start = int(state.get("idx", 0) or 0)
+        if start >= len(books):
+            self._finish_card_grid_stream(stream_key)
+            return
+
+        end_limit = min(start + self._CARD_STREAM_BATCH_SIZE, len(books))
+        deadline = time.perf_counter() + self._CARD_STREAM_FRAME_BUDGET_SEC
+        end = start
+        grid_widget = state.get("grid_widget")
+        updates_were_enabled = None
+        if grid_widget is not None:
+            try:
+                updates_were_enabled = grid_widget.updatesEnabled()
+                grid_widget.setUpdatesEnabled(False)
+            except Exception:
+                updates_were_enabled = None
+        try:
+            for i in range(start, end_limit):
+                self._add_streamed_card(state, i, books[i])
+                end = i + 1
+                if end > start and time.perf_counter() >= deadline:
+                    break
+        finally:
+            if grid_widget is not None and updates_were_enabled is not None:
+                try:
+                    grid_widget.setUpdatesEnabled(updates_were_enabled)
+                    grid_widget.update()
+                except Exception:
+                    pass
+        state["idx"] = end
+        if state.get("loading_visible"):
+            self._pump_loading_events()
+        if end >= len(books):
+            self._finish_card_grid_stream(stream_key)
+
+    def _finish_card_grid_stream(self, stream_key: str) -> None:
+        state = getattr(self, "_card_stream_states", {}).pop(stream_key, None)
+        timer = getattr(self, "_card_stream_timers", {}).get(stream_key)
+        if timer is not None:
+            timer.stop()
+        if not state:
+            return
+        grid_layout = state["grid_layout"]
+        books = state["books"]
+        cols = max(1, int(state.get("cols", 1) or 1))
+        for c in range(max(grid_layout.columnCount(), cols + 2, 64)):
+            grid_layout.setColumnStretch(c, 0)
+        grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        last_row = (len(books) - 1) // cols + 1
+        try:
+            row_limit = max(grid_layout.rowCount(), last_row + 2)
+        except Exception:
+            row_limit = last_row + 2
+        for r in range(row_limit):
+            grid_layout.setRowStretch(r, 0)
+        grid_layout.setRowStretch(last_row, 1)
+        grid_widget = state.get("grid_widget")
+        if grid_widget is not None:
+            try:
+                grid_widget.updateGeometry()
+                grid_widget.update()
+            except Exception:
+                pass
+        if state.get("loading_visible"):
+            self._pump_loading_events()
+
     def _populate_grid_common(
         self,
         books: list[dict],
@@ -9037,6 +9210,7 @@ class EpubLibraryDialog(QDialog):
         card_cache: dict | None = None,
         full_books: list[dict] | None = None,
         scroll_area: QScrollArea | None = None,
+        stream_key: str = "grid",
     ):
         """Shared render pipeline used by both tabs.
 
@@ -9058,6 +9232,12 @@ class EpubLibraryDialog(QDialog):
         previous behaviour (any path not in *books* is treated as
         gone).
         """
+        stream_key = stream_key or "grid"
+        self._stop_card_stream(stream_key)
+        self._card_stream_generation[stream_key] = (
+            int(self._card_stream_generation.get(stream_key, 0) or 0) + 1
+        )
+        generation = self._card_stream_generation[stream_key]
         selected_paths = selected_paths if selected_paths is not None else set()
         card_cache = card_cache if card_cache is not None else {}
         loading_visible = bool(
@@ -9195,128 +9375,29 @@ class EpubLibraryDialog(QDialog):
         preset_key = (self._card_size, card_w)
 
         show_raw_title = bool(getattr(self, "_show_raw_titles", False))
-        # Pump on a time budget rather than every Nth card: card build cost
-        # varies wildly (title-fit loop, cover scaling), so a fixed stride
-        # leaves uneven gaps that stall the spinner. Yielding to the event
-        # loop whenever ~10 ms has elapsed keeps the animation continuous and
-        # bounds any single freeze to one card's build time.
-        _last_pump = time.perf_counter()
-        for idx, book in enumerate(books):
-            if loading_visible and (time.perf_counter() - _last_pump) >= 0.010:
-                self._pump_loading_events()
-                _last_pump = time.perf_counter()
-            path = book.get("path", "") or ""
-            sig = self._card_signature(book)
-            cached = card_cache.get(path)
-            reuse = bool(
-                cached
-                and cached[1] == sig
-                and cached[2] == preset_key
-                and cached[3] == show_raw_title
-            )
-            if reuse:
-                card = cached[0]
-                # Always refresh the card's backing book dict, even
-                # when the signature matched and we're reusing the
-                # widget. :meth:`_card_signature` deliberately covers
-                # only the fields that affect rendering \u2014 so a
-                # late-resolved ``raw_source_path`` (e.g. the next
-                # scan finally matched the workspace to a raw in
-                # ``Library/Raw`` / the registry) wouldn't shift the
-                # signature and the cached widget would keep its
-                # OLD book dict forever. That bit the context menu:
-                # Load for translation / Reveal source file / Clear
-                # saved raw link all read ``card.book.get
-                # (\"raw_source_path\")`` directly, so they missed
-                # while the warning badge (driven by
-                # ``missing_raw_file``) already reflected the fresh
-                # resolution. Re-pointing ``card.book`` at the new
-                # dict here keeps every downstream consumer in
-                # sync without paying the widget-rebuild cost.
-                try:
-                    card.book = book
-                except Exception:
-                    pass
-            else:
-                # Either no cached widget, a book field drifted, or
-                # the card-size / raw-titles toggle changed \u2014
-                # rebuild. Cover resolution reuses the
-                # ``_cover_path_cache`` entry if one exists so flipping
-                # the View dropdown doesn't spawn a fresh
-                # :class:`_CoverLoader` thread per book just to re-
-                # extract the same cover from disk.
-                if cached:
-                    try:
-                        cached[0].setParent(None)
-                        cached[0].deleteLater()
-                    except Exception:
-                        pass
-                card = _BookCard(
-                    book, preset=preset, show_raw_title=show_raw_title)
-                card.clicked.connect(self._on_card_clicked)
-                card.context_menu_requested.connect(self._show_context_menu)
-                card.select_requested.connect(self._on_card_select_requested)
-                self._install_library_drop_target(card, recursive=True)
-                cached_cover = self._cover_path_cache.get(path)
-                run_loader = False
-                if cached_cover is not None:
-                    # Hit — either a resolved path we can paint now,
-                    # or an empty/sentinel string meaning no cover.
-                    if cached_cover and cached_cover != "_none_" and os.path.isfile(cached_cover):
-                        card.set_cover(cached_cover)
-                    elif cached_cover == "" and book.get("type", "epub") in ("epub", "in_progress"):
-                        # First-pass negative cache — retry once because
-                        # raw_source_path may have appeared since the
-                        # last attempt. Mark as "_none_" so we don't
-                        # retry again if this attempt also fails.
-                        self._cover_path_cache[path] = "_none_"
-                        run_loader = True
-                    # else: "_none_" sentinel or non-epub — permanent.
-                else:
-                    run_loader = True
-                if run_loader:
-                    loader = _CoverLoader(
-                        book["path"],
-                        file_type=book.get("type", "epub"),
-                        config=self._config,
-                        original_path=book.get("original_path"),
-                        raw_source_path=book.get("raw_source_path"),
-                        parent=self,
-                    )
-                    loader.finished.connect(self._on_cover_loaded)
-                    self._cover_threads.append(loader)
-                    loader.start()
-            card_cache[path] = (card, sig, preset_key, show_raw_title)
-            card.set_selected(path in selected_paths)
-            card_list.append(card)
-            row, col = divmod(idx, cols)
-            grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
-            card.show()
-        if loading_visible:
-            self._pump_loading_events()
-
-        # Keep the grid packed from the top-left. A stretch spacer column
-        # here can leave cached cards stranded at the far edge after a
-        # viewport-width or scrollbar recalculation.
-        for c in range(max(grid_layout.columnCount(), cols + 2, 64)):
-            grid_layout.setColumnStretch(c, 0)
-        grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-
-        # Pack cards to the top of the viewport: give the row below the
-        # last populated row all of the vertical stretch. Without this,
-        # QGridLayout distributes the extra vertical space across rows and
-        # leaves a giant gap between rows 1 and 2 in the Completed tab when
-        # there are fewer rows than viewport height.
-        last_row = (len(books) - 1) // cols + 1
-        for r in range(last_row):
-            grid_layout.setRowStretch(r, 0)
-        grid_layout.setRowStretch(last_row, 1)
         if grid_widget is not None and _grid_updates_were_enabled is not None:
             try:
                 grid_widget.setUpdatesEnabled(_grid_updates_were_enabled)
                 grid_widget.update()
             except Exception:
                 pass
+
+        self._card_stream_states[stream_key] = {
+            "generation": generation,
+            "books": list(books),
+            "idx": 0,
+            "grid_layout": grid_layout,
+            "grid_widget": grid_widget,
+            "card_list": card_list,
+            "card_cache": card_cache,
+            "selected_paths": selected_paths,
+            "preset": preset,
+            "preset_key": preset_key,
+            "show_raw_title": show_raw_title,
+            "cols": cols,
+            "loading_visible": loading_visible,
+        }
+        self._card_stream_timer(stream_key).start()
         if loading_visible:
             self._pump_loading_events()
 
@@ -9335,6 +9416,7 @@ class EpubLibraryDialog(QDialog):
             # cache, so toggling Format / search is an O(visible)
             # detach + re-add pass instead of a full rebuild.
             full_books=self._in_progress_books,
+            stream_key="ip",
         )
 
     def _populate_completed(self, books: list[dict]):
@@ -9347,6 +9429,7 @@ class EpubLibraryDialog(QDialog):
             card_cache=self._comp_card_cache,
             full_books=self._completed_books,
             scroll_area=self._comp_scroll,
+            stream_key="comp",
         )
 
     def _active_selection(self) -> tuple[set[str], list[_BookCard]]:
@@ -10970,6 +11053,7 @@ class EpubLibraryDialog(QDialog):
             self._auto_refresh_timer.stop()
         except Exception:
             pass
+        self._stop_card_stream()
         _stop_qthread_safely(
             getattr(self, "_scanner_thread", None),
             timeout_ms=1500,
