@@ -145,7 +145,7 @@ class SDLXLIFFReviewDialog(QDialog):
         "muted": "#94a3b8",
     }
     REVIEW_ROW_MIN_HEIGHT = 96
-    REVIEW_ROW_MAX_HEIGHT = 220
+    REVIEW_ROW_MAX_HEIGHT = 360
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
     _SDLXLIFF_AUTOGEN_STATUSES = {
@@ -2356,6 +2356,14 @@ class SDLXLIFFReviewDialog(QDialog):
         )
         return label
 
+    @staticmethod
+    def _wrapped_tooltip(text, width=560):
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        escaped = html_lib.escape(text).replace("\n", "<br>")
+        return f'<div style="white-space: normal; width: {int(width)}px;">{escaped}</div>'
+
     def _review_status_colors(self):
         return {
             "green": (self.THEME["panel"], self.THEME["accent"], self.THEME["info"], self.THEME["success"], self.THEME["border"]),
@@ -2522,7 +2530,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 ) if tooltip_translation and target_editable and not tooltip_pending else None,
             )
             source_label.setMaximumHeight(max(24, row_height - 14))
-            source_label.setToolTip(str(source_text or ""))
+            source_label.setToolTip(self._wrapped_tooltip(source_text))
 
             if old_widget is not None:
                 grid.removeWidget(old_widget)
@@ -2958,7 +2966,7 @@ class SDLXLIFFReviewDialog(QDialog):
             editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         except Exception:
             pass
-        editor.setToolTip(str(text or ""))
+        editor.setToolTip(self._wrapped_tooltip(text))
         try:
             editor.viewport().setCursor(Qt.IBeamCursor)
         except Exception:
@@ -3187,7 +3195,7 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         )
         label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
-        label.setToolTip(str(text or ""))
+        label.setToolTip(self._wrapped_tooltip(text))
 
         tooltip_translation = str(tooltip_translation or "").strip()
         tooltip_pending = bool(tooltip_pending)
@@ -3198,7 +3206,7 @@ class SDLXLIFFReviewDialog(QDialog):
         container.setObjectName("SdlReviewSourceText")
         container.setMinimumWidth(0)
         container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        container.setToolTip(str(text or ""))
+        container.setToolTip(self._wrapped_tooltip(text))
         container.setStyleSheet("QWidget#SdlReviewSourceText { background: transparent; }")
 
         layout = QVBoxLayout(container)
@@ -3236,7 +3244,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "}"
             )
         else:
-            translated_label.setToolTip(tooltip_translation)
+            translated_label.setToolTip(self._wrapped_tooltip(tooltip_translation))
             translated_label.setStyleSheet(
                 "QLabel#SdlReviewMachineTranslation { "
                 "color: #b6c7dc; background: rgba(23, 37, 54, 185); "
@@ -3274,10 +3282,10 @@ class SDLXLIFFReviewDialog(QDialog):
             translated_chars_per_line = max(30, int(chars_per_line * 1.35))
             source_with_translation_lines = (
                 _wrapped_lines(source_text, chars_per_line)
-                + min(4, _wrapped_lines(tooltip_preview, translated_chars_per_line))
+                + min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
             )
             max_lines = max(max_lines, source_with_translation_lines)
-        extra_lines = max(0, min(6, max_lines - 1))
+        extra_lines = max(0, min(12, max_lines - 1))
         height = min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
         if tooltip_preview:
             height = min(self.REVIEW_ROW_MAX_HEIGHT, max(height, self.REVIEW_ROW_MIN_HEIGHT + 30))
@@ -3342,7 +3350,7 @@ class SDLXLIFFReviewDialog(QDialog):
             ) if tooltip_translation and target_editable and not tooltip_pending else None,
         )
         source_label.setMaximumHeight(max(24, row_height - 14))
-        source_label.setToolTip(str(source_text or ""))
+        source_label.setToolTip(self._wrapped_tooltip(source_text))
 
         dot = QLabel("●")
         dot.setObjectName("SdlReviewStatusDot")
