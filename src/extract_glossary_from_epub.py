@@ -6594,7 +6594,7 @@ def main(log_callback=None, stop_callback=None):
     print(f"📐 Compression Factor: {compression_factor}")
 
     # Toggle for chapter splitting (manual glossary tab)
-    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"
     if chapter_split_enabled or os.getenv("DEBUG_CHAPTER_SPLIT_LOG", "0") == "1":
         print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
 

@@ -708,7 +708,7 @@ class ExtractGlossaryScreen(MDScreen):
         os.environ["GLOSSARY_HISTORY_ROLLING"] = "1"
         os.environ["GLOSSARY_REQUEST_MERGING_ENABLED"] = "1" if cfg.get("glossary_request_merging_enabled", False) else "0"
         os.environ["GLOSSARY_REQUEST_MERGE_COUNT"] = str(cfg.get("glossary_request_merge_count", 3))
-        os.environ["GLOSSARY_ENABLE_CHAPTER_SPLIT"] = "1" if cfg.get("glossary_enable_chapter_split", True) else "0"
+        os.environ["GLOSSARY_ENABLE_CHAPTER_SPLIT"] = "1" if cfg.get("glossary_enable_chapter_split", False) else "0"
         os.environ["GLOSSARY_COMPRESSION_FACTOR"] = str(cfg.get("glossary_compression_factor", 1.0))
         os.environ["GLOSSARY_MAX_OUTPUT_TOKENS"] = str(cfg.get("glossary_max_output_tokens", -1))
         os.environ["USE_GLOSSARY_KEYS"] = "1" if cfg.get("use_glossary_keys", False) else "0"

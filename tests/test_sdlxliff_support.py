@@ -865,6 +865,40 @@ def test_retranslation_show_model_info_defaults_on_but_respects_saved_false():
     assert mixin._get_retranslation_show_model_info_state() is False
 
 
+def test_dynamic_request_splitting_defaults_off():
+    glossary_gui = (SRC / "GlossaryManager_GUI.py").read_text(encoding="utf-8")
+    translator_gui = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    async_processor = (SRC / "async_api_processor.py").read_text(encoding="utf-8")
+    txt_extractor = (SRC / "extract_glossary_from_txt.py").read_text(encoding="utf-8")
+    epub_extractor = (SRC / "extract_glossary_from_epub.py").read_text(encoding="utf-8")
+    glossary_manager = (SRC / "GlossaryManager.py").read_text(encoding="utf-8")
+    android_screen = (SRC / "android" / "extract_glossary_screen.py").read_text(encoding="utf-8")
+
+    assert "config.get('glossary_enable_chapter_split', False)" in glossary_gui
+    assert "glossary_enable_chapter_split_checkbox.setChecked(False)" in glossary_gui
+    assert "'glossary_enable_chapter_split',\n            False," in translator_gui
+    assert "return '1', '99', '1' if chapter_split else '0'" in translator_gui
+    assert "os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = _balanced_chapter_split" in translator_gui
+    assert "self.gui.config.get('glossary_enable_chapter_split', False)" in async_processor
+    assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in txt_extractor
+    assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in epub_extractor
+    assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"' in glossary_manager
+    assert 'cfg.get("glossary_enable_chapter_split", False)' in android_screen
+
+    combined = "\n".join([
+        glossary_gui,
+        translator_gui,
+        async_processor,
+        txt_extractor,
+        epub_extractor,
+        glossary_manager,
+        android_screen,
+    ])
+    assert "glossary_enable_chapter_split', True" not in combined
+    assert 'glossary_enable_chapter_split", True' not in combined
+    assert 'os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1")' not in combined
+
+
 def test_retranslation_autogenerates_sdlxliff_sidecars_from_completed_entries(tmp_path, monkeypatch):
     source = tmp_path / "chapter0001.xhtml"
     output = tmp_path / "response_chapter0001.html"

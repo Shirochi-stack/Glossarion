@@ -902,7 +902,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     
     # Get chapter split threshold, toggle, and filter mode
     chapter_split_threshold = int(os.getenv("GLOSSARY_CHAPTER_SPLIT_THRESHOLD", "100000"))
-    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"
     filter_mode = os.getenv("GLOSSARY_FILTER_MODE", "all")  # all, only_with_honorifics, only_without_honorifics
     
     # Check if parallel extraction is enabled for automatic glossary

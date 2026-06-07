@@ -3118,7 +3118,7 @@ class GlossaryManagerMixin:
         # Dynamic request splitting toggle (below Glossary Request Merging)
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
             self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Dynamic request splitting")
-        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', True))
+        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
         self.glossary_enable_chapter_split_checkbox.setToolTip(
             "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
         )
@@ -4562,7 +4562,7 @@ Do not stop after the glossary."""
                 self.glossary_max_sentences_entry.setText("200")
                 self.glossary_target_language_combo.setCurrentText("English")
                 if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
-                    self.glossary_enable_chapter_split_checkbox.setChecked(True)
+                    self.glossary_enable_chapter_split_checkbox.setChecked(False)
                 
                 # Reset filter mode to 'all'
                 if 'all' in self.glossary_filter_mode_buttons:

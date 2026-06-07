@@ -38,7 +38,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
     safety_margin_output = 500
     available_tokens = int((effective_output - safety_margin_output) / max(compression_factor, 0.01))
     available_tokens = max(available_tokens, 1000)
-    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "0") == "1"
 
     
     text_chapters = []

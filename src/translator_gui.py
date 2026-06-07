@@ -10534,8 +10534,6 @@ Recent translations to summarize:
         return display_to_mode.get(mode_raw, mode_raw.lower().replace(' ', '_'))
 
     def _current_glossary_request_env(self, force_balanced_request_merging=False):
-        if force_balanced_request_merging:
-            return '1', '99', '1'
         merging_enabled = self._live_bool_setting(
             'glossary_request_merging_checkbox',
             'glossary_request_merging_enabled_var',
@@ -10552,8 +10550,10 @@ Recent translations to summarize:
             'glossary_enable_chapter_split_checkbox',
             'glossary_enable_chapter_split_var',
             'glossary_enable_chapter_split',
-            True,
+            False,
         )
+        if force_balanced_request_merging:
+            return '1', '99', '1' if chapter_split else '0'
         return '1' if merging_enabled else '0', str(merge_count), '1' if chapter_split else '0'
 
     def _glossary_contextual_env_value(self):
@@ -15165,16 +15165,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             for f in getattr(self, 'selected_files', [])
                         )
                         if auto_glossary_mode == 'balanced' and has_text_files:
-                            self.append_log(f"📑 Balanced mode: request merging enabled (99), chapter splitting enabled")
-                            self.append_log(f"📑 These values are hardcoded for optimal glossary quality")
+                            _balanced_merge_enabled, _balanced_merge_count, _balanced_chapter_split = self._current_glossary_request_env(
+                                force_balanced_request_merging=True
+                            )
+                            split_status = "enabled" if _balanced_chapter_split == '1' else "disabled"
+                            self.append_log(f"📑 Balanced mode: request merging enabled (99), dynamic request splitting {split_status}")
+                            self.append_log(f"📑 Request merging is hardcoded for optimal glossary quality")
                             saved_env = {
                                 'GLOSSARY_REQUEST_MERGING_ENABLED': os.environ.get('GLOSSARY_REQUEST_MERGING_ENABLED'),
                                 'GLOSSARY_REQUEST_MERGE_COUNT': os.environ.get('GLOSSARY_REQUEST_MERGE_COUNT'),
                                 'GLOSSARY_ENABLE_CHAPTER_SPLIT': os.environ.get('GLOSSARY_ENABLE_CHAPTER_SPLIT'),
                             }
-                            os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1'
-                            os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = '99'
-                            os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1'
+                            os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = _balanced_merge_enabled
+                            os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = _balanced_merge_count
+                            os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = _balanced_chapter_split
                         elif auto_glossary_mode == 'balanced':
                             self.append_log(f"📑 Balanced mode: image glossary extraction")
                         elif has_text_files:  # full + text
