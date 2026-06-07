@@ -10,7 +10,9 @@ import tempfile
 import queue
 import time
 import json
+import warnings
 from bs4 import BeautifulSoup
+from bs4 import MarkupResemblesLocatorWarning
 import PatternManager as PM
 import duplicate_detection_config as ddc
 from glossary_refinement import refine_glossary_entries, refinement_enabled as _glossary_refinement_enabled
@@ -21,6 +23,12 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 # robust field delimiting.  Commas in descriptions no longer break parsing.
 # ---------------------------------------------------------------------------
 GLOSSARY_SEP = '\x1F'
+
+def _html_soup(markup):
+    """Parse HTML text without logging BeautifulSoup's filename-like markup warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", MarkupResemblesLocatorWarning)
+        return BeautifulSoup(markup, 'html.parser')
 
 def _gsep(text):
     """Auto-detect glossary separator: Unit Separator if present, else comma."""
@@ -120,7 +128,7 @@ def _extract_raw_title_from_epub(epub_path):
                 try:
                     soup = BeautifulSoup(content, 'xml')
                 except Exception:
-                    soup = BeautifulSoup(content, 'html.parser')
+                    soup = _html_soup(content)
                     
                 # Try dc:title
                 title_tag = soup.find('dc:title')
@@ -883,7 +891,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
-        soup = BeautifulSoup(html_text, 'html.parser')
+        soup = _html_soup(html_text)
         return soup.get_text()
     
     # Check stop before processing chapters
@@ -2857,8 +2865,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     honorific_first_indices = {}
     # Clean HTML if present
     print(f"📑 Step 1/7: Cleaning HTML tags...")
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(text, 'html.parser')
+    soup = _html_soup(text)
     clean_text = soup.get_text()
     print(f"📑 Clean text size: {len(clean_text):,} characters")
     

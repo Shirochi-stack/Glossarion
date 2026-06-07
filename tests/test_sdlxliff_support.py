@@ -844,6 +844,52 @@ def test_sdlxliff_review_detects_sidecar_when_source_matches_target(tmp_path):
     assert dialog._sdlxliff_sidecar_needs_source_regeneration(str(sidecar)) is True
 
 
+def test_sdlxliff_review_filters_empty_sidecars_from_piece_list(tmp_path):
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar_dir.mkdir()
+    empty_sidecar = sidecar_dir / "response_cover.html.sdlxliff"
+    text_sidecar = sidecar_dir / "response_chapter0001.html.sdlxliff"
+    empty_sidecar.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="cover.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[<html><body></body></html>]]></source>
+        <target><![CDATA[<html><body></body></html>]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    text_sidecar.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter0001.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[<html><body><p>Source</p></body></html>]]></source>
+        <target><![CDATA[<html><body><p>Target</p></body></html>]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog.current_path = ""
+
+    pieces = dialog._load_pieces()
+
+    assert [piece["name"] for piece in pieces] == ["response_chapter0001.html.sdlxliff"]
+    assert pieces[0]["source_count"] == 1
+    assert pieces[0]["target_count"] == 1
+
+
 def test_sdlxliff_review_autorefresh_regenerates_sidecar_from_changed_output(tmp_path, monkeypatch):
     source = tmp_path / "chapter0001.xhtml"
     output = tmp_path / "response_chapter0001.html"

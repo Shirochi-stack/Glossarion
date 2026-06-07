@@ -170,8 +170,7 @@ class SDLXLIFFReviewDialog(QDialog):
             current_book = self._book_entries[self._book_index]
             self.output_dir = current_book.get("output_dir") or self.output_dir
             self.current_path = current_book.get("current_path") or self.current_path
-        self._maybe_regenerate_review_sidecars(force=True)
-        self.pieces = self._load_pieces()
+        self.pieces = []
         self._pending_target_edits = {}
         self._edit_save_timer = QTimer(self)
         self._edit_save_timer.setSingleShot(True)
@@ -188,6 +187,11 @@ class SDLXLIFFReviewDialog(QDialog):
         self._restoring_review_scroll = False
         self._active_render_row = None
         self._active_render_page = None
+        self._preload_render_timer = None
+        self._preload_render_queue = []
+        self._preload_render_row = None
+        self._preload_render_page = None
+        self._preload_render_state = None
         self._sdl_review_loading_icon_timer = None
         self._sdl_review_loading_icon = None
         self._sdl_review_loading_original_pixmap = None
@@ -203,6 +207,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._last_review_signature = None
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
+        self._review_data_loaded = False
+        self._initial_review_load_started = False
+        self._queued_review_refresh = False
         self._seamless_review_old_page = None
         self._tooltip_translations = {}
         self._tooltip_translation_running = False
@@ -320,7 +327,11 @@ class SDLXLIFFReviewDialog(QDialog):
         close_row.addWidget(close_btn)
         main_layout.addLayout(close_row)
 
-        self._populate_piece_list()
+        self.header_label.setText("Loading SDLXLIFF review...")
+        try:
+            self.loading_label.setText("Loading SDLXLIFF...")
+        except Exception:
+            pass
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -337,8 +348,31 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         self._start_review_auto_refresh()
+        if not self._review_data_loaded and not self._initial_review_load_started:
+            self._initial_review_load_started = True
+            self._show_review_loading_page()
+            self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=25)
+            return
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+
+    def _queue_review_refresh(self, force=True, current_path=None, signature=None, seamless=False, delay_ms=25):
+        if self._queued_review_refresh:
+            return
+        self._queued_review_refresh = True
+        if not seamless:
+            self._show_review_loading_page()
+
+        def _run_refresh():
+            self._queued_review_refresh = False
+            self.refresh_review_data(
+                force=force,
+                current_path=current_path,
+                signature=signature,
+                seamless=seamless,
+            )
+
+        QTimer.singleShot(max(0, int(delay_ms)), _run_refresh)
 
     def _current_review_signature(self):
         dirs = []
@@ -599,6 +633,8 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if not self.isVisible() or self._refreshing_review_data:
                 return
+            if not self._review_data_loaded:
+                return
             if self._active_render_timer is not None or self._active_render_page is not None:
                 return
             if self._edit_save_timer.isActive() or self._pending_target_edits:
@@ -665,8 +701,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._seamless_review_old_page = old_visible_page
             else:
                 self._seamless_review_old_page = None
-                self._clear_cached_review_pages()
+            self._clear_cached_review_pages()
             self.pieces = self._load_pieces()
+            self._review_data_loaded = True
             self._populate_piece_list()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
@@ -707,11 +744,18 @@ class SDLXLIFFReviewDialog(QDialog):
             autogen_signature = None
         if (
             output_changed
+            or not self._review_data_loaded
             or not self.pieces
             or (signature is not None and signature != self._last_review_signature)
             or (autogen_signature is not None and autogen_signature != self._last_autogen_signature)
         ):
-            self.refresh_review_data(force=True, current_path=self.current_path, signature=signature)
+            self._initial_review_load_started = True
+            self._queue_review_refresh(
+                force=True,
+                current_path=self.current_path,
+                signature=signature,
+                delay_ms=25,
+            )
             return
         if self.current_path:
             if self._select_piece_for_path(self.current_path):
@@ -974,6 +1018,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _clear_cached_review_pages(self):
         self._cancel_active_review_render()
+        self._cancel_review_preload(discard_page=True)
         for row, page in list(self._piece_pages.items()):
             self._remove_review_page_widget(page)
         self._piece_pages.clear()
@@ -1000,19 +1045,14 @@ class SDLXLIFFReviewDialog(QDialog):
         entry = self._book_entries[index]
         self.output_dir = entry.get("output_dir") or self.output_dir
         self.current_path = entry.get("current_path") or ""
-        self._maybe_regenerate_review_sidecars(force=True)
-        self.pieces = self._load_pieces()
+        self.pieces = []
+        self._review_data_loaded = False
         self._update_review_book_nav()
         self._show_review_loading_page()
-        self._populate_piece_list()
-        self._last_review_signature = self._current_review_signature()
-        try:
-            self._last_autogen_signature = self._current_review_autogen_signature()
-        except Exception:
-            pass
+        self.piece_list.clear()
+        self.header_label.setText("Loading SDLXLIFF review...")
         self._start_review_auto_refresh()
-        if self.pieces:
-            QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
+        self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=25)
 
     def _apply_translator_theme(self, parent):
         base_style = ""
@@ -1671,6 +1711,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 "rows": [],
             }
 
+    @staticmethod
+    def _review_piece_is_empty_sidecar(piece):
+        if not isinstance(piece, dict) or piece.get("error"):
+            return False
+        return int(piece.get("source_count") or 0) == 0 and int(piece.get("target_count") or 0) == 0
+
+    def _filter_review_pieces(self, pieces):
+        filtered = [
+            piece for piece in (pieces or [])
+            if piece is not None and not self._review_piece_is_empty_sidecar(piece)
+        ]
+        for index, piece in enumerate(filtered):
+            piece["index"] = index
+        return filtered
+
     def _load_pieces(self):
         sidecar_dir = os.path.join(self.output_dir or "", "SDLXLIFF")
         paths = []
@@ -1702,7 +1757,10 @@ class SDLXLIFFReviewDialog(QDialog):
             metadata["label"] = self._review_label_from_metadata(metadata)
 
         if len(work_items) <= 1:
-            return [self._build_piece(path, idx, metadata) for idx, (path, metadata) in enumerate(work_items)]
+            return self._filter_review_pieces([
+                self._build_piece(path, idx, metadata)
+                for idx, (path, metadata) in enumerate(work_items)
+            ])
 
         pieces = [None] * len(work_items)
         max_workers = max(1, min(8, len(work_items)))
@@ -1719,7 +1777,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     path, metadata = work_items[idx]
                     pieces[idx] = self._build_piece(path, idx, metadata)
                     pieces[idx]["error"] = str(exc)
-        return [piece for piece in pieces if piece is not None]
+        return self._filter_review_pieces(pieces)
 
     def _populate_piece_list(self):
         try:
@@ -1897,6 +1955,8 @@ class SDLXLIFFReviewDialog(QDialog):
         self._remove_review_page_widget(old_page)
 
     def _discard_piece_page(self, row, page=None):
+        if row == self._preload_render_row:
+            self._cancel_review_preload(discard_page=False)
         page = page or self._piece_pages.get(row)
         if page is None:
             return
@@ -1935,9 +1995,188 @@ class SDLXLIFFReviewDialog(QDialog):
         if row is not None and row not in self._piece_render_complete:
             self._discard_piece_page(row, page)
 
+    def _cancel_review_preload(self, discard_page=True):
+        timer = self._preload_render_timer
+        row = self._preload_render_row
+        page = self._preload_render_page
+        self._preload_render_timer = None
+        self._preload_render_queue = []
+        self._preload_render_row = None
+        self._preload_render_page = None
+        self._preload_render_state = None
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+        if discard_page and row is not None and row not in self._piece_render_complete and page is not None:
+            try:
+                if self._piece_pages.get(row) is page:
+                    self._piece_pages.pop(row, None)
+                self._piece_render_complete.discard(row)
+            except Exception:
+                pass
+            self._remove_review_page_widget(page)
+
+    def _review_preload_order(self, current_row):
+        if not self.pieces:
+            return []
+        try:
+            current_row = int(current_row)
+        except Exception:
+            current_row = 0
+        rows = [
+            row for row in range(len(self.pieces))
+            if row != current_row
+            and row not in self._piece_render_complete
+            and row not in self._piece_pages
+        ]
+        rows.sort(key=lambda row: (abs(row - current_row), row))
+        return rows
+
+    def _queue_review_page_preloads(self, current_row):
+        try:
+            if not self.isVisible() or not self._review_data_loaded:
+                return
+            if self._preload_render_timer is not None or self._preload_render_row is not None:
+                return
+            self._preload_render_queue = self._review_preload_order(current_row)
+            if self._preload_render_queue:
+                QTimer.singleShot(150, self._start_next_review_preload)
+        except Exception:
+            pass
+
+    def _start_next_review_preload(self):
+        try:
+            if not self.isVisible() or not self._review_data_loaded:
+                return
+            if self._active_render_timer is not None or self._active_render_page is not None:
+                QTimer.singleShot(150, self._start_next_review_preload)
+                return
+            try:
+                current_row = self.piece_list.currentRow()
+            except Exception:
+                current_row = -1
+            while self._preload_render_queue:
+                row = self._preload_render_queue.pop(0)
+                if row == current_row or row in self._piece_render_complete or row in self._piece_pages:
+                    continue
+                if 0 <= row < len(self.pieces):
+                    self._start_review_preload_row(row)
+                    return
+        except Exception:
+            self._cancel_review_preload(discard_page=True)
+
+    def _start_review_preload_row(self, row):
+        if row < 0 or row >= len(self.pieces):
+            return
+        piece = self.pieces[row]
+        page, layout = self._create_review_rows_page()
+        self._piece_pages[row] = page
+        self._piece_render_complete.discard(row)
+        self.rows_stack.addWidget(page)
+
+        if piece.get("error"):
+            error = QLabel(f"Could not parse SDLXLIFF:\n{piece['error']}")
+            error.setTextFormat(Qt.PlainText)
+            error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+            layout.addWidget(error)
+            layout.addStretch(1)
+            self._piece_render_complete.add(row)
+            QTimer.singleShot(60, self._start_next_review_preload)
+            return
+
+        rows = piece.get("rows") or []
+        if not rows:
+            empty = QLabel("No p/h1-h6 text units found in this sidecar.")
+            empty.setTextFormat(Qt.PlainText)
+            empty.setStyleSheet(f"color: {self.THEME['muted']}; padding: 12px;")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            self._piece_render_complete.add(row)
+            QTimer.singleShot(60, self._start_next_review_preload)
+            return
+
+        max_len = max([len(r.get("source", "")) for r in rows] + [len(r.get("target", "")) for r in rows] + [1])
+        self._preload_render_row = row
+        self._preload_render_page = page
+        self._preload_render_state = {
+            "idx": 0,
+            "layout": layout,
+            "rows": rows,
+            "max_len": max_len,
+            "colors": self._review_status_colors(),
+        }
+
+        self._run_review_preload_batch()
+
+    def _run_review_preload_batch(self):
+        current_timer = self._preload_render_timer
+        self._preload_render_timer = None
+        if current_timer is not None:
+            try:
+                current_timer.deleteLater()
+            except Exception:
+                pass
+        row = self._preload_render_row
+        page = self._preload_render_page
+        state = self._preload_render_state
+        if row is None or page is None or not isinstance(state, dict):
+            self._cancel_review_preload(discard_page=True)
+            return
+        try:
+            if not self.isVisible() or self._active_render_timer is not None or self._active_render_page is not None:
+                self._preload_render_timer = QTimer(self)
+                self._preload_render_timer.setSingleShot(True)
+                self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
+                self._preload_render_timer.start(180)
+                return
+            try:
+                current_row = self.piece_list.currentRow()
+            except Exception:
+                current_row = -1
+            if row == current_row:
+                self._cancel_review_preload(discard_page=True)
+                return
+
+            rows = state.get("rows") or []
+            layout = state.get("layout")
+            old_widget, old_layout = self.rows_widget, self.rows_layout
+            self.rows_widget, self.rows_layout = page, layout
+            try:
+                start = int(state.get("idx", 0))
+                end = min(len(rows), start + 24)
+                piece = self.pieces[row]
+                for idx in range(start, end):
+                    self._add_review_row(piece, rows[idx], idx, state.get("max_len", 1), state.get("colors") or self._review_status_colors())
+                state["idx"] = end
+            finally:
+                self.rows_widget, self.rows_layout = old_widget, old_layout
+
+            if state["idx"] >= len(rows):
+                if layout is not None:
+                    layout.addStretch(1)
+                self._piece_render_complete.add(row)
+                self._preload_render_timer = None
+                self._preload_render_row = None
+                self._preload_render_page = None
+                self._preload_render_state = None
+                QTimer.singleShot(60, self._start_next_review_preload)
+                return
+
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_review_preload_batch)
+            self._preload_render_timer = timer
+            timer.start(45)
+        except Exception:
+            self._cancel_review_preload(discard_page=True)
+
     def _request_render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        self._cancel_review_preload(discard_page=True)
         self._save_current_review_scroll()
         QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
@@ -3064,6 +3303,8 @@ class SDLXLIFFReviewDialog(QDialog):
     def _render_piece(self, row, show_loading=True):
         if row < 0 or row >= len(self.pieces):
             return
+        if self._preload_render_row is not None:
+            self._cancel_review_preload(discard_page=True)
         try:
             if self.piece_list.currentRow() != row:
                 return
@@ -3101,6 +3342,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.rows_stack.setCurrentWidget(cached_page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._queue_review_page_preloads(row)
             return
 
         if cached_page is not None:
@@ -3130,6 +3372,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._queue_review_page_preloads(row)
             return
 
         rows = piece.get("rows") or []
@@ -3149,6 +3392,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_seamless_review_swap(page)
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
+            self._queue_review_page_preloads(row)
             return
 
         row_state = {"idx": 0}
@@ -3195,6 +3439,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
+                self._queue_review_page_preloads(row)
             except Exception as exc:
                 if render_token == self._render_token:
                     self._clear_rows(layout)
@@ -3208,6 +3453,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._finish_seamless_review_swap(page)
                     self._finish_rows_rebuild(final=True)
                     self._restore_review_scroll(row)
+                    self._queue_review_page_preloads(row)
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
