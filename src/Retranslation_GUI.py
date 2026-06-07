@@ -2782,7 +2782,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _refresh_current_visible_dirty_source_previews(self):
         self._review_dirty_preview_refresh_queued = False
         try:
-            piece_index = self._current_piece_row()
+            piece_index = self._displayed_piece_row()
             if piece_index < 0 or piece_index >= len(self.pieces):
                 return
             rows = self.pieces[piece_index].get("rows") or []
@@ -4033,7 +4033,9 @@ class SDLXLIFFReviewDialog(QDialog):
             self.rows_layout = cached_page.layout()
             self.rows_stack.setCurrentWidget(cached_page)
             self._finish_rows_rebuild(final=True)
+            self._queue_refresh_current_visible_dirty_source_previews()
             self._restore_review_scroll(row)
+            QTimer.singleShot(0, self._queue_refresh_current_visible_dirty_source_previews)
             self._queue_review_page_preloads(row)
             return
 

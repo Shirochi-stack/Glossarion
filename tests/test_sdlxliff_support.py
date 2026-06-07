@@ -565,6 +565,8 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_update_review_row_source_previews" in source
     assert "_source_preview_dirty" in source
     assert "_queue_refresh_current_visible_dirty_source_previews" in source
+    assert "piece_index = self._displayed_piece_row()" in source
+    assert "QTimer.singleShot(0, self._queue_refresh_current_visible_dirty_source_previews)" in source
     assert "_current_machine_translation_signature" in source
     assert "_reload_machine_translation_previews" in source
     assert "if self._tooltip_translation_running:" in source
