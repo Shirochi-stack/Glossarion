@@ -477,13 +477,68 @@ class SDLXLIFFReviewDialog(QDialog):
                 changed.append(key[1])
         return sorted(set(changed))
 
+    @staticmethod
+    def _review_normalized_unit_text(text):
+        return " ".join(str(text or "").split())
+
+    def _sdlxliff_sidecar_needs_source_regeneration(self, path):
+        try:
+            source_html, target_html = self._read_sdlxliff_html_pair(path)
+            source_texts = [
+                self._review_normalized_unit_text(unit.get("text"))
+                for unit in self._extract_text_units(source_html)
+            ]
+            target_texts = [
+                self._review_normalized_unit_text(unit.get("text"))
+                for unit in self._extract_text_units(target_html)
+            ]
+            source_non_empty = [text for text in source_texts if text]
+            target_non_empty = [text for text in target_texts if text]
+            if target_non_empty and not source_non_empty:
+                return True
+            if (
+                source_non_empty
+                and target_non_empty
+                and len(source_non_empty) == len(target_non_empty)
+                and source_non_empty == target_non_empty
+            ):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _invalid_review_sidecar_outputs(self, output_dir):
+        invalid = []
+        for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
+            if not self._sdlxliff_sidecar_needs_source_regeneration(path):
+                continue
+            output_name = self._sidecar_output_name(path)
+            if output_name:
+                invalid.append(output_name)
+        return sorted(set(invalid))
+
+    def _invalid_review_sidecar_regen_key(self, output_files, autogen_signature):
+        return (
+            tuple(sorted(str(name or "").lower() for name in (output_files or []) if name)),
+            autogen_signature or (),
+            self._current_review_signature(),
+        )
+
     def _maybe_regenerate_review_sidecars(self, force=False):
         previous_signature = getattr(self, "_last_autogen_signature", None)
         try:
             signature = self._current_review_autogen_signature()
         except Exception:
             signature = ()
-        if not force and signature == previous_signature:
+
+        invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
+        invalid_regen_key = None
+        if invalid_outputs:
+            invalid_regen_key = self._invalid_review_sidecar_regen_key(invalid_outputs, signature)
+            if not force and invalid_regen_key == getattr(self, "_last_invalid_sidecar_regen_key", None):
+                invalid_outputs = []
+
+        if not force and signature == previous_signature and not invalid_outputs:
             return False
         self._last_autogen_signature = signature
 
@@ -502,7 +557,7 @@ class SDLXLIFFReviewDialog(QDialog):
         output_files = None
         if not force:
             changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
-            output_files = changed_outputs or None
+            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []))) or None
 
         try:
             stats = generator(
@@ -512,6 +567,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 output_files=output_files,
                 overwrite=True,
             )
+            if invalid_regen_key is not None and invalid_outputs:
+                self._last_invalid_sidecar_regen_key = self._invalid_review_sidecar_regen_key(
+                    invalid_outputs or output_files,
+                    signature,
+                )
             return bool(stats and (stats.get("created") or stats.get("paths")))
         except Exception:
             return False
@@ -3300,8 +3360,46 @@ class RetranslationMixin:
                 matches.append(path)
         return matches
 
+    @staticmethod
+    def _sdlxliff_valid_epub_path(output_dir, path):
+        if not path:
+            return None
+        candidate = path if os.path.isabs(str(path)) else os.path.join(output_dir or "", str(path))
+        candidate = os.path.normpath(candidate)
+        return candidate if os.path.isfile(candidate) and candidate.lower().endswith(".epub") else None
+
+    def _sdlxliff_preferred_input_epub(self, output_dir, file_path=None):
+        direct = self._sdlxliff_valid_epub_path(output_dir, file_path)
+        if direct:
+            return direct
+        exact = self._sdlxliff_exact_input_epub_candidates(output_dir)
+        return exact[0] if exact else None
+
+    def _sdlxliff_update_source_epub_ref(self, output_dir, epub_path):
+        epub_path = self._sdlxliff_valid_epub_path(output_dir, epub_path)
+        if not output_dir or not epub_path:
+            return False
+        source_ref = os.path.join(output_dir, "source_epub.txt")
+        try:
+            current = ""
+            if os.path.isfile(source_ref):
+                with open(source_ref, "r", encoding="utf-8", errors="ignore") as f:
+                    current = f.read().strip()
+            current_path = self._sdlxliff_valid_epub_path(output_dir, current)
+            if current_path and os.path.normcase(os.path.abspath(current_path)) == os.path.normcase(os.path.abspath(epub_path)):
+                return False
+            with open(source_ref, "w", encoding="utf-8") as f:
+                f.write(os.path.abspath(epub_path))
+            return True
+        except Exception:
+            return False
+
     def _sdlxliff_autogen_epub_candidates(self, output_dir, file_path=None):
         candidates = []
+        preferred = self._sdlxliff_preferred_input_epub(output_dir, file_path)
+        if preferred:
+            candidates.append(preferred)
+            self._sdlxliff_update_source_epub_ref(output_dir, preferred)
         source_ref = os.path.join(output_dir or "", "source_epub.txt")
         try:
             if os.path.isfile(source_ref):
@@ -3311,8 +3409,6 @@ class RetranslationMixin:
                     candidates.append(ref)
         except Exception:
             pass
-        if file_path:
-            candidates.append(file_path)
         candidates.extend(self._sdlxliff_exact_input_epub_candidates(output_dir))
         try:
             for fname in os.listdir(output_dir or ""):
@@ -3323,16 +3419,14 @@ class RetranslationMixin:
         resolved = []
         seen = set()
         for candidate in candidates:
-            if not candidate:
+            path = self._sdlxliff_valid_epub_path(output_dir, candidate)
+            if not path:
                 continue
-            path = candidate if os.path.isabs(str(candidate)) else os.path.join(output_dir or "", str(candidate))
-            path = os.path.normpath(path)
             norm = os.path.normcase(os.path.abspath(path))
             if norm in seen:
                 continue
             seen.add(norm)
-            if os.path.isfile(path) and path.lower().endswith(".epub"):
-                resolved.append(path)
+            resolved.append(path)
         return resolved
 
     def _sdlxliff_autogen_read_source_html(self, output_dir, entry, output_file=None, progress_key=None, file_path=None):
@@ -8352,8 +8446,14 @@ class RetranslationMixin:
         def _source_epub_candidates():
             candidates = []
             file_path = data.get('file_path')
-            if file_path:
-                candidates.append(file_path)
+            try:
+                preferred = self._sdlxliff_preferred_input_epub(data['output_dir'], file_path)
+                if preferred:
+                    candidates.append(preferred)
+                    self._sdlxliff_update_source_epub_ref(data['output_dir'], preferred)
+            except Exception:
+                if file_path:
+                    candidates.append(file_path)
             source_ref = os.path.join(data['output_dir'], "source_epub.txt")
             try:
                 if os.path.isfile(source_ref):
@@ -8376,16 +8476,14 @@ class RetranslationMixin:
             seen = set()
             resolved = []
             for candidate in candidates:
-                if not candidate:
+                path = self._sdlxliff_valid_epub_path(data['output_dir'], candidate)
+                if not path:
                     continue
-                path = candidate if os.path.isabs(str(candidate)) else os.path.join(data['output_dir'], str(candidate))
-                path = os.path.normpath(path)
                 norm = os.path.normcase(os.path.abspath(path))
                 if norm in seen:
                     continue
                 seen.add(norm)
-                if os.path.isfile(path) and path.lower().endswith(".epub"):
-                    resolved.append(path)
+                resolved.append(path)
             return resolved
 
         def _source_exists_in_epub(display_info):
