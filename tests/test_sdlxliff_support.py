@@ -14,6 +14,11 @@ from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from TransateKRtoEN import _write_html_sdlxliff_sidecar
 from Retranslation_GUI import SDLXLIFFReviewDialog
+from scan_html_folder import (
+    _count_beautifulsoup_review_tags,
+    _missing_beautifulsoup_tags_issue,
+    _sdlxliff_review_tag_counts,
+)
 
 
 SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>
@@ -517,3 +522,85 @@ def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
     assert piece["yellow_count"] == 0
     assert piece["rows"][0]["status"] == "red"
     assert piece["rows"][0]["reason"] == "tag mismatch"
+
+
+def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+
+    assert "Translate Tool Tips" in source
+    assert "google-translate-free" in source
+    assert "from google_free_translate import GoogleFreeTranslateNew" in source
+    assert 'name="sdlxliff-tooltip-google-translate-free"' in source
+    assert "batch_html = self._tooltip_batch_html(work)" in source
+    assert "result = translator.translate(batch_html)" in source
+    assert 'data-sdl-tip="' in source
+    assert "Google tooltip:" in source
+    assert "📋 Copy translated tooltip" in source
+    assert "➡️ Inject tooltip translation into output" in source
+    assert "lambda _checked=False, text=tooltip_translation" in source
+
+
+def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    work = [
+        (0, ("piece", 0, "Title"), "10년 후가 두렵다", "h1"),
+        (1, ("piece", 1, "Body"), "안녕하세요 독자님들.", "p"),
+    ]
+
+    batch_html = dialog._tooltip_batch_html(work)
+    translations = dialog._extract_tooltip_batch_translations(
+        '<h1 data-sdl-tip="0">I fear ten years later</h1>'
+        '<p data-sdl-tip="1">Hello, readers.</p>',
+        work,
+    )
+
+    assert '<h1 data-sdl-tip="0">10년 후가 두렵다</h1>' in batch_html
+    assert '<p data-sdl-tip="1">안녕하세요 독자님들.</p>' in batch_html
+    assert translations == {
+        ("piece", 0, "Title"): "I fear ten years later",
+        ("piece", 1, "Body"): "Hello, readers.",
+    }
+    assert dialog._source_tooltip_text("안녕하세요 독자님들.", "Hello, readers.") == "Hello, readers."
+
+
+def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
+    issue = _missing_beautifulsoup_tags_issue({"p": 212}, {"p": 213})
+
+    assert issue == "missing_tags: 212/213 (+1)"
+
+
+def test_qa_sdlxliff_tag_check_flags_missing_output_text_units():
+    issue = _missing_beautifulsoup_tags_issue({"p": 174}, {"p": 173})
+
+    assert issue == "missing_tags: 174/173 (-1)"
+
+
+def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):
+    assert _count_beautifulsoup_review_tags("<p></p><p>Source</p><h1>Title</h1><h2> </h2>") == {
+        "h1": 1,
+        "p": 1,
+    }
+
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar_dir.mkdir()
+    (sidecar_dir / "response_chapter0001.html.sdlxliff").write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter0001.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[<html><body><h1>Title</h1><p></p><p>Body</p></body></html>]]></source>
+        <target><![CDATA[<html><body><h1>Title</h1><p>Body</p><p>Extra</p></body></html>]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+
+    source_counts, output_counts = _sdlxliff_review_tag_counts(str(tmp_path), "response_chapter0001.html")
+
+    assert source_counts == {"h1": 1, "p": 1}
+    assert output_counts == {"h1": 1, "p": 2}
+    assert _missing_beautifulsoup_tags_issue(source_counts, output_counts) == "missing_tags: 2/3 (+1)"

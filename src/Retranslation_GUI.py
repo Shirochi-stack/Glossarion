@@ -25,6 +25,7 @@ import traceback
 import subprocess
 import platform
 import time
+import threading
 
 _IS_MACOS = (sys.platform == 'darwin')
 
@@ -126,6 +127,9 @@ class AnimatedRefreshButton(QPushButton):
 class SDLXLIFFReviewDialog(QDialog):
     """Internal source/output reviewer for generated SDLXLIFF HTML sidecars."""
 
+    _tooltip_translation_finished = Signal(int, object, str)
+    _tooltip_translation_progress = Signal(int, int)
+
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
     THEME = {
         "bg": "#1e1e1e",
@@ -189,6 +193,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
         self._seamless_review_old_page = None
+        self._tooltip_translations = {}
+        self._tooltip_translation_running = False
+        self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
+        self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -239,7 +247,22 @@ class SDLXLIFFReviewDialog(QDialog):
         self.header_label.setTextFormat(Qt.PlainText)
         self.header_label.setWordWrap(True)
         self.header_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {self.THEME['accent']};")
-        detail_layout.addWidget(self.header_label)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        header_row.addWidget(self.header_label, 1)
+        self.translate_tooltips_btn = QPushButton("Translate Tool Tips")
+        self.translate_tooltips_btn.setCursor(Qt.PointingHandCursor)
+        self.translate_tooltips_btn.setToolTip("Translate source-row tooltips with google-translate-free.")
+        self.translate_tooltips_btn.setStyleSheet(
+            "QPushButton { background-color:#2b4f6f; color:#d7ecff; border:1px solid #5a9fd4; "
+            "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
+            "QPushButton:hover { background-color:#356b96; border-color:#7bb3e0; }"
+            "QPushButton:disabled { color:#94a3b8; background-color:#2a3b4d; border-color:#4a5568; }"
+        )
+        self.translate_tooltips_btn.clicked.connect(self._translate_current_piece_tooltips)
+        header_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignTop | Qt.AlignRight)
+        detail_layout.addLayout(header_row)
 
         legend_row = QHBoxLayout()
         legend_row.setSpacing(10)
@@ -1736,6 +1759,197 @@ class SDLXLIFFReviewDialog(QDialog):
     def _review_target_language_code(self):
         return self._GT_LANG_CODES.get(self._review_target_language().lower(), "en")
 
+    def _tooltip_cache_key(self, piece, row_data):
+        piece_path = ""
+        try:
+            piece_path = os.path.normcase(os.path.abspath(piece.get("path") or piece.get("output_name") or ""))
+        except Exception:
+            piece_path = str(piece.get("path") or piece.get("output_name") or "")
+        source_index = row_data.get("source_index")
+        if source_index is None:
+            source_index = row_data.get("row_index")
+        return (piece_path, source_index, str(row_data.get("source", "") or ""))
+
+    def _row_tooltip_translation(self, piece, row_data):
+        cached = row_data.get("tooltip_translation")
+        if cached:
+            return str(cached)
+        key = self._tooltip_cache_key(piece, row_data)
+        cached = self._tooltip_translations.get(key)
+        if cached:
+            row_data["tooltip_translation"] = cached
+            return str(cached)
+        return ""
+
+    def _set_row_tooltip_translation(self, piece, row_data, translated):
+        translated = str(translated or "").strip()
+        if not translated:
+            return
+        row_data["tooltip_translation"] = translated
+        self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
+
+    @staticmethod
+    def _source_tooltip_text(source_text, translated):
+        source_text = str(source_text or "")
+        translated = str(translated or "").strip()
+        if translated:
+            return translated
+        return source_text
+
+    @staticmethod
+    def _tooltip_batch_tag_name(tag_name):
+        tag_name = str(tag_name or "").strip().lower()
+        if re.fullmatch(r"h[1-6]", tag_name) or tag_name == "p":
+            return tag_name
+        return "p"
+
+    def _tooltip_batch_html(self, work):
+        parts = []
+        for pos, (_row_idx, _key, source_text, tag_name) in enumerate(work):
+            tag_name = self._tooltip_batch_tag_name(tag_name)
+            escaped = html_lib.escape(str(source_text or ""), quote=False)
+            parts.append(f'<{tag_name} data-sdl-tip="{pos}">{escaped}</{tag_name}>')
+        return "\n".join(parts)
+
+    def _extract_tooltip_batch_translations(self, translated_html, work):
+        translated_html = html_lib.unescape(str(translated_html or ""))
+        if not translated_html.strip() or not work:
+            return {}
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(translated_html, "html.parser")
+            nodes = [
+                node for node in soup.find_all(self.TEXT_TAGS)
+                if node.get_text(" ", strip=True)
+            ]
+            by_position = {}
+            for node in nodes:
+                raw_pos = node.get("data-sdl-tip")
+                if raw_pos is None:
+                    raw_pos = node.get("data-sdl-tip".lower())
+                try:
+                    pos = int(raw_pos)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= pos < len(work):
+                    by_position[pos] = node.get_text(" ", strip=True)
+            if len(by_position) < len(work):
+                ordered_texts = [
+                    node.get_text(" ", strip=True)
+                    for node in nodes
+                    if node.get_text(" ", strip=True)
+                ]
+                for pos, text in enumerate(ordered_texts[:len(work)]):
+                    by_position.setdefault(pos, text)
+            return {
+                key: by_position[pos]
+                for pos, (_row_idx, key, _source_text, _tag_name) in enumerate(work)
+                if str(by_position.get(pos, "")).strip()
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _menu_preview_text(text, limit=92):
+        text = " ".join(str(text or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "..."
+
+    def _current_piece_row(self):
+        try:
+            return self.piece_list.currentRow()
+        except Exception:
+            return -1
+
+    def _translate_current_piece_tooltips(self):
+        if self._tooltip_translation_running:
+            return
+        row = self._current_piece_row()
+        if row < 0 or row >= len(self.pieces):
+            return
+        piece = self.pieces[row]
+        work = []
+        for row_idx, row_data in enumerate(piece.get("rows") or []):
+            source_text = str(row_data.get("source", "") or "").strip()
+            if not source_text or self._row_tooltip_translation(piece, row_data):
+                continue
+            work.append((
+                row_idx,
+                self._tooltip_cache_key(piece, row_data),
+                source_text,
+                row_data.get("source_tag"),
+            ))
+        if not work:
+            try:
+                self.translate_tooltips_btn.setText("Tool Tips Ready")
+                QTimer.singleShot(1200, lambda: self.translate_tooltips_btn.setText("Translate Tool Tips"))
+            except Exception:
+                pass
+            return
+
+        self._tooltip_translation_running = True
+        target_code = self._review_target_language_code()
+        try:
+            self.translate_tooltips_btn.setEnabled(False)
+            self.translate_tooltips_btn.setText("Translating...")
+        except Exception:
+            pass
+
+        def _worker():
+            translations = {}
+            error = ""
+            try:
+                from google_free_translate import GoogleFreeTranslateNew
+                translator = GoogleFreeTranslateNew("auto", target_code)
+                batch_html = self._tooltip_batch_html(work)
+                result = translator.translate(batch_html)
+                translated_html = str(result.get("translatedText") or "").strip()
+                translations = self._extract_tooltip_batch_translations(translated_html, work)
+                if not translations:
+                    error = "Google Translate Free returned no parseable tooltip translations."
+                self._tooltip_translation_progress.emit(1, 1)
+            except Exception as exc:
+                error = str(exc)
+            self._tooltip_translation_finished.emit(row, translations, error)
+
+        threading.Thread(target=_worker, name="sdlxliff-tooltip-google-translate-free", daemon=True).start()
+
+    def _update_tooltip_translation_progress(self, done, total):
+        try:
+            if self._tooltip_translation_running:
+                self.translate_tooltips_btn.setText("Translating...")
+        except Exception:
+            pass
+
+    def _apply_tooltip_translations(self, row, translations, error):
+        self._tooltip_translation_running = False
+        try:
+            self.translate_tooltips_btn.setEnabled(True)
+            self.translate_tooltips_btn.setText("Translate Tool Tips")
+        except Exception:
+            pass
+        if 0 <= row < len(self.pieces):
+            piece = self.pieces[row]
+            for row_data in piece.get("rows") or []:
+                key = self._tooltip_cache_key(piece, row_data)
+                if key in translations:
+                    self._set_row_tooltip_translation(piece, row_data, translations[key])
+            if self._current_piece_row() == row:
+                self._discard_piece_page(row)
+                QTimer.singleShot(0, lambda row=row: self._render_piece(row, show_loading=False))
+        if error and not translations:
+            try:
+                self.save_status_label.setText(f"Tooltip translation failed: {error}")
+            except Exception:
+                pass
+        elif translations:
+            try:
+                self.save_status_label.setText(f"Translated {len(translations)} tooltips")
+                QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
+            except Exception:
+                pass
+
     def _selected_text_for_widget(self, widget):
         try:
             if isinstance(widget, QPlainTextEdit):
@@ -1790,7 +2004,14 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _show_review_text_context_menu(self, widget, pos, edit_callback=None):
+    def _show_review_text_context_menu(
+        self,
+        widget,
+        pos,
+        edit_callback=None,
+        tooltip_translation=None,
+        inject_tooltip_callback=None,
+    ):
         selected = self._selected_text_for_widget(widget).strip()
         has_selection = bool(selected)
         is_editable_editor = isinstance(widget, QPlainTextEdit) and not widget.isReadOnly()
@@ -1833,6 +2054,22 @@ class SDLXLIFFReviewDialog(QDialog):
             menu.addSeparator()
             edit_action = menu.addAction("Edit Output")
             edit_action.triggered.connect(edit_callback)
+
+        tooltip_translation = str(tooltip_translation or "").strip()
+        if tooltip_translation:
+            menu.addSeparator()
+            preview_action = menu.addAction(f"Google tooltip: {self._menu_preview_text(tooltip_translation)}")
+            preview_action.setEnabled(False)
+            preview_action.setToolTip(tooltip_translation)
+            copy_tooltip_action = menu.addAction("📋 Copy translated tooltip")
+            copy_tooltip_action.triggered.connect(
+                lambda _checked=False, text=tooltip_translation: self._copy_review_text(text)
+            )
+            if inject_tooltip_callback is not None:
+                inject_action = menu.addAction("➡️ Inject tooltip translation into output")
+                inject_action.triggered.connect(
+                    lambda _checked=False, text=tooltip_translation: inject_tooltip_callback(text)
+                )
 
         menu.addSeparator()
         gt_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
@@ -2062,7 +2299,7 @@ class SDLXLIFFReviewDialog(QDialog):
             layout.addStretch(1)
         return container
 
-    def _text_label(self, text, missing=False):
+    def _text_label(self, text, missing=False, tooltip_translation=None, inject_tooltip_callback=None):
         label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
@@ -2072,7 +2309,12 @@ class SDLXLIFFReviewDialog(QDialog):
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setContextMenuPolicy(Qt.CustomContextMenu)
         label.customContextMenuRequested.connect(
-            lambda pos, lbl=label: self._show_review_text_context_menu(lbl, pos)
+            lambda pos, lbl=label: self._show_review_text_context_menu(
+                lbl,
+                pos,
+                tooltip_translation=tooltip_translation,
+                inject_tooltip_callback=inject_tooltip_callback,
+            )
         )
         label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
         return label
@@ -2128,19 +2370,37 @@ class SDLXLIFFReviewDialog(QDialog):
 
         source_missing = not row_data.get("source_tag")
         target_missing = not row_data.get("target_tag")
+        target_editable = not source_missing or not target_missing
+        tooltip_translation = self._row_tooltip_translation(piece, row_data)
 
         tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
         tag_label.setToolTip(row_data.get("reason", ""))
-        source_label = self._text_label(source_text, missing=source_missing)
-        source_label.setMaximumHeight(max(24, row_height - 14))
-        source_label.setToolTip(source_text)
         target_widget = self._target_display_widget(
             piece["index"],
             idx,
             target_text,
-            editable=not source_missing or not target_missing,
+            editable=target_editable,
             height=max(30, row_height - 14),
         )
+
+        def _inject_tooltip_translation(translated, editor=target_widget):
+            try:
+                if isinstance(editor, QPlainTextEdit) and not editor.isReadOnly():
+                    editor.setPlainText(str(translated or ""))
+                    editor.setFocus(Qt.OtherFocusReason)
+                    return
+            except Exception:
+                pass
+            self._apply_target_edit(piece["index"], idx, translated)
+
+        source_label = self._text_label(
+            source_text,
+            missing=source_missing,
+            tooltip_translation=tooltip_translation,
+            inject_tooltip_callback=_inject_tooltip_translation if tooltip_translation and target_editable else None,
+        )
+        source_label.setMaximumHeight(max(24, row_height - 14))
+        source_label.setToolTip(self._source_tooltip_text(source_text, tooltip_translation))
 
         dot = QLabel("●")
         dot.setAlignment(Qt.AlignCenter)

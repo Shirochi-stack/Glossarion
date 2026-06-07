@@ -2873,7 +2873,7 @@ class QAScannerMixin:
             )
             check_missing_beautifulsoup_tags_checkbox.setToolTip(
                 "Compares source and output p and h1-h6 tag counts from matching SDLXLIFF sidecars. "
-                "Flags output files where those source wrappers were dropped."
+                "Flags output files where those text-unit wrappers were dropped or added."
             )
             detection_layout.addWidget(check_missing_beautifulsoup_tags_checkbox)
 

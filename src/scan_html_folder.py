@@ -5882,14 +5882,17 @@ def _strip_html_like_extensions(name):
 
 
 def _count_beautifulsoup_review_tags(html_content):
-    """Count source/output review tags visible to BeautifulSoup."""
+    """Count non-empty source/output review text units visible to BeautifulSoup."""
     if not isinstance(html_content, str) or not html_content:
         return {}
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         counts = {}
         for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
-            count = len(soup.find_all(tag_name))
+            count = sum(
+                1 for tag in soup.find_all(tag_name)
+                if tag.get_text(" ", strip=True)
+            )
             if count:
                 counts[tag_name] = count
         return counts
@@ -5943,22 +5946,20 @@ def _sdlxliff_review_tag_counts(folder_path, filename):
 
 
 def _missing_beautifulsoup_tags_issue(source_counts, output_counts):
-    if not isinstance(source_counts, dict) or not source_counts:
+    if not isinstance(source_counts, dict):
         return None
     output_counts = output_counts if isinstance(output_counts, dict) else {}
-    missing_parts = []
-    total_missing = 0
     total_source = 0
+    total_output = 0
     for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
         source_count = _safe_int(source_counts.get(tag_name), 0)
         output_count = _safe_int(output_counts.get(tag_name), 0)
         total_source += source_count
-        if source_count > output_count:
-            total_missing += source_count - output_count
-            missing_parts.append(f"{tag_name}:{output_count}/{source_count}")
-    if not missing_parts:
+        total_output += output_count
+    delta = total_output - total_source
+    if delta == 0:
         return None
-    return f"missing_beautifulsoup_tags_{total_missing}_of_{total_source}: {', '.join(missing_parts)}"
+    return f"missing_tags: {total_source}/{total_output} ({delta:+d})"
 
 
 # Matches real angle-bracket tags like <concept> or <概念>. Tag names can be
