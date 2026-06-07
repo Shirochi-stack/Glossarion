@@ -8790,7 +8790,7 @@ def _create_processing_options_section(self, parent):
         self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
 
     if not hasattr(self, 'allow_ai_markdown_headers_var'):
-        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', True)
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
