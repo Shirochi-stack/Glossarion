@@ -6314,16 +6314,24 @@ class EpubLibraryDialog(QDialog):
         """Keep the library offscreen during scan so flash cards pre-render."""
         if getattr(self, "_hidden_prewarm_active", False):
             return
+        if getattr(self, "_library_flash_cards_prewarmed", False):
+            self._warm_library_widgets()
+            return
         self._hidden_prewarm_active = True
+        self._hide_after_initial_prewarm = False
         self._hidden_prewarm_old_opacity = self.windowOpacity()
-        self.setAttribute(Qt.WA_DontShowOnScreen, False)
+        self.setAttribute(Qt.WA_DontShowOnScreen, True)
         self.setWindowOpacity(0.0)
         self.move(-20000, -20000)
         self.show()
         self._fade_native_window_seen = True
-        self.raise_()
         self._warm_library_widgets()
-        if self._scanner_thread and self._scanner_thread.isRunning():
+        scan_started = False
+        if not getattr(self, "_initial_scan_started", False):
+            self._hide_after_initial_prewarm = True
+            self._load_books()
+            scan_started = getattr(self, "_scanner_thread", None) is not None
+        if scan_started or (self._scanner_thread and self._scanner_thread.isRunning()):
             self._hide_after_initial_prewarm = True
         else:
             self._finish_hidden_prewarm(hide=True)

@@ -886,7 +886,7 @@ class SplashManager(QObject):
                             self._manual_progress_auto_cap = None
                             self._manual_progress_auto_boost = 1.0
                             results["manga_available"] = False
-                        print(f"Optional startup module unavailable ({spec['module']}): {e}")
+                        print(f"Optional startup module unavailable ({spec.get('module') or spec.get('display') or spec['key']}): {e}")
                     else:
                         print(f"Warning: Could not import {spec['module']}: {e}")
                 if self.app:
@@ -943,7 +943,7 @@ class SplashManager(QObject):
                                 self._manual_progress_auto_cap = None
                                 self._manual_progress_auto_boost = 1.0
                                 results["manga_available"] = False
-                            print(f"Optional startup module unavailable ({spec['module']}): {e}")
+                            print(f"Optional startup module unavailable ({spec.get('module') or spec.get('display') or spec['key']}): {e}")
                         else:
                             print(f"Warning: Could not import {spec['module']}: {e}")
                 if self.app:

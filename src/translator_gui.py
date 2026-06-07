@@ -683,7 +683,7 @@ if '--run-pdf-extraction' in sys.argv:
 try:
     import threading as _sweep_threading
     _sweep_threading.Thread(
-        target=_sweep_large_caches, args=("startup",), daemon=True,
+        target=_sweep_large_caches, kwargs={"phase": "startup"}, daemon=True,
         name="CacheSweep-startup",
     ).start()
 except Exception:
@@ -23882,7 +23882,7 @@ Important rules:
                     dlg.prewarm_flash_cards()
                 else:
                     dlg.hide()
-                return
+                return dlg
             if hasattr(dlg, 'cancel_hidden_prewarm_for_visible_show'):
                 dlg.cancel_hidden_prewarm_for_visible_show()
             dlg.setAttribute(Qt.WA_DontShowOnScreen, False)
@@ -23897,9 +23897,11 @@ Important rules:
                     dlg.show()
                 dlg.raise_()
                 dlg.activateWindow()
+            return dlg
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open Library:\n{e}")
+            return None
 
     def _handle_library_import_epub(self, path: str):
         """Library \u2192 Import EPUB: set the picked file as the current input.
@@ -28987,6 +28989,57 @@ if __name__ == "__main__":
         # Mark modules as already loaded to skip lazy loading
         main_window._modules_loaded = True
         main_window._modules_loading = False
+
+        epub_prewarm_setting = os.environ.get("GLOSSARION_PREWARM_EPUB_LIBRARY_DIALOG", "").strip().lower()
+        epub_prewarm_enabled = (
+            epub_prewarm_setting not in ("0", "false", "no", "off")
+            and (getattr(sys, "frozen", False) or epub_prewarm_setting in ("1", "true", "yes", "on"))
+        )
+        if splash_manager and epub_prewarm_enabled:
+            splash_manager.update_status("Warming EPUB Library...")
+            try:
+                main_window.set_startup_prewarm_button_loading('epub_library', True, "Loading...")
+            except Exception:
+                pass
+            try:
+                dlg = main_window._open_epub_library(show=False)
+                try:
+                    timeout_ms = int(os.environ.get(
+                        "GLOSSARION_EPUB_LIBRARY_SPLASH_PREWARM_TIMEOUT_MS", "30000"))
+                except (TypeError, ValueError):
+                    timeout_ms = 30000
+                deadline = time.perf_counter() + max(0.0, timeout_ms / 1000.0)
+                next_status = 0.0
+
+                def _epub_prewarm_busy(dialog):
+                    if dialog is None:
+                        return False
+                    if getattr(dialog, "_hidden_prewarm_active", False):
+                        return True
+                    try:
+                        return any(
+                            thread is not None and thread.isRunning()
+                            for thread in (getattr(dialog, "_cover_threads", None) or [])
+                        )
+                    except Exception:
+                        return False
+
+                while _epub_prewarm_busy(dlg) and time.perf_counter() < deadline:
+                    now = time.perf_counter()
+                    if now >= next_status:
+                        splash_manager.update_status("Warming EPUB Library...")
+                        next_status = now + 0.5
+                    qapp.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    time.sleep(0.01)
+                if _epub_prewarm_busy(dlg):
+                    print("[SPLASH] EPUB Library prewarm still running; continuing hidden after splash")
+            except Exception as e:
+                print(f"[SPLASH] EPUB Library prewarm skipped: {e}")
+            finally:
+                try:
+                    main_window.set_startup_prewarm_button_loading('epub_library', False)
+                except Exception:
+                    pass
 
         if splash_manager:
             splash_manager.show_ready_frame()
