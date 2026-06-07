@@ -2983,6 +2983,257 @@ class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
 
     _RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY = "retranslation_show_model_info"
+    _SDLXLIFF_AUTOGEN_STATUSES = {
+        "completed",
+        "qa_failed",
+        "completed_empty",
+        "completed_image_only",
+    }
+
+    @staticmethod
+    def _sdlxliff_autogen_output_path(output_dir, output_file):
+        if not output_dir or not output_file:
+            return None
+        normalized = str(output_file).replace("\\", "/")
+        path = normalized if os.path.isabs(normalized) else os.path.join(output_dir, normalized)
+        return os.path.normpath(path)
+
+    @staticmethod
+    def _sdlxliff_autogen_source_candidates(entry, output_file=None, progress_key=None):
+        entry = entry if isinstance(entry, dict) else {}
+        raw_candidates = [
+            entry.get("original_basename"),
+            entry.get("original_filename"),
+            entry.get("chapter_file"),
+            entry.get("source_filename"),
+            entry.get("filename"),
+            progress_key,
+        ]
+        if output_file:
+            output_name = os.path.basename(str(output_file).replace("\\", "/"))
+            if output_name.lower().startswith("response_"):
+                raw_candidates.append(output_name[len("response_"):])
+        candidates = []
+        seen = set()
+        for candidate in raw_candidates:
+            if not candidate:
+                continue
+            text = str(candidate).replace("\\", "/")
+            variants = [text, os.path.basename(text)]
+            stem, ext = os.path.splitext(text)
+            if not ext and stem:
+                variants.extend([f"{text}.xhtml", f"{text}.html", f"{text}.htm"])
+                base = os.path.basename(text)
+                variants.extend([f"{base}.xhtml", f"{base}.html", f"{base}.htm"])
+            elif ext.lower() in (".html", ".htm", ".xhtml"):
+                for html_ext in (".xhtml", ".html", ".htm"):
+                    variants.append(f"{stem}{html_ext}")
+                base = os.path.basename(text)
+                base_stem, _base_ext = os.path.splitext(base)
+                if base_stem:
+                    for html_ext in (".xhtml", ".html", ".htm"):
+                        variants.append(f"{base_stem}{html_ext}")
+            for variant in variants:
+                if variant and variant not in seen:
+                    seen.add(variant)
+                    candidates.append(variant)
+        return candidates
+
+    @staticmethod
+    def _sdlxliff_autogen_decode(data):
+        for encoding in ("utf-8", "utf-8-sig", "cp949", "latin-1"):
+            try:
+                return data.decode(encoding)
+            except Exception:
+                continue
+        return data.decode("utf-8", errors="replace")
+
+    def _sdlxliff_autogen_epub_candidates(self, output_dir, file_path=None):
+        candidates = []
+        source_ref = os.path.join(output_dir or "", "source_epub.txt")
+        try:
+            if os.path.isfile(source_ref):
+                with open(source_ref, "r", encoding="utf-8", errors="ignore") as f:
+                    ref = f.read().strip()
+                if ref:
+                    candidates.append(ref)
+        except Exception:
+            pass
+        if file_path:
+            candidates.append(file_path)
+        try:
+            for fname in os.listdir(output_dir or ""):
+                if str(fname).lower().endswith(".epub"):
+                    candidates.append(os.path.join(output_dir, fname))
+        except Exception:
+            pass
+        resolved = []
+        seen = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = candidate if os.path.isabs(str(candidate)) else os.path.join(output_dir or "", str(candidate))
+            path = os.path.normpath(path)
+            norm = os.path.normcase(os.path.abspath(path))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(path) and path.lower().endswith(".epub"):
+                resolved.append(path)
+        return resolved
+
+    def _sdlxliff_autogen_read_source_html(self, output_dir, entry, output_file=None, progress_key=None, file_path=None):
+        candidates = self._sdlxliff_autogen_source_candidates(entry, output_file, progress_key)
+        candidate_names = {str(c).replace("\\", "/").lower().strip("/") for c in candidates if c}
+        candidate_basenames = {os.path.basename(str(c).replace("\\", "/")).lower() for c in candidates if c}
+        candidate_names.discard("")
+        candidate_basenames.discard("")
+        if candidate_names or candidate_basenames:
+            for epub_path in self._sdlxliff_autogen_epub_candidates(output_dir, file_path):
+                try:
+                    with zipfile.ZipFile(epub_path, "r") as zf:
+                        for name in zf.namelist():
+                            normalized = str(name).replace("\\", "/").lower().strip("/")
+                            if normalized in candidate_names or os.path.basename(normalized) in candidate_basenames:
+                                return self._sdlxliff_autogen_decode(zf.read(name)), f"{epub_path}!{name}"
+                except Exception:
+                    continue
+
+        output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
+        output_norm = os.path.normcase(os.path.abspath(output_path)) if output_path else ""
+        output_base = os.path.basename(str(output_file or "").replace("\\", "/")).lower()
+        for candidate in candidates:
+            text = str(candidate).replace("\\", "/")
+            variants = [text]
+            basename = os.path.basename(text)
+            if basename and basename != text:
+                variants.append(basename)
+            for variant in variants:
+                path = variant if os.path.isabs(variant) else os.path.join(output_dir or "", variant)
+                path = os.path.normpath(path)
+                if output_norm and os.path.normcase(os.path.abspath(path)) == output_norm:
+                    continue
+                if output_base and os.path.basename(path).lower() == output_base:
+                    continue
+                if os.path.isfile(path):
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as f:
+                            return f.read(), path
+                    except Exception:
+                        continue
+        return None, None
+
+    def _generate_sdlxliff_sidecars_from_completed_entries(
+        self,
+        output_dir,
+        file_path=None,
+        progress_data=None,
+        output_files=None,
+        overwrite=True,
+    ):
+        stats = {
+            "considered": 0,
+            "created": 0,
+            "skipped": 0,
+            "missing_source": 0,
+            "missing_output": 0,
+            "failed": 0,
+            "paths": [],
+        }
+        if not output_dir or not os.path.isdir(output_dir):
+            return stats
+
+        if progress_data is None:
+            progress_path = os.path.join(output_dir, "translation_progress.json")
+            try:
+                with open(progress_path, "r", encoding="utf-8") as f:
+                    progress_data = json.load(f)
+            except Exception:
+                progress_data = {}
+
+        chapters = progress_data.get("chapters") if isinstance(progress_data, dict) else None
+        if not isinstance(chapters, dict):
+            chapters = progress_data if isinstance(progress_data, dict) else {}
+        if not isinstance(chapters, dict):
+            return stats
+
+        requested = None
+        if output_files:
+            requested = {
+                os.path.basename(str(name).replace("\\", "/")).lower()
+                for name in output_files
+                if name
+            }
+            requested.discard("")
+
+        seen_outputs = set()
+        old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
+        os.environ["OUTPUT_SDLXLIFF"] = "1"
+        try:
+            from TransateKRtoEN import _write_html_sdlxliff_sidecar
+
+            for progress_key, entry in chapters.items():
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get("status", "") or "").lower()
+                if status not in self._SDLXLIFF_AUTOGEN_STATUSES:
+                    continue
+                output_file = entry.get("output_file")
+                output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+                if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+                    continue
+                if requested is not None and output_name.lower() not in requested:
+                    continue
+                if output_name.lower() in seen_outputs:
+                    stats["skipped"] += 1
+                    continue
+                seen_outputs.add(output_name.lower())
+                stats["considered"] += 1
+
+                sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
+                if not overwrite and os.path.isfile(sidecar_path):
+                    stats["skipped"] += 1
+                    stats["paths"].append(sidecar_path)
+                    continue
+
+                output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
+                if not output_path or not os.path.isfile(output_path):
+                    stats["missing_output"] += 1
+                    continue
+                try:
+                    with open(output_path, "r", encoding="utf-8", errors="replace") as f:
+                        target_html = f.read()
+                except Exception:
+                    stats["missing_output"] += 1
+                    continue
+
+                source_html, source_path = self._sdlxliff_autogen_read_source_html(
+                    output_dir,
+                    entry,
+                    output_file=output_file,
+                    progress_key=progress_key,
+                    file_path=file_path,
+                )
+                if not source_html:
+                    stats["missing_source"] += 1
+                    continue
+
+                chapter = dict(entry)
+                if not chapter.get("original_basename"):
+                    chapter["original_basename"] = os.path.basename(str(source_path or output_name).split("!", 1)[-1])
+                result_path = _write_html_sdlxliff_sidecar(output_dir, output_name, chapter, source_html, target_html)
+                if result_path:
+                    stats["created"] += 1
+                    stats["paths"].append(result_path)
+                else:
+                    stats["failed"] += 1
+        finally:
+            if old_output_sdlxliff is None:
+                os.environ.pop("OUTPUT_SDLXLIFF", None)
+            else:
+                os.environ["OUTPUT_SDLXLIFF"] = old_output_sdlxliff
+
+        return stats
 
     def _open_or_reuse_sdlxliff_review(self, output_dir, review_path=None, parent=None):
         try:
@@ -4874,7 +5125,7 @@ class RetranslationMixin:
                         )
                 else:
                     text_analysis_btn.setToolTip(
-                        "Review source/output text analysis. No SDLXLIFF sidecars were found for this output folder yet."
+                        "Review source/output text analysis. SDLXLIFF sidecars will be generated from completed entries if needed."
                     )
             except RuntimeError:
                 pass
@@ -4885,10 +5136,30 @@ class RetranslationMixin:
         def _show_text_analysis():
             sidecars = _text_analysis_sidecars()
             if not sidecars:
+                stats = self._generate_sdlxliff_sidecars_from_completed_entries(
+                    output_dir,
+                    file_path=file_path,
+                    progress_data=prog,
+                    overwrite=True,
+                )
+                sidecars = _text_analysis_sidecars()
+                if sidecars:
+                    _queue_text_analysis_button_update()
+            if not sidecars:
+                detail = ""
+                try:
+                    detail = (
+                        f"\n\nAuto-generation considered {stats.get('considered', 0)} completed entries; "
+                        f"missing source: {stats.get('missing_source', 0)}, "
+                        f"missing output: {stats.get('missing_output', 0)}, "
+                        f"failed: {stats.get('failed', 0)}."
+                    )
+                except Exception:
+                    detail = ""
                 self._show_message(
                     'info',
                     "Text Analysis Unavailable",
-                    "No SDLXLIFF sidecars were found for this output folder.",
+                    "No SDLXLIFF sidecars were found or generated for this output folder." + detail,
                     parent=dialog,
                 )
                 return
@@ -7890,8 +8161,19 @@ class RetranslationMixin:
                 self._show_message('error', "Source Missing", "The raw source file for this entry was not found.", parent=data.get('dialog', self))
                 return
             if not review_path:
-                self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file was found for this exact output filename.", parent=data.get('dialog', self))
-                return
+                progress_entry = display_info.get('info', {}) or {}
+                output_file = display_info.get('output_file') or progress_entry.get('output_file')
+                self._generate_sdlxliff_sidecars_from_completed_entries(
+                    data['output_dir'],
+                    file_path=data.get('file_path'),
+                    progress_data=data.get('prog'),
+                    output_files=[output_file] if output_file else None,
+                    overwrite=True,
+                )
+                review_path = _sdlxliff_review_path_for_item(display_info)
+                if not review_path:
+                    self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file could be generated for this exact output filename.", parent=data.get('dialog', self))
+                    return
             try:
                 self._open_or_reuse_sdlxliff_review(data['output_dir'], review_path, data.get('dialog', self))
             except Exception as e:
@@ -8070,7 +8352,7 @@ class RetranslationMixin:
             )
             act_open = menu.addAction("📂 Open File")
             act_review_sdlxliff = None
-            if _source_exists_for_item(display_info) and _sdlxliff_review_path_for_item(display_info):
+            if _source_exists_for_item(display_info) and qa_file_path:
                 act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
             act_open_audio = None
             act_delete_audio = None
