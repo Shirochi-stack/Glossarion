@@ -1145,3 +1145,134 @@ def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):
     assert source_counts == {"h1": 1, "p": 1}
     assert output_counts == {"h1": 1, "p": 2}
     assert _missing_beautifulsoup_tags_issue(source_counts, output_counts) == "missing_tags: 2/3 (+1)"
+
+
+def _norm_windows_rename_test_path(path):
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _windows_rename_test_gui(tmp_path):
+    import translator_gui
+    from translator_gui import TranslatorGUI
+
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {}
+    gui.base_dir = str(tmp_path / "app")
+    gui.manual_glossary_map = {}
+    gui.manual_glossary_path = None
+    gui.auto_loaded_glossary_path = None
+    gui.auto_loaded_glossary_for_file = None
+    gui.manual_glossary_manually_loaded = False
+    gui._glossary_dir_candidate_cache = {"stale": object()}
+    gui.logs = []
+    gui.append_log = gui.logs.append
+    gui.save_config = lambda show_message=True: None
+    gui._update_manual_glossary_status = lambda: None
+    Path(gui.base_dir, "Glossary").mkdir(parents=True)
+    return translator_gui, gui
+
+
+def test_windows_epub_rename_moves_auto_glossary_and_updates_state(tmp_path, monkeypatch):
+    translator_gui, gui = _windows_rename_test_gui(tmp_path)
+    monkeypatch.setattr(translator_gui.sys, "platform", "win32")
+
+    old_epub = tmp_path / "Book .epub"
+    old_epub.write_text("epub", encoding="utf-8")
+    glossary_dir = Path(gui.base_dir) / "Glossary" / "Book"
+    glossary_dir.mkdir(parents=True)
+
+    old_glossary = glossary_dir / "Book _glossary.csv"
+    old_glossary.write_text("term,translation\n", encoding="utf-8")
+    for name in (
+        "Book _glossary_progress.json",
+        "Book _gender_tracker.json",
+        "Book _glossary_history.json",
+    ):
+        (glossary_dir / name).write_text("{}", encoding="utf-8")
+
+    old_epub_abs = _norm_windows_rename_test_path(old_epub)
+    old_glossary_abs = _norm_windows_rename_test_path(old_glossary)
+    gui.manual_glossary_map = {old_epub_abs: old_glossary_abs}
+    gui.config["manual_glossary_map"] = dict(gui.manual_glossary_map)
+    gui.manual_glossary_path = old_glossary_abs
+    gui.config["manual_glossary_path"] = old_glossary_abs
+    gui.auto_loaded_glossary_path = old_glossary_abs
+    gui.auto_loaded_glossary_for_file = old_epub_abs
+    monkeypatch.setenv("MANUAL_GLOSSARY", old_glossary_abs)
+
+    new_path = gui._windows_supported_input_path(str(old_epub))
+
+    new_epub = tmp_path / "Book.epub"
+    new_glossary = glossary_dir / "Book_glossary.csv"
+    new_epub_abs = _norm_windows_rename_test_path(new_epub)
+    new_glossary_abs = _norm_windows_rename_test_path(new_glossary)
+
+    assert _norm_windows_rename_test_path(new_path) == new_epub_abs
+    assert new_epub.is_file()
+    assert not old_epub.exists()
+    assert new_glossary.read_text(encoding="utf-8") == "term,translation\n"
+    assert not old_glossary.exists()
+    assert (glossary_dir / "Book_glossary_progress.json").is_file()
+    assert (glossary_dir / "Book_gender_tracker.json").is_file()
+    assert (glossary_dir / "Book_glossary_history.json").is_file()
+    assert gui.manual_glossary_map == {new_epub_abs: new_glossary_abs}
+    assert gui.config["manual_glossary_map"] == {new_epub_abs: new_glossary_abs}
+    assert gui.manual_glossary_path == new_glossary_abs
+    assert gui.config["manual_glossary_path"] == new_glossary_abs
+    assert gui.auto_loaded_glossary_path == new_glossary_abs
+    assert gui.auto_loaded_glossary_for_file == new_epub_abs
+    assert os.environ["MANUAL_GLOSSARY"] == new_glossary_abs
+    assert gui._glossary_dir_candidate_cache == {}
+
+
+def test_windows_epub_rename_does_not_overwrite_existing_glossary(tmp_path, monkeypatch):
+    translator_gui, gui = _windows_rename_test_gui(tmp_path)
+    monkeypatch.setattr(translator_gui.sys, "platform", "win32")
+
+    old_epub = tmp_path / "Novel .epub"
+    old_epub.write_text("epub", encoding="utf-8")
+    glossary_dir = Path(gui.base_dir) / "Glossary" / "Novel"
+    glossary_dir.mkdir(parents=True)
+    old_glossary = glossary_dir / "Novel _glossary.json"
+    new_glossary = glossary_dir / "Novel_glossary.json"
+    old_glossary.write_text('{"old": true}', encoding="utf-8")
+    new_glossary.write_text('{"existing": true}', encoding="utf-8")
+
+    gui.manual_glossary_map = {
+        _norm_windows_rename_test_path(old_epub): _norm_windows_rename_test_path(old_glossary)
+    }
+    gui.config["manual_glossary_map"] = dict(gui.manual_glossary_map)
+
+    new_path = gui._windows_supported_input_path(str(old_epub))
+
+    assert _norm_windows_rename_test_path(new_path) == _norm_windows_rename_test_path(tmp_path / "Novel.epub")
+    assert old_glossary.read_text(encoding="utf-8") == '{"old": true}'
+    assert new_glossary.read_text(encoding="utf-8") == '{"existing": true}'
+    assert gui.manual_glossary_map == {
+        _norm_windows_rename_test_path(tmp_path / "Novel.epub"): _norm_windows_rename_test_path(old_glossary)
+    }
+    assert gui.config["manual_glossary_map"] == gui.manual_glossary_map
+
+
+def test_windows_non_epub_rename_does_not_remap_glossary_state(tmp_path, monkeypatch):
+    translator_gui, gui = _windows_rename_test_gui(tmp_path)
+    monkeypatch.setattr(translator_gui.sys, "platform", "win32")
+
+    old_text = tmp_path / "Notes .txt"
+    old_text.write_text("text", encoding="utf-8")
+    glossary = Path(gui.base_dir) / "Glossary" / "Notes" / "Notes _glossary.csv"
+    glossary.parent.mkdir(parents=True)
+    glossary.write_text("term,translation\n", encoding="utf-8")
+
+    original_map = {
+        _norm_windows_rename_test_path(old_text): _norm_windows_rename_test_path(glossary)
+    }
+    gui.manual_glossary_map = dict(original_map)
+    gui.config["manual_glossary_map"] = dict(original_map)
+
+    new_path = gui._windows_supported_input_path(str(old_text))
+
+    assert _norm_windows_rename_test_path(new_path) == _norm_windows_rename_test_path(tmp_path / "Notes.txt")
+    assert (tmp_path / "Notes.txt").is_file()
+    assert gui.manual_glossary_map == original_map
+    assert gui.config["manual_glossary_map"] == original_map

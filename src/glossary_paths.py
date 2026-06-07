@@ -23,6 +23,16 @@ _LEGACY_GLOSSARY_SUFFIXES = (
     "_glossary.md",
 )
 
+_AUTO_GLOSSARY_RENAME_SUFFIXES = (
+    "_glossary.csv",
+    "_glossary.json",
+    "_glossary.txt",
+    "_glossary.md",
+    "_glossary_progress.json",
+    "_gender_tracker.json",
+    "_glossary_history.json",
+)
+
 _BACKGROUND_MIGRATION_LOCK = threading.Lock()
 _BACKGROUND_MIGRATION_THREADS = {}
 
@@ -202,6 +212,103 @@ def get_book_glossary_path(shared_glossary_dir: str, book_name: str, filename: s
         get_book_glossary_dir(shared_glossary_dir, book_name, create=create, fallback_base=fallback_base),
         os.path.basename(filename),
     )
+
+
+def rename_auto_glossary_artifacts_for_book_rename(shared_glossary_dirs, old_book_name: str, new_book_name: str, logger=None):
+    """Rename generated glossary artifacts after a source book file rename.
+
+    Only known auto-generated glossary filenames are moved, and existing
+    destinations are never overwritten. Returns a dict with ``moved``,
+    ``conflicts``, and ``errors`` lists of path tuples.
+    """
+    result = {"moved": [], "conflicts": [], "errors": []}
+
+    old_base = glossary_book_base_from_output(old_book_name)
+    new_base = glossary_book_base_from_output(new_book_name)
+    if not old_base or not new_base or old_base == new_base:
+        return result
+
+    old_folder = sanitize_glossary_folder_name(old_base)
+    new_folder = sanitize_glossary_folder_name(new_base)
+
+    roots = []
+    seen_roots = set()
+    for raw_root in shared_glossary_dirs or []:
+        if not raw_root:
+            continue
+        try:
+            root = resolve_shared_glossary_dir(raw_root)
+            key = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+        except Exception:
+            continue
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        roots.append(root)
+
+    def _add_dir(items, seen, path, dst_dir):
+        try:
+            key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        except Exception:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        items.append((path, dst_dir))
+
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+
+        candidate_dirs = []
+        seen_dirs = set()
+        _add_dir(candidate_dirs, seen_dirs, root, root)
+        _add_dir(
+            candidate_dirs,
+            seen_dirs,
+            os.path.join(root, old_folder),
+            os.path.join(root, new_folder),
+        )
+        if old_base != old_folder:
+            _add_dir(
+                candidate_dirs,
+                seen_dirs,
+                os.path.join(root, old_base),
+                os.path.join(root, new_folder),
+            )
+
+        for src_dir, dst_dir in candidate_dirs:
+            if not os.path.isdir(src_dir):
+                continue
+            for suffix in _AUTO_GLOSSARY_RENAME_SUFFIXES:
+                src = os.path.join(src_dir, f"{old_base}{suffix}")
+                if not os.path.isfile(src):
+                    continue
+                dst = os.path.join(dst_dir, f"{new_base}{suffix}")
+                try:
+                    if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
+                        continue
+                    if os.path.exists(dst):
+                        result["conflicts"].append((src, dst))
+                        _safe_log(
+                            logger,
+                            f"Skipped glossary rename because destination exists: {os.path.basename(src)} -> {os.path.basename(dst)}",
+                        )
+                        continue
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    os.rename(src, dst)
+                    result["moved"].append((src, dst))
+                except Exception as exc:
+                    result["errors"].append((src, dst, str(exc)))
+                    _safe_log(logger, f"Glossary rename failed for {src}: {exc}")
+
+            try:
+                if src_dir != root and os.path.isdir(src_dir) and not os.listdir(src_dir):
+                    os.rmdir(src_dir)
+            except Exception:
+                pass
+
+    return result
 
 
 def migrate_legacy_glossary_files(shared_glossary_dir: str, book_name: str, logger=None):

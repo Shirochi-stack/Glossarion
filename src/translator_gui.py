@@ -24079,6 +24079,11 @@ Important rules:
                 counter += 1
 
             os.rename(path, candidate)
+            if ext.lower() == '.epub':
+                try:
+                    self._remap_windows_renamed_epub_glossary(path, candidate)
+                except Exception:
+                    pass
             try:
                 self.append_log(
                     "⚠️ Windows does not support this filename for generated output folders because it ends in dots/spaces."
@@ -24095,6 +24100,189 @@ Important rules:
             except Exception:
                 pass
             return path
+
+    def _windows_glossary_rename_dirs(self):
+        """Return shared Glossary dirs used by auto-mapping for source renames."""
+        dirs = []
+
+        try:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        except Exception:
+            override_dir = None
+        if override_dir:
+            try:
+                dirs.append(os.path.join(os.path.abspath(override_dir), 'Glossary'))
+            except Exception:
+                dirs.append(os.path.join(override_dir, 'Glossary'))
+
+        try:
+            base_dir = getattr(self, 'base_dir', '')
+            if base_dir:
+                dirs.append(os.path.join(base_dir, 'Glossary'))
+        except Exception:
+            pass
+
+        try:
+            dirs.append(os.path.join(_get_app_dir(), 'Glossary'))
+        except Exception:
+            pass
+
+        unique = []
+        seen = set()
+        for path in dirs:
+            if not path:
+                continue
+            try:
+                key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+            except Exception:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        return unique
+
+    @staticmethod
+    def _path_lookup_key(path):
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        except Exception:
+            return os.path.normcase(os.path.normpath(str(path or "")))
+
+    def _remap_windows_renamed_epub_glossary(self, old_epub_path, new_epub_path):
+        """Move generated glossary files and retarget state after an EPUB rename."""
+        if not old_epub_path or not new_epub_path:
+            return
+        if not str(old_epub_path).lower().endswith('.epub') or not str(new_epub_path).lower().endswith('.epub'):
+            return
+
+        old_epub_abs = os.path.normpath(os.path.abspath(old_epub_path))
+        new_epub_abs = os.path.normpath(os.path.abspath(new_epub_path))
+        old_epub_key = self._path_lookup_key(old_epub_abs)
+        moved_lookup = {}
+
+        try:
+            from glossary_paths import rename_auto_glossary_artifacts_for_book_rename
+
+            rename_result = rename_auto_glossary_artifacts_for_book_rename(
+                self._windows_glossary_rename_dirs(),
+                os.path.splitext(os.path.basename(old_epub_path))[0],
+                os.path.splitext(os.path.basename(new_epub_path))[0],
+                logger=getattr(self, 'append_log', None),
+            )
+            for src, dst in rename_result.get('moved', []):
+                moved_lookup[self._path_lookup_key(src)] = os.path.normpath(os.path.abspath(dst))
+
+            moved_count = len(rename_result.get('moved', []))
+            conflict_count = len(rename_result.get('conflicts', []))
+            if moved_count:
+                try:
+                    self.append_log(f"📑 Renamed auto-mapped glossary files for Windows-safe EPUB name: {moved_count} file(s)")
+                except Exception:
+                    pass
+            elif conflict_count:
+                try:
+                    self.append_log("⚠️ Kept existing glossary mapping because a renamed glossary destination already exists")
+                except Exception:
+                    pass
+        except Exception as exc:
+            try:
+                self.append_log(f"⚠️ Could not rename associated glossary files: {exc}")
+            except Exception:
+                pass
+
+        def _moved_glossary_path(path):
+            if not path:
+                return path, False
+            replacement = moved_lookup.get(self._path_lookup_key(path))
+            if replacement:
+                return replacement, True
+            return path, False
+
+        changed = False
+
+        try:
+            manual_map = getattr(self, 'manual_glossary_map', None)
+            if isinstance(manual_map, dict) and manual_map:
+                updated_map = {}
+                for key, glossary_path in manual_map.items():
+                    try:
+                        map_key_matches_epub = self._path_lookup_key(key) == old_epub_key
+                    except Exception:
+                        map_key_matches_epub = False
+
+                    new_glossary_path, glossary_moved = _moved_glossary_path(glossary_path)
+                    if map_key_matches_epub:
+                        updated_map[new_epub_abs] = new_glossary_path
+                        changed = True
+                    else:
+                        updated_map[key] = new_glossary_path
+                        changed = changed or glossary_moved
+
+                if updated_map != manual_map:
+                    self.manual_glossary_map = updated_map
+                    try:
+                        self.config['manual_glossary_map'] = updated_map
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            if self._path_lookup_key(getattr(self, 'auto_loaded_glossary_for_file', None)) == old_epub_key:
+                self.auto_loaded_glossary_for_file = new_epub_abs
+                changed = True
+        except Exception:
+            pass
+
+        for attr in ('auto_loaded_glossary_path', 'manual_glossary_path'):
+            try:
+                current = getattr(self, attr, None)
+                updated, did_move = _moved_glossary_path(current)
+                if did_move and updated != current:
+                    setattr(self, attr, updated)
+                    changed = True
+                    if attr == 'manual_glossary_path':
+                        try:
+                            self.config['manual_glossary_path'] = updated
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        try:
+            config_gp = self.config.get('manual_glossary_path')
+            updated_config_gp, did_move = _moved_glossary_path(config_gp)
+            if did_move and updated_config_gp != config_gp:
+                self.config['manual_glossary_path'] = updated_config_gp
+                changed = True
+        except Exception:
+            pass
+
+        try:
+            env_gp = os.environ.get('MANUAL_GLOSSARY')
+            updated_env_gp, did_move = _moved_glossary_path(env_gp)
+            if did_move and updated_env_gp:
+                os.environ['MANUAL_GLOSSARY'] = updated_env_gp
+                changed = True
+            elif getattr(self, 'manual_glossary_path', None) and not getattr(self, 'manual_glossary_map', None):
+                os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+        except Exception:
+            pass
+
+        if moved_lookup:
+            try:
+                cache = getattr(self, '_glossary_dir_candidate_cache', None)
+                if isinstance(cache, dict):
+                    cache.clear()
+            except Exception:
+                pass
+
+        if changed:
+            try:
+                self._update_manual_glossary_status()
+            except Exception:
+                pass
 
     def _normalize_windows_input_filenames(self, paths):
         """Apply Windows filename normalization to a list of selected source paths."""
