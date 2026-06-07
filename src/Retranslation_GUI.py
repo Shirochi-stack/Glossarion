@@ -779,7 +779,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     path = str(value)
                 except Exception:
                     continue
-                if path and path.lower().endswith(".epub") and os.path.isfile(path):
+                if (
+                    path
+                    and (
+                        (path.lower().endswith(".epub") and os.path.isfile(path))
+                        or RetranslationMixin._sdlxliff_is_extracted_epub_dir(path)
+                    )
+                ):
                     candidates.append(path)
 
         widget = parent
@@ -881,6 +887,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _discover_review_books(self, parent):
         entries = []
+        entries_by_dir = {}
         seen_dirs = set()
         initial_output_dir = os.path.abspath(self.output_dir) if self.output_dir else ""
         initial_current_path = os.path.abspath(self.current_path) if self.current_path else ""
@@ -897,16 +904,25 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 return
             if norm in seen_dirs:
+                existing = entries_by_dir.get(norm)
+                if existing is not None:
+                    if epub_path and not existing.get("epub_path"):
+                        existing["epub_path"] = epub_path
+                        existing["label"] = os.path.splitext(os.path.basename(os.path.normpath(epub_path)))[0] or existing.get("label") or "SDLXLIFF"
+                    if current_path and os.path.isfile(current_path) and not existing.get("current_path"):
+                        existing["current_path"] = current_path
                 return
             seen_dirs.add(norm)
-            label = os.path.splitext(os.path.basename(epub_path))[0] if epub_path else os.path.basename(abs_dir)
+            label = os.path.splitext(os.path.basename(os.path.normpath(epub_path)))[0] if epub_path else os.path.basename(abs_dir)
             selected_path = current_path if current_path and os.path.isfile(current_path) else ""
-            entries.append({
+            entry = {
                 "epub_path": epub_path or "",
                 "output_dir": output_dir,
                 "label": label or "SDLXLIFF",
                 "current_path": selected_path,
-            })
+            }
+            entries.append(entry)
+            entries_by_dir[norm] = entry
 
         if initial_output_dir:
             _add_entry(initial_output_dir, current_path=initial_current_path)
@@ -1462,6 +1478,16 @@ class SDLXLIFFReviewDialog(QDialog):
         return os.path.basename(str(name or "").replace("\\", "/")).lower()
 
     @staticmethod
+    def _canonical_review_path(name):
+        text = str(name or "").replace("\\", "/").strip().lower()
+        text = text.lstrip("/")
+        while text.startswith("./"):
+            text = text[2:]
+        while text.startswith("../"):
+            text = text[3:]
+        return text
+
+    @staticmethod
     def _sidecar_output_name(path_or_name):
         sidecar_name = os.path.basename(str(path_or_name or "").replace("\\", "/"))
         suffix = ".sdlxliff"
@@ -1565,6 +1591,12 @@ class SDLXLIFFReviewDialog(QDialog):
             href = id_to_href.get(idref)
             if not href:
                 continue
+            href_key = self._canonical_review_path(href)
+            if href_key:
+                spine_positions[href_key] = position
+                no_ext, _ext = os.path.splitext(href_key)
+                if no_ext:
+                    spine_positions[no_ext] = position
             href_base = self._canonical_basename(href)
             if not href_base:
                 continue
@@ -1595,13 +1627,21 @@ class SDLXLIFFReviewDialog(QDialog):
 
         opf_position = None
         for candidate in (original_name, output_name, self._original_name_from_output(output_name)):
-            normalized = self._canonical_basename(candidate)
-            if normalized in spine_positions:
-                opf_position = spine_positions[normalized]
-                break
-            no_ext, _ext = os.path.splitext(normalized)
-            if no_ext in spine_positions:
-                opf_position = spine_positions[no_ext]
+            normalized_keys = [
+                self._canonical_review_path(candidate),
+                self._canonical_basename(candidate),
+            ]
+            for normalized in normalized_keys:
+                if not normalized:
+                    continue
+                if normalized in spine_positions:
+                    opf_position = spine_positions[normalized]
+                    break
+                no_ext, _ext = os.path.splitext(normalized)
+                if no_ext in spine_positions:
+                    opf_position = spine_positions[no_ext]
+                    break
+            if opf_position is not None:
                 break
 
         chapter_num = progress_entry.get("actual_num", progress_entry.get("chapter_num"))
@@ -3546,6 +3586,49 @@ class RetranslationMixin:
                 continue
         return data.decode("utf-8", errors="replace")
 
+    @staticmethod
+    def _sdlxliff_is_extracted_epub_dir(path):
+        if not path or not os.path.isdir(path):
+            return False
+        direct_candidates = [
+            os.path.join(path, "content.opf"),
+            os.path.join(path, "OEBPS", "content.opf"),
+            os.path.join(path, "EPUB", "content.opf"),
+            os.path.join(path, "META-INF", "container.xml"),
+        ]
+        if any(os.path.isfile(candidate) for candidate in direct_candidates):
+            return True
+        try:
+            for _root_dir, _dirs, files in os.walk(path):
+                if any(str(fname).lower().endswith(".opf") for fname in files):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _sdlxliff_autogen_read_source_from_directory(root_dir, candidate_names, candidate_basenames):
+        if not root_dir or not os.path.isdir(root_dir):
+            return None, None
+        try:
+            root_abs = os.path.abspath(root_dir)
+            for dirpath, _dirs, files in os.walk(root_abs):
+                for fname in files:
+                    rel = os.path.relpath(os.path.join(dirpath, fname), root_abs).replace("\\", "/")
+                    normalized = rel.lower().strip("/")
+                    basename = os.path.basename(normalized)
+                    if normalized not in candidate_names and basename not in candidate_basenames:
+                        continue
+                    path = os.path.join(dirpath, fname)
+                    try:
+                        with open(path, "rb") as f:
+                            return RetranslationMixin._sdlxliff_autogen_decode(f.read()), path
+                    except Exception:
+                        continue
+        except Exception:
+            return None, None
+        return None, None
+
     def _sdlxliff_current_input_file_candidates(self):
         candidates = []
 
@@ -3588,7 +3671,7 @@ class RetranslationMixin:
             if norm in seen:
                 continue
             seen.add(norm)
-            if os.path.isfile(path):
+            if os.path.exists(path):
                 resolved.append(path)
         return resolved
 
@@ -3599,12 +3682,32 @@ class RetranslationMixin:
             return []
         matches = []
         for path in self._sdlxliff_current_input_file_candidates():
-            if not str(path).lower().endswith(".epub"):
+            if os.path.isfile(path) and str(path).lower().endswith(".epub"):
+                candidate_key = os.path.splitext(os.path.basename(path))[0]
+            elif self._sdlxliff_is_extracted_epub_dir(path):
+                candidate_key = os.path.basename(os.path.normpath(path))
+            else:
                 continue
-            stem = os.path.splitext(os.path.basename(path))[0]
-            if os.path.normcase(stem) == output_key:
+            if os.path.normcase(candidate_key) == output_key:
                 matches.append(path)
         return matches
+
+    def _sdlxliff_valid_current_input_epub_candidates(self):
+        candidates = []
+        seen = set()
+        for path in self._sdlxliff_current_input_file_candidates():
+            resolved = self._sdlxliff_valid_epub_path("", path)
+            if not resolved:
+                continue
+            try:
+                norm = os.path.normcase(os.path.abspath(resolved))
+            except Exception:
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            candidates.append(resolved)
+        return candidates
 
     @staticmethod
     def _sdlxliff_valid_epub_path(output_dir, path):
@@ -3612,14 +3715,21 @@ class RetranslationMixin:
             return None
         candidate = path if os.path.isabs(str(path)) else os.path.join(output_dir or "", str(path))
         candidate = os.path.normpath(candidate)
-        return candidate if os.path.isfile(candidate) and candidate.lower().endswith(".epub") else None
+        if os.path.isfile(candidate) and candidate.lower().endswith(".epub"):
+            return candidate
+        if RetranslationMixin._sdlxliff_is_extracted_epub_dir(candidate):
+            return candidate
+        return None
 
     def _sdlxliff_preferred_input_epub(self, output_dir, file_path=None):
         direct = self._sdlxliff_valid_epub_path(output_dir, file_path)
         if direct:
             return direct
         exact = self._sdlxliff_exact_input_epub_candidates(output_dir)
-        return exact[0] if exact else None
+        if exact:
+            return exact[0]
+        current = self._sdlxliff_valid_current_input_epub_candidates()
+        return current[0] if len(current) == 1 else None
 
     def _sdlxliff_update_source_epub_ref(self, output_dir, epub_path):
         epub_path = self._sdlxliff_valid_epub_path(output_dir, epub_path)
@@ -3656,10 +3766,15 @@ class RetranslationMixin:
         except Exception:
             pass
         candidates.extend(self._sdlxliff_exact_input_epub_candidates(output_dir))
+        candidates.extend(self._sdlxliff_valid_current_input_epub_candidates())
         try:
             for fname in os.listdir(output_dir or ""):
                 if str(fname).lower().endswith(".epub"):
                     candidates.append(os.path.join(output_dir, fname))
+                else:
+                    path = os.path.join(output_dir, fname)
+                    if self._sdlxliff_is_extracted_epub_dir(path):
+                        candidates.append(path)
         except Exception:
             pass
         resolved = []
@@ -3683,6 +3798,15 @@ class RetranslationMixin:
         candidate_basenames.discard("")
         if candidate_names or candidate_basenames:
             for epub_path in self._sdlxliff_autogen_epub_candidates(output_dir, file_path):
+                if os.path.isdir(epub_path):
+                    source_text, source_path = self._sdlxliff_autogen_read_source_from_directory(
+                        epub_path,
+                        candidate_names,
+                        candidate_basenames,
+                    )
+                    if source_text:
+                        return source_text, source_path
+                    continue
                 try:
                     with zipfile.ZipFile(epub_path, "r") as zf:
                         for name in zf.namelist():
