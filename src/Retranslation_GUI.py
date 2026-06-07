@@ -148,20 +148,29 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_ROW_MAX_HEIGHT = 220
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
+    _SDLXLIFF_AUTOGEN_STATUSES = {
+        "completed",
+        "qa_failed",
+        "completed_empty",
+        "completed_image_only",
+    }
 
-    def __init__(self, output_dir, current_path=None, parent=None, config=None):
+    def __init__(self, output_dir, current_path=None, parent=None, config=None, autogen_owner=None):
         super().__init__(parent)
         self.output_dir = output_dir
         self.current_path = os.path.abspath(current_path) if current_path else ""
         parent_config = getattr(parent, "config", None)
         self._config = config if isinstance(config, dict) else (parent_config if isinstance(parent_config, dict) else {})
         self._context_parent = parent
+        self._sdlxliff_autogen_owner = autogen_owner
+        self._last_autogen_signature = None
         self._book_entries = self._discover_review_books(parent)
         self._book_index = self._initial_review_book_index()
         if self._book_entries:
             current_book = self._book_entries[self._book_index]
             self.output_dir = current_book.get("output_dir") or self.output_dir
             self.current_path = current_book.get("current_path") or self.current_path
+        self._maybe_regenerate_review_sidecars(force=True)
         self.pieces = self._load_pieces()
         self._pending_target_edits = {}
         self._edit_save_timer = QTimer(self)
@@ -355,6 +364,156 @@ class SDLXLIFFReviewDialog(QDialog):
                     signature.append((os.path.normcase(os.path.abspath(path)), -1, -1))
         return tuple(sorted(signature))
 
+    @staticmethod
+    def _review_file_signature(path):
+        try:
+            norm = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            norm = str(path or "")
+        try:
+            stat = os.stat(path)
+            mtime = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))
+            return (norm, stat.st_size, mtime)
+        except Exception:
+            return (norm, -1, -1)
+
+    def _current_review_autogen_signature(self):
+        output_dir = self.output_dir or ""
+        signature = []
+        progress_path = os.path.join(output_dir, "translation_progress.json")
+        source_ref_path = os.path.join(output_dir, "source_epub.txt")
+        signature.append(("progress",) + self._review_file_signature(progress_path))
+        signature.append(("source_epub_ref",) + self._review_file_signature(source_ref_path))
+
+        epub_paths = []
+        try:
+            if os.path.isfile(source_ref_path):
+                with open(source_ref_path, "r", encoding="utf-8", errors="ignore") as f:
+                    ref = f.read().strip()
+                if ref:
+                    epub_paths.append(ref if os.path.isabs(ref) else os.path.join(output_dir, ref))
+        except Exception:
+            pass
+        try:
+            if 0 <= self._book_index < len(self._book_entries):
+                epub_path = self._book_entries[self._book_index].get("epub_path")
+                if epub_path:
+                    epub_paths.append(epub_path)
+        except Exception:
+            pass
+        seen_epubs = set()
+        for epub_path in epub_paths:
+            try:
+                norm = os.path.normcase(os.path.abspath(epub_path))
+            except Exception:
+                continue
+            if norm in seen_epubs:
+                continue
+            seen_epubs.add(norm)
+            signature.append(("source_epub",) + self._review_file_signature(epub_path))
+
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                progress_data = json.load(f)
+        except Exception:
+            progress_data = {}
+        chapters = progress_data.get("chapters") if isinstance(progress_data, dict) else None
+        if not isinstance(chapters, dict):
+            chapters = progress_data if isinstance(progress_data, dict) else {}
+        if isinstance(chapters, dict):
+            for progress_key, entry in chapters.items():
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get("status", "") or "").lower()
+                if status not in self._SDLXLIFF_AUTOGEN_STATUSES:
+                    continue
+                output_file = entry.get("output_file")
+                output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+                if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+                    continue
+                normalized = str(output_file).replace("\\", "/")
+                output_path = normalized if os.path.isabs(normalized) else os.path.join(output_dir, normalized)
+                signature.append((
+                    "output_html",
+                    str(progress_key),
+                    output_name.lower(),
+                    status,
+                    str(entry.get("original_basename") or ""),
+                    str(entry.get("original_filename") or ""),
+                    str(entry.get("chapter_file") or ""),
+                    str(entry.get("source_filename") or ""),
+                    str(entry.get("filename") or ""),
+                ) + self._review_file_signature(os.path.normpath(output_path)))
+        return tuple(sorted(signature))
+
+    @staticmethod
+    def _changed_review_autogen_outputs(previous_signature, current_signature):
+        previous_signature = previous_signature or ()
+        current_signature = current_signature or ()
+
+        def _output_rows(signature):
+            rows = {}
+            for entry in signature:
+                if not entry or entry[0] != "output_html":
+                    continue
+                output_name = entry[2] if len(entry) > 2 else ""
+                key = (entry[1] if len(entry) > 1 else "", output_name)
+                if output_name:
+                    rows[key] = entry
+            return rows
+
+        previous = _output_rows(previous_signature)
+        current = _output_rows(current_signature)
+        changed = []
+        for key, entry in current.items():
+            if previous.get(key) != entry:
+                changed.append(key[1])
+        return sorted(set(changed))
+
+    def _maybe_regenerate_review_sidecars(self, force=False):
+        previous_signature = getattr(self, "_last_autogen_signature", None)
+        try:
+            signature = self._current_review_autogen_signature()
+        except Exception:
+            signature = ()
+        if not force and signature == previous_signature:
+            return False
+        self._last_autogen_signature = signature
+
+        owner = getattr(self, "_sdlxliff_autogen_owner", None)
+        generator = getattr(owner, "_generate_sdlxliff_sidecars_from_completed_entries", None)
+        if not callable(generator):
+            return False
+
+        file_path = None
+        try:
+            if 0 <= self._book_index < len(self._book_entries):
+                file_path = self._book_entries[self._book_index].get("epub_path") or None
+        except Exception:
+            file_path = None
+
+        output_files = None
+        if not force:
+            changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
+            output_files = changed_outputs or None
+
+        try:
+            stats = generator(
+                self.output_dir,
+                file_path=file_path,
+                progress_data=None,
+                output_files=output_files,
+                overwrite=True,
+            )
+            return bool(stats and (stats.get("created") or stats.get("paths")))
+        except Exception:
+            return False
+        finally:
+            try:
+                self._last_autogen_signature = self._current_review_autogen_signature()
+            except Exception:
+                pass
+
     def _start_review_auto_refresh(self):
         try:
             if self._auto_refresh_timer is not None:
@@ -385,8 +544,15 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
             signature = self._current_review_signature()
-            if signature != self._last_review_signature:
-                self.refresh_review_data(force=True, signature=signature, seamless=True)
+            autogen_signature = self._current_review_autogen_signature()
+            sidecar_changed = signature != self._last_review_signature
+            autogen_changed = autogen_signature != self._last_autogen_signature
+            if sidecar_changed or autogen_changed:
+                self.refresh_review_data(
+                    force=sidecar_changed and not autogen_changed,
+                    signature=signature,
+                    seamless=True,
+                )
         except Exception:
             pass
 
@@ -394,9 +560,10 @@ class SDLXLIFFReviewDialog(QDialog):
         if self._refreshing_review_data:
             return
         try:
-            if not force and signature is None:
+            autogen_changed = self._maybe_regenerate_review_sidecars(force=force)
+            if signature is None or autogen_changed or force:
                 signature = self._current_review_signature()
-                if signature == self._last_review_signature:
+                if not force and not autogen_changed and signature == self._last_review_signature:
                     return
             old_visible_page = None
             if seamless:
@@ -435,6 +602,10 @@ class SDLXLIFFReviewDialog(QDialog):
             self.pieces = self._load_pieces()
             self._populate_piece_list()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
+            try:
+                self._last_autogen_signature = self._current_review_autogen_signature()
+            except Exception:
+                pass
             if self.pieces and self.isVisible():
                 show_loading = not (seamless and old_visible_page is not None)
                 QTimer.singleShot(0, lambda show_loading=show_loading: self._render_piece(self._initial_piece_row, show_loading=show_loading))
@@ -463,7 +634,16 @@ class SDLXLIFFReviewDialog(QDialog):
             signature = self._current_review_signature()
         except Exception:
             signature = None
-        if output_changed or not self.pieces or (signature is not None and signature != self._last_review_signature):
+        try:
+            autogen_signature = self._current_review_autogen_signature()
+        except Exception:
+            autogen_signature = None
+        if (
+            output_changed
+            or not self.pieces
+            or (signature is not None and signature != self._last_review_signature)
+            or (autogen_signature is not None and autogen_signature != self._last_autogen_signature)
+        ):
             self.refresh_review_data(force=True, current_path=self.current_path, signature=signature)
             return
         if self.current_path:
@@ -753,11 +933,16 @@ class SDLXLIFFReviewDialog(QDialog):
         entry = self._book_entries[index]
         self.output_dir = entry.get("output_dir") or self.output_dir
         self.current_path = entry.get("current_path") or ""
+        self._maybe_regenerate_review_sidecars(force=True)
         self.pieces = self._load_pieces()
         self._update_review_book_nav()
         self._show_review_loading_page()
         self._populate_piece_list()
         self._last_review_signature = self._current_review_signature()
+        try:
+            self._last_autogen_signature = self._current_review_autogen_signature()
+        except Exception:
+            pass
         self._start_review_auto_refresh()
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
@@ -3259,6 +3444,7 @@ class RetranslationMixin:
                 review_path,
                 parent or self,
                 config=getattr(self, 'config', {}),
+                autogen_owner=self,
             )
             review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
             cache[key] = review_dialog
@@ -3271,6 +3457,10 @@ class RetranslationMixin:
 
             review_dialog.destroyed.connect(_forget_dialog)
         else:
+            try:
+                review_dialog._sdlxliff_autogen_owner = self
+            except Exception:
+                pass
             review_dialog.reopen_for_path(output_dir, review_path)
 
         review_dialog.show()
