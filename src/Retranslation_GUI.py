@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
-                                QSplitter, QPlainTextEdit, QStackedWidget, QComboBox)
+                                QPlainTextEdit, QStackedWidget, QComboBox)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
 import xml.etree.ElementTree as ET
@@ -225,23 +225,24 @@ class SDLXLIFFReviewDialog(QDialog):
         if book_nav is not None:
             main_layout.addWidget(book_nav)
 
-        splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter, 1)
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(6)
+        main_layout.addLayout(content_row, 1)
 
         self.piece_list = QListWidget()
         self.piece_list.setObjectName("SdlReviewPieceList")
         self.piece_list.setMinimumWidth(168)
         self.piece_list.setMaximumWidth(220)
-        splitter.addWidget(self.piece_list)
+        self.piece_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        content_row.addWidget(self.piece_list, 0)
 
         detail = QWidget()
         detail.setObjectName("SdlReviewDetail")
         detail_layout = QVBoxLayout(detail)
-        detail_layout.setContentsMargins(6, 0, 0, 0)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.setSpacing(8)
-        splitter.addWidget(detail)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        content_row.addWidget(detail, 1)
 
         self.header_label = QLabel()
         self.header_label.setTextFormat(Qt.PlainText)
@@ -261,7 +262,6 @@ class SDLXLIFFReviewDialog(QDialog):
             "QPushButton:disabled { color:#94a3b8; background-color:#2a3b4d; border-color:#4a5568; }"
         )
         self.translate_tooltips_btn.clicked.connect(self._translate_current_piece_tooltips)
-        header_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignTop | Qt.AlignRight)
         detail_layout.addLayout(header_row)
 
         legend_row = QHBoxLayout()
@@ -274,6 +274,7 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_note.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt; background: transparent;")
         legend_row.addWidget(legend_note)
         legend_row.addStretch(1)
+        legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter | Qt.AlignRight)
         detail_layout.addLayout(legend_row)
 
         self.scroll = QScrollArea()
@@ -1128,6 +1129,32 @@ class SDLXLIFFReviewDialog(QDialog):
         return "red", "tag mismatch"
 
     @staticmethod
+    def _review_piece_non_empty_count(rows, side):
+        text_key = "source" if side == "source" else "target"
+        tag_key = "source_tag" if side == "source" else "target_tag"
+        try:
+            return sum(
+                1 for row in (rows or [])
+                if row.get(tag_key) and str(row.get(text_key, "") or "").strip()
+            )
+        except Exception:
+            return 0
+
+    def _refresh_piece_summary(self, piece):
+        rows = piece.get("rows") or []
+        source_count = self._review_piece_non_empty_count(rows, "source")
+        target_count = self._review_piece_non_empty_count(rows, "target")
+        red_count = sum(1 for row in rows if row.get("status") == "red")
+        yellow_count = sum(1 for row in rows if row.get("status") == "yellow")
+        piece["source_count"] = source_count
+        piece["target_count"] = target_count
+        piece["red_count"] = red_count
+        piece["yellow_count"] = yellow_count
+        piece["count_ratio"] = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
+        piece["mismatch"] = source_count != target_count or red_count > 0
+        return piece
+
+    @staticmethod
     def _canonical_basename(name):
         return os.path.basename(str(name or "").replace("\\", "/")).lower()
 
@@ -1470,6 +1497,47 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
 
+    def _refresh_piece_list_item(self, piece_index):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            piece = self.pieces[piece_index]
+            item = self.piece_list.item(piece_index)
+            if item is None:
+                return
+            output_name = self._output_name_for_piece(piece)
+            item.setText(self._sidebar_label_for_piece(piece, piece_index))
+            item.setToolTip(
+                f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+            )
+            if piece["mismatch"]:
+                item.setForeground(QColor(self.THEME["danger"]))
+            elif piece["yellow_count"]:
+                item.setForeground(QColor(self.THEME["warning"]))
+            else:
+                item.setForeground(QColor(self.THEME["success"]))
+        except Exception:
+            pass
+
+    def _refresh_piece_header(self, piece_index):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            if self.piece_list.currentRow() != piece_index:
+                return
+            piece = self.pieces[piece_index]
+            status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
+            flagged = piece["red_count"] + piece["yellow_count"]
+            output_name = self._output_name_for_piece(piece)
+            review_label = piece.get("review_label") or f"[{piece_index + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
+            self.header_label.setText(
+                f"{review_label} {output_name}  -  source {piece['source_count']} text units "
+                f"- output {piece['target_count']} - {status_text} - {flagged} flagged rows "
+                f"(ratio ~= {piece['count_ratio']:.2f})"
+            )
+        except Exception:
+            pass
+
     def _row_for_piece_path(self, path):
         if not path:
             return None
@@ -1714,6 +1782,7 @@ class SDLXLIFFReviewDialog(QDialog):
         else:
             text = "-"
         label = QLabel(text)
+        label.setObjectName("SdlReviewTagLabel")
         label.setTextFormat(Qt.PlainText)
         label.setAlignment(Qt.AlignCenter)
         label.setFixedWidth(92)
@@ -1726,6 +1795,66 @@ class SDLXLIFFReviewDialog(QDialog):
             f"color: {color}; background: transparent; font: 9pt Consolas, 'Courier New', monospace;"
         )
         return label
+
+    def _review_status_colors(self):
+        return {
+            "green": (self.THEME["panel"], self.THEME["accent"], self.THEME["info"], self.THEME["success"], self.THEME["border"]),
+            "yellow": ("#3d3320", self.THEME["accent"], self.THEME["warning"], self.THEME["warning"], self.THEME["warning"]),
+            "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
+        }
+
+    def _refresh_visible_review_row_status(self, piece_index, row_index):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            if self.piece_list.currentRow() != piece_index:
+                return
+            piece = self.pieces[piece_index]
+            rows = piece.get("rows") or []
+            if row_index < 0 or row_index >= len(rows):
+                return
+            row_data = rows[row_index]
+            page = self._piece_pages.get(piece_index) or self.rows_widget
+            if page is None:
+                return
+            frame = None
+            for candidate in page.findChildren(QFrame, "SdlReviewRow"):
+                try:
+                    if int(candidate.property("sdl_row_index") or -1) == row_index:
+                        frame = candidate
+                        break
+                except Exception:
+                    continue
+            if frame is None:
+                return
+            colors = self._review_status_colors()
+            bg, _source_bar, _target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
+            row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
+            frame.setProperty("sdl_status", row_data["status"])
+            frame.setProperty("sdl_base_style", row_style)
+            frame.setStyleSheet(row_style)
+
+            tag_label = frame.findChild(QLabel, "SdlReviewTagLabel")
+            if tag_label is not None:
+                tag_color = {
+                    "green": self.THEME["success"],
+                    "yellow": self.THEME["warning"],
+                    "red": self.THEME["danger"],
+                }.get(row_data["status"], self.THEME["muted"])
+                tag_label.setStyleSheet(
+                    f"color: {tag_color}; background: transparent; font: 9pt Consolas, 'Courier New', monospace;"
+                )
+                tag_label.setToolTip(row_data.get("reason", ""))
+
+            dot = frame.findChild(QLabel, "SdlReviewStatusDot")
+            if dot is not None:
+                dot.setStyleSheet(f"color: {dot_color}; background: transparent; font-size: 13pt;")
+                dot.setToolTip(row_data.get("reason", ""))
+
+            self._status_jump_indices.clear()
+            frame.update()
+        except Exception:
+            pass
 
     _GT_LANG_CODES = {
         "english": "en",
@@ -1789,14 +1918,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
 
     @staticmethod
-    def _source_tooltip_text(source_text, translated):
-        source_text = str(source_text or "")
-        translated = str(translated or "").strip()
-        if translated:
-            return translated
-        return source_text
-
-    @staticmethod
     def _tooltip_batch_tag_name(tag_name):
         tag_name = str(tag_name or "").strip().lower()
         if re.fullmatch(r"h[1-6]", tag_name) or tag_name == "p":
@@ -1849,44 +1970,24 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return {}
 
-    @staticmethod
-    def _menu_preview_text(text, limit=92):
-        text = " ".join(str(text or "").split())
-        if len(text) <= limit:
-            return text
-        return text[: max(0, limit - 1)].rstrip() + "..."
-
     def _current_piece_row(self):
         try:
             return self.piece_list.currentRow()
         except Exception:
             return -1
 
-    def _translate_current_piece_tooltips(self):
+    def _start_tooltip_translation(self, row, work, ready_text="Tool Tips Ready"):
         if self._tooltip_translation_running:
-            return
-        row = self._current_piece_row()
+            return False
         if row < 0 or row >= len(self.pieces):
-            return
-        piece = self.pieces[row]
-        work = []
-        for row_idx, row_data in enumerate(piece.get("rows") or []):
-            source_text = str(row_data.get("source", "") or "").strip()
-            if not source_text or self._row_tooltip_translation(piece, row_data):
-                continue
-            work.append((
-                row_idx,
-                self._tooltip_cache_key(piece, row_data),
-                source_text,
-                row_data.get("source_tag"),
-            ))
+            return False
         if not work:
             try:
-                self.translate_tooltips_btn.setText("Tool Tips Ready")
+                self.translate_tooltips_btn.setText(ready_text)
                 QTimer.singleShot(1200, lambda: self.translate_tooltips_btn.setText("Translate Tool Tips"))
             except Exception:
                 pass
-            return
+            return False
 
         self._tooltip_translation_running = True
         target_code = self._review_target_language_code()
@@ -1914,6 +2015,48 @@ class SDLXLIFFReviewDialog(QDialog):
             self._tooltip_translation_finished.emit(row, translations, error)
 
         threading.Thread(target=_worker, name="sdlxliff-tooltip-google-translate-free", daemon=True).start()
+        return True
+
+    def _translate_current_piece_tooltips(self):
+        if self._tooltip_translation_running:
+            return
+        row = self._current_piece_row()
+        if row < 0 or row >= len(self.pieces):
+            return
+        piece = self.pieces[row]
+        work = []
+        for row_idx, row_data in enumerate(piece.get("rows") or []):
+            source_text = str(row_data.get("source", "") or "").strip()
+            if not source_text or self._row_tooltip_translation(piece, row_data):
+                continue
+            work.append((
+                row_idx,
+                self._tooltip_cache_key(piece, row_data),
+                source_text,
+                row_data.get("source_tag"),
+            ))
+        self._start_tooltip_translation(row, work, ready_text="Tool Tips Ready")
+
+    def _translate_single_row_tooltip(self, piece_index, row_index):
+        if self._tooltip_translation_running:
+            return
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return
+        piece = self.pieces[piece_index]
+        rows = piece.get("rows") or []
+        if row_index < 0 or row_index >= len(rows):
+            return
+        row_data = rows[row_index]
+        source_text = str(row_data.get("source", "") or "").strip()
+        if not source_text:
+            return
+        work = [(
+            row_index,
+            self._tooltip_cache_key(piece, row_data),
+            source_text,
+            row_data.get("source_tag"),
+        )]
+        self._start_tooltip_translation(piece_index, work, ready_text="Tool Tip Ready")
 
     def _update_tooltip_translation_progress(self, done, total):
         try:
@@ -2009,8 +2152,9 @@ class SDLXLIFFReviewDialog(QDialog):
         widget,
         pos,
         edit_callback=None,
-        tooltip_translation=None,
-        inject_tooltip_callback=None,
+        translate_tooltip_callback=None,
+        tooltip_is_translated=False,
+        inject_machine_translation_callback=None,
     ):
         selected = self._selected_text_for_widget(widget).strip()
         has_selection = bool(selected)
@@ -2055,21 +2199,18 @@ class SDLXLIFFReviewDialog(QDialog):
             edit_action = menu.addAction("Edit Output")
             edit_action.triggered.connect(edit_callback)
 
-        tooltip_translation = str(tooltip_translation or "").strip()
-        if tooltip_translation:
+        if translate_tooltip_callback is not None:
             menu.addSeparator()
-            preview_action = menu.addAction(f"Google tooltip: {self._menu_preview_text(tooltip_translation)}")
-            preview_action.setEnabled(False)
-            preview_action.setToolTip(tooltip_translation)
-            copy_tooltip_action = menu.addAction("📋 Copy translated tooltip")
-            copy_tooltip_action.triggered.connect(
-                lambda _checked=False, text=tooltip_translation: self._copy_review_text(text)
-            )
-            if inject_tooltip_callback is not None:
-                inject_action = menu.addAction("➡️ Inject tooltip translation into output")
-                inject_action.triggered.connect(
-                    lambda _checked=False, text=tooltip_translation: inject_tooltip_callback(text)
-                )
+            tooltip_action_text = "\U0001fa84  Retranslate tooltip" if tooltip_is_translated else "\U0001fa84  Translate tooltip"
+            tooltip_action = menu.addAction(tooltip_action_text)
+            tooltip_action.setEnabled(not self._tooltip_translation_running and bool(self._all_text_for_widget(widget).strip()))
+            tooltip_action.triggered.connect(lambda _checked=False: translate_tooltip_callback())
+
+        if inject_machine_translation_callback is not None:
+            if translate_tooltip_callback is None:
+                menu.addSeparator()
+            inject_action = menu.addAction("\U0001f4e5  Inject Machine Translation")
+            inject_action.triggered.connect(lambda _checked=False: inject_machine_translation_callback())
 
         menu.addSeparator()
         gt_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
@@ -2232,6 +2373,10 @@ class SDLXLIFFReviewDialog(QDialog):
             status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
         row_data["status"] = status
         row_data["reason"] = reason
+        self._refresh_piece_summary(piece)
+        self._refresh_piece_list_item(piece_index)
+        self._refresh_piece_header(piece_index)
+        self._refresh_visible_review_row_status(piece_index, row_index)
         return True
 
     def closeEvent(self, event):
@@ -2299,7 +2444,14 @@ class SDLXLIFFReviewDialog(QDialog):
             layout.addStretch(1)
         return container
 
-    def _text_label(self, text, missing=False, tooltip_translation=None, inject_tooltip_callback=None):
+    def _text_label(
+        self,
+        text,
+        missing=False,
+        tooltip_translation=None,
+        translate_tooltip_callback=None,
+        inject_machine_translation_callback=None,
+    ):
         label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
@@ -2312,14 +2464,60 @@ class SDLXLIFFReviewDialog(QDialog):
             lambda pos, lbl=label: self._show_review_text_context_menu(
                 lbl,
                 pos,
-                tooltip_translation=tooltip_translation,
-                inject_tooltip_callback=inject_tooltip_callback,
+                translate_tooltip_callback=translate_tooltip_callback,
+                tooltip_is_translated=bool(str(tooltip_translation or "").strip()),
+                inject_machine_translation_callback=inject_machine_translation_callback,
             )
         )
         label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
-        return label
+        label.setToolTip(str(text or ""))
 
-    def _review_row_height(self, source_text, target_text):
+        tooltip_translation = str(tooltip_translation or "").strip()
+        if not tooltip_translation:
+            return label
+
+        container = QWidget()
+        container.setObjectName("SdlReviewSourceText")
+        container.setMinimumWidth(0)
+        container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        container.setToolTip(str(text or ""))
+        container.setStyleSheet("QWidget#SdlReviewSourceText { background: transparent; }")
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addStretch(1)
+        layout.addWidget(label)
+
+        translated_label = QLabel(tooltip_translation)
+        translated_label.setObjectName("SdlReviewMachineTranslation")
+        translated_label.setTextFormat(Qt.PlainText)
+        translated_label.setWordWrap(True)
+        translated_label.setMinimumWidth(0)
+        translated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        translated_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        translated_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        translated_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        translated_label.customContextMenuRequested.connect(
+            lambda pos, lbl=translated_label: self._show_review_text_context_menu(
+                lbl,
+                pos,
+                inject_machine_translation_callback=inject_machine_translation_callback,
+            )
+        )
+        translated_label.setToolTip(tooltip_translation)
+        translated_label.setStyleSheet(
+            "QLabel#SdlReviewMachineTranslation { "
+            "color: #b6c7dc; background: rgba(23, 37, 54, 185); "
+            "border: 1px solid #37536d; border-left: 3px solid #5aa7d8; "
+            "border-radius: 4px; padding: 3px 7px; font-size: 7pt; "
+            "}"
+        )
+        layout.addWidget(translated_label)
+        layout.addStretch(1)
+        return container
+
+    def _review_row_height(self, source_text, target_text, tooltip_translation=None):
         try:
             viewport_width = max(700, self.scroll.viewport().width())
         except Exception:
@@ -2328,22 +2526,38 @@ class SDLXLIFFReviewDialog(QDialog):
         text_column_width = max(180, (viewport_width - fixed_width) // 2)
         chars_per_line = max(24, int(text_column_width / 9))
         max_lines = 1
-        for value in (source_text, target_text):
+
+        def _wrapped_lines(value, line_chars):
             text = str(value or "")
             if not text:
-                continue
+                return 1
             wrapped_lines = 0
             for part in text.splitlines() or [text]:
-                wrapped_lines += max(1, (len(part) + chars_per_line - 1) // chars_per_line)
-            max_lines = max(max_lines, wrapped_lines)
+                wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
+            return wrapped_lines
+
+        max_lines = max(max_lines, _wrapped_lines(source_text, chars_per_line))
+        max_lines = max(max_lines, _wrapped_lines(target_text, chars_per_line))
+        tooltip_translation = str(tooltip_translation or "").strip()
+        if tooltip_translation:
+            translated_chars_per_line = max(30, int(chars_per_line * 1.35))
+            source_with_translation_lines = (
+                _wrapped_lines(source_text, chars_per_line)
+                + min(4, _wrapped_lines(tooltip_translation, translated_chars_per_line))
+            )
+            max_lines = max(max_lines, source_with_translation_lines)
         extra_lines = max(0, min(6, max_lines - 1))
-        return min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
+        height = min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
+        if tooltip_translation:
+            height = min(self.REVIEW_ROW_MAX_HEIGHT, max(height, self.REVIEW_ROW_MIN_HEIGHT + 30))
+        return height
 
     def _add_review_row(self, piece, row_data, idx, max_len, colors):
         bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
         source_text = row_data.get("source", "")
         target_text = row_data.get("target", "")
-        row_height = self._review_row_height(source_text, target_text)
+        tooltip_translation = self._row_tooltip_translation(piece, row_data)
+        row_height = self._review_row_height(source_text, target_text, tooltip_translation)
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
         frame.setProperty("sdl_status", row_data["status"])
@@ -2371,7 +2585,6 @@ class SDLXLIFFReviewDialog(QDialog):
         source_missing = not row_data.get("source_tag")
         target_missing = not row_data.get("target_tag")
         target_editable = not source_missing or not target_missing
-        tooltip_translation = self._row_tooltip_translation(piece, row_data)
 
         tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
         tag_label.setToolTip(row_data.get("reason", ""))
@@ -2383,10 +2596,13 @@ class SDLXLIFFReviewDialog(QDialog):
             height=max(30, row_height - 14),
         )
 
-        def _inject_tooltip_translation(translated, editor=target_widget):
+        def _inject_machine_translation(translated=tooltip_translation, editor=target_widget):
+            translated = str(translated or "").strip()
+            if not translated:
+                return
             try:
                 if isinstance(editor, QPlainTextEdit) and not editor.isReadOnly():
-                    editor.setPlainText(str(translated or ""))
+                    editor.setPlainText(translated)
                     editor.setFocus(Qt.OtherFocusReason)
                     return
             except Exception:
@@ -2397,12 +2613,18 @@ class SDLXLIFFReviewDialog(QDialog):
             source_text,
             missing=source_missing,
             tooltip_translation=tooltip_translation,
-            inject_tooltip_callback=_inject_tooltip_translation if tooltip_translation and target_editable else None,
+            translate_tooltip_callback=(
+                lambda pi=piece["index"], ri=idx: self._translate_single_row_tooltip(pi, ri)
+            ) if source_text else None,
+            inject_machine_translation_callback=(
+                _inject_machine_translation if tooltip_translation and target_editable else None
+            ),
         )
         source_label.setMaximumHeight(max(24, row_height - 14))
-        source_label.setToolTip(self._source_tooltip_text(source_text, tooltip_translation))
+        source_label.setToolTip(str(source_text or ""))
 
         dot = QLabel("●")
+        dot.setObjectName("SdlReviewStatusDot")
         dot.setAlignment(Qt.AlignCenter)
         dot.setStyleSheet(f"color: {dot_color}; background: transparent; font-size: 13pt;")
         dot.setToolTip(row_data.get("reason", ""))
@@ -2488,11 +2710,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         rows = piece.get("rows") or []
         max_len = max([len(r.get("source", "")) for r in rows] + [len(r.get("target", "")) for r in rows] + [1])
-        colors = {
-            "green": (self.THEME["panel"], self.THEME["accent"], self.THEME["info"], self.THEME["success"], self.THEME["border"]),
-            "yellow": ("#3d3320", self.THEME["accent"], self.THEME["warning"], self.THEME["warning"], self.THEME["warning"]),
-            "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
-        }
+        colors = self._review_status_colors()
 
         if not rows:
             empty = QLabel("No p/h1-h6 text units found in this sidecar.")

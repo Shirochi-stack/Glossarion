@@ -534,10 +534,20 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "batch_html = self._tooltip_batch_html(work)" in source
     assert "result = translator.translate(batch_html)" in source
     assert 'data-sdl-tip="' in source
-    assert "Google tooltip:" in source
-    assert "📋 Copy translated tooltip" in source
-    assert "➡️ Inject tooltip translation into output" in source
-    assert "lambda _checked=False, text=tooltip_translation" in source
+    assert "_start_tooltip_translation" in source
+    assert "_translate_single_row_tooltip" in source
+    assert "Translate tooltip" in source
+    assert "Retranslate tooltip" in source
+    assert "Inject Machine Translation" in source
+    assert "inject_machine_translation_callback" in source
+    assert "SdlReviewSourceText" in source
+    assert "SdlReviewMachineTranslation" in source
+    assert "border-left: 3px solid #5aa7d8" in source
+    assert "background: rgba(23, 37, 54, 185)" in source
+    assert "font-size: 7pt" in source
+    assert "Google tooltip:" not in source
+    assert "Copy translated tooltip" not in source
+    assert "Inject tooltip translation into output" not in source
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
@@ -560,7 +570,27 @@ def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
         ("piece", 0, "Title"): "I fear ten years later",
         ("piece", 1, "Body"): "Hello, readers.",
     }
-    assert dialog._source_tooltip_text("안녕하세요 독자님들.", "Hello, readers.") == "Hello, readers."
+    assert dialog._review_row_height("안녕하세요 독자님들.", "Hello, readers.", "Hello, readers.") >= (
+        dialog.REVIEW_ROW_MIN_HEIGHT + 30
+    )
+
+
+def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    rows = [
+        {"source_tag": "p", "source": "Source 1", "target_tag": "p", "target": "Target 1", "status": "green"},
+        {"source_tag": "p", "source": "Source 2", "target_tag": "p", "target": "", "status": "red"},
+    ]
+    piece = {"rows": rows}
+
+    dialog._refresh_piece_summary(piece)
+
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 1
+    assert piece["red_count"] == 1
+    assert piece["yellow_count"] == 0
+    assert piece["mismatch"] is True
+    assert piece["count_ratio"] == 0.5
 
 
 def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
