@@ -99,5 +99,6 @@ tests/**
 !tests/test_sdlxliff_json_batch.py
 !tests/test_google_free_translate.py
 !tests/test_gemini_free_budget.py
+!tests/test_glossary_dedup_logging.py
 junktests/
 warp.md

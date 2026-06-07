@@ -4470,9 +4470,22 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     
     # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
-    pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log)
+    pass1_stats = {"missing_raw_name_count": 0}
+    pass1_results = _skip_raw_name_duplicates(
+        glossary, fuzzy_threshold, use_rapidfuzz, dedup_log, pass1_stats
+    )
     pass1_removed = original_count - len(pass1_results)
-    print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
+    missing_raw_name_count = int(pass1_stats.get("missing_raw_name_count", 0) or 0)
+    pass1_duplicates_removed = max(0, pass1_removed - missing_raw_name_count)
+    if missing_raw_name_count:
+        missing_entry_label = "entry" if missing_raw_name_count == 1 else "entries"
+        print(
+            f"[Dedup] ✅ PASS 1 complete: {pass1_duplicates_removed} duplicates removed, "
+            f"{missing_raw_name_count} {missing_entry_label} skipped due to missing raw_name "
+            f"({len(pass1_results)} remaining)"
+        )
+    else:
+        print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
     
     # PASS 2: Translated name deduplication (if enabled)
     if dedupe_translations:
@@ -4492,7 +4505,7 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     return final_results
 
 
-def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None):
+def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None, stats=None):
     """Pass 1: Remove entries with similar raw names using optimized serial processing"""
     # Note: Parallel processing doesn't work well for deduplication because:
     # 1. Order matters - can't determine if A is duplicate of B until we've processed A
@@ -4500,7 +4513,7 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz, dedup_lo
     # 3. The serial version with RapidFuzz batch processing is already very fast
     
     # Use optimized serial version for all sizes
-    return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log)
+    return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log, stats)
 
 
 def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
@@ -5043,7 +5056,7 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         return (best_score >= fuzzy_threshold, best_score, best_match)
 
 
-def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None):
+def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, dedup_log=None, stats=None):
     """Serial version of Pass 1: raw name fuzzy deduplication.
     
     Fixes:
@@ -5086,6 +5099,8 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         # Get raw_name and clean it
         raw_name = entry.get('raw_name', '')
         if not raw_name:
+            if stats is not None:
+                stats["missing_raw_name_count"] = stats.get("missing_raw_name_count", 0) + 1
             continue
             
         # Remove honorifics + NFC normalize for comparison (unless disabled)
