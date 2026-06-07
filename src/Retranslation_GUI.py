@@ -157,6 +157,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     _tooltip_translation_finished = Signal(int, object, str)
     _tooltip_translation_progress = Signal(int, int)
+    _tooltip_translation_batch_finished = Signal(int, int, str)
 
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
     THEME = {
@@ -240,8 +241,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._queued_review_refresh = False
         self._seamless_review_old_page = None
         self._tooltip_translation_running = False
+        self._tooltip_translation_batch_active = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
+        self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         try:
             self._last_review_signature = self._current_review_signature()
         except Exception:
@@ -277,6 +280,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
         self.piece_list = QListWidget()
         self.piece_list.setObjectName("SdlReviewPieceList")
+        self.piece_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.piece_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.piece_list.customContextMenuRequested.connect(self._translate_piece_list_context_selection)
+        self.piece_list.installEventFilter(self)
         self.piece_list.setMinimumWidth(168)
         self.piece_list.setMaximumWidth(220)
         self.piece_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -1181,11 +1188,9 @@ class SDLXLIFFReviewDialog(QDialog):
             }}
             QListWidget#SdlReviewPieceList::item:selected {{
                 background-color: {self.THEME['accent']};
-                color: {self.THEME['text']};
             }}
             QListWidget#SdlReviewPieceList::item:selected:hover {{
                 background-color: #6cb4e8;
-                color: {self.THEME['text']};
             }}
             QScrollArea#SdlReviewScroll {{
                 border: 1px solid {self.THEME['border']};
@@ -2857,6 +2862,95 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return -1
 
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self.piece_list and event.type() == QEvent.KeyPress:
+                if event.key() == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
+                    self.piece_list.selectAll()
+                    event.accept()
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _selected_piece_rows(self):
+        try:
+            rows = [self.piece_list.row(item) for item in self.piece_list.selectedItems()]
+        except Exception:
+            rows = []
+        return sorted({row for row in rows if 0 <= row < len(self.pieces)})
+
+    def _translate_piece_list_context_selection(self, pos):
+        try:
+            item = self.piece_list.itemAt(pos)
+            if item is None:
+                return
+            clicked_row = self.piece_list.row(item)
+            if not item.isSelected():
+                self.piece_list.clearSelection()
+                item.setSelected(True)
+            rows = self._selected_piece_rows() or [clicked_row]
+            menu = QMenu(self)
+            menu.setStyleSheet(
+                "QMenu { padding: 4px 6px 4px 4px; }"
+                "QMenu::item { padding: 6px 18px 6px 12px; }"
+            )
+            entry_count = len(rows)
+            action_text = (
+                f"🌐 Generate Google Translate Preview ({entry_count} entries)"
+                if entry_count != 1
+                else "🌐 Generate Google Translate Preview"
+            )
+            translate_action = menu.addAction(action_text)
+            translate_action.setEnabled(not self._tooltip_translation_running)
+            translate_action.triggered.connect(
+                lambda _checked=False, selected_rows=list(rows): self._translate_piece_rows_tooltips(selected_rows)
+            )
+            self._piece_list_context_menu = menu
+            menu.aboutToHide.connect(lambda m=menu: self._clear_piece_list_context_menu(m))
+            menu.popup(self.piece_list.viewport().mapToGlobal(pos))
+        except Exception:
+            pass
+
+    def _clear_piece_list_context_menu(self, menu):
+        try:
+            if getattr(self, "_piece_list_context_menu", None) is menu:
+                self._piece_list_context_menu = None
+            menu.deleteLater()
+        except Exception:
+            pass
+
+    def _piece_tooltip_work(self, piece_index):
+        if piece_index < 0 or piece_index >= len(self.pieces):
+            return []
+        piece = self.pieces[piece_index]
+        work = []
+        for row_idx, row_data in enumerate(piece.get("rows") or []):
+            source_text = str(row_data.get("source", "") or "").strip()
+            if not source_text:
+                continue
+            work.append((
+                row_idx,
+                self._tooltip_translation_key(piece, row_data),
+                source_text,
+                row_data.get("source_tag"),
+            ))
+        return work
+
+    def _mark_tooltip_translation_pending(self, piece_index, work):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            rows = self.pieces[piece_index].get("rows") or []
+            pending_rows = []
+            for row_idx, _key, _source_text, _tag_name in work:
+                if 0 <= row_idx < len(rows):
+                    rows[row_idx]["tooltip_translation_pending"] = True
+                    pending_rows.append(row_idx)
+            self._refresh_visible_review_row_source_previews(piece_index, pending_rows, visible_only=False)
+        except Exception:
+            pass
+
     def _start_tooltip_translation(self, row, work, ready_text="Preview Ready"):
         if self._tooltip_translation_running:
             return False
@@ -2880,17 +2974,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.translate_tooltips_btn.setText("Translating...")
         except Exception:
             pass
-        try:
-            piece = self.pieces[row]
-            rows = piece.get("rows") or []
-            pending_rows = []
-            for row_idx, _key, _source_text, _tag_name in work:
-                if 0 <= row_idx < len(rows):
-                    rows[row_idx]["tooltip_translation_pending"] = True
-                    pending_rows.append(row_idx)
-            self._refresh_visible_review_row_source_previews(row, pending_rows, visible_only=False)
-        except Exception:
-            pass
+        self._mark_tooltip_translation_pending(row, work)
 
         def _worker():
             translations = {}
@@ -2912,24 +2996,93 @@ class SDLXLIFFReviewDialog(QDialog):
         threading.Thread(target=_worker, name="sdlxliff-tooltip-google-translate-free", daemon=True).start()
         return True
 
+    def _start_piece_list_tooltip_translation(self, jobs):
+        if self._tooltip_translation_running:
+            return False
+        jobs = [(row, work) for row, work in (jobs or []) if 0 <= row < len(self.pieces) and work]
+        if not jobs:
+            try:
+                self.translate_tooltips_btn.setText("Preview Ready")
+                QTimer.singleShot(
+                    1200,
+                    lambda: self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT),
+                )
+            except Exception:
+                pass
+            return False
+
+        self._tooltip_translation_running = True
+        self._tooltip_translation_batch_active = True
+        target_code = self._review_target_language_code()
+        total_jobs = len(jobs)
+        try:
+            self.translate_tooltips_btn.setEnabled(False)
+            self.translate_tooltips_btn.setText(f"Translating 0/{total_jobs}...")
+        except Exception:
+            pass
+        for piece_index, work in jobs:
+            self._mark_tooltip_translation_pending(piece_index, work)
+
+        def _worker():
+            translated_count = 0
+            last_error = ""
+            try:
+                from google_free_translate import GoogleFreeTranslateNew
+                translator = GoogleFreeTranslateNew("auto", target_code)
+            except Exception as exc:
+                self._tooltip_translation_batch_finished.emit(0, total_jobs, str(exc))
+                return
+
+            for done, (piece_index, work) in enumerate(jobs, start=1):
+                translations = {}
+                error = ""
+                try:
+                    batch_html = self._tooltip_batch_html(work)
+                    result = translator.translate(batch_html)
+                    translated_html = str(result.get("translatedText") or "").strip()
+                    translations = self._extract_tooltip_batch_translations(translated_html, work)
+                    translated_count += len(translations)
+                    if not translations:
+                        error = "Google Translate Free returned no parseable tooltip translations."
+                except Exception as exc:
+                    error = str(exc)
+                if error:
+                    last_error = error
+                self._tooltip_translation_finished.emit(piece_index, translations, error)
+                self._tooltip_translation_progress.emit(done, total_jobs)
+            self._tooltip_translation_batch_finished.emit(translated_count, total_jobs, last_error)
+
+        threading.Thread(target=_worker, name="sdlxliff-piece-list-google-translate-free", daemon=True).start()
+        return True
+
+    def _translate_piece_rows_tooltips(self, piece_rows):
+        if self._tooltip_translation_running:
+            return
+        rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
+        jobs = [(row, self._piece_tooltip_work(row)) for row in rows]
+        jobs = [(row, work) for row, work in jobs if work]
+        if len(jobs) == 1:
+            row, work = jobs[0]
+            self._start_tooltip_translation(row, work, ready_text="Preview Ready")
+        elif jobs:
+            self._start_piece_list_tooltip_translation(jobs)
+        else:
+            try:
+                self.translate_tooltips_btn.setText("Preview Ready")
+                QTimer.singleShot(
+                    1200,
+                    lambda: self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT),
+                )
+            except Exception:
+                pass
+
     def _translate_current_piece_tooltips(self):
         if self._tooltip_translation_running:
             return
         row = self._current_piece_row()
         if row < 0 or row >= len(self.pieces):
             return
-        piece = self.pieces[row]
-        work = []
-        for row_idx, row_data in enumerate(piece.get("rows") or []):
-            source_text = str(row_data.get("source", "") or "").strip()
-            if not source_text:
-                continue
-            work.append((
-                row_idx,
-                self._tooltip_translation_key(piece, row_data),
-                source_text,
-                row_data.get("source_tag"),
-            ))
+        work = self._piece_tooltip_work(row)
         self._start_tooltip_translation(row, work, ready_text="Preview Ready")
 
     def _translate_single_row_tooltip(self, piece_index, row_index):
@@ -2956,17 +3109,22 @@ class SDLXLIFFReviewDialog(QDialog):
     def _update_tooltip_translation_progress(self, done, total):
         try:
             if self._tooltip_translation_running:
-                self.translate_tooltips_btn.setText("Translating...")
+                if int(total or 0) > 1:
+                    self.translate_tooltips_btn.setText(f"Translating {int(done or 0)}/{int(total)}...")
+                else:
+                    self.translate_tooltips_btn.setText("Translating...")
         except Exception:
             pass
 
     def _apply_tooltip_translations(self, row, translations, error):
-        self._tooltip_translation_running = False
-        try:
-            self.translate_tooltips_btn.setEnabled(True)
-            self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT)
-        except Exception:
-            pass
+        batch_active = bool(getattr(self, "_tooltip_translation_batch_active", False))
+        if not batch_active:
+            self._tooltip_translation_running = False
+            try:
+                self.translate_tooltips_btn.setEnabled(True)
+                self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT)
+            except Exception:
+                pass
         if 0 <= row < len(self.pieces):
             piece = self.pieces[row]
             changed_rows = set()
@@ -2979,6 +3137,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     changed_rows.add(row_index)
             if changed_rows:
                 self._refresh_visible_review_row_source_previews(row, changed_rows, visible_only=False)
+        if batch_active:
+            return
         if error and not translations:
             try:
                 self.save_status_label.setText(f"Tooltip translation failed: {error}")
@@ -2990,6 +3150,29 @@ class SDLXLIFFReviewDialog(QDialog):
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             except Exception:
                 pass
+
+    def _finish_piece_list_tooltip_translations(self, translated_count, piece_count, error):
+        self._tooltip_translation_batch_active = False
+        self._tooltip_translation_running = False
+        try:
+            self.translate_tooltips_btn.setEnabled(True)
+            self.translate_tooltips_btn.setText("Preview Ready")
+            QTimer.singleShot(
+                1200,
+                lambda: self.translate_tooltips_btn.setText(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT),
+            )
+        except Exception:
+            pass
+        try:
+            if int(translated_count or 0) > 0:
+                self.save_status_label.setText(
+                    f"Translated {int(translated_count)} tooltips across {int(piece_count or 0)} entries"
+                )
+                QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
+            elif error:
+                self.save_status_label.setText(f"Tooltip translation failed: {error}")
+        except Exception:
+            pass
 
     def _selected_text_for_widget(self, widget):
         try:
