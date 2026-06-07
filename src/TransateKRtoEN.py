@@ -15690,7 +15690,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         closed_any = False
         api_tls = api_call_state.get("tls")
         if api_tls is not None:
-            for attr in ("current_stream", "openai_client", "gemini_client"):
+            for attr in (
+                "current_stream",
+                "current_openai_sdk_client",
+                "current_httpx_client",
+                "current_oai_http_client",
+                "openai_client",
+                "gemini_client",
+            ):
                 obj = getattr(api_tls, attr, None)
                 if obj is None:
                     continue
@@ -15710,13 +15717,26 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     setattr(api_tls, attr, None)
                 except Exception:
                     pass
+            try:
+                openai_clients = getattr(api_tls, "openai_clients", None)
+                if isinstance(openai_clients, dict):
+                    for obj in list(openai_clients.values()):
+                        try:
+                            if hasattr(obj, "close"):
+                                obj.close()
+                                closed_any = True
+                        except Exception:
+                            pass
+                    openai_clients.clear()
+            except Exception:
+                pass
         return closed_any
 
-    def _cancel_current_api_call() -> None:
+    def _cancel_current_api_call(*, mark_client_cancel: bool = False) -> None:
         """Cancel this wrapper's API call without tearing down sibling batch workers."""
         cancel_event.set()
         closed_local = _close_api_thread_transport()
-        if closed_local:
+        if closed_local or not mark_client_cancel:
             return
         try:
             if callable(local_cancel_only_check) and local_cancel_only_check():
@@ -15971,7 +15991,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                _cancel_current_api_call()
+                _cancel_current_api_call(mark_client_cancel=True)
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
                 try:

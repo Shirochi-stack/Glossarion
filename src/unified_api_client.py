@@ -3825,6 +3825,9 @@ class UnifiedClient:
             self._thread_local.chapter_context = None
             self._thread_local.local_cancel_check = None
             self._thread_local.current_stream = None
+            self._thread_local.current_openai_sdk_client = None
+            self._thread_local.current_httpx_client = None
+            self._thread_local.current_oai_http_client = None
             self._thread_local.output_token_limit = None
             
             # THREAD-LOCAL CACHE
@@ -20987,6 +20990,16 @@ class UnifiedClient:
                             _http_client.close()
                     except Exception:
                         pass
+                    try:
+                        tls = self._get_thread_local_client()
+                        if getattr(tls, "current_openai_sdk_client", None) is client:
+                            tls.current_openai_sdk_client = None
+                        if getattr(tls, "current_httpx_client", None) is underlying:
+                            tls.current_httpx_client = None
+                        if getattr(tls, "current_oai_http_client", None) is _http_client:
+                            tls.current_oai_http_client = None
+                    except Exception:
+                        pass
 
                 try:
                     # Check all stop sources (global flag, class-level, instance-level, etc.)
@@ -21076,6 +21089,13 @@ class UnifiedClient:
                     except Exception:
                         pass
                     underlying = getattr(client, '_client', None)
+                    try:
+                        tls = self._get_thread_local_client()
+                        tls.current_openai_sdk_client = client
+                        tls.current_httpx_client = underlying
+                        tls.current_oai_http_client = _http_client
+                    except Exception:
+                        pass
                     try:
                         if underlying is not None:
                             with self._all_httpx_clients_lock:

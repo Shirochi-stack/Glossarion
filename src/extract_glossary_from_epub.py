@@ -464,7 +464,67 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 pass
     
     while True:  # Retry loop for timeout and cancelled errors
+        attempt_cancel_event = threading.Event()
+        api_call_state = {"tls": None}
+
+        def _close_api_thread_transport() -> bool:
+            closed_any = False
+            api_tls = api_call_state.get("tls")
+            if api_tls is not None:
+                for attr in (
+                    "current_stream",
+                    "current_openai_sdk_client",
+                    "current_httpx_client",
+                    "current_oai_http_client",
+                    "openai_client",
+                    "gemini_client",
+                ):
+                    obj = getattr(api_tls, attr, None)
+                    if obj is None:
+                        continue
+                    try:
+                        if attr == "gemini_client" and hasattr(obj, "_client"):
+                            http_client = obj._client
+                            if hasattr(http_client, "close"):
+                                http_client.close()
+                            if hasattr(http_client, "_transport"):
+                                http_client._transport.close()
+                        if hasattr(obj, "close"):
+                            obj.close()
+                        closed_any = True
+                    except Exception:
+                        pass
+                    try:
+                        setattr(api_tls, attr, None)
+                    except Exception:
+                        pass
+                try:
+                    openai_clients = getattr(api_tls, "openai_clients", None)
+                    if isinstance(openai_clients, dict):
+                        for obj in list(openai_clients.values()):
+                            try:
+                                if hasattr(obj, "close"):
+                                    obj.close()
+                                    closed_any = True
+                            except Exception:
+                                pass
+                        openai_clients.clear()
+                except Exception:
+                    pass
+            return closed_any
+
+        def _cancel_current_api_call(*, mark_client_cancel: bool = False) -> None:
+            attempt_cancel_event.set()
+            closed_local = _close_api_thread_transport()
+            if closed_local or not mark_client_cancel:
+                return
+            if hasattr(client, 'cancel_current_operation'):
+                client.cancel_current_operation()
+
         def api_call():
+            tls_for_local_cancel = None
+            had_local_cancel = False
+            previous_local_cancel = None
             try:
                 # Apply chapter/chunk context in THIS thread so UnifiedClient's
                 # thread-local metadata is visible to watchdog/payloads.
@@ -484,6 +544,15 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         )
                 except Exception:
                     pass
+                try:
+                    if hasattr(client, '_get_thread_local_client'):
+                        tls_for_local_cancel = client._get_thread_local_client()
+                        api_call_state["tls"] = tls_for_local_cancel
+                        had_local_cancel = hasattr(tls_for_local_cancel, 'local_cancel_check')
+                        previous_local_cancel = getattr(tls_for_local_cancel, 'local_cancel_check', None)
+                        tls_for_local_cancel.local_cancel_check = attempt_cancel_event.is_set
+                except Exception:
+                    tls_for_local_cancel = None
                 # Reinitialize client if needed (check correct client based on type)
                 # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
                 if not getattr(client, '_multi_key_mode', False):
@@ -523,6 +592,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         except Exception:
                             pass
                 elapsed = time.time() - start_time
+
+                if attempt_cancel_event.is_set():
+                    return
                 
                 # Capture raw response object for thought signatures (if available)
                 raw_obj = None
@@ -537,6 +609,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Include raw_obj plus concrete model/key metadata in the result tuple.
                 result_queue.put((result, elapsed, raw_obj, actual_model, actual_key))
             except Exception as e:
+                if attempt_cancel_event.is_set():
+                    return
                 actual_model, actual_key = _capture_actual_request_metadata()
                 try:
                     e._glossarion_actual_model = actual_model
@@ -544,6 +618,15 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 except Exception:
                     pass
                 result_queue.put(e)
+            finally:
+                if tls_for_local_cancel is not None:
+                    try:
+                        if had_local_cancel:
+                            tls_for_local_cancel.local_cancel_check = previous_local_cancel
+                        else:
+                            tls_for_local_cancel.local_cancel_check = None
+                    except Exception:
+                        pass
         # Apply submission delay shared across glossary batch threads to space out API launches.
         # Priority: per-key api_call_delay from glossary keys > global SEND_INTERVAL_SECONDS
         try:
@@ -656,8 +739,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         if chunk_timeout and api_time > chunk_timeout:
                             if hasattr(client, '_in_cleanup'):
                                 client._in_cleanup = True
-                            if hasattr(client, 'cancel_current_operation'):
-                                client.cancel_current_operation()
+                            _cancel_current_api_call()
                             raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                         
                         # client.send() returns (str, Optional[str]) tuple
@@ -687,8 +769,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             client._in_cleanup = True
                         
                         # Try to cancel the operation
-                        if hasattr(client, 'cancel_current_operation'):
-                            client.cancel_current_operation()
+                        _cancel_current_api_call(mark_client_cancel=True)
                         
                         # Don't wait for the thread to finish - just raise immediately
                         raise UnifiedClientError("Glossary extraction stopped by user")
@@ -698,8 +779,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         if elapsed >= timeout:
                             if hasattr(client, '_in_cleanup'):
                                 client._in_cleanup = True
-                            if hasattr(client, 'cancel_current_operation'):
-                                client.cancel_current_operation()
+                            _cancel_current_api_call()
+                            try:
+                                api_thread.join(timeout=2.0)
+                            except Exception:
+                                pass
                             raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
         
         except UnifiedClientError as e:
