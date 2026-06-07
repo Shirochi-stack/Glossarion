@@ -638,6 +638,33 @@ def test_sdlxliff_review_persists_and_reloads_machine_translation_preview(tmp_pa
     assert new_dialog._row_tooltip_translation(reloaded, reloaded["rows"][0]) == "Machine preview sentence."
 
 
+def test_sdlxliff_review_generate_preview_includes_cached_first_row():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._tooltip_translation_running = False
+    dialog._config = {"output_language": "English"}
+    dialog._tooltip_translations = {}
+    piece = {
+        "path": "piece.sdlxliff",
+        "rows": [
+            {"row_index": 0, "source_index": 0, "source_tag": "p", "source": "Already cached."},
+            {"row_index": 1, "source_index": 1, "source_tag": "p", "source": "Needs preview."},
+        ],
+    }
+    dialog.pieces = [piece]
+    dialog._set_row_tooltip_translation(piece, piece["rows"][0], "Cached preview.")
+    captured = {}
+    dialog._current_piece_row = lambda: 0
+    dialog._start_tooltip_translation = lambda row, work, ready_text="": captured.update(
+        {"row": row, "work": work, "ready_text": ready_text}
+    )
+
+    dialog._translate_current_piece_tooltips()
+
+    assert captured["row"] == 0
+    assert [item[0] for item in captured["work"]] == [0, 1]
+    assert captured["ready_text"] == "Preview Ready"
+
+
 def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_language(tmp_path):
     output_name = "response_chapter0001.html"
     _write_html_sdlxliff_sidecar(

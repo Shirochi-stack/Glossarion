@@ -2843,7 +2843,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return -1
 
-    def _start_tooltip_translation(self, row, work, ready_text="Tool Tips Ready"):
+    def _start_tooltip_translation(self, row, work, ready_text="Preview Ready"):
         if self._tooltip_translation_running:
             return False
         if row < 0 or row >= len(self.pieces):
@@ -2908,7 +2908,7 @@ class SDLXLIFFReviewDialog(QDialog):
         work = []
         for row_idx, row_data in enumerate(piece.get("rows") or []):
             source_text = str(row_data.get("source", "") or "").strip()
-            if not source_text or self._row_tooltip_translation(piece, row_data):
+            if not source_text:
                 continue
             work.append((
                 row_idx,
@@ -2916,7 +2916,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_text,
                 row_data.get("source_tag"),
             ))
-        self._start_tooltip_translation(row, work, ready_text="Tool Tips Ready")
+        self._start_tooltip_translation(row, work, ready_text="Preview Ready")
 
     def _translate_single_row_tooltip(self, piece_index, row_index):
         if self._tooltip_translation_running:
@@ -2937,7 +2937,7 @@ class SDLXLIFFReviewDialog(QDialog):
             source_text,
             row_data.get("source_tag"),
         )]
-        self._start_tooltip_translation(piece_index, work, ready_text="Tool Tip Ready")
+        self._start_tooltip_translation(piece_index, work, ready_text="Preview Ready")
 
     def _update_tooltip_translation_progress(self, done, total):
         try:
