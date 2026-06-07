@@ -537,6 +537,7 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "batch_html = self._tooltip_batch_html(work)" in source
     assert "result = translator.translate(batch_html)" in source
     assert 'data-sdl-tip="' in source
+    assert "self._review_loading_minimum_ms = 10" in source
     assert "_start_tooltip_translation" in source
     assert "_translate_single_row_tooltip" in source
     assert "setSelectionMode(QAbstractItemView.ExtendedSelection)" in source
@@ -557,10 +558,22 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_translate_piece_rows_tooltips" in source
     assert "_start_piece_list_tooltip_translation" in source
     assert "refresh=piece_index == current_row" in source
-    assert "if row == self._current_piece_row()" in source
+    assert "current_row = self._displayed_piece_row()" in source
+    assert "if row == self._displayed_piece_row()" in source
     assert "_refresh_visible_review_row_source_preview" in source
-    assert "_refresh_visible_review_row_source_previews" in source
-    assert "visible_only=False" in source
+    assert "_patch_review_row_machine_translation_preview" in source
+    assert "_update_review_row_source_previews" in source
+    assert "_source_preview_dirty" in source
+    assert "_queue_refresh_current_visible_dirty_source_previews" in source
+    assert "_current_machine_translation_signature" in source
+    assert "_reload_machine_translation_previews" in source
+    assert "if self._tooltip_translation_running:" in source
+    assert "elif mt_changed:" in source
+    assert "self.refresh_review_data(" in source
+    assert "_write_machine_translation_entries" in source
+    assert "persist=False" in source
+    assert "self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)" in source
+    assert "self._update_review_row_source_previews(row, changed_rows, visible_only=True)" in source
     assert "Google Translate \\u2192" in source
     assert "_open_google_translate" not in source
     assert "Translate tooltip" not in source
@@ -589,9 +602,14 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     apply_start = source.index("def _apply_tooltip_translations")
     apply_end = source.index("def _selected_text_for_widget")
     apply_body = source[apply_start:apply_end]
-    assert "_refresh_visible_review_row_source_preview" in apply_body
-    assert "_discard_piece_page" in apply_body
+    assert "_update_review_row_source_previews" in apply_body
+    assert "_refresh_visible_review_row_source_previews" not in apply_body
+    assert "_discard_piece_page" not in apply_body
     assert "_render_piece" not in apply_body
+    batch_start = source.index("def _start_piece_list_tooltip_translation")
+    batch_end = source.index("def _translate_piece_rows_tooltips", batch_start)
+    batch_body = source[batch_start:batch_end]
+    assert "_discard_piece_page" not in batch_body
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
@@ -642,12 +660,14 @@ def test_sdlxliff_review_signature_tracks_machine_translation_deletions(tmp_path
     dialog.output_dir = str(tmp_path)
     dialog._book_entries = []
 
-    with_preview = dialog._current_review_signature()
+    sidecar_signature = dialog._current_review_signature()
+    with_preview = dialog._current_machine_translation_signature()
     preview_path.unlink()
-    without_preview = dialog._current_review_signature()
+    without_preview = dialog._current_machine_translation_signature()
     mt_dir.rmdir()
-    without_folder = dialog._current_review_signature()
+    without_folder = dialog._current_machine_translation_signature()
 
+    assert dialog._current_review_signature() == sidecar_signature
     assert with_preview != without_preview
     assert without_preview != without_folder
     assert any(entry[0] == "machine_translation_dir" and entry[2] == -1 for entry in without_folder)

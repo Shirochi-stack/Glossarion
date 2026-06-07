@@ -703,6 +703,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
             if self._edit_save_timer.isActive() or self._pending_target_edits:
                 return
+            if self._tooltip_translation_running:
+                return
             try:
                 from PySide6.QtWidgets import QApplication
                 focus = QApplication.focusWidget()
@@ -2920,12 +2922,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 if changed_rows:
                     changed_by_piece[piece_index] = changed_rows
 
-            current_row = self._current_piece_row()
+            current_row = self._displayed_piece_row()
             for piece_index, changed_rows in changed_by_piece.items():
                 if piece_index == current_row:
                     self._update_review_row_source_previews(piece_index, changed_rows, visible_only=True)
-                else:
-                    self._discard_piece_page(piece_index)
         except Exception:
             pass
         try:
@@ -2935,20 +2935,18 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _write_machine_translation_entry(self, piece, row_data, translated):
-        translated = str(translated or "").strip()
-        if not translated:
+    def _write_machine_translation_entries(self, piece, row_translations):
+        row_translations = [
+            (row_data, str(translated or "").strip())
+            for row_data, translated in (row_translations or [])
+            if str(translated or "").strip()
+        ]
+        if not row_translations:
             return
         path = self._machine_translation_path_for_piece(piece)
         if not path:
             return
         target_code = self._review_target_language_code()
-        entry_key = self._machine_translation_row_key(row_data, target_code)
-        source_index = row_data.get("source_index")
-        if source_index is None:
-            source_index = row_data.get("row_index")
-        source_tag = str(row_data.get("source_tag", "") or "").strip().lower()
-        source_hash = self._machine_translation_source_hash(row_data.get("source", ""))
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             data = {}
@@ -2963,13 +2961,22 @@ class SDLXLIFFReviewDialog(QDialog):
             entries = data.get("entries")
             if not isinstance(entries, dict):
                 entries = {}
-            entries[entry_key] = {
-                "source_index": source_index,
-                "source_tag": source_tag,
-                "source_hash": source_hash,
-                "target_language": target_code,
-                "translation": translated,
-            }
+
+            for row_data, translated in row_translations:
+                entry_key = self._machine_translation_row_key(row_data, target_code)
+                source_index = row_data.get("source_index")
+                if source_index is None:
+                    source_index = row_data.get("row_index")
+                source_tag = str(row_data.get("source_tag", "") or "").strip().lower()
+                source_hash = self._machine_translation_source_hash(row_data.get("source", ""))
+                entries[entry_key] = {
+                    "source_index": source_index,
+                    "source_tag": source_tag,
+                    "source_hash": source_hash,
+                    "target_language": target_code,
+                    "translation": translated,
+                }
+
             data.update({
                 "version": 1,
                 "sidecar": os.path.basename(str(piece.get("path") or piece.get("output_name") or "")),
@@ -2979,6 +2986,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _write_machine_translation_entry(self, piece, row_data, translated):
+        translated = str(translated or "").strip()
+        if not translated:
+            return
+        self._write_machine_translation_entries(piece, [(row_data, translated)])
 
     def _tooltip_translation_key(self, piece, row_data):
         piece_path = ""
@@ -3003,13 +3016,14 @@ class SDLXLIFFReviewDialog(QDialog):
             return str(stored)
         return ""
 
-    def _set_row_tooltip_translation(self, piece, row_data, translated):
+    def _set_row_tooltip_translation(self, piece, row_data, translated, persist=True):
         translated = str(translated or "").strip()
         if not translated:
             return
         row_data["tooltip_translation"] = translated
         row_data["_source_preview_dirty"] = True
-        self._write_machine_translation_entry(piece, row_data, translated)
+        if persist:
+            self._write_machine_translation_entry(piece, row_data, translated)
 
     @staticmethod
     def _tooltip_batch_tag_name(tag_name):
@@ -3069,6 +3083,16 @@ class SDLXLIFFReviewDialog(QDialog):
             return self.piece_list.currentRow()
         except Exception:
             return -1
+
+    def _displayed_piece_row(self):
+        try:
+            current_widget = self.rows_stack.currentWidget()
+            for row, page in self._piece_pages.items():
+                if page is current_widget:
+                    return row
+        except Exception:
+            pass
+        return self._current_piece_row()
 
     def _piece_list_viewport_pos_from_event(self, obj, event):
         try:
@@ -3272,11 +3296,9 @@ class SDLXLIFFReviewDialog(QDialog):
             self.translate_tooltips_btn.setText(f"Translating 0/{total_jobs}...")
         except Exception:
             pass
-        current_row = self._current_piece_row()
+        current_row = self._displayed_piece_row()
         for piece_index, work in jobs:
             self._mark_tooltip_translation_pending(piece_index, work, refresh=piece_index == current_row)
-            if piece_index != current_row:
-                self._discard_piece_page(piece_index)
 
         def _worker():
             translated_count = 0
@@ -3383,18 +3405,21 @@ class SDLXLIFFReviewDialog(QDialog):
         if 0 <= row < len(self.pieces):
             piece = self.pieces[row]
             changed_rows = set()
+            rows_to_persist = []
             for row_index, row_data in enumerate(piece.get("rows") or []):
                 key = self._tooltip_translation_key(piece, row_data)
                 if row_data.pop("tooltip_translation_pending", False):
                     changed_rows.add(row_index)
                 if key in translations:
-                    self._set_row_tooltip_translation(piece, row_data, translations[key])
+                    translated = translations[key]
+                    self._set_row_tooltip_translation(piece, row_data, translated, persist=False)
+                    rows_to_persist.append((row_data, translated))
                     changed_rows.add(row_index)
+            if rows_to_persist:
+                self._write_machine_translation_entries(piece, rows_to_persist)
             if changed_rows:
-                if row == self._current_piece_row():
+                if row == self._displayed_piece_row():
                     self._update_review_row_source_previews(row, changed_rows, visible_only=True)
-                else:
-                    self._discard_piece_page(row)
             if translations:
                 try:
                     self._last_machine_translation_signature = self._current_machine_translation_signature()
