@@ -225,7 +225,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdl_review_loading_icon = None
         self._sdl_review_loading_original_pixmap = None
         self._sdl_review_loading_angle = 0
-        self._review_loading_minimum_ms = 140
+        self._review_loading_minimum_ms = 10
         self._status_jump_indices = {}
         self._highlighted_status_frame = None
         self._book_nav_combo = None
