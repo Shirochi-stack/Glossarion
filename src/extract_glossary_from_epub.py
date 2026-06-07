@@ -52,6 +52,18 @@ if sys.platform.startswith("win"):
 
 MODEL = os.getenv("MODEL", "gemini-2.0-flash")
 
+def _format_sampling_log_float(value):
+    try:
+        number = round(float(value), 6)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{number:.6f}".rstrip("0").rstrip(".")
+    if text in ("", "-0"):
+        text = "0"
+    if "." not in text and "e" not in text.lower():
+        text = f"{text}.0"
+    return text
+
 def _positive_int(value):
     try:
         if value in (None, ""):
@@ -6669,12 +6681,13 @@ def main(log_callback=None, stop_callback=None):
 
     # Log glossary anti-duplicate parameters usage (matches GlossaryManager)
     if os.getenv("GLOSSARY_ENABLE_ANTI_DUPLICATE", "0") == "1":
-        ad_top_p = os.getenv("GLOSSARY_TOP_P", "1.0")
+        ad_top_p = _format_sampling_log_float(os.getenv("GLOSSARY_TOP_P", "1.0"))
+        ad_min_p = _format_sampling_log_float(os.getenv("GLOSSARY_MIN_P", "0.0"))
         ad_top_k = os.getenv("GLOSSARY_TOP_K", "0")
-        ad_freq = os.getenv("GLOSSARY_FREQUENCY_PENALTY", "0.0")
-        ad_pres = os.getenv("GLOSSARY_PRESENCE_PENALTY", "0.0")
-        ad_rep = os.getenv("GLOSSARY_REPETITION_PENALTY", "1.0")
-        print(f"🎯 Anti-duplicate enabled for glossary (top_p={ad_top_p}, top_k={ad_top_k}, freq_penalty={ad_freq}, presence_penalty={ad_pres}, repetition_penalty={ad_rep})")
+        ad_freq = _format_sampling_log_float(os.getenv("GLOSSARY_FREQUENCY_PENALTY", "0.0"))
+        ad_pres = _format_sampling_log_float(os.getenv("GLOSSARY_PRESENCE_PENALTY", "0.0"))
+        ad_rep = _format_sampling_log_float(os.getenv("GLOSSARY_REPETITION_PENALTY", "1.0"))
+        print(f"🎯 Anti-duplicate enabled for glossary (top_p={ad_top_p}, min_p={ad_min_p}, top_k={ad_top_k}, freq_penalty={ad_freq}, presence_penalty={ad_pres}, repetition_penalty={ad_rep})")
     
     # Log custom fields
     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')

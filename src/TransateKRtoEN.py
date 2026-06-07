@@ -7055,7 +7055,6 @@ class BatchTranslationProcessor:
 
                         # Handle cancelled chunks (skipped due to stop request)
                         if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
-                            print(f"⏭️ Chunk {chunk_idx}/{total_chunks} cancelled (stop requested)")
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
                             raise Exception("Translation stopped by user")
 

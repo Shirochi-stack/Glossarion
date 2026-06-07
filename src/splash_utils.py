@@ -32,6 +32,34 @@ def _cpu_worker_cap():
         return 1
 
 
+def _load_startup_config_hint():
+    """Best-effort config read for optional splash prewarm tasks."""
+    try:
+        import json
+        candidates = []
+        env_app_dir = os.environ.get("GLOSSARION_APP_DIR")
+        if env_app_dir:
+            candidates.append(os.path.join(env_app_dir, "config.json"))
+        if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
+            candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "config.json"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
+        candidates.append(os.path.join(os.getcwd(), "config.json"))
+        seen = set()
+        for path in candidates:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
 def _load_pyside6_modules():
     module_names = ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
     if os.environ.get("GLOSSARION_SERIAL_QT_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
@@ -758,7 +786,24 @@ class SplashManager(QObject):
             importlib.import_module("PySide6.QtWebEngineWidgets")
         except Exception:
             pass
-        return importlib.import_module("epub_library")
+        mod = importlib.import_module("epub_library")
+        scan_setting = os.environ.get("GLOSSARION_PREWARM_EPUB_LIBRARY_SCAN", "").strip().lower()
+        if (
+            scan_setting not in ("0", "false", "no", "off")
+            and (getattr(sys, "frozen", False) or scan_setting in ("1", "true", "yes", "on"))
+            and hasattr(mod, "prewarm_library_scan_cache")
+        ):
+            try:
+                config_hint = _load_startup_config_hint()
+                threading.Thread(
+                    target=mod.prewarm_library_scan_cache,
+                    args=(config_hint,),
+                    daemon=True,
+                    name="epub-library-scan-prewarm",
+                ).start()
+            except Exception:
+                pass
+        return mod
 
     def _is_startup_module_available(self, module_name):
         try:

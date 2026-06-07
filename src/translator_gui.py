@@ -29005,24 +29005,16 @@ if __name__ == "__main__":
                 dlg = main_window._open_epub_library(show=False)
                 try:
                     timeout_ms = int(os.environ.get(
-                        "GLOSSARION_EPUB_LIBRARY_SPLASH_PREWARM_TIMEOUT_MS", "30000"))
+                        "GLOSSARION_EPUB_LIBRARY_SPLASH_PREWARM_TIMEOUT_MS", "4500"))
                 except (TypeError, ValueError):
-                    timeout_ms = 30000
+                    timeout_ms = 4500
                 deadline = time.perf_counter() + max(0.0, timeout_ms / 1000.0)
                 next_status = 0.0
 
                 def _epub_prewarm_busy(dialog):
                     if dialog is None:
                         return False
-                    if getattr(dialog, "_hidden_prewarm_active", False):
-                        return True
-                    try:
-                        return any(
-                            thread is not None and thread.isRunning()
-                            for thread in (getattr(dialog, "_cover_threads", None) or [])
-                        )
-                    except Exception:
-                        return False
+                    return bool(getattr(dialog, "_hidden_prewarm_active", False))
 
                 while _epub_prewarm_busy(dlg) and time.perf_counter() < deadline:
                     now = time.perf_counter()
