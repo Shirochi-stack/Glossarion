@@ -222,14 +222,14 @@ class SDLXLIFFReviewDialog(QDialog):
 
         self.piece_list = QListWidget()
         self.piece_list.setObjectName("SdlReviewPieceList")
-        self.piece_list.setMinimumWidth(180)
-        self.piece_list.setMaximumWidth(240)
+        self.piece_list.setMinimumWidth(168)
+        self.piece_list.setMaximumWidth(220)
         splitter.addWidget(self.piece_list)
 
         detail = QWidget()
         detail.setObjectName("SdlReviewDetail")
         detail_layout = QVBoxLayout(detail)
-        detail_layout.setContentsMargins(14, 0, 0, 0)
+        detail_layout.setContentsMargins(6, 0, 0, 0)
         detail_layout.setSpacing(8)
         splitter.addWidget(detail)
         splitter.setStretchFactor(0, 0)
