@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
 import xml.etree.ElementTree as ET
 import zipfile
@@ -281,9 +281,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list = QListWidget()
         self.piece_list.setObjectName("SdlReviewPieceList")
         self.piece_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.piece_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.piece_list.customContextMenuRequested.connect(self._translate_piece_list_context_selection)
+        self.piece_list.setContextMenuPolicy(Qt.NoContextMenu)
         self.piece_list.installEventFilter(self)
+        self.piece_list.viewport().installEventFilter(self)
         self.piece_list.setMinimumWidth(168)
         self.piece_list.setMaximumWidth(220)
         self.piece_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -2862,11 +2862,49 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return -1
 
+    def _piece_list_viewport_pos_from_event(self, obj, event):
+        try:
+            if hasattr(event, "position"):
+                pos = event.position().toPoint()
+            else:
+                pos = event.pos()
+            if obj is self.piece_list:
+                return self.piece_list.viewport().mapFrom(self.piece_list, pos)
+            return pos
+        except Exception:
+            try:
+                return self.piece_list.viewport().rect().center()
+            except Exception:
+                return QPoint()
+
     def eventFilter(self, obj, event):
         try:
             if obj is self.piece_list and event.type() == QEvent.KeyPress:
                 if event.key() == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
                     self.piece_list.selectAll()
+                    event.accept()
+                    return True
+            piece_list_obj = obj is self.piece_list
+            piece_list_viewport = False
+            try:
+                piece_list_viewport = obj is self.piece_list.viewport()
+            except Exception:
+                piece_list_viewport = False
+            if piece_list_obj or piece_list_viewport:
+                event_type = event.type()
+                if event_type == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+                    self._translate_piece_list_context_selection(
+                        self._piece_list_viewport_pos_from_event(obj, event)
+                    )
+                    event.accept()
+                    return True
+                if event_type == QEvent.MouseButtonRelease and event.button() == Qt.RightButton:
+                    event.accept()
+                    return True
+                if event_type == QEvent.ContextMenu:
+                    self._translate_piece_list_context_selection(
+                        self._piece_list_viewport_pos_from_event(obj, event)
+                    )
                     event.accept()
                     return True
         except Exception:
@@ -2887,8 +2925,12 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
             clicked_row = self.piece_list.row(item)
             if not item.isSelected():
-                self.piece_list.clearSelection()
-                item.setSelected(True)
+                previous_signal_state = self.piece_list.blockSignals(True)
+                try:
+                    self.piece_list.clearSelection()
+                    item.setSelected(True)
+                finally:
+                    self.piece_list.blockSignals(previous_signal_state)
             rows = self._selected_piece_rows() or [clicked_row]
             menu = QMenu(self)
             menu.setStyleSheet(
@@ -2937,7 +2979,7 @@ class SDLXLIFFReviewDialog(QDialog):
             ))
         return work
 
-    def _mark_tooltip_translation_pending(self, piece_index, work):
+    def _mark_tooltip_translation_pending(self, piece_index, work, refresh=True):
         try:
             if piece_index < 0 or piece_index >= len(self.pieces):
                 return
@@ -2947,7 +2989,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["tooltip_translation_pending"] = True
                     pending_rows.append(row_idx)
-            self._refresh_visible_review_row_source_previews(piece_index, pending_rows, visible_only=False)
+            if refresh and pending_rows:
+                self._refresh_visible_review_row_source_previews(piece_index, pending_rows, visible_only=False)
         except Exception:
             pass
 
@@ -3020,8 +3063,11 @@ class SDLXLIFFReviewDialog(QDialog):
             self.translate_tooltips_btn.setText(f"Translating 0/{total_jobs}...")
         except Exception:
             pass
+        current_row = self._current_piece_row()
         for piece_index, work in jobs:
-            self._mark_tooltip_translation_pending(piece_index, work)
+            self._mark_tooltip_translation_pending(piece_index, work, refresh=piece_index == current_row)
+            if piece_index != current_row:
+                self._discard_piece_page(piece_index)
 
         def _worker():
             translated_count = 0
@@ -3136,7 +3182,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._set_row_tooltip_translation(piece, row_data, translations[key])
                     changed_rows.add(row_index)
             if changed_rows:
-                self._refresh_visible_review_row_source_previews(row, changed_rows, visible_only=False)
+                if row == self._current_piece_row():
+                    self._refresh_visible_review_row_source_previews(row, changed_rows, visible_only=False)
+                else:
+                    self._discard_piece_page(row)
         if batch_active:
             return
         if error and not translations:

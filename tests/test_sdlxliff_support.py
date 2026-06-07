@@ -539,6 +539,25 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert 'data-sdl-tip="' in source
     assert "_start_tooltip_translation" in source
     assert "_translate_single_row_tooltip" in source
+    assert "setSelectionMode(QAbstractItemView.ExtendedSelection)" in source
+    assert "setContextMenuPolicy(Qt.NoContextMenu)" in source
+    assert "self.piece_list.viewport().installEventFilter(self)" in source
+    assert "customContextMenuRequested.connect(self._translate_piece_list_context_selection)" not in source
+    assert "event_type == QEvent.MouseButtonPress and event.button() == Qt.RightButton" in source
+    assert "QMenu(self)" in source
+    assert "QMenu::item { padding: 6px 18px 6px 12px; }" in source
+    assert "Generate Google Translate Preview ({entry_count} entries)" in source
+    assert "menu.popup(self.piece_list.viewport().mapToGlobal(pos))" in source
+    context_start = source.index("def _translate_piece_list_context_selection")
+    context_end = source.index("def _clear_piece_list_context_menu", context_start)
+    context_body = source[context_start:context_end]
+    assert "setCurrentRow(clicked_row)" not in context_body
+    assert "blockSignals(True)" in context_body
+    assert "self.piece_list.selectAll()" in source
+    assert "_translate_piece_rows_tooltips" in source
+    assert "_start_piece_list_tooltip_translation" in source
+    assert "refresh=piece_index == current_row" in source
+    assert "if row == self._current_piece_row()" in source
     assert "_refresh_visible_review_row_source_preview" in source
     assert "_refresh_visible_review_row_source_previews" in source
     assert "visible_only=False" in source
@@ -554,6 +573,11 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "SdlReviewMachineTranslation" in source
     assert "SdlReviewMachineTranslationPending" in source
     assert "QListWidget#SdlReviewPieceList::item:hover:!selected" in source
+    selected_style = source[
+        source.index("QListWidget#SdlReviewPieceList::item:selected {{"):
+        source.index("QListWidget#SdlReviewPieceList::item:selected:hover {{")
+    ]
+    assert not re.search(r"(?m)^\s*color\s*:", selected_style)
     assert "border: 1px dashed #8a6f2a" in source
     assert "padding: 5px 8px; font-size: 8pt" in source
     assert "border-left: 3px solid #5aa7d8" in source
@@ -566,7 +590,7 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     apply_end = source.index("def _selected_text_for_widget")
     apply_body = source[apply_start:apply_end]
     assert "_refresh_visible_review_row_source_preview" in apply_body
-    assert "_discard_piece_page" not in apply_body
+    assert "_discard_piece_page" in apply_body
     assert "_render_piece" not in apply_body
 
 
@@ -684,6 +708,35 @@ def test_sdlxliff_review_generate_preview_includes_stored_first_row():
     assert captured["row"] == 0
     assert [item[0] for item in captured["work"]] == [0, 1]
     assert captured["ready_text"] == "Preview Ready"
+
+
+def test_sdlxliff_review_selected_piece_preview_jobs_include_row_zero():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._tooltip_translation_running = False
+    dialog._config = {"output_language": "English"}
+    dialog.pieces = [
+        {
+            "path": "piece0.sdlxliff",
+            "rows": [
+                {"row_index": 0, "source_index": 0, "source_tag": "p", "source": "First piece row zero."},
+            ],
+        },
+        {
+            "path": "piece1.sdlxliff",
+            "rows": [
+                {"row_index": 0, "source_index": 0, "source_tag": "p", "source": "Second piece row zero."},
+                {"row_index": 1, "source_index": 1, "source_tag": "p", "source": "Second piece row one."},
+            ],
+        },
+    ]
+    captured = {}
+    dialog._start_piece_list_tooltip_translation = lambda jobs: captured.update({"jobs": jobs})
+
+    dialog._translate_piece_rows_tooltips([1, 0, 1])
+
+    assert [piece_row for piece_row, _work in captured["jobs"]] == [0, 1]
+    assert [item[0] for item in captured["jobs"][0][1]] == [0]
+    assert [item[0] for item in captured["jobs"][1][1]] == [0, 1]
 
 
 def test_sdlxliff_review_source_preview_marks_identical_machine_translation(qtbot):
