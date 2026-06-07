@@ -29,10 +29,10 @@ import threading
 import hashlib
 
 _IS_MACOS = (sys.platform == 'darwin')
-_MACHINE_TRANSLATION_CACHE_DIR = "Machine_Translation"
+_MACHINE_TRANSLATION_DIR = "Machine_Translation"
 
 
-def _sdlxliff_cache_output_name(path_or_name):
+def _sdlxliff_machine_translation_output_name(path_or_name):
     name = os.path.basename(str(path_or_name or "").replace("\\", "/"))
     suffix = ".sdlxliff"
     if name.lower().endswith(suffix):
@@ -40,8 +40,8 @@ def _sdlxliff_cache_output_name(path_or_name):
     return name
 
 
-def _sdlxliff_machine_translation_cache_path(output_dir, output_or_sidecar):
-    output_name = _sdlxliff_cache_output_name(output_or_sidecar)
+def _sdlxliff_machine_translation_path(output_dir, output_or_sidecar):
+    output_name = _sdlxliff_machine_translation_output_name(output_or_sidecar)
     if not output_name:
         return None
     base_dir = str(output_dir or "")
@@ -55,7 +55,7 @@ def _sdlxliff_machine_translation_cache_path(output_dir, output_or_sidecar):
     safe_name = re.sub(r'[^A-Za-z0-9._ -]+', '_', output_name).strip(" .")
     if not safe_name:
         safe_name = hashlib.sha256(output_name.encode("utf-8", errors="replace")).hexdigest()
-    return os.path.join(base_dir, "SDLXLIFF", _MACHINE_TRANSLATION_CACHE_DIR, f"{safe_name}.json")
+    return os.path.join(base_dir, "SDLXLIFF", _MACHINE_TRANSLATION_DIR, f"{safe_name}.json")
 
 def _get_app_dir() -> str:
     """Return the application's base directory (Windows-safe)."""
@@ -239,7 +239,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self._initial_review_load_started = False
         self._queued_review_refresh = False
         self._seamless_review_old_page = None
-        self._tooltip_translations = {}
         self._tooltip_translation_running = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
@@ -421,9 +420,25 @@ class SDLXLIFFReviewDialog(QDialog):
             for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
                 try:
                     stat = os.stat(path)
-                    signature.append((os.path.normcase(os.path.abspath(path)), stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))))
+                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1000000000))))
                 except Exception:
-                    signature.append((os.path.normcase(os.path.abspath(path)), -1, -1))
+                    signature.append(("sdlxliff", os.path.normcase(os.path.abspath(path)), -1, -1))
+            mt_dir = os.path.join(output_dir, "SDLXLIFF", _MACHINE_TRANSLATION_DIR)
+            try:
+                mt_dir_norm = os.path.normcase(os.path.abspath(mt_dir))
+            except Exception:
+                mt_dir_norm = str(mt_dir or "")
+            signature.append(("machine_translation_dir",) + self._review_file_signature(mt_dir))
+            if os.path.isdir(mt_dir):
+                try:
+                    for name in sorted(os.listdir(mt_dir)):
+                        if not str(name).lower().endswith(".json"):
+                            continue
+                        mt_path = os.path.join(mt_dir, name)
+                        if os.path.isfile(mt_path):
+                            signature.append(("machine_translation",) + self._review_file_signature(mt_path))
+                except Exception:
+                    signature.append(("machine_translation_scan_failed", mt_dir_norm, -1, -1))
         return tuple(sorted(signature))
 
     @staticmethod
@@ -680,7 +695,7 @@ class SDLXLIFFReviewDialog(QDialog):
             autogen_changed = autogen_signature != self._last_autogen_signature
             if sidecar_changed or autogen_changed:
                 self.refresh_review_data(
-                    force=sidecar_changed and not autogen_changed,
+                    force=False,
                     signature=signature,
                     seamless=True,
                 )
@@ -1339,6 +1354,16 @@ class SDLXLIFFReviewDialog(QDialog):
         label.mousePressEvent = _jump
         return label
 
+    @staticmethod
+    def _review_row_index_property(widget, default=-1):
+        try:
+            value = widget.property("sdl_row_index")
+            if value is None:
+                return default
+            return int(value)
+        except Exception:
+            return default
+
     def _jump_to_status(self, status):
         page = self.rows_widget
         if page is None or page is self.loading_page:
@@ -1348,7 +1373,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 frame for frame in page.findChildren(QFrame, "SdlReviewRow")
                 if frame.property("sdl_status") == status
             ]
-            frames.sort(key=lambda frame: int(frame.property("sdl_row_index") or 0))
+            frames.sort(key=lambda frame: self._review_row_index_property(frame, default=0))
             if not frames:
                 return
             try:
@@ -1778,7 +1803,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "mismatch": source_count != target_count or red_count > 0,
                 "rows": rows,
             }
-            self._load_machine_translation_cache_for_piece(piece)
+            self._load_machine_translation_file_for_piece(piece)
             return piece
         except Exception as exc:
             return {
@@ -2418,7 +2443,7 @@ class SDLXLIFFReviewDialog(QDialog):
             frame = None
             for candidate in page.findChildren(QFrame, "SdlReviewRow"):
                 try:
-                    if int(candidate.property("sdl_row_index") or -1) == row_index:
+                    if self._review_row_index_property(candidate) == row_index:
                         frame = candidate
                         break
                 except Exception:
@@ -2478,7 +2503,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 return None
             for candidate in page.findChildren(QFrame, "SdlReviewRow"):
                 try:
-                    if int(candidate.property("sdl_row_index") or -1) == row_index:
+                    if self._review_row_index_property(candidate) == row_index:
                         return candidate
                 except Exception:
                     continue
@@ -2498,7 +2523,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 return frames
             for candidate in page.findChildren(QFrame, "SdlReviewRow"):
                 try:
-                    frames[int(candidate.property("sdl_row_index") or -1)] = candidate
+                    frames[self._review_row_index_property(candidate)] = candidate
                 except Exception:
                     continue
         except Exception:
@@ -2649,7 +2674,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _machine_translation_source_hash(text):
         return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
 
-    def _machine_translation_cache_row_key(self, row_data, target_code=None):
+    def _machine_translation_row_key(self, row_data, target_code=None):
         target_code = target_code or self._review_target_language_code()
         source_index = row_data.get("source_index")
         if source_index is None:
@@ -2658,14 +2683,14 @@ class SDLXLIFFReviewDialog(QDialog):
         source_hash = self._machine_translation_source_hash(row_data.get("source", ""))
         return f"{target_code}|{source_index}|{source_tag}|{source_hash}"
 
-    def _machine_translation_cache_path_for_piece(self, piece):
-        return _sdlxliff_machine_translation_cache_path(
+    def _machine_translation_path_for_piece(self, piece):
+        return _sdlxliff_machine_translation_path(
             getattr(self, "output_dir", "") or "",
             piece.get("path") or piece.get("output_name") or piece.get("name"),
         )
 
-    def _read_machine_translation_cache(self, piece):
-        path = self._machine_translation_cache_path_for_piece(piece)
+    def _read_machine_translation_file(self, piece):
+        path = self._machine_translation_path_for_piece(piece)
         if not path or not os.path.isfile(path):
             return {}
         try:
@@ -2676,18 +2701,16 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return {}
 
-    def _load_machine_translation_cache_for_piece(self, piece):
+    def _load_machine_translation_file_for_piece(self, piece):
         rows = piece.get("rows") or []
         if not rows:
             return
-        entries = self._read_machine_translation_cache(piece)
+        entries = self._read_machine_translation_file(piece)
         if not entries:
             return
         target_code = self._review_target_language_code()
-        if not hasattr(self, "_tooltip_translations") or not isinstance(getattr(self, "_tooltip_translations", None), dict):
-            self._tooltip_translations = {}
         for row_data in rows:
-            key = self._machine_translation_cache_row_key(row_data, target_code)
+            key = self._machine_translation_row_key(row_data, target_code)
             entry = entries.get(key)
             if not isinstance(entry, dict):
                 continue
@@ -2699,17 +2722,16 @@ class SDLXLIFFReviewDialog(QDialog):
             if not translated:
                 continue
             row_data["tooltip_translation"] = translated
-            self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
 
-    def _write_machine_translation_cache_entry(self, piece, row_data, translated):
+    def _write_machine_translation_entry(self, piece, row_data, translated):
         translated = str(translated or "").strip()
         if not translated:
             return
-        path = self._machine_translation_cache_path_for_piece(piece)
+        path = self._machine_translation_path_for_piece(piece)
         if not path:
             return
         target_code = self._review_target_language_code()
-        cache_key = self._machine_translation_cache_row_key(row_data, target_code)
+        entry_key = self._machine_translation_row_key(row_data, target_code)
         source_index = row_data.get("source_index")
         if source_index is None:
             source_index = row_data.get("row_index")
@@ -2729,7 +2751,7 @@ class SDLXLIFFReviewDialog(QDialog):
             entries = data.get("entries")
             if not isinstance(entries, dict):
                 entries = {}
-            entries[cache_key] = {
+            entries[entry_key] = {
                 "source_index": source_index,
                 "source_tag": source_tag,
                 "source_hash": source_hash,
@@ -2746,7 +2768,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _tooltip_cache_key(self, piece, row_data):
+    def _tooltip_translation_key(self, piece, row_data):
         piece_path = ""
         try:
             piece_path = os.path.normcase(os.path.abspath(piece.get("path") or piece.get("output_name") or ""))
@@ -2764,25 +2786,17 @@ class SDLXLIFFReviewDialog(QDialog):
         )
 
     def _row_tooltip_translation(self, piece, row_data):
-        cached = row_data.get("tooltip_translation")
-        if cached:
-            return str(cached)
-        key = self._tooltip_cache_key(piece, row_data)
-        cached = self._tooltip_translations.get(key)
-        if cached:
-            row_data["tooltip_translation"] = cached
-            return str(cached)
+        stored = row_data.get("tooltip_translation")
+        if stored:
+            return str(stored)
         return ""
 
     def _set_row_tooltip_translation(self, piece, row_data, translated):
         translated = str(translated or "").strip()
         if not translated:
             return
-        if not hasattr(self, "_tooltip_translations") or not isinstance(getattr(self, "_tooltip_translations", None), dict):
-            self._tooltip_translations = {}
         row_data["tooltip_translation"] = translated
-        self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
-        self._write_machine_translation_cache_entry(piece, row_data, translated)
+        self._write_machine_translation_entry(piece, row_data, translated)
 
     @staticmethod
     def _tooltip_batch_tag_name(tag_name):
@@ -2874,7 +2888,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["tooltip_translation_pending"] = True
                     pending_rows.append(row_idx)
-            self._refresh_visible_review_row_source_previews(row, pending_rows, visible_only=True)
+            self._refresh_visible_review_row_source_previews(row, pending_rows, visible_only=False)
         except Exception:
             pass
 
@@ -2912,7 +2926,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             work.append((
                 row_idx,
-                self._tooltip_cache_key(piece, row_data),
+                self._tooltip_translation_key(piece, row_data),
                 source_text,
                 row_data.get("source_tag"),
             ))
@@ -2933,7 +2947,7 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         work = [(
             row_index,
-            self._tooltip_cache_key(piece, row_data),
+            self._tooltip_translation_key(piece, row_data),
             source_text,
             row_data.get("source_tag"),
         )]
@@ -2957,7 +2971,7 @@ class SDLXLIFFReviewDialog(QDialog):
             piece = self.pieces[row]
             changed_rows = set()
             for row_index, row_data in enumerate(piece.get("rows") or []):
-                key = self._tooltip_cache_key(piece, row_data)
+                key = self._tooltip_translation_key(piece, row_data)
                 if row_data.pop("tooltip_translation_pending", False):
                     changed_rows.add(row_index)
                 if key in translations:
@@ -3356,7 +3370,8 @@ class SDLXLIFFReviewDialog(QDialog):
         layout.addWidget(label)
 
         preview_text = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else tooltip_translation
-        translated_label = QLabel(preview_text)
+        preview_label_text = preview_text if tooltip_pending else f"MT: {preview_text}"
+        translated_label = QLabel(preview_label_text)
         translated_label.setObjectName(
             "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"
         )
@@ -8207,8 +8222,8 @@ class RetranslationMixin:
                 return None
             return os.path.join(data['output_dir'], "SDLXLIFF", f"{output_name}.sdlxliff")
 
-        def _machine_translation_cache_path_for_output_file(output_file):
-            return _sdlxliff_machine_translation_cache_path(data['output_dir'], output_file)
+        def _machine_translation_path_for_output_file(output_file):
+            return _sdlxliff_machine_translation_path(data['output_dir'], output_file)
 
         def _clear_refinement_progress_fields(entry):
             """Remove stale refinement metadata when a chapter is queued again."""
@@ -8583,7 +8598,7 @@ class RetranslationMixin:
                                 continue
                             seen_sidecars.add(sidecar_key)
                             sidecar_paths.append(sidecar_path)
-                            machine_translation_path = _machine_translation_cache_path_for_output_file(candidate_output)
+                            machine_translation_path = _machine_translation_path_for_output_file(candidate_output)
                             if machine_translation_path:
                                 machine_translation_key = os.path.normcase(os.path.abspath(machine_translation_path))
                                 if machine_translation_key not in seen_machine_translation:
@@ -8603,10 +8618,10 @@ class RetranslationMixin:
                                 if os.path.exists(machine_translation_path):
                                     os.remove(machine_translation_path)
                                     machine_translation_deleted_count += 1
-                                    print(f"Deleted Machine Translation cache: {machine_translation_path}")
+                                    print(f"Deleted Machine Translation preview: {machine_translation_path}")
                             except Exception as e:
                                 machine_translation_failed_count += 1
-                                print(f"Failed to delete Machine Translation cache {machine_translation_path}: {e}")
+                                print(f"Failed to delete Machine Translation preview {machine_translation_path}: {e}")
 
                         print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                         ch_entry["status"] = "pending"
@@ -8655,7 +8670,7 @@ class RetranslationMixin:
             if sidecar_deleted_count > 0:
                 success_parts.append(f"deleted {sidecar_deleted_count} SDLXLIFF sidecar(s)")
             if machine_translation_deleted_count > 0:
-                success_parts.append(f"deleted {machine_translation_deleted_count} machine translation cache file(s)")
+                success_parts.append(f"deleted {machine_translation_deleted_count} Machine Translation preview file(s)")
             if marked_count > 0:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
@@ -8667,7 +8682,7 @@ class RetranslationMixin:
             if sidecar_failed_count > 0:
                 success_parts.append(f"failed to delete {sidecar_failed_count} SDLXLIFF sidecar(s)")
             if machine_translation_failed_count > 0:
-                success_parts.append(f"failed to delete {machine_translation_failed_count} machine translation cache file(s)")
+                success_parts.append(f"failed to delete {machine_translation_failed_count} Machine Translation preview file(s)")
             
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."

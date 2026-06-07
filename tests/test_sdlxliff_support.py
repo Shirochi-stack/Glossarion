@@ -11,11 +11,12 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from lxml import etree
+from PySide6.QtWidgets import QFrame, QLabel
 
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from TransateKRtoEN import _write_html_sdlxliff_sidecar
-from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_cache_path
+from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
     _missing_beautifulsoup_tags_issue,
@@ -540,7 +541,7 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_translate_single_row_tooltip" in source
     assert "_refresh_visible_review_row_source_preview" in source
     assert "_refresh_visible_review_row_source_previews" in source
-    assert "visible_only=True" in source
+    assert "visible_only=False" in source
     assert "Google Translate \\u2192" in source
     assert "_open_google_translate" not in source
     assert "Translate tooltip" not in source
@@ -594,15 +595,38 @@ def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
     )
 
 
-def test_sdlxliff_machine_translation_cache_path_uses_machine_translation_subfolder(tmp_path):
+def test_sdlxliff_machine_translation_path_uses_machine_translation_subfolder(tmp_path):
     sidecar = tmp_path / "SDLXLIFF" / "response_piece_0002.html.sdlxliff"
 
-    assert _sdlxliff_machine_translation_cache_path(str(tmp_path), "response_piece_0002.html") == str(
+    assert _sdlxliff_machine_translation_path(str(tmp_path), "response_piece_0002.html") == str(
         tmp_path / "SDLXLIFF" / "Machine_Translation" / "response_piece_0002.html.json"
     )
-    assert _sdlxliff_machine_translation_cache_path("", str(sidecar)) == str(
+    assert _sdlxliff_machine_translation_path("", str(sidecar)) == str(
         tmp_path / "SDLXLIFF" / "Machine_Translation" / "response_piece_0002.html.json"
     )
+
+
+def test_sdlxliff_review_signature_tracks_machine_translation_deletions(tmp_path):
+    sdl_dir = tmp_path / "SDLXLIFF"
+    mt_dir = sdl_dir / "Machine_Translation"
+    mt_dir.mkdir(parents=True)
+    (sdl_dir / "response_piece_0002.html.sdlxliff").write_text("sidecar", encoding="utf-8")
+    preview_path = mt_dir / "response_piece_0002.html.json"
+    preview_path.write_text('{"entries": {}}', encoding="utf-8")
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+
+    with_preview = dialog._current_review_signature()
+    preview_path.unlink()
+    without_preview = dialog._current_review_signature()
+    mt_dir.rmdir()
+    without_folder = dialog._current_review_signature()
+
+    assert with_preview != without_preview
+    assert without_preview != without_folder
+    assert any(entry[0] == "machine_translation_dir" and entry[2] == -1 for entry in without_folder)
 
 
 def test_sdlxliff_review_persists_and_reloads_machine_translation_preview(tmp_path):
@@ -618,35 +642,32 @@ def test_sdlxliff_review_persists_and_reloads_machine_translation_preview(tmp_pa
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog.output_dir = str(tmp_path)
     dialog._config = {"output_language": "English"}
-    dialog._tooltip_translations = {}
     piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
 
     dialog._set_row_tooltip_translation(piece, piece["rows"][0], "Machine preview sentence.")
 
-    cache_path = tmp_path / "SDLXLIFF" / "Machine_Translation" / f"{output_name}.json"
-    assert cache_path.is_file()
-    cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert list(cached["entries"].values())[0]["translation"] == "Machine preview sentence."
+    preview_path = tmp_path / "SDLXLIFF" / "Machine_Translation" / f"{output_name}.json"
+    assert preview_path.is_file()
+    stored_preview = json.loads(preview_path.read_text(encoding="utf-8"))
+    assert list(stored_preview["entries"].values())[0]["translation"] == "Machine preview sentence."
 
     new_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     new_dialog.output_dir = str(tmp_path)
     new_dialog._config = {"output_language": "English"}
-    new_dialog._tooltip_translations = {}
     reloaded = new_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
 
     assert reloaded["rows"][0]["tooltip_translation"] == "Machine preview sentence."
     assert new_dialog._row_tooltip_translation(reloaded, reloaded["rows"][0]) == "Machine preview sentence."
 
 
-def test_sdlxliff_review_generate_preview_includes_cached_first_row():
+def test_sdlxliff_review_generate_preview_includes_stored_first_row():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog._tooltip_translation_running = False
     dialog._config = {"output_language": "English"}
-    dialog._tooltip_translations = {}
     piece = {
         "path": "piece.sdlxliff",
         "rows": [
-            {"row_index": 0, "source_index": 0, "source_tag": "p", "source": "Already cached."},
+            {"row_index": 0, "source_index": 0, "source_tag": "p", "source": "Already stored."},
             {"row_index": 1, "source_index": 1, "source_tag": "p", "source": "Needs preview."},
         ],
     }
@@ -665,7 +686,27 @@ def test_sdlxliff_review_generate_preview_includes_cached_first_row():
     assert captured["ready_text"] == "Preview Ready"
 
 
-def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_language(tmp_path):
+def test_sdlxliff_review_source_preview_marks_identical_machine_translation(qtbot):
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    widget = dialog._text_label(
+        "Final Fantasy VI: The Novel",
+        tooltip_translation="Final Fantasy VI: The Novel",
+    )
+    qtbot.addWidget(widget)
+
+    labels = widget.findChildren(QLabel)
+    assert any(label.text() == "MT: Final Fantasy VI: The Novel" for label in labels)
+
+
+def test_sdlxliff_review_row_index_property_preserves_zero(qtbot):
+    frame = QFrame()
+    qtbot.addWidget(frame)
+    frame.setProperty("sdl_row_index", 0)
+
+    assert SDLXLIFFReviewDialog._review_row_index_property(frame) == 0
+
+
+def test_sdlxliff_review_machine_translation_ignores_changed_source_or_language(tmp_path):
     output_name = "response_chapter0001.html"
     _write_html_sdlxliff_sidecar(
         str(tmp_path),
@@ -678,7 +719,6 @@ def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_lan
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog.output_dir = str(tmp_path)
     dialog._config = {"output_language": "English"}
-    dialog._tooltip_translations = {}
     piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
     dialog._set_row_tooltip_translation(piece, piece["rows"][0], "Cached English preview.")
 
@@ -692,7 +732,6 @@ def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_lan
     changed_source_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     changed_source_dialog.output_dir = str(tmp_path)
     changed_source_dialog._config = {"output_language": "English"}
-    changed_source_dialog._tooltip_translations = {}
     changed_source_piece = changed_source_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
     assert changed_source_piece["rows"][0].get("tooltip_translation", "") == ""
 
@@ -706,20 +745,19 @@ def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_lan
     changed_language_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     changed_language_dialog.output_dir = str(tmp_path)
     changed_language_dialog._config = {"output_language": "Spanish"}
-    changed_language_dialog._tooltip_translations = {}
     changed_language_piece = changed_language_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
     assert changed_language_piece["rows"][0].get("tooltip_translation", "") == ""
 
 
-def test_retranslation_cleanup_deletes_machine_translation_cache_with_sdlxliff_sidecars():
+def test_retranslation_cleanup_deletes_machine_translation_preview_with_sdlxliff_sidecars():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
     retranslate_start = source.index("def retranslate_selected")
     retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
 
     assert '"Machine_Translation"' in source
-    assert "_machine_translation_cache_path_for_output_file" in retranslate_body
+    assert "_machine_translation_path_for_output_file" in retranslate_body
     assert "machine_translation_deleted_count" in retranslate_body
-    assert "Deleted Machine Translation cache" in retranslate_body
+    assert "Deleted Machine Translation preview" in retranslate_body
 
 
 def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
