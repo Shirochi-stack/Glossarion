@@ -275,8 +275,9 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_note.setTextFormat(Qt.PlainText)
         legend_note.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt; background: transparent;")
         legend_row.addWidget(legend_note)
+        legend_row.addSpacing(24)
+        legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter)
         legend_row.addStretch(1)
-        legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter | Qt.AlignRight)
         detail_layout.addLayout(legend_row)
 
         self.scroll = QScrollArea()
