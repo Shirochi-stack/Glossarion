@@ -15,7 +15,7 @@ from lxml import etree
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from TransateKRtoEN import _write_html_sdlxliff_sidecar
-from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog
+from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_cache_path
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
     _missing_beautifulsoup_tags_issue,
@@ -592,6 +592,107 @@ def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
     assert dialog._review_row_height("안녕하세요 독자님들.", "Hello, readers.", "Hello, readers.") >= (
         dialog.REVIEW_ROW_MIN_HEIGHT + 30
     )
+
+
+def test_sdlxliff_machine_translation_cache_path_uses_machine_translation_subfolder(tmp_path):
+    sidecar = tmp_path / "SDLXLIFF" / "response_piece_0002.html.sdlxliff"
+
+    assert _sdlxliff_machine_translation_cache_path(str(tmp_path), "response_piece_0002.html") == str(
+        tmp_path / "SDLXLIFF" / "Machine_Translation" / "response_piece_0002.html.json"
+    )
+    assert _sdlxliff_machine_translation_cache_path("", str(sidecar)) == str(
+        tmp_path / "SDLXLIFF" / "Machine_Translation" / "response_piece_0002.html.json"
+    )
+
+
+def test_sdlxliff_review_persists_and_reloads_machine_translation_preview(tmp_path):
+    output_name = "response_chapter0001.html"
+    _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<p>Source sentence.</p>",
+        "<p>Translated sentence.</p>",
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output_name}.sdlxliff"
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {"output_language": "English"}
+    dialog._tooltip_translations = {}
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+
+    dialog._set_row_tooltip_translation(piece, piece["rows"][0], "Machine preview sentence.")
+
+    cache_path = tmp_path / "SDLXLIFF" / "Machine_Translation" / f"{output_name}.json"
+    assert cache_path.is_file()
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert list(cached["entries"].values())[0]["translation"] == "Machine preview sentence."
+
+    new_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    new_dialog.output_dir = str(tmp_path)
+    new_dialog._config = {"output_language": "English"}
+    new_dialog._tooltip_translations = {}
+    reloaded = new_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+
+    assert reloaded["rows"][0]["tooltip_translation"] == "Machine preview sentence."
+    assert new_dialog._row_tooltip_translation(reloaded, reloaded["rows"][0]) == "Machine preview sentence."
+
+
+def test_sdlxliff_review_machine_translation_cache_ignores_changed_source_or_language(tmp_path):
+    output_name = "response_chapter0001.html"
+    _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<p>Original source.</p>",
+        "<p>Translated sentence.</p>",
+    )
+    sidecar = tmp_path / "SDLXLIFF" / f"{output_name}.sdlxliff"
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {"output_language": "English"}
+    dialog._tooltip_translations = {}
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+    dialog._set_row_tooltip_translation(piece, piece["rows"][0], "Cached English preview.")
+
+    _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<p>Changed source.</p>",
+        "<p>Translated sentence.</p>",
+    )
+    changed_source_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    changed_source_dialog.output_dir = str(tmp_path)
+    changed_source_dialog._config = {"output_language": "English"}
+    changed_source_dialog._tooltip_translations = {}
+    changed_source_piece = changed_source_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+    assert changed_source_piece["rows"][0].get("tooltip_translation", "") == ""
+
+    _write_html_sdlxliff_sidecar(
+        str(tmp_path),
+        output_name,
+        {"original_basename": "chapter0001.xhtml"},
+        "<p>Original source.</p>",
+        "<p>Translated sentence.</p>",
+    )
+    changed_language_dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    changed_language_dialog.output_dir = str(tmp_path)
+    changed_language_dialog._config = {"output_language": "Spanish"}
+    changed_language_dialog._tooltip_translations = {}
+    changed_language_piece = changed_language_dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+    assert changed_language_piece["rows"][0].get("tooltip_translation", "") == ""
+
+
+def test_retranslation_cleanup_deletes_machine_translation_cache_with_sdlxliff_sidecars():
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    retranslate_start = source.index("def retranslate_selected")
+    retranslate_body = source[retranslate_start:source.index("# Add buttons", retranslate_start)]
+
+    assert '"Machine_Translation"' in source
+    assert "_machine_translation_cache_path_for_output_file" in retranslate_body
+    assert "machine_translation_deleted_count" in retranslate_body
+    assert "Deleted Machine Translation cache" in retranslate_body
 
 
 def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():

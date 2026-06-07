@@ -26,8 +26,36 @@ import subprocess
 import platform
 import time
 import threading
+import hashlib
 
 _IS_MACOS = (sys.platform == 'darwin')
+_MACHINE_TRANSLATION_CACHE_DIR = "Machine_Translation"
+
+
+def _sdlxliff_cache_output_name(path_or_name):
+    name = os.path.basename(str(path_or_name or "").replace("\\", "/"))
+    suffix = ".sdlxliff"
+    if name.lower().endswith(suffix):
+        name = name[:-len(suffix)]
+    return name
+
+
+def _sdlxliff_machine_translation_cache_path(output_dir, output_or_sidecar):
+    output_name = _sdlxliff_cache_output_name(output_or_sidecar)
+    if not output_name:
+        return None
+    base_dir = str(output_dir or "")
+    if not base_dir:
+        sidecar_path = str(output_or_sidecar or "")
+        sidecar_dir = os.path.dirname(sidecar_path)
+        if os.path.basename(sidecar_dir).lower() == "sdlxliff":
+            base_dir = os.path.dirname(sidecar_dir)
+    if not base_dir:
+        return None
+    safe_name = re.sub(r'[^A-Za-z0-9._ -]+', '_', output_name).strip(" .")
+    if not safe_name:
+        safe_name = hashlib.sha256(output_name.encode("utf-8", errors="replace")).hexdigest()
+    return os.path.join(base_dir, "SDLXLIFF", _MACHINE_TRANSLATION_CACHE_DIR, f"{safe_name}.json")
 
 def _get_app_dir() -> str:
     """Return the application's base directory (Windows-safe)."""
@@ -1732,7 +1760,7 @@ class SDLXLIFFReviewDialog(QDialog):
             source_count = len(source_review_units)
             target_count = len(target_review_units)
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
-            return {
+            piece = {
                 "path": path,
                 "index": index,
                 "name": os.path.basename(path),
@@ -1750,6 +1778,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 "mismatch": source_count != target_count or red_count > 0,
                 "rows": rows,
             }
+            self._load_machine_translation_cache_for_piece(piece)
+            return piece
         except Exception as exc:
             return {
                 "path": path,
@@ -2615,6 +2645,107 @@ class SDLXLIFFReviewDialog(QDialog):
     def _review_target_language_code(self):
         return self._GT_LANG_CODES.get(self._review_target_language().lower(), "en")
 
+    @staticmethod
+    def _machine_translation_source_hash(text):
+        return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
+
+    def _machine_translation_cache_row_key(self, row_data, target_code=None):
+        target_code = target_code or self._review_target_language_code()
+        source_index = row_data.get("source_index")
+        if source_index is None:
+            source_index = row_data.get("row_index")
+        source_tag = str(row_data.get("source_tag", "") or "").strip().lower()
+        source_hash = self._machine_translation_source_hash(row_data.get("source", ""))
+        return f"{target_code}|{source_index}|{source_tag}|{source_hash}"
+
+    def _machine_translation_cache_path_for_piece(self, piece):
+        return _sdlxliff_machine_translation_cache_path(
+            getattr(self, "output_dir", "") or "",
+            piece.get("path") or piece.get("output_name") or piece.get("name"),
+        )
+
+    def _read_machine_translation_cache(self, piece):
+        path = self._machine_translation_cache_path_for_piece(piece)
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("entries") if isinstance(data, dict) else {}
+            return entries if isinstance(entries, dict) else {}
+        except Exception:
+            return {}
+
+    def _load_machine_translation_cache_for_piece(self, piece):
+        rows = piece.get("rows") or []
+        if not rows:
+            return
+        entries = self._read_machine_translation_cache(piece)
+        if not entries:
+            return
+        target_code = self._review_target_language_code()
+        if not hasattr(self, "_tooltip_translations") or not isinstance(getattr(self, "_tooltip_translations", None), dict):
+            self._tooltip_translations = {}
+        for row_data in rows:
+            key = self._machine_translation_cache_row_key(row_data, target_code)
+            entry = entries.get(key)
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("target_language") != target_code:
+                continue
+            if entry.get("source_hash") != self._machine_translation_source_hash(row_data.get("source", "")):
+                continue
+            translated = str(entry.get("translation") or "").strip()
+            if not translated:
+                continue
+            row_data["tooltip_translation"] = translated
+            self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
+
+    def _write_machine_translation_cache_entry(self, piece, row_data, translated):
+        translated = str(translated or "").strip()
+        if not translated:
+            return
+        path = self._machine_translation_cache_path_for_piece(piece)
+        if not path:
+            return
+        target_code = self._review_target_language_code()
+        cache_key = self._machine_translation_cache_row_key(row_data, target_code)
+        source_index = row_data.get("source_index")
+        if source_index is None:
+            source_index = row_data.get("row_index")
+        source_tag = str(row_data.get("source_tag", "") or "").strip().lower()
+        source_hash = self._machine_translation_source_hash(row_data.get("source", ""))
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = {}
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except Exception:
+                    data = {}
+            entries = data.get("entries")
+            if not isinstance(entries, dict):
+                entries = {}
+            entries[cache_key] = {
+                "source_index": source_index,
+                "source_tag": source_tag,
+                "source_hash": source_hash,
+                "target_language": target_code,
+                "translation": translated,
+            }
+            data.update({
+                "version": 1,
+                "sidecar": os.path.basename(str(piece.get("path") or piece.get("output_name") or "")),
+                "entries": entries,
+            })
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def _tooltip_cache_key(self, piece, row_data):
         piece_path = ""
         try:
@@ -2624,7 +2755,13 @@ class SDLXLIFFReviewDialog(QDialog):
         source_index = row_data.get("source_index")
         if source_index is None:
             source_index = row_data.get("row_index")
-        return (piece_path, source_index, str(row_data.get("source", "") or ""))
+        return (
+            piece_path,
+            self._review_target_language_code(),
+            source_index,
+            str(row_data.get("source_tag", "") or "").strip().lower(),
+            self._machine_translation_source_hash(row_data.get("source", "")),
+        )
 
     def _row_tooltip_translation(self, piece, row_data):
         cached = row_data.get("tooltip_translation")
@@ -2641,8 +2778,11 @@ class SDLXLIFFReviewDialog(QDialog):
         translated = str(translated or "").strip()
         if not translated:
             return
+        if not hasattr(self, "_tooltip_translations") or not isinstance(getattr(self, "_tooltip_translations", None), dict):
+            self._tooltip_translations = {}
         row_data["tooltip_translation"] = translated
         self._tooltip_translations[self._tooltip_cache_key(piece, row_data)] = translated
+        self._write_machine_translation_cache_entry(piece, row_data, translated)
 
     @staticmethod
     def _tooltip_batch_tag_name(tag_name):
@@ -8067,6 +8207,9 @@ class RetranslationMixin:
                 return None
             return os.path.join(data['output_dir'], "SDLXLIFF", f"{output_name}.sdlxliff")
 
+        def _machine_translation_cache_path_for_output_file(output_file):
+            return _sdlxliff_machine_translation_cache_path(data['output_dir'], output_file)
+
         def _clear_refinement_progress_fields(entry):
             """Remove stale refinement metadata when a chapter is queued again."""
             if not isinstance(entry, dict):
@@ -8395,6 +8538,8 @@ class RetranslationMixin:
             merged_cleared_count = 0
             sidecar_deleted_count = 0
             sidecar_failed_count = 0
+            machine_translation_deleted_count = 0
+            machine_translation_failed_count = 0
             progress_updated = False
 
             for ch_info in selected_chapters:
@@ -8427,6 +8572,8 @@ class RetranslationMixin:
 
                         sidecar_paths = []
                         seen_sidecars = set()
+                        machine_translation_paths = []
+                        seen_machine_translation = set()
                         for candidate_output in (output_file, target_output_file):
                             sidecar_path = _sdlxliff_sidecar_path_for_output_file(candidate_output)
                             if not sidecar_path:
@@ -8436,6 +8583,12 @@ class RetranslationMixin:
                                 continue
                             seen_sidecars.add(sidecar_key)
                             sidecar_paths.append(sidecar_path)
+                            machine_translation_path = _machine_translation_cache_path_for_output_file(candidate_output)
+                            if machine_translation_path:
+                                machine_translation_key = os.path.normcase(os.path.abspath(machine_translation_path))
+                                if machine_translation_key not in seen_machine_translation:
+                                    seen_machine_translation.add(machine_translation_key)
+                                    machine_translation_paths.append(machine_translation_path)
                         for sidecar_path in sidecar_paths:
                             try:
                                 if os.path.exists(sidecar_path):
@@ -8445,6 +8598,15 @@ class RetranslationMixin:
                             except Exception as e:
                                 sidecar_failed_count += 1
                                 print(f"Failed to delete SDLXLIFF sidecar {sidecar_path}: {e}")
+                        for machine_translation_path in machine_translation_paths:
+                            try:
+                                if os.path.exists(machine_translation_path):
+                                    os.remove(machine_translation_path)
+                                    machine_translation_deleted_count += 1
+                                    print(f"Deleted Machine Translation cache: {machine_translation_path}")
+                            except Exception as e:
+                                machine_translation_failed_count += 1
+                                print(f"Failed to delete Machine Translation cache {machine_translation_path}: {e}")
 
                         print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                         ch_entry["status"] = "pending"
@@ -8492,6 +8654,8 @@ class RetranslationMixin:
                 success_parts.append(f"Deleted {deleted_count} files")
             if sidecar_deleted_count > 0:
                 success_parts.append(f"deleted {sidecar_deleted_count} SDLXLIFF sidecar(s)")
+            if machine_translation_deleted_count > 0:
+                success_parts.append(f"deleted {machine_translation_deleted_count} machine translation cache file(s)")
             if marked_count > 0:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
@@ -8502,6 +8666,8 @@ class RetranslationMixin:
                 success_parts.append(f"cleared {merged_cleared_count} merged child chapters")
             if sidecar_failed_count > 0:
                 success_parts.append(f"failed to delete {sidecar_failed_count} SDLXLIFF sidecar(s)")
+            if machine_translation_failed_count > 0:
+                success_parts.append(f"failed to delete {machine_translation_failed_count} machine translation cache file(s)")
             
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
