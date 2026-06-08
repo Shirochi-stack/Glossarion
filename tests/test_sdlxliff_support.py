@@ -1506,8 +1506,20 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "if show_loading:\n            self._show_review_loading_page()" not in render_body
     assert "if show_loading:\n            self.rows_stack.setCurrentWidget(page)" in render_body
     assert "self._finish_rows_rebuild(final=False)" in render_body
+    assert "self._refresh_review_stream_geometry(final=False)" in render_body
+    assert "self.rows_stack, self.scroll.viewport(), self.scroll" in render_body
     assert "widget.setUpdatesEnabled(False)" in render_body
     assert "widget.setUpdatesEnabled(True)" in render_body
+    assert "widget.update()" in render_body
+    assert "updates_enabled=False" in render_body
+    assert "batch_frames.append(frame)" in render_body
+    sync_body = source[
+        source.index("def _sync_review_scroll_range"):
+        source.index("def _save_current_review_scroll", source.index("def _sync_review_scroll_range"))
+    ]
+    assert "page.setMinimumHeight(content_height)" in sync_body
+    assert "page.setMaximumHeight(content_height)" in sync_body
+    assert "page.resize(max(1, page.width()), content_height)" in sync_body
     assert "QApplication.processEvents(QEventLoop.AllEvents, 10)" not in render_body
     assert "self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)" in source
     assert "self._update_review_row_source_previews(row, changed_rows, visible_only=True)" in source

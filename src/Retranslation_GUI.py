@@ -3806,6 +3806,9 @@ class SDLXLIFFReviewDialog(QDialog):
             page.updateGeometry()
             viewport_height = max(1, self.scroll.viewport().height())
             content_height = max(viewport_height, page.sizeHint().height(), page.minimumSizeHint().height())
+            page.setMinimumHeight(content_height)
+            page.setMaximumHeight(content_height)
+            page.resize(max(1, page.width()), content_height)
             self.rows_stack.setMinimumHeight(content_height)
             self.rows_stack.setMaximumHeight(content_height)
             self.rows_stack.updateGeometry()
@@ -5769,7 +5772,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return False
 
-    def _add_review_row(self, piece, row_data, idx, max_len, colors, row_model=None):
+    def _add_review_row(self, piece, row_data, idx, max_len, colors, row_model=None, updates_enabled=True):
         bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
         row_model = row_model if isinstance(row_model, dict) else {}
         source_text = row_model.get("source_text", row_data.get("source", ""))
@@ -5785,6 +5788,7 @@ class SDLXLIFFReviewDialog(QDialog):
         frame.setProperty("sdl_two_column_layout", two_column_layout)
         frame.setFixedHeight(row_height)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        frame.setUpdatesEnabled(bool(updates_enabled))
         row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
         frame.setProperty("sdl_base_style", row_style)
         frame.setStyleSheet(row_style)
@@ -5889,6 +5893,7 @@ class SDLXLIFFReviewDialog(QDialog):
             grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
             grid.addWidget(target_widget, 0, 5)
         self.rows_layout.addWidget(frame)
+        return frame
 
     def _render_piece(self, row, show_loading=True):
         if row < 0 or row >= len(self.pieces):
@@ -6069,29 +6074,52 @@ class SDLXLIFFReviewDialog(QDialog):
                 _finish_active_render_timer()
                 _discard_active_render_page()
                 return
-            visible_stream = self.rows_stack.currentWidget() is page
-            stream_widgets = (page, self.scroll.viewport()) if visible_stream else ()
             try:
-                for widget in stream_widgets:
-                    try:
-                        widget.setUpdatesEnabled(False)
-                    except Exception:
-                        pass
-                self.rows_widget = page
-                self.rows_layout = layout
-                start = row_state["idx"]
-                end = min(len(rows), start + batch_size)
-                for idx in range(start, end):
-                    row_model = row_models[idx] if idx < len(row_models) else None
-                    self._add_review_row(piece, rows[idx], idx, max_len, colors, row_model=row_model)
-                row_state["idx"] = end
-                for widget in stream_widgets:
-                    try:
-                        widget.setUpdatesEnabled(True)
-                    except Exception:
-                        pass
-                if visible_stream:
-                    self._finish_rows_rebuild(final=False)
+                visible_stream = self.rows_stack.currentWidget() is page
+                stream_widgets = tuple(
+                    widget for widget in (page, self.rows_stack, self.scroll.viewport(), self.scroll)
+                    if widget is not None
+                ) if visible_stream else ()
+                try:
+                    for widget in stream_widgets:
+                        try:
+                            widget.setUpdatesEnabled(False)
+                        except Exception:
+                            pass
+                    self.rows_widget = page
+                    self.rows_layout = layout
+                    start = row_state["idx"]
+                    end = min(len(rows), start + batch_size)
+                    batch_frames = []
+                    for idx in range(start, end):
+                        row_model = row_models[idx] if idx < len(row_models) else None
+                        frame = self._add_review_row(
+                            piece,
+                            rows[idx],
+                            idx,
+                            max_len,
+                            colors,
+                            row_model=row_model,
+                            updates_enabled=False,
+                        )
+                        if frame is not None:
+                            batch_frames.append(frame)
+                    row_state["idx"] = end
+                    if visible_stream:
+                        self._refresh_review_stream_geometry(final=False)
+                    for frame in batch_frames:
+                        try:
+                            frame.setUpdatesEnabled(True)
+                            frame.update()
+                        except Exception:
+                            pass
+                finally:
+                    for widget in stream_widgets:
+                        try:
+                            widget.setUpdatesEnabled(True)
+                            widget.update()
+                        except Exception:
+                            pass
 
                 if row_state["idx"] < len(rows):
                     render_timer.start(1)
@@ -6113,11 +6141,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 _finish_active_render_timer()
                 self._queue_review_page_preloads(row)
             except Exception as exc:
-                for widget in stream_widgets:
-                    try:
-                        widget.setUpdatesEnabled(True)
-                    except Exception:
-                        pass
                 _finish_active_render_timer()
                 if render_token == self._render_token:
                     self._clear_rows(layout)
