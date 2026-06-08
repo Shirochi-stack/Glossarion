@@ -1521,12 +1521,10 @@ def _setup_qt_environment() -> None:
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 
-def _create_profile(app: Any, *, user_agent: Optional[str] = None) -> Any:
+def _create_profile(app: Any, *, user_agent: Optional[str] = None) -> tuple[Any, Path]:
     from PySide6.QtWebEngineCore import QWebEngineProfile
 
-    profile_root = Path.home() / ".glossarion" / "gemini_free_browser"
-    if os.getenv("GEMINI_FREE_EPHEMERAL_PROFILE", "0").lower() in ("1", "true", "yes"):
-        profile_root = profile_root / uuid.uuid4().hex
+    profile_root = Path.home() / ".glossarion" / "gemini_free_browser" / uuid.uuid4().hex
     profile_root.mkdir(parents=True, exist_ok=True)
 
     profile = QWebEngineProfile(f"gemini-free-{uuid.uuid4().hex}", app)
@@ -1540,7 +1538,15 @@ def _create_profile(app: Any, *, user_agent: Optional[str] = None) -> Any:
         profile.setHttpAcceptLanguage(os.getenv("GEMINI_FREE_ACCEPT_LANGUAGE", "en-US,en;q=0.9"))
     except Exception:
         pass
-    return profile
+    return profile, profile_root
+
+
+def _cleanup_profile_root(profile_root: Any) -> None:
+    try:
+        from shutdown_utils import cleanup_generated_browser_profile_dir
+        cleanup_generated_browser_profile_dir(str(profile_root), "gemini_free_browser")
+    except Exception:
+        pass
 
 
 def _set_default_page_viewport(page: Any) -> None:
@@ -1577,7 +1583,7 @@ def run_qtwebengine_request(
     if app is None:
         app = QApplication(["gemini-free-request"])
 
-    profile = _create_profile(app, user_agent=user_agent)
+    profile, profile_root = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
     timeout_seconds = _timeout_seconds(timeout, 60)
@@ -1712,6 +1718,7 @@ def run_qtwebengine_request(
             cleanup_loop.exec()
         except Exception:
             pass
+        _cleanup_profile_root(profile_root)
 
 
 def load_rendered_page_text(
@@ -1733,7 +1740,7 @@ def load_rendered_page_text(
     if app is None:
         app = QApplication(["gemini-free-page"])
 
-    profile = _create_profile(app, user_agent=user_agent)
+    profile, profile_root = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
     timeout_seconds = _timeout_seconds(timeout)
@@ -1803,6 +1810,7 @@ def load_rendered_page_text(
             cleanup_loop.exec()
         except Exception:
             pass
+        _cleanup_profile_root(profile_root)
 
 
 def load_ai_mode_prompt_text(
@@ -1823,7 +1831,7 @@ def load_ai_mode_prompt_text(
     if app is None:
         app = QApplication(["gemini-free-ai-mode"])
 
-    profile = _create_profile(app, user_agent=user_agent)
+    profile, profile_root = _create_profile(app, user_agent=user_agent)
     page = QWebEnginePage(profile, app)
     _set_default_page_viewport(page)
     base_url = _build_search_base_url()
@@ -2028,6 +2036,7 @@ def load_ai_mode_prompt_text(
             cleanup_loop.exec()
         except Exception:
             pass
+        _cleanup_profile_root(profile_root)
 
 
 def _send_chat_completion_qt_once(

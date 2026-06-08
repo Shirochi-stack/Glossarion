@@ -21,7 +21,7 @@ from typing import Callable, Iterable, Optional
 _last_qt_shutdown_drain_at = 0.0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
 _WINDOWS_SW_HIDE = 0
-_BROWSER_STATE_CLEANUP_DIRS = (
+_BROWSER_STATE_PROFILE_PARENT_DIRS = (
     "authnd_browser",
     "gemini_free_browser",
     "qtwebengine_requests",
@@ -199,19 +199,41 @@ def _path_is_under_root(path: str, root: str) -> bool:
         return False
 
 
-def _browser_cleanup_target(root: str, dirname: str) -> Optional[str]:
-    if dirname not in _BROWSER_STATE_CLEANUP_DIRS:
+def _browser_profile_parent(root: str, dirname: str) -> Optional[str]:
+    if dirname not in _BROWSER_STATE_PROFILE_PARENT_DIRS:
         return None
     try:
         root_abs = os.path.abspath(root)
-        target = os.path.abspath(os.path.join(root_abs, dirname))
-        if os.path.basename(target) != dirname:
+        parent = os.path.abspath(os.path.join(root_abs, dirname))
+        if os.path.basename(parent) != dirname:
             return None
-        if not _path_is_under_root(target, root_abs):
+        if not _path_is_under_root(parent, root_abs):
             return None
-        return target
+        return parent
     except Exception:
         return None
+
+
+def _validated_browser_profile_target(profile_dir: str, expected_parent_name: str) -> tuple[Optional[str], Optional[str]]:
+    if expected_parent_name not in _BROWSER_STATE_PROFILE_PARENT_DIRS:
+        return None, None
+    try:
+        target = os.path.abspath(os.path.expanduser(str(profile_dir or "")))
+        parent = os.path.abspath(os.path.dirname(target))
+        root = os.path.abspath(os.path.dirname(parent))
+        if os.path.basename(parent) != expected_parent_name:
+            return None, None
+        if os.path.basename(target) in ("", ".", "..", expected_parent_name):
+            return None, None
+        if os.path.dirname(target) != parent:
+            return None, None
+        if not _path_is_under_root(target, parent):
+            return None, None
+        if os.path.normcase(target) == os.path.normcase(parent):
+            return None, None
+        return root, target
+    except Exception:
+        return None, None
 
 
 def _rmtree_onerror(func, path, exc_info) -> None:
@@ -312,6 +334,44 @@ def _remove_or_handoff_browser_state(root: str, target: str, stats: dict) -> Non
         pass
 
 
+def cleanup_generated_browser_profile_dir(profile_dir: str, expected_parent_name: str) -> dict:
+    """Remove one generated browser profile child directory, never its parent."""
+    stats = {
+        "removed": 0,
+        "moved": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    root, target = _validated_browser_profile_target(profile_dir, expected_parent_name)
+    if not root or not target:
+        stats["skipped"] = 1
+        return stats
+    if not os.path.lexists(target):
+        return stats
+    if not os.path.isdir(target) or os.path.islink(target):
+        stats["skipped"] = 1
+        return stats
+    _remove_or_handoff_browser_state(root, target, stats)
+    return stats
+
+
+def _cleanup_browser_profile_children(parent_dir: str, expected_parent_name: str, stats: dict) -> None:
+    try:
+        entries = os.listdir(parent_dir)
+    except FileNotFoundError:
+        return
+    except Exception:
+        stats["failed"] += 1
+        return
+
+    for entry in entries:
+        child = os.path.abspath(os.path.join(parent_dir, entry))
+        child_stats = cleanup_generated_browser_profile_dir(child, expected_parent_name)
+        stats["removed"] += child_stats.get("removed", 0)
+        stats["moved"] += child_stats.get("moved", 0)
+        stats["failed"] += child_stats.get("failed", 0)
+
+
 def cleanup_browser_generated_state_for_shutdown() -> dict:
     """Remove generated Qt/Chromium browser state without touching user config."""
     stats = {
@@ -329,11 +389,11 @@ def cleanup_browser_generated_state_for_shutdown() -> dict:
     stats["roots"] = len(roots)
     for root in roots:
         _sweep_browser_cleanup_handoff(root, stats)
-        for dirname in _BROWSER_STATE_CLEANUP_DIRS:
-            target = _browser_cleanup_target(root, dirname)
-            if not target:
+        for dirname in _BROWSER_STATE_PROFILE_PARENT_DIRS:
+            parent = _browser_profile_parent(root, dirname)
+            if not parent or not os.path.isdir(parent):
                 continue
-            _remove_or_handoff_browser_state(root, target, stats)
+            _cleanup_browser_profile_children(parent, dirname, stats)
 
     if stats["removed"] or stats["moved"] or stats["failed"]:
         try:

@@ -1062,6 +1062,11 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
             cleanup_loop.exec()
         except Exception:
             pass
+        try:
+            from shutdown_utils import cleanup_generated_browser_profile_dir
+            cleanup_generated_browser_profile_dir(profile_root, "authnd_browser")
+        except Exception:
+            pass
 
 
 def get_captcha_token(page_url: str, timeout: int = 90) -> str:

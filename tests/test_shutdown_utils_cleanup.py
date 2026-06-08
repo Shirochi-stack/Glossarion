@@ -1,7 +1,10 @@
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
+import gemini_free
 import shutdown_utils
 
 
@@ -25,21 +28,25 @@ def _touch(path: Path, text: str = "x") -> Path:
     return path
 
 
-def _make_generated_dir(root: Path, name: str) -> Path:
-    generated = root / name
-    _touch(generated / "Local Storage" / "leveldb" / "000003.log")
-    _touch(generated / "cache" / "Cache" / "data_0")
-    return generated
+def _make_profile_dir(root: Path, parent_name: str, child_name: str = "profile-1") -> Path:
+    profile = root / parent_name / child_name
+    _touch(profile / "Local Storage" / "leveldb" / "000003.log")
+    _touch(profile / "cache" / "Cache" / "data_0")
+    return profile
 
 
-def test_browser_state_cleanup_removes_only_generated_dirs(monkeypatch, tmp_path):
+def test_browser_state_cleanup_removes_only_child_profiles(monkeypatch, tmp_path):
     home = _isolated_state_env(monkeypatch, tmp_path)
     root = home / ".glossarion"
     root.mkdir()
 
-    generated_names = ("authnd_browser", "gemini_free_browser", "qtwebengine_requests")
-    for name in generated_names:
-        _make_generated_dir(root, name)
+    generated_profiles = [
+        _make_profile_dir(root, "authnd_browser", "authnd-1"),
+        _make_profile_dir(root, "gemini_free_browser", "gemini-1"),
+        _make_profile_dir(root, "qtwebengine_requests", "request-1"),
+    ]
+    _touch(root / "authnd_browser" / "root-level-file")
+    _touch(root / "gemini_free_browser" / "legacy-root-level-file")
 
     preserve_dirs = ("cache", "authza_browser", "authza_browser_2")
     for name in preserve_dirs:
@@ -56,10 +63,15 @@ def test_browser_state_cleanup_removes_only_generated_dirs(monkeypatch, tmp_path
 
     stats = shutdown_utils.cleanup_browser_generated_state_for_shutdown()
 
-    assert stats["removed"] == len(generated_names)
+    assert stats["removed"] == len(generated_profiles)
     assert stats["failed"] == 0
-    for name in generated_names:
-        assert not (root / name).exists()
+    for profile in generated_profiles:
+        assert not profile.exists()
+    assert (root / "authnd_browser").is_dir()
+    assert (root / "authnd_browser" / "root-level-file").is_file()
+    assert (root / "gemini_free_browser").is_dir()
+    assert (root / "gemini_free_browser" / "legacy-root-level-file").is_file()
+    assert (root / "qtwebengine_requests").is_dir()
     for name in preserve_dirs:
         assert (root / name / "kept.txt").is_file()
     for name in preserve_files:
@@ -78,7 +90,7 @@ def test_browser_state_cleanup_finds_app_data_roots(monkeypatch, tmp_path):
         home / ".config" / "Glossarion",
     ]
     for root in roots:
-        _make_generated_dir(root, "qtwebengine_requests")
+        _make_profile_dir(root, "qtwebengine_requests", "request-1")
         _touch(root / "cache" / "kept.txt")
 
     stats = shutdown_utils.cleanup_browser_generated_state_for_shutdown()
@@ -86,7 +98,8 @@ def test_browser_state_cleanup_finds_app_data_roots(monkeypatch, tmp_path):
     assert stats["removed"] == len(roots)
     assert stats["failed"] == 0
     for root in roots:
-        assert not (root / "qtwebengine_requests").exists()
+        assert (root / "qtwebengine_requests").is_dir()
+        assert not (root / "qtwebengine_requests" / "request-1").exists()
         assert (root / "cache" / "kept.txt").is_file()
 
 
@@ -94,14 +107,14 @@ def test_browser_state_cleanup_finds_app_data_roots(monkeypatch, tmp_path):
 def test_browser_state_cleanup_skips_helper_processes(monkeypatch, tmp_path, helper_env):
     home = _isolated_state_env(monkeypatch, tmp_path)
     root = home / ".glossarion"
-    _make_generated_dir(root, "authnd_browser")
+    profile = _make_profile_dir(root, "authnd_browser")
     monkeypatch.setenv(helper_env, "1")
 
     stats = shutdown_utils.cleanup_browser_generated_state_for_shutdown()
 
     assert stats["skipped"] == 1
     assert stats["removed"] == 0
-    assert (root / "authnd_browser").is_dir()
+    assert profile.is_dir()
 
 
 def test_browser_state_cleanup_sweeps_stale_handoff(monkeypatch, tmp_path):
@@ -121,7 +134,7 @@ def test_browser_state_cleanup_sweeps_stale_handoff(monkeypatch, tmp_path):
 def test_browser_state_cleanup_moves_then_retries_locked_target(monkeypatch, tmp_path):
     home = _isolated_state_env(monkeypatch, tmp_path)
     root = home / ".glossarion"
-    target = _make_generated_dir(root, "authnd_browser")
+    target = _make_profile_dir(root, "authnd_browser", "authnd-locked")
     original_remove = shutdown_utils._remove_path_once
 
     def remove_with_initial_lock(path):
@@ -137,4 +150,78 @@ def test_browser_state_cleanup_moves_then_retries_locked_target(monkeypatch, tmp
     assert stats["moved"] == 1
     assert stats["failed"] == 0
     assert not target.exists()
+    assert (root / "authnd_browser").is_dir()
     assert not any((root / ".startup_cleanup_deleting").glob("*"))
+
+
+def test_cleanup_generated_browser_profile_dir_refuses_parent_and_wrong_parent(monkeypatch, tmp_path):
+    home = _isolated_state_env(monkeypatch, tmp_path)
+    root = home / ".glossarion"
+    valid_profile = _make_profile_dir(root, "authnd_browser", "keep-me")
+    parent = root / "authnd_browser"
+    wrong_parent_profile = _make_profile_dir(root, "authza_browser", "do-not-touch")
+
+    parent_stats = shutdown_utils.cleanup_generated_browser_profile_dir(parent, "authnd_browser")
+    wrong_stats = shutdown_utils.cleanup_generated_browser_profile_dir(wrong_parent_profile, "authnd_browser")
+    valid_stats = shutdown_utils.cleanup_generated_browser_profile_dir(valid_profile, "authnd_browser")
+
+    assert parent_stats["skipped"] == 1
+    assert wrong_stats["skipped"] == 1
+    assert valid_stats["removed"] == 1
+    assert parent.is_dir()
+    assert not valid_profile.exists()
+    assert wrong_parent_profile.is_dir()
+
+
+def test_cleanup_generated_browser_profile_dir_preserves_siblings(monkeypatch, tmp_path):
+    home = _isolated_state_env(monkeypatch, tmp_path)
+    root = home / ".glossarion"
+    target = _make_profile_dir(root, "gemini_free_browser", "remove-me")
+    sibling = _make_profile_dir(root, "gemini_free_browser", "keep-me")
+
+    stats = shutdown_utils.cleanup_generated_browser_profile_dir(target, "gemini_free_browser")
+
+    assert stats["removed"] == 1
+    assert not target.exists()
+    assert sibling.is_dir()
+    assert (root / "gemini_free_browser").is_dir()
+
+
+def test_gemini_free_profile_uses_per_request_child_root(monkeypatch, tmp_path):
+    home = _isolated_state_env(monkeypatch, tmp_path)
+
+    class FakeProfile:
+        def __init__(self, name, app):
+            self.name = name
+            self.app = app
+            self.storage_path = ""
+            self.cache_path = ""
+            self.user_agent = ""
+            self.accept_language = ""
+
+        def setHttpUserAgent(self, value):
+            self.user_agent = value
+
+        def setPersistentStoragePath(self, value):
+            self.storage_path = value
+
+        def setCachePath(self, value):
+            self.cache_path = value
+
+        def setHttpAcceptLanguage(self, value):
+            self.accept_language = value
+
+    pyside_module = types.ModuleType("PySide6")
+    webengine_module = types.ModuleType("PySide6.QtWebEngineCore")
+    webengine_module.QWebEngineProfile = FakeProfile
+    monkeypatch.setitem(sys.modules, "PySide6", pyside_module)
+    monkeypatch.setitem(sys.modules, "PySide6.QtWebEngineCore", webengine_module)
+    monkeypatch.setattr(gemini_free.Path, "home", classmethod(lambda cls: home))
+
+    profile, profile_root = gemini_free._create_profile(object())
+
+    assert profile_root.parent == home / ".glossarion" / "gemini_free_browser"
+    assert profile_root.name
+    assert profile_root.is_dir()
+    assert profile.storage_path == str(profile_root)
+    assert profile.cache_path == str(profile_root / "cache")
