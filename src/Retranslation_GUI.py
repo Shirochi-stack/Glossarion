@@ -6037,13 +6037,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._queue_review_page_preloads(row)
                 return
 
-        if show_loading:
-            self._show_review_loading_page()
-
         render_timer = QTimer(self)
         render_timer.setSingleShot(True)
         row_state = {"idx": 0}
         batch_size = 24
+
+        if show_loading:
+            self.rows_stack.setCurrentWidget(page)
+            self._finish_seamless_review_swap(page)
+            self._finish_rows_rebuild(final=False)
 
         def _finish_active_render_timer():
             if self._active_render_timer is render_timer:
@@ -6076,7 +6078,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     row_model = row_models[idx] if idx < len(row_models) else None
                     self._add_review_row(piece, rows[idx], idx, max_len, colors, row_model=row_model)
                 row_state["idx"] = end
-                self._spin_review_loading_icon()
+                if self.rows_stack.currentWidget() is page:
+                    self._finish_rows_rebuild(final=False)
 
                 if row_state["idx"] < len(rows):
                     render_timer.start(1)
