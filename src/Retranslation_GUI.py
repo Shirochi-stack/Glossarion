@@ -307,12 +307,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         self._review_data_preload_finished.connect(self._apply_review_data_preload)
-        try:
-            self._last_review_signature = self._current_review_signature()
-            self._last_machine_translation_signature = self._current_machine_translation_signature()
-        except Exception:
-            pass
-
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
@@ -491,7 +485,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not self._review_data_loaded and not self._initial_review_load_started:
             self._initial_review_load_started = True
             self._show_review_loading_page()
-            self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=25)
+            self._queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)
             return
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
@@ -754,8 +748,15 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             signature = ()
 
-        invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
+        if not force and previous_signature is None:
+            self._last_autogen_signature = signature
+            if not missing_outputs:
+                return False
+            previous_signature = signature
+            invalid_outputs = []
+        else:
+            invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
         invalid_regen_key = None
         if invalid_outputs:
             invalid_regen_key = self._invalid_review_sidecar_regen_key(invalid_outputs, signature)
@@ -1401,26 +1402,15 @@ class SDLXLIFFReviewDialog(QDialog):
         self.raise_()
         self.activateWindow()
         self._start_review_auto_refresh()
-        try:
-            signature = self._current_review_signature()
-        except Exception:
-            signature = None
-        try:
-            autogen_signature = self._current_review_autogen_signature()
-        except Exception:
-            autogen_signature = None
         if (
             output_changed
             or not self._review_data_loaded
             or not self.pieces
-            or (signature is not None and signature != self._last_review_signature)
-            or (autogen_signature is not None and autogen_signature != self._last_autogen_signature)
         ):
             self._initial_review_load_started = True
             self._queue_review_refresh(
-                force=True,
+                force=False,
                 current_path=self.current_path,
-                signature=signature,
                 delay_ms=25,
             )
             return
@@ -1552,6 +1542,17 @@ class SDLXLIFFReviewDialog(QDialog):
             return []
         return sorted(paths, key=lambda path: os.path.basename(path).lower())
 
+    @staticmethod
+    def _output_dir_has_sdlxliff_sidecars(output_dir):
+        sidecar_dir = os.path.join(output_dir or "", "SDLXLIFF")
+        try:
+            if not os.path.isdir(sidecar_dir):
+                return False
+            with os.scandir(sidecar_dir) as entries:
+                return any(entry.is_file() and entry.name.lower().endswith(".sdlxliff") for entry in entries)
+        except Exception:
+            return False
+
     def _discover_review_books(self, parent):
         entries = []
         entries_by_dir = {}
@@ -1562,8 +1563,7 @@ class SDLXLIFFReviewDialog(QDialog):
         def _add_entry(output_dir, epub_path=None, current_path=None):
             if not output_dir:
                 return
-            sidecars = self._sdlxliff_sidecar_paths_for_output_dir(output_dir)
-            if not sidecars:
+            if not self._output_dir_has_sdlxliff_sidecars(output_dir):
                 return
             try:
                 abs_dir = os.path.abspath(output_dir)
@@ -1737,7 +1737,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list.clear()
         self.header_label.setText("Loading SDLXLIFF review...")
         self._start_review_auto_refresh()
-        self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=25)
+        self._queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)
 
     def _apply_translator_theme(self, parent):
         base_style = ""
@@ -2670,7 +2670,7 @@ class SDLXLIFFReviewDialog(QDialog):
             output_map[normalized] = copied
         return output_map
 
-    def _find_opf_path(self):
+    def _find_opf_path(self, allow_deep_search=True):
         output_dir = self.output_dir or ""
         if not output_dir or not os.path.isdir(output_dir):
             return None
@@ -2682,6 +2682,8 @@ class SDLXLIFFReviewDialog(QDialog):
         for path in direct_candidates:
             if os.path.isfile(path):
                 return path
+        if not allow_deep_search:
+            return None
         try:
             for root_dir, _dirs, files in os.walk(output_dir):
                 for fname in files:
@@ -2691,8 +2693,8 @@ class SDLXLIFFReviewDialog(QDialog):
             return None
         return None
 
-    def _read_spine_positions(self):
-        opf_path = self._find_opf_path()
+    def _read_spine_positions(self, allow_deep_search=True):
+        opf_path = self._find_opf_path(allow_deep_search=allow_deep_search)
         if not opf_path:
             return {}
         try:
@@ -2752,8 +2754,16 @@ class SDLXLIFFReviewDialog(QDialog):
             or self._original_name_from_output(output_name)
         )
 
-        opf_position = None
+        opf_position = progress_entry.get("opf_position")
+        if opf_position is None:
+            opf_position = progress_entry.get("position")
+        try:
+            opf_position = int(opf_position) if opf_position is not None else None
+        except Exception:
+            opf_position = None
         for candidate in (original_name, output_name, self._original_name_from_output(output_name)):
+            if opf_position is not None:
+                break
             normalized_keys = [
                 self._canonical_review_path(candidate),
                 self._canonical_basename(candidate),
@@ -3010,7 +3020,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 paths.insert(0, self.current_path)
 
         progress_map = self._read_progress_metadata()
-        spine_positions = self._read_spine_positions()
+        spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)
         work_items = []
         for fallback_index, path in enumerate(paths):
             metadata = self._sidecar_metadata(path, fallback_index, progress_map, spine_positions)

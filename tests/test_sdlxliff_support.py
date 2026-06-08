@@ -1364,6 +1364,9 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert 'self.flag_accuracy_btn.setText(f"{frames[self._flag_accuracy_button_frame]} Flagging")' in source
     assert 'QShortcut(QKeySequence("F5"), self)' in source
     assert "self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)" in source
+    constructor_body = source[source.index("def __init__"):source.index("self.setWindowTitle", source.index("def __init__"))]
+    assert "self._last_review_signature = self._current_review_signature()" not in constructor_body
+    assert "self._last_machine_translation_signature = self._current_machine_translation_signature()" not in constructor_body
     manual_refresh_body = source[
         source.index("def _manual_review_refresh"):
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
@@ -1426,6 +1429,9 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "self.piece_list.setMinimumWidth(242)" in source
     assert "self.piece_list.setMaximumWidth(286)" in source
     assert "self.piece_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
+    assert "def _output_dir_has_sdlxliff_sidecars" in source
+    assert "_queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)" in source
+    assert "spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)" in source
     assert "REVIEW_PRELOAD_RADIUS = 2" in source
     assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
     assert "REVIEW_PRELOAD_IDLE_MS = 350" in source
