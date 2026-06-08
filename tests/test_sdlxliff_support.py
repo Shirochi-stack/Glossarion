@@ -406,6 +406,8 @@ def test_translation_chunk_prompt_parts_keep_chunk_html_in_user_message():
 
     cfg = SimpleNamespace(
         ENABLE_TRANSLATION_CHUNK_PROMPT=False,
+        INCLUDE_PREVIOUS_CHUNK=False,
+        PREVIOUS_CHUNK_CONTEXT_LIMIT=3,
         TRANSLATION_CHUNK_PROMPT_ROLE="assistant",
         TRANSLATION_CHUNK_PROMPT="Part {chunk_idx}/{total_chunks} {chunk_html}",
     )
@@ -458,6 +460,76 @@ def test_translation_chunk_prompt_parts_keep_chunk_html_in_user_message():
     assert user_prompt == "Part 2/5\n<p>Chunk HTML</p>"
 
 
+def test_translation_chunk_prompt_can_include_previous_chunk_memory():
+    from TransateKRtoEN import _build_translation_chunk_prompt_parts
+
+    cfg = SimpleNamespace(
+        ENABLE_TRANSLATION_CHUNK_PROMPT=False,
+        INCLUDE_PREVIOUS_CHUNK=True,
+        PREVIOUS_CHUNK_CONTEXT_LIMIT=3,
+        TRANSLATION_CHUNK_PROMPT_ROLE="assistant",
+        TRANSLATION_CHUNK_PROMPT="Part {chunk_idx}/{total_chunks}",
+    )
+    previous = "<p>One</p><p>Two</p><p>Three</p><p>Four</p>"
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Current</p>",
+        2,
+        5,
+        cfg,
+        previous_chunk_html=previous,
+    )
+    assert system == "system base"
+    assert user_prompt == "<p>Current</p>"
+    assert len(prompt_msgs) == 1
+    assert prompt_msgs[0]["role"] == "assistant"
+    assert "[MEMORY - PREVIOUS CHUNK CONTEXT]" in prompt_msgs[0]["content"]
+    assert "<p>One</p>" not in prompt_msgs[0]["content"]
+    assert "<p>Two</p>" in prompt_msgs[0]["content"]
+    assert "<p>Three</p>" in prompt_msgs[0]["content"]
+    assert "<p>Four</p>" in prompt_msgs[0]["content"]
+
+    cfg.TRANSLATION_CHUNK_PROMPT_ROLE = "user"
+    cfg.ENABLE_TRANSLATION_CHUNK_PROMPT = True
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Current</p>",
+        2,
+        5,
+        cfg,
+        previous_chunk_html=previous,
+    )
+    assert system == "system base"
+    assert prompt_msgs == []
+    assert user_prompt.startswith("[MEMORY - PREVIOUS CHUNK CONTEXT]")
+    assert "[END MEMORY - PREVIOUS CHUNK CONTEXT]\nPart 2/5\n<p>Current</p>" in user_prompt
+
+    cfg.PREVIOUS_CHUNK_CONTEXT_LIMIT = -1
+    cfg.ENABLE_TRANSLATION_CHUNK_PROMPT = False
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Current</p>",
+        2,
+        5,
+        cfg,
+        previous_chunk_html=previous,
+    )
+    assert previous in user_prompt
+
+    cfg.PREVIOUS_CHUNK_CONTEXT_LIMIT = 2
+    plain_previous = "line one\nline two\nline three"
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Current</p>",
+        2,
+        5,
+        cfg,
+        previous_chunk_html=plain_previous,
+    )
+    assert "line one" not in user_prompt
+    assert "line two\nline three" in user_prompt
+
+
 def test_translation_chunk_prompt_ui_and_paths_use_new_toggle_contract():
     transate_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
     settings_source = (SRC / "other_settings.py").read_text(encoding="utf-8")
@@ -469,6 +541,9 @@ def test_translation_chunk_prompt_ui_and_paths_use_new_toggle_contract():
     assert transate_source.count("_build_translation_chunk_prompt_parts(") >= 3
     assert "chunk_prompt_template =" not in transate_source
     assert "Enable chunk prompt" in dialog_source
+    assert "Include previous chunk" in dialog_source
+    assert "previous_chunk_context_limit" in dialog_source
+    assert "PREVIOUS_CHUNK_CONTEXT_LIMIT" in transate_source
     assert "translation_chunk_prompt_role" in dialog_source
     assert '"{chunk_html}"' not in dialog_source
 

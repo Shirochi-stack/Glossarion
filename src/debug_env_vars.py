@@ -337,6 +337,8 @@ def print_env_var_status():
     # Prompts and safety
     prompt_vars = {
         'ENABLE_TRANSLATION_CHUNK_PROMPT': 'Enable translation chunk prompt',
+        'INCLUDE_PREVIOUS_CHUNK': 'Include previous chunk context',
+        'PREVIOUS_CHUNK_CONTEXT_LIMIT': 'Previous chunk context tag/line limit',
         'TRANSLATION_CHUNK_PROMPT_ROLE': 'Translation chunk prompt role',
         'TRANSLATION_CHUNK_PROMPT': 'Translation chunk prompt',
         'IMAGE_CHUNK_PROMPT': 'Image chunk prompt',

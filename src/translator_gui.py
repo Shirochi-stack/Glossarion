@@ -3904,6 +3904,11 @@ Recent translations to summarize:
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.enable_translation_chunk_prompt_var = bool(self.config.get('enable_translation_chunk_prompt', False))
+        self.include_previous_chunk_var = bool(self.config.get('include_previous_chunk', False))
+        try:
+            self.previous_chunk_context_limit_var = max(-1, int(self.config.get('previous_chunk_context_limit', 3)))
+        except Exception:
+            self.previous_chunk_context_limit_var = 3
         self.translation_chunk_prompt_role_var = str(self.config.get('translation_chunk_prompt_role', 'assistant') or 'assistant').strip().lower()
         if self.translation_chunk_prompt_role_var not in {'system', 'assistant', 'user'}:
             self.translation_chunk_prompt_role_var = 'assistant'
@@ -17966,6 +17971,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'ENABLE_TRANSLATION_CHUNK_PROMPT': '1' if getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False)) else '0',
+            'INCLUDE_PREVIOUS_CHUNK': '1' if getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False)) else '0',
+            'PREVIOUS_CHUNK_CONTEXT_LIMIT': str(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3))),
             'TRANSLATION_CHUNK_PROMPT_ROLE': str(getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant')) or 'assistant').strip().lower(),
             'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', self.config.get('translation_chunk_prompt', ''))),
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
@@ -27080,6 +27087,8 @@ Important rules:
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('allow_ai_markdown_headers', ['allow_ai_markdown_headers_var'], False, bool),
                 ('enable_translation_chunk_prompt', ['enable_translation_chunk_prompt_checkbox', 'enable_translation_chunk_prompt_var'], False, bool),
+                ('include_previous_chunk', ['include_previous_chunk_checkbox', 'include_previous_chunk_var'], False, bool),
+                ('previous_chunk_context_limit', ['previous_chunk_context_limit_spin', 'previous_chunk_context_limit_var'], 3, lambda v: max(-1, safe_int(v, 3))),
                 ('translation_chunk_prompt_role', ['translation_chunk_prompt_role_var'], 'assistant', str),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
@@ -27575,6 +27584,8 @@ Important rules:
             self.config.setdefault('disable_empty_safety_heuristic', False)
             self.config.setdefault('missing_finish_as_prohibited', self.config.get('unknown_finish_as_prohibited', False))
             self.config.setdefault('enable_translation_chunk_prompt', False)
+            self.config.setdefault('include_previous_chunk', False)
+            self.config.setdefault('previous_chunk_context_limit', 3)
             self.config.setdefault('translation_chunk_prompt_role', 'assistant')
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
@@ -28505,6 +28516,8 @@ Important rules:
 
                 # Prompts
                 ('ENABLE_TRANSLATION_CHUNK_PROMPT', '1' if getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False)) else '0'),
+                ('INCLUDE_PREVIOUS_CHUNK', '1' if getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False)) else '0'),
+                ('PREVIOUS_CHUNK_CONTEXT_LIMIT', str(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3)))),
                 ('TRANSLATION_CHUNK_PROMPT_ROLE', str(getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant')) or 'assistant').strip().lower()),
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),

@@ -5872,6 +5872,7 @@ def configure_translation_chunk_prompt(self):
         QMessageBox,
         QPushButton,
         QRadioButton,
+        QSpinBox,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -5988,6 +5989,32 @@ def configure_translation_chunk_prompt(self):
     self.enable_translation_chunk_prompt_checkbox = enable_cb
     options_v.addWidget(enable_cb)
 
+    previous_row = QWidget()
+    previous_h = QHBoxLayout(previous_row)
+    previous_h.setContentsMargins(0, 0, 0, 0)
+    previous_h.setSpacing(8)
+
+    include_previous_cb = self._create_styled_checkbox("Include previous chunk")
+    include_previous_cb.setChecked(bool(getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False))))
+    self.include_previous_chunk_checkbox = include_previous_cb
+    previous_h.addWidget(include_previous_cb)
+    previous_h.addSpacing(8)
+    previous_h.addWidget(QLabel("Tags/lines:"))
+
+    previous_limit_spin = QSpinBox()
+    previous_limit_spin.setRange(-1, 1000)
+    previous_limit_spin.setToolTip("Use -1 to include the entire previous chunk.")
+    previous_limit_spin.setFixedWidth(88)
+    try:
+        previous_limit = int(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3)))
+    except Exception:
+        previous_limit = 3
+    previous_limit_spin.setValue(max(-1, previous_limit))
+    self.previous_chunk_context_limit_spin = previous_limit_spin
+    previous_h.addWidget(previous_limit_spin)
+    previous_h.addStretch()
+    options_v.addWidget(previous_row)
+
     role_row = QWidget()
     role_h = QHBoxLayout(role_row)
     role_h.setContentsMargins(0, 0, 0, 0)
@@ -6064,6 +6091,9 @@ def configure_translation_chunk_prompt(self):
             example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '')
             if not enable_cb.isChecked():
                 example = "[Chunk prompt disabled]"
+            if include_previous_cb.isChecked():
+                previous_note = f"[Previous chunk memory included: {previous_limit_spin.value()} tag(s)/line(s)]"
+                example = f"{previous_note}\n{example}" if example else previous_note
             display_text = example[:200] + "..." if len(example) > 200 else example
             example_label.setText(display_text)
         except Exception:
@@ -6071,6 +6101,8 @@ def configure_translation_chunk_prompt(self):
     
     chunk_prompt_text.textChanged.connect(update_example)
     enable_cb.toggled.connect(lambda _checked: update_example())
+    include_previous_cb.toggled.connect(lambda _checked: update_example())
+    previous_limit_spin.valueChanged.connect(lambda _value: update_example())
     update_example()
     
     main_layout.addWidget(example_box)
@@ -6081,12 +6113,18 @@ def configure_translation_chunk_prompt(self):
     def save_chunk_prompt():
         self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
         self.enable_translation_chunk_prompt_var = bool(enable_cb.isChecked())
+        self.include_previous_chunk_var = bool(include_previous_cb.isChecked())
+        self.previous_chunk_context_limit_var = int(previous_limit_spin.value())
         selected_role = next((role for role, rb in role_buttons.items() if rb.isChecked()), 'assistant')
         self.translation_chunk_prompt_role_var = selected_role
         self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
         self.config['enable_translation_chunk_prompt'] = self.enable_translation_chunk_prompt_var
+        self.config['include_previous_chunk'] = self.include_previous_chunk_var
+        self.config['previous_chunk_context_limit'] = self.previous_chunk_context_limit_var
         self.config['translation_chunk_prompt_role'] = self.translation_chunk_prompt_role_var
         os.environ['ENABLE_TRANSLATION_CHUNK_PROMPT'] = '1' if self.enable_translation_chunk_prompt_var else '0'
+        os.environ['INCLUDE_PREVIOUS_CHUNK'] = '1' if self.include_previous_chunk_var else '0'
+        os.environ['PREVIOUS_CHUNK_CONTEXT_LIMIT'] = str(self.previous_chunk_context_limit_var)
         os.environ['TRANSLATION_CHUNK_PROMPT_ROLE'] = self.translation_chunk_prompt_role_var
         os.environ['TRANSLATION_CHUNK_PROMPT'] = self.translation_chunk_prompt
         try:
@@ -6102,6 +6140,8 @@ def configure_translation_chunk_prompt(self):
         if result == QMessageBox.Yes:
             chunk_prompt_text.setPlainText(self.default_translation_chunk_prompt)
             enable_cb.setChecked(False)
+            include_previous_cb.setChecked(False)
+            previous_limit_spin.setValue(3)
             role_buttons['assistant'].setChecked(True)
             self.translation_chunk_prompt_role_var = 'assistant'
             update_example()

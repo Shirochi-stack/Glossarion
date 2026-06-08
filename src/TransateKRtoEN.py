@@ -913,6 +913,13 @@ class TranslationConfig:
         self.TRANSLATION_CHUNK_PROMPT_ROLE = _normalize_translation_chunk_prompt_role(
             os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
         )
+        self.INCLUDE_PREVIOUS_CHUNK = os.getenv("INCLUDE_PREVIOUS_CHUNK", "0").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            self.PREVIOUS_CHUNK_CONTEXT_LIMIT = int(os.getenv("PREVIOUS_CHUNK_CONTEXT_LIMIT", "3"))
+        except Exception:
+            self.PREVIOUS_CHUNK_CONTEXT_LIMIT = 3
+        if self.PREVIOUS_CHUNK_CONTEXT_LIMIT < -1:
+            self.PREVIOUS_CHUNK_CONTEXT_LIMIT = -1
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
         # Read merge count early so we can use it for placeholder handling
@@ -1144,6 +1151,12 @@ class TranslationConfig:
 
 DEFAULT_TRANSLATION_CHUNK_PROMPT = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
 _TRANSLATION_CHUNK_PROMPT_ROLES = {"system", "assistant", "user"}
+_PREVIOUS_CHUNK_MEMORY_HEADER = (
+    "[MEMORY - PREVIOUS CHUNK CONTEXT]\n"
+    "The following source HTML is context from the immediately previous chunk only. "
+    "Do NOT translate, repeat, or include it in your response.\n\n"
+)
+_PREVIOUS_CHUNK_MEMORY_FOOTER = "\n\n[END MEMORY - PREVIOUS CHUNK CONTEXT]"
 
 
 def _normalize_translation_chunk_prompt_role(role):
@@ -1162,12 +1175,75 @@ def _format_translation_chunk_prompt(template, chunk_idx, total_chunks):
     )
 
 
+def _translation_chunk_prompt_bool(config, attr_name, env_name, default=False):
+    if config is not None:
+        return bool(getattr(config, attr_name, default))
+    raw = os.getenv(env_name, "1" if default else "0")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _translation_chunk_prompt_int(config, attr_name, env_name, default=3):
+    raw = getattr(config, attr_name, default) if config is not None else os.getenv(env_name, str(default))
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(-1, value)
+
+
+def _extract_previous_chunk_context(previous_chunk_html, limit):
+    raw = str(previous_chunk_html or "").strip()
+    if not raw:
+        return ""
+    if limit == -1:
+        return raw
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 3
+    if limit <= 0:
+        return ""
+
+    try:
+        soup = BeautifulSoup(raw, "html.parser")
+        root = soup.body or soup
+        tags = [
+            child
+            for child in getattr(root, "children", [])
+            if getattr(child, "name", None)
+        ]
+        if len(tags) <= 1:
+            nested_tags = [
+                tag
+                for tag in root.find_all(True)
+                if getattr(tag, "name", None) not in {"html", "body", "div", "section", "article", "main"}
+            ]
+            if nested_tags:
+                tags = nested_tags
+        tag_blocks = [str(tag).strip() for tag in tags if str(tag).strip()]
+        if tag_blocks:
+            return "\n".join(tag_blocks[-limit:]).strip()
+    except Exception:
+        pass
+
+    lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
+    return "\n".join(lines[-limit:]).strip()
+
+
+def _wrap_previous_chunk_context_memory(previous_chunk_context):
+    context = str(previous_chunk_context or "").strip()
+    if not context:
+        return ""
+    return f"{_PREVIOUS_CHUNK_MEMORY_HEADER}{context}{_PREVIOUS_CHUNK_MEMORY_FOOTER}"
+
+
 def _build_translation_chunk_prompt_parts(
     system_content,
     chunk_html,
     chunk_idx,
     total_chunks,
     config=None,
+    previous_chunk_html=None,
 ):
     """Return updated system content, optional prompt messages, and final user prompt."""
     user_prompt = chunk_html
@@ -1179,31 +1255,71 @@ def _build_translation_chunk_prompt_parts(
     if not has_multiple_chunks:
         return system_content, chunk_prompt_msgs, user_prompt
 
-    if config is None:
-        enabled = os.getenv("ENABLE_TRANSLATION_CHUNK_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
-    else:
-        enabled = bool(getattr(config, "ENABLE_TRANSLATION_CHUNK_PROMPT", False))
-    if not enabled:
-        return system_content, chunk_prompt_msgs, user_prompt
-
-    template = getattr(config, "TRANSLATION_CHUNK_PROMPT", None)
-    if template is None:
-        template = os.getenv("TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
-    prompt = _format_translation_chunk_prompt(template, chunk_idx, total_chunks)
-    if not prompt:
-        return system_content, chunk_prompt_msgs, user_prompt
-
     role = _normalize_translation_chunk_prompt_role(
-        getattr(config, "TRANSLATION_CHUNK_PROMPT_ROLE", None)
-        or os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
+        getattr(config, "TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
+        if config is not None
+        else os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
     )
-    if role == "system":
+    system_additions = []
+    user_prefixes = []
+
+    try:
+        current_chunk_idx = int(chunk_idx or 0)
+    except Exception:
+        current_chunk_idx = 0
+    include_previous_chunk = _translation_chunk_prompt_bool(
+        config,
+        "INCLUDE_PREVIOUS_CHUNK",
+        "INCLUDE_PREVIOUS_CHUNK",
+        False,
+    )
+    if include_previous_chunk and current_chunk_idx > 1:
+        previous_limit = _translation_chunk_prompt_int(
+            config,
+            "PREVIOUS_CHUNK_CONTEXT_LIMIT",
+            "PREVIOUS_CHUNK_CONTEXT_LIMIT",
+            3,
+        )
+        previous_context = _extract_previous_chunk_context(previous_chunk_html, previous_limit)
+        previous_memory = _wrap_previous_chunk_context_memory(previous_context)
+        if previous_memory:
+            if role == "system":
+                system_additions.append(previous_memory)
+            elif role == "user":
+                user_prefixes.append(previous_memory)
+            else:
+                chunk_prompt_msgs.append({"role": "assistant", "content": previous_memory})
+
+    enabled = _translation_chunk_prompt_bool(
+        config,
+        "ENABLE_TRANSLATION_CHUNK_PROMPT",
+        "ENABLE_TRANSLATION_CHUNK_PROMPT",
+        False,
+    )
+    if not enabled and not system_additions and not user_prefixes and not chunk_prompt_msgs:
+        return system_content, chunk_prompt_msgs, user_prompt
+
+    if enabled:
+        template = (
+            getattr(config, "TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
+            if config is not None
+            else os.getenv("TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
+        )
+        prompt = _format_translation_chunk_prompt(template, chunk_idx, total_chunks)
+        if prompt:
+            if role == "system":
+                system_additions.append(prompt)
+            elif role == "user":
+                user_prefixes.append(prompt)
+            else:
+                chunk_prompt_msgs.append({"role": "assistant", "content": prompt})
+
+    if system_additions:
         base = str(system_content or "").rstrip()
-        system_content = f"{base}\n\n{prompt}" if base else prompt
-    elif role == "user":
-        user_prompt = f"{prompt}\n{chunk_html}" if chunk_html else prompt
-    else:
-        chunk_prompt_msgs = [{"role": "assistant", "content": prompt}]
+        additions = "\n\n".join(system_additions)
+        system_content = f"{base}\n\n{additions}" if base else additions
+    if user_prefixes:
+        user_prompt = "\n".join(user_prefixes + ([chunk_html] if chunk_html else []))
 
     return system_content, chunk_prompt_msgs, user_prompt
 
@@ -6248,6 +6364,12 @@ class BatchTranslationProcessor:
                 filename=chapter_filename,
             )
             total_chunks = len(chunks)
+            chunk_source_by_idx = {}
+            for chunk_source_html, chunk_source_idx, _chunk_source_total in chunks:
+                try:
+                    chunk_source_by_idx[int(chunk_source_idx)] = chunk_source_html
+                except Exception:
+                    pass
             
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
             
@@ -6262,6 +6384,10 @@ class BatchTranslationProcessor:
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
+                try:
+                    previous_chunk_html = chunk_source_by_idx.get(int(chunk_idx) - 1, "")
+                except Exception:
+                    previous_chunk_html = ""
                 
                 # Check if stop requested - but respect wait_for_chunks setting
                 if local_stop_cb():
@@ -6396,6 +6522,7 @@ class BatchTranslationProcessor:
                     chunk_idx,
                     total_chunks,
                     self.config,
+                    previous_chunk_html=previous_chunk_html,
                 )
 
                 chapter_msgs = (
@@ -7025,7 +7152,8 @@ class BatchTranslationProcessor:
                     # Sleep BEFORE submitting (apply to all chunks when multiple chunks exist)
                     if thread_delay > 0 and total_chunks > 1:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
-                        print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
+                        if thread_delay >= 0.1:
+                            print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before submitting chunk {chunk_num}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
@@ -22406,11 +22534,13 @@ def main(log_callback=None, stop_callback=None):
             chapter_truncated = False  # Track explicit truncation across all chunks
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
+                previous_chunk_html = chunks[chunk_idx_enumerate - 1][0] if chunk_idx_enumerate > 0 else ""
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
                 if total_chunks > 1:
                     thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                     if thread_delay > 0:
-                        print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
+                        if thread_delay >= 0.1:
+                            print(f"🧵 Chapter {actual_num}: Delaying {thread_delay}s before processing chunk {chunk_idx}/{total_chunks}")
                         
                         # Interruptible sleep - check stop flag every 0.1s
                         # But respect WAIT_FOR_CHUNKS setting during graceful stop
@@ -22679,6 +22809,7 @@ def main(log_callback=None, stop_callback=None):
                     chunk_idx,
                     total_chunks,
                     config,
+                    previous_chunk_html=previous_chunk_html,
                 )
                 current_base = [{"role": "system", "content": current_system_content}]
 
