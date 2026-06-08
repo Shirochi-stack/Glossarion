@@ -3103,10 +3103,16 @@ class SDLXLIFFReviewDialog(QDialog):
         if tooltip_lines:
             max_lines = max(max_lines, source_lines + tooltip_lines)
         if two_column_layout:
-            total_lines = source_lines + target_lines + tooltip_lines
-            height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(cls.REVIEW_ROW_MIN_HEIGHT, 126 + total_lines * 23))
+            source_height = max(34, (source_lines + tooltip_lines) * 22 + (28 if tooltip_lines else 10))
+            target_height = max(38, target_lines * 22 + 28)
+            text_height = 10 + source_height + 7 + target_height
+            controls_height = 3 * 34 + 2 * 5 + 24
+            height = min(
+                cls.REVIEW_ROW_MAX_HEIGHT,
+                max(cls.REVIEW_ROW_MIN_HEIGHT, text_height, controls_height),
+            )
             if tooltip_preview:
-                height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 72))
+                height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 40))
             return height
         extra_lines = max(0, min(12, max_lines - 1))
         height = min(cls.REVIEW_ROW_MAX_HEIGHT, cls.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
@@ -5191,9 +5197,9 @@ class SDLXLIFFReviewDialog(QDialog):
         source_lines = max(1, int(source_lines or 1))
         target_lines = max(1, int(target_lines or 1))
         tooltip_lines = max(0, int(tooltip_lines or 0))
-        source_height = max(34, (source_lines + tooltip_lines) * 22 + (30 if tooltip_lines else 12))
-        target_height = max(38, target_lines * 22 + 30)
-        available = max(38, int(row_height or self.REVIEW_ROW_MIN_HEIGHT) - 18)
+        source_height = max(34, (source_lines + tooltip_lines) * 22 + (28 if tooltip_lines else 10))
+        target_height = max(38, target_lines * 22 + 28)
+        available = max(38, int(row_height or self.REVIEW_ROW_MIN_HEIGHT) - 10)
         return min(source_height, available), min(target_height, available)
 
     def _apply_review_row_text_geometry(
@@ -5307,7 +5313,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 max_bar_width=74,
             )
         )
-        controls_layout.addStretch(1)
         controls_layout.addWidget(metrics)
         controls_layout.addStretch(1)
         return controls
@@ -5621,7 +5626,6 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             content_layout.addWidget(source_label)
             content_layout.addWidget(target_widget)
-            content_layout.addStretch(1)
             grid.addWidget(content, 0, 1)
             controls = self._review_row_controls_widget(
                 piece,
