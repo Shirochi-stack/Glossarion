@@ -1361,7 +1361,7 @@ class SDLXLIFFReviewDialog(QDialog):
             else:
                 self._seamless_review_old_page = None
             self._clear_cached_review_pages()
-            self.pieces = self._load_pieces()
+            self.pieces = self._load_pieces(stream_sidebar=not seamless)
             self._review_data_loaded = True
             self._populate_piece_list()
             self._start_review_data_preload()
@@ -2796,6 +2796,89 @@ class SDLXLIFFReviewDialog(QDialog):
         prefix = piece.get("review_label") or f"[{row + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
         return f"{prefix} {piece.get('source_count', 0)} -> {piece.get('target_count', 0)}"
 
+    def _apply_piece_list_item_style(self, item, piece):
+        if item is None or not isinstance(piece, dict):
+            return
+        if piece.get("mismatch"):
+            item.setForeground(QColor(self.THEME["danger"]))
+        elif piece.get("purple_count"):
+            item.setForeground(QColor(self.THEME["purple"]))
+        elif piece.get("yellow_count"):
+            item.setForeground(QColor(self.THEME["warning"]))
+        else:
+            item.setForeground(QColor(self.THEME["success"]))
+
+    def _piece_list_item_for_piece(self, piece, row):
+        label = self._sidebar_label_for_piece(piece, row)
+        output_name = self._output_name_for_piece(piece)
+        item = QListWidgetItem(label)
+        item.setToolTip(
+            f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+        )
+        item.setData(Qt.UserRole, row)
+        self._apply_piece_list_item_style(item, piece)
+        return item
+
+    def _prepare_streaming_piece_list(self, work_items):
+        if not work_items:
+            return False
+        try:
+            self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
+        except Exception:
+            pass
+        try:
+            previous_updates = self.piece_list.updatesEnabled()
+        except Exception:
+            previous_updates = True
+        try:
+            self.piece_list.setUpdatesEnabled(False)
+            self.piece_list.clear()
+            selected_row = 0
+            current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
+            for row, (path, metadata) in enumerate(work_items):
+                output_name = metadata.get("output_name") or self._sidecar_output_name(path)
+                label = metadata.get("label") or self._review_label_from_metadata(metadata)
+                item = QListWidgetItem(f"{label} loading...")
+                item.setToolTip(f"{output_name}\nloading SDLXLIFF...\n{path}")
+                item.setData(Qt.UserRole, row)
+                item.setForeground(QColor(self.THEME["muted"]))
+                self.piece_list.addItem(item)
+                if current_norm and os.path.normcase(os.path.abspath(path)) == current_norm:
+                    selected_row = row
+            if work_items:
+                previous_block = self.piece_list.blockSignals(True)
+                self.piece_list.setCurrentRow(selected_row)
+                self.piece_list.blockSignals(previous_block)
+        except Exception:
+            return False
+        finally:
+            try:
+                self.piece_list.setUpdatesEnabled(previous_updates)
+                self.piece_list.update()
+            except Exception:
+                pass
+        self._pump_review_loading_events(max_ms=8)
+        return True
+
+    def _stream_piece_list_item(self, original_index, piece):
+        try:
+            item = self.piece_list.item(original_index)
+            if item is None:
+                return
+            if self._review_piece_is_empty_sidecar(piece):
+                item.setHidden(True)
+                return
+            item.setHidden(False)
+            item.setText(self._sidebar_label_for_piece(piece, original_index))
+            output_name = self._output_name_for_piece(piece)
+            item.setToolTip(
+                f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
+            )
+            item.setData(Qt.UserRole, original_index)
+            self._apply_piece_list_item_style(item, piece)
+        except Exception:
+            pass
+
     def _build_piece(self, path, index, metadata=None):
         metadata = dict(metadata or {})
         metadata.setdefault("output_name", self._sidecar_output_name(path))
@@ -2897,7 +2980,7 @@ class SDLXLIFFReviewDialog(QDialog):
             piece["index"] = index
         return filtered
 
-    def _load_pieces(self):
+    def _load_pieces(self, stream_sidebar=False):
         sidecar_dir = os.path.join(self.output_dir or "", "SDLXLIFF")
         paths = []
         try:
@@ -2927,11 +3010,20 @@ class SDLXLIFFReviewDialog(QDialog):
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
             metadata["label"] = self._review_label_from_metadata(metadata)
 
+        stream_sidebar = bool(stream_sidebar and self.isVisible())
+        if stream_sidebar:
+            stream_sidebar = self._prepare_streaming_piece_list(work_items)
+
         if len(work_items) <= 1:
-            return self._filter_review_pieces([
+            pieces = [
                 self._build_piece(path, idx, metadata)
                 for idx, (path, metadata) in enumerate(work_items)
-            ])
+            ]
+            if stream_sidebar:
+                for idx, piece in enumerate(pieces):
+                    self._stream_piece_list_item(idx, piece)
+                self._pump_review_loading_events(max_ms=5)
+            return self._filter_review_pieces(pieces)
 
         pieces = [None] * len(work_items)
         max_workers = max(1, min(8, len(work_items)))
@@ -2954,6 +3046,8 @@ class SDLXLIFFReviewDialog(QDialog):
                         path, metadata = work_items[idx]
                         pieces[idx] = self._build_piece(path, idx, metadata)
                         pieces[idx]["error"] = str(exc)
+                    if stream_sidebar:
+                        self._stream_piece_list_item(idx, pieces[idx])
                 self._pump_review_loading_events(max_ms=5)
         return self._filter_review_pieces(pieces)
 
@@ -2966,21 +3060,7 @@ class SDLXLIFFReviewDialog(QDialog):
         selected_row = 0
         current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
         for row, piece in enumerate(self.pieces):
-            label = self._sidebar_label_for_piece(piece, row)
-            output_name = self._output_name_for_piece(piece)
-            item = QListWidgetItem(label)
-            item.setToolTip(
-                f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
-            )
-            item.setData(Qt.UserRole, row)
-            if piece["mismatch"]:
-                item.setForeground(QColor(self.THEME["danger"]))
-            elif piece.get("purple_count"):
-                item.setForeground(QColor(self.THEME["purple"]))
-            elif piece["yellow_count"]:
-                item.setForeground(QColor(self.THEME["warning"]))
-            else:
-                item.setForeground(QColor(self.THEME["success"]))
+            item = self._piece_list_item_for_piece(piece, row)
             self.piece_list.addItem(item)
             if current_norm and os.path.normcase(os.path.abspath(piece["path"])) == current_norm:
                 selected_row = row
@@ -3011,14 +3091,7 @@ class SDLXLIFFReviewDialog(QDialog):
             item.setToolTip(
                 f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
             )
-            if piece["mismatch"]:
-                item.setForeground(QColor(self.THEME["danger"]))
-            elif piece.get("purple_count"):
-                item.setForeground(QColor(self.THEME["purple"]))
-            elif piece["yellow_count"]:
-                item.setForeground(QColor(self.THEME["warning"]))
-            else:
-                item.setForeground(QColor(self.THEME["success"]))
+            self._apply_piece_list_item_style(item, piece)
         except Exception:
             pass
 
