@@ -7,10 +7,13 @@ import logging
 import threading
 import time
 import json
+import html as html_lib
+import re
 import requests
 from typing import Optional, Dict, Any
 import urllib.parse
 import random
+from html.parser import HTMLParser
 
 GOOGLE_TRANSLATE_CO_IN_ENDPOINT = 'https://translate.google.co.in/translate_a/single'
 GOOGLETRANS_AJAX_ENDPOINT = 'https://translate.googleapis.com/translate_a/single'
@@ -46,6 +49,55 @@ GOOGLE_TRANSLATE_CODE_ALIASES = {
     "zh-tw": "zh-TW",
     "zh-hant": "zh-TW",
 }
+
+
+class _MarkedHtmlSegmentParser(HTMLParser):
+    """Extract flat data-sdl-tip tagged segments without using an HTML repair parser."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.segments = []
+        self._current = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = list(attrs or [])
+        attr_map = {str(name).lower(): value for name, value in attrs}
+        if self._current is None and "data-sdl-tip" in attr_map:
+            self._current = {"tag": tag, "attrs": attrs, "text": []}
+            return
+        if self._current is not None:
+            self._current["text"].append(self.get_starttag_text() or "")
+
+    def handle_endtag(self, tag):
+        if self._current is not None and tag.lower() == str(self._current.get("tag", "")).lower():
+            self.segments.append(self._current)
+            self._current = None
+            return
+        if self._current is not None:
+            self._current["text"].append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self._current is not None:
+            self._current["text"].append(data)
+
+    def handle_entityref(self, name):
+        if self._current is not None:
+            self._current["text"].append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self._current is not None:
+            self._current["text"].append(f"&#{name};")
+
+
+def _html_start_tag(tag, attrs):
+    parts = [f"<{tag}"]
+    for name, value in attrs or []:
+        if value is None:
+            parts.append(f" {name}")
+        else:
+            parts.append(f' {name}="{html_lib.escape(str(value), quote=True)}"')
+    parts.append(">")
+    return "".join(parts)
 
 
 def google_translate_language_code(language: Any, default: str = "en") -> str:
@@ -321,7 +373,54 @@ class GoogleFreeTranslateNew:
                 'detectedSourceLanguage': self.source_language,
                 'error': str(e)
             }
-    
+
+    @staticmethod
+    def _sanitize_argos_text_tag_fragments(source_text: str, translated_text: str) -> str:
+        translated = str(translated_text or "")
+        if not translated:
+            return translated
+        source = str(source_text or "")
+        if not re.search(r'(?i)(?:</?\s*(?:p|h[1-6])\b|/?\s*(?:p|h[1-6])\s*>)', translated):
+            return translated
+
+        # Argos can leak HTML-ish batch delimiters into plain text as "p>", "/p>",
+        # "<p>", or "</p>". Strip only text-unit tag fragments, then normalize gaps.
+        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|h[1-6])(?:\s+[^>]*)?\s*>', ' ', translated)
+        cleaned = re.sub(r'(?i)(?<![\w/])/?\s*(?:p|h[1-6])\s*>', ' ', cleaned)
+        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|h[1-6])\b[^<\s]*$', ' ', cleaned)
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+        cleaned = re.sub(r' *\n *', '\n', cleaned)
+        cleaned = cleaned.strip()
+        if cleaned:
+            return cleaned
+        return translated if source.strip() else ""
+
+    def _translate_marked_html_batch_via_argos(self, text: str, translation, stop_check=None) -> Optional[str]:
+        if "data-sdl-tip" not in str(text or ""):
+            return None
+        parser = _MarkedHtmlSegmentParser()
+        try:
+            parser.feed(str(text or ""))
+            parser.close()
+        except Exception:
+            return None
+        if not parser.segments:
+            return None
+
+        rebuilt = []
+        for segment in parser.segments:
+            if stop_check and stop_check():
+                raise Exception("Operation cancelled")
+            source_text = html_lib.unescape("".join(segment.get("text") or []))
+            translated = translation.translate(source_text) if source_text.strip() else ""
+            translated = self._sanitize_argos_text_tag_fragments(source_text, translated)
+            tag = segment.get("tag") or "p"
+            rebuilt.append(
+                f"{_html_start_tag(tag, segment.get('attrs') or [])}"
+                f"{html_lib.escape(translated, quote=False)}"
+                f"</{tag}>"
+            )
+        return "\n".join(rebuilt)
     
     def _translate_via_argos(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
         """Fallback to Argos Translate (offline-capable)."""
@@ -436,7 +535,10 @@ class GoogleFreeTranslateNew:
                     pass
                 if _stop_requested():
                     raise Exception("Operation cancelled")
-                translated_text = translation.translate(text)
+                translated_text = self._translate_marked_html_batch_via_argos(text, translation, _stop_requested)
+                if translated_text is None:
+                    translated_text = translation.translate(text)
+                    translated_text = self._sanitize_argos_text_tag_fragments(text, translated_text)
                 return {
                     'translatedText': translated_text,
                     'detectedSourceLanguage': argos_source,

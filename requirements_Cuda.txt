@@ -119,6 +119,9 @@ cryptography
 # Version management
 packaging
 
+# Offline machine translator
+argostranslate
+
 # Silent truncation detection (optional - for QA Scanner truncation check)
 sentence-transformers
 deep-translator

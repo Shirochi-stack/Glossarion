@@ -45,6 +45,43 @@ class SlowInterruptClient:
         return "late result"
 
 
+def _install_fake_argos(monkeypatch, translate_func):
+    calls = []
+
+    class FakeTranslation:
+        def translate(self, text):
+            calls.append(text)
+            return translate_func(text)
+
+    translation = FakeTranslation()
+
+    class FakeLanguage:
+        def __init__(self, code):
+            self.code = code
+
+        def get_translation(self, to_lang):
+            if self.code == "ko" and getattr(to_lang, "code", "") == "en":
+                return translation
+            return None
+
+    package_mod = types.ModuleType("argostranslate.package")
+    package_mod.update_package_index = lambda: None
+    package_mod.get_available_packages = lambda: []
+    package_mod.install_from_path = lambda path: None
+
+    translate_mod = types.ModuleType("argostranslate.translate")
+    translate_mod.get_installed_languages = lambda: [FakeLanguage("ko"), FakeLanguage("en")]
+
+    parent_mod = types.ModuleType("argostranslate")
+    parent_mod.package = package_mod
+    parent_mod.translate = translate_mod
+
+    monkeypatch.setitem(sys.modules, "argostranslate", parent_mod)
+    monkeypatch.setitem(sys.modules, "argostranslate.package", package_mod)
+    monkeypatch.setitem(sys.modules, "argostranslate.translate", translate_mod)
+    return calls
+
+
 @pytest.mark.parametrize(
     ("display_name", "code"),
     [
@@ -213,3 +250,43 @@ def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
         GOOGLETRANS_AJAX_ENDPOINT,
         {"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": "Hello"},
     )
+
+
+def test_argos_fallback_translates_marked_html_segments_without_tag_bleed(monkeypatch):
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", True, raising=False)
+    calls = _install_fake_argos(
+        monkeypatch,
+        lambda text: {
+            "Title raw": "Title translated News /p>",
+            "Body raw": "Body translated </p><p>",
+        }.get(text, text),
+    )
+    batch_html = '<h1 data-sdl-tip="0">Title raw</h1>\n<p data-sdl-tip="1">Body raw</p>'
+
+    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    translator.rate_limit = 0
+    result = translator.translate(batch_html)
+
+    assert calls == ["Title raw", "Body raw"]
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == (
+        '<h1 data-sdl-tip="0">Title translated News</h1>\n'
+        '<p data-sdl-tip="1">Body translated</p>'
+    )
+    assert "News /p>" not in result["translatedText"]
+    assert "</p><p>" not in result["translatedText"]
+
+
+def test_argos_fallback_sanitizes_plain_text_tag_fragments(monkeypatch):
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", True, raising=False)
+    _install_fake_argos(
+        monkeypatch,
+        lambda _text: "First sentence. News /p> Second p> <p>Third</p>",
+    )
+
+    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    translator.rate_limit = 0
+    result = translator.translate("Plain source")
+
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == "First sentence. News Second Third"

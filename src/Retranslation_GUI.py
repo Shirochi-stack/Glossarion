@@ -3644,7 +3644,7 @@ class SDLXLIFFReviewDialog(QDialog):
         label.setObjectName("SdlReviewTagLabel")
         label.setTextFormat(Qt.PlainText)
         label.setAlignment(Qt.AlignCenter)
-        label.setFixedWidth(92)
+        label.setFixedWidth(48)
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
@@ -3652,7 +3652,7 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label.setStyleSheet(
-            f"color: {color}; background: transparent; font: 9pt Consolas, 'Courier New', monospace;"
+            f"color: {color}; background: transparent; font: 16pt Consolas, 'Courier New', monospace;"
         )
         return label
 
@@ -3712,7 +3712,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     "red": self.THEME["danger"],
                 }.get(row_data["status"], self.THEME["muted"])
                 tag_label.setStyleSheet(
-                    f"color: {tag_color}; background: transparent; font: 9pt Consolas, 'Courier New', monospace;"
+                    f"color: {tag_color}; background: transparent; font: 16pt Consolas, 'Courier New', monospace;"
                 )
                 tag_label.setToolTip(row_data.get("reason", ""))
 
@@ -4304,6 +4304,14 @@ class SDLXLIFFReviewDialog(QDialog):
         return ""
 
     def _set_row_tooltip_translation(self, piece, row_data, translated, persist=True):
+        translated = str(translated or "").strip()
+        if not translated:
+            return
+        try:
+            from google_free_translate import GoogleFreeTranslateNew
+            translated = GoogleFreeTranslateNew._sanitize_argos_text_tag_fragments(row_data.get("source", ""), translated)
+        except Exception:
+            pass
         translated = str(translated or "").strip()
         if not translated:
             return
@@ -5314,7 +5322,6 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         )
         controls_layout.addWidget(metrics)
-        controls_layout.addStretch(1)
         return controls
 
     def _inject_current_machine_translation_to_target(self, piece_index, row_index, editor=None):
@@ -5550,9 +5557,9 @@ class SDLXLIFFReviewDialog(QDialog):
         frame.setStyleSheet(row_style)
         grid = QGridLayout(frame)
         grid.setContentsMargins(10, 5, 10, 5)
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(0)
-        grid.setColumnMinimumWidth(0, 92)
+        grid.setColumnMinimumWidth(0, 48)
         if two_column_layout:
             grid.setColumnStretch(0, 0)
             grid.setColumnStretch(1, 1)
@@ -5641,7 +5648,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_translation,
                 tooltip_pending,
             )
-            grid.addWidget(controls, 0, 2)
+            grid.addWidget(controls, 0, 2, Qt.AlignTop)
         else:
             grid.addWidget(source_label, 0, 1)
             grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
