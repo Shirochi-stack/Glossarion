@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
-from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette
+from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -175,8 +175,14 @@ class SDLXLIFFReviewDialog(QDialog):
     }
     REVIEW_ROW_MIN_HEIGHT = 96
     REVIEW_ROW_MAX_HEIGHT = 360
+    REVIEW_PRELOAD_RADIUS = 2
+    REVIEW_PRELOAD_BATCH_SIZE = 8
+    REVIEW_PRELOAD_IDLE_MS = 350
+    REVIEW_PRELOAD_STEP_MS = 90
+    REVIEW_MAX_CACHED_PAGES = 7
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
+    MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     _SDLXLIFF_AUTOGEN_STATUSES = {
         "completed",
         "qa_failed",
@@ -221,6 +227,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._preload_render_row = None
         self._preload_render_page = None
         self._preload_render_state = None
+        self._preload_start_queued = False
+        self._review_page_cache_trim_queued = False
+        self._last_review_selection_change = 0.0
         self._sdl_review_loading_icon_timer = None
         self._sdl_review_loading_icon = None
         self._sdl_review_loading_original_pixmap = None
@@ -242,6 +251,10 @@ class SDLXLIFFReviewDialog(QDialog):
         self._initial_review_load_started = False
         self._queued_review_refresh = False
         self._seamless_review_old_page = None
+        self._review_context_menu_open = False
+        self._review_text_context_menu = None
+        self._piece_list_context_menu = None
+        self._manual_refresh_shortcut = None
         self._tooltip_translation_running = False
         self._tooltip_translation_batch_active = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
@@ -287,6 +300,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list.setContextMenuPolicy(Qt.NoContextMenu)
         self.piece_list.installEventFilter(self)
         self.piece_list.viewport().installEventFilter(self)
+        self.piece_list.setUniformItemSizes(True)
         self.piece_list.setMinimumWidth(168)
         self.piece_list.setMaximumWidth(220)
         self.piece_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -317,6 +331,16 @@ class SDLXLIFFReviewDialog(QDialog):
             "QPushButton:disabled { color:#94a3b8; background-color:#2a3b4d; border-color:#4a5568; }"
         )
         self.translate_tooltips_btn.clicked.connect(self._translate_current_piece_tooltips)
+        self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)
+        self.refresh_review_btn.setCursor(Qt.PointingHandCursor)
+        self.refresh_review_btn.setToolTip("Run the SDLXLIFF auto-refresh check now (F5).")
+        self.refresh_review_btn.setStyleSheet(
+            "QPushButton { background-color:#28394c; color:#d7ecff; border:1px solid #547596; "
+            "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
+            "QPushButton:hover { background-color:#324d68; border-color:#7bb3e0; }"
+            "QPushButton:disabled { color:#94a3b8; background-color:#253241; border-color:#4a5568; }"
+        )
+        self.refresh_review_btn.clicked.connect(self._manual_review_refresh)
         detail_layout.addLayout(header_row)
 
         legend_row = QHBoxLayout()
@@ -331,6 +355,7 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_row.addSpacing(24)
         legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter)
         legend_row.addStretch(1)
+        legend_row.addWidget(self.refresh_review_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         detail_layout.addLayout(legend_row)
 
         self.scroll = QScrollArea()
@@ -369,6 +394,9 @@ class SDLXLIFFReviewDialog(QDialog):
             self.loading_label.setText("Loading SDLXLIFF...")
         except Exception:
             pass
+        self._manual_refresh_shortcut = QShortcut(QKeySequence("F5"), self)
+        self._manual_refresh_shortcut.setContext(Qt.WindowShortcut)
+        self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -693,11 +721,16 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _manual_review_refresh(self):
+        self._silent_review_refresh()
+
     def _silent_review_refresh(self):
         try:
             if not self.isVisible() or self._refreshing_review_data:
                 return
             if not self._review_data_loaded:
+                return
+            if self._review_context_menu_is_open():
                 return
             if self._active_render_timer is not None or self._active_render_page is not None:
                 return
@@ -2203,6 +2236,7 @@ class SDLXLIFFReviewDialog(QDialog):
         row = self._preload_render_row
         page = self._preload_render_page
         self._preload_render_timer = None
+        self._preload_start_queued = False
         self._preload_render_queue = []
         self._preload_render_row = None
         self._preload_render_page = None
@@ -2222,6 +2256,52 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             self._remove_review_page_widget(page)
 
+    def _review_context_menu_is_open(self):
+        return bool(getattr(self, "_review_context_menu_open", False))
+
+    def _pause_review_preload_for_context_menu(self):
+        timer = self._preload_render_timer
+        self._preload_render_timer = None
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+
+    def _resume_review_background_after_context_menu(self):
+        try:
+            if self._review_dirty_preview_refresh_queued:
+                QTimer.singleShot(0, self._refresh_current_visible_dirty_source_previews)
+            if self._preload_render_row is not None and self._preload_render_state is not None:
+                if self._preload_render_timer is None:
+                    timer = QTimer(self)
+                    timer.setSingleShot(True)
+                    timer.timeout.connect(self._run_review_preload_batch)
+                    self._preload_render_timer = timer
+                    timer.start(self.REVIEW_PRELOAD_STEP_MS)
+                return
+            current_row = self._displayed_piece_row()
+            if 0 <= current_row < len(self.pieces):
+                QTimer.singleShot(90, lambda row=current_row: self._queue_review_page_preloads(row))
+        except Exception:
+            pass
+
+    def _set_review_context_menu_open(self, open_):
+        self._review_context_menu_open = bool(open_)
+        if self._review_context_menu_open:
+            self._pause_review_preload_for_context_menu()
+        else:
+            self._resume_review_background_after_context_menu()
+
+    def _review_selection_recently_changed(self):
+        try:
+            return (time.monotonic() - float(self._last_review_selection_change or 0.0)) < (
+                self.REVIEW_PRELOAD_IDLE_MS / 1000.0
+            )
+        except Exception:
+            return False
+
     def _review_preload_order(self, current_row):
         if not self.pieces:
             return []
@@ -2229,33 +2309,50 @@ class SDLXLIFFReviewDialog(QDialog):
             current_row = int(current_row)
         except Exception:
             current_row = 0
-        rows = [
-            row for row in range(len(self.pieces))
-            if row != current_row
-            and row not in self._piece_render_complete
-            and row not in self._piece_pages
-        ]
-        rows.sort(key=lambda row: (abs(row - current_row), row))
+        rows = []
+        for distance in range(1, self.REVIEW_PRELOAD_RADIUS + 1):
+            for row in (current_row + distance, current_row - distance):
+                if (
+                    0 <= row < len(self.pieces)
+                    and row not in self._piece_render_complete
+                    and row not in self._piece_pages
+                    and row not in rows
+                ):
+                    rows.append(row)
         return rows
 
     def _queue_review_page_preloads(self, current_row):
         try:
             if not self.isVisible() or not self._review_data_loaded:
                 return
+            if self._review_context_menu_is_open():
+                return
+            self._queue_review_page_cache_trim(current_row)
             if self._preload_render_timer is not None or self._preload_render_row is not None:
+                return
+            if self._preload_start_queued:
                 return
             self._preload_render_queue = self._review_preload_order(current_row)
             if self._preload_render_queue:
-                QTimer.singleShot(150, self._start_next_review_preload)
+                self._preload_start_queued = True
+                delay_ms = self.REVIEW_PRELOAD_IDLE_MS if self._review_selection_recently_changed() else 150
+                QTimer.singleShot(delay_ms, self._start_next_review_preload)
         except Exception:
             pass
 
     def _start_next_review_preload(self):
+        self._preload_start_queued = False
         try:
             if not self.isVisible() or not self._review_data_loaded:
                 return
+            if self._review_context_menu_is_open():
+                self._queue_review_page_preloads(self._displayed_piece_row())
+                return
+            if self._review_selection_recently_changed():
+                self._queue_review_page_preloads(self._displayed_piece_row())
+                return
             if self._active_render_timer is not None or self._active_render_page is not None:
-                QTimer.singleShot(150, self._start_next_review_preload)
+                self._queue_review_page_preloads(self._displayed_piece_row())
                 return
             try:
                 current_row = self.piece_list.currentRow()
@@ -2273,6 +2370,9 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _start_review_preload_row(self, row):
         if row < 0 or row >= len(self.pieces):
+            return
+        if self._review_selection_recently_changed():
+            self._queue_review_page_preloads(self._displayed_piece_row())
             return
         piece = self.pieces[row]
         page, layout = self._create_review_rows_page()
@@ -2329,11 +2429,23 @@ class SDLXLIFFReviewDialog(QDialog):
             self._cancel_review_preload(discard_page=True)
             return
         try:
+            if self._review_context_menu_is_open():
+                self._preload_render_timer = QTimer(self)
+                self._preload_render_timer.setSingleShot(True)
+                self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
+                self._preload_render_timer.start(max(220, self.REVIEW_PRELOAD_IDLE_MS))
+                return
+            if self._review_selection_recently_changed():
+                self._preload_render_timer = QTimer(self)
+                self._preload_render_timer.setSingleShot(True)
+                self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
+                self._preload_render_timer.start(self.REVIEW_PRELOAD_IDLE_MS)
+                return
             if not self.isVisible() or self._active_render_timer is not None or self._active_render_page is not None:
                 self._preload_render_timer = QTimer(self)
                 self._preload_render_timer.setSingleShot(True)
                 self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
-                self._preload_render_timer.start(180)
+                self._preload_render_timer.start(max(180, self.REVIEW_PRELOAD_STEP_MS))
                 return
             try:
                 current_row = self.piece_list.currentRow()
@@ -2349,7 +2461,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.rows_widget, self.rows_layout = page, layout
             try:
                 start = int(state.get("idx", 0))
-                end = min(len(rows), start + 24)
+                end = min(len(rows), start + self.REVIEW_PRELOAD_BATCH_SIZE)
                 piece = self.pieces[row]
                 for idx in range(start, end):
                     self._add_review_row(piece, rows[idx], idx, state.get("max_len", 1), state.get("colors") or self._review_status_colors())
@@ -2365,20 +2477,67 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._preload_render_row = None
                 self._preload_render_page = None
                 self._preload_render_state = None
-                QTimer.singleShot(60, self._start_next_review_preload)
+                QTimer.singleShot(self.REVIEW_PRELOAD_STEP_MS, self._start_next_review_preload)
                 return
 
             timer = QTimer(self)
             timer.setSingleShot(True)
             timer.timeout.connect(self._run_review_preload_batch)
             self._preload_render_timer = timer
-            timer.start(45)
+            timer.start(self.REVIEW_PRELOAD_STEP_MS)
         except Exception:
             self._cancel_review_preload(discard_page=True)
+
+    def _queue_review_page_cache_trim(self, current_row):
+        if getattr(self, "_review_page_cache_trim_queued", False):
+            return
+        self._review_page_cache_trim_queued = True
+        QTimer.singleShot(250, lambda row=current_row: self._trim_review_page_cache(row))
+
+    def _trim_review_page_cache(self, current_row):
+        self._review_page_cache_trim_queued = False
+        try:
+            try:
+                current_row = int(current_row)
+            except Exception:
+                current_row = self._displayed_piece_row()
+            current_widget = self.rows_stack.currentWidget()
+            active_page = self._active_render_page
+            preload_page = self._preload_render_page
+            cached_rows = list(self._piece_pages.items())
+            if len(cached_rows) <= self.REVIEW_MAX_CACHED_PAGES:
+                farthest_allowed = self.REVIEW_PRELOAD_RADIUS
+            else:
+                farthest_allowed = 0
+
+            removable = []
+            for row, page in cached_rows:
+                if row == current_row or page is current_widget or page is active_page or page is preload_page:
+                    continue
+                distance = abs(row - current_row) if current_row >= 0 else self.REVIEW_PRELOAD_RADIUS + 1
+                if distance > farthest_allowed or len(cached_rows) > self.REVIEW_MAX_CACHED_PAGES:
+                    removable.append((distance, row, page))
+
+            if not removable:
+                return
+            removable.sort(reverse=True)
+            for _distance, row, page in removable[:4]:
+                try:
+                    if self._piece_pages.get(row) is page:
+                        self._piece_pages.pop(row, None)
+                    self._piece_render_complete.discard(row)
+                    self._remove_review_page_widget(page)
+                except Exception:
+                    pass
+            if len(removable) > 4:
+                self._queue_review_page_cache_trim(current_row)
+        except Exception:
+            pass
 
     def _request_render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        self._last_review_selection_change = time.monotonic()
         self._cancel_review_preload(discard_page=True)
         self._save_current_review_scroll()
         QTimer.singleShot(0, lambda row=row: self._render_piece(row))
@@ -2742,7 +2901,7 @@ class SDLXLIFFReviewDialog(QDialog):
             translated_label.setObjectName(
                 "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"
             )
-            translated_label.setText(preview_text if tooltip_pending else f"MT: {preview_text}")
+            translated_label.setText(preview_text)
             if tooltip_pending:
                 translated_label.setToolTip("Google Translate preview is being generated.")
                 translated_label.setStyleSheet(
@@ -2835,9 +2994,14 @@ class SDLXLIFFReviewDialog(QDialog):
         if self._review_dirty_preview_refresh_queued:
             return
         self._review_dirty_preview_refresh_queued = True
+        if self._review_context_menu_is_open():
+            return
         QTimer.singleShot(0, self._refresh_current_visible_dirty_source_previews)
 
     def _refresh_current_visible_dirty_source_previews(self):
+        if self._review_context_menu_is_open():
+            self._review_dirty_preview_refresh_queued = True
+            return
         self._review_dirty_preview_refresh_queued = False
         try:
             piece_index = self._displayed_piece_row()
@@ -2982,8 +3146,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
             current_row = self._displayed_piece_row()
             for piece_index, changed_rows in changed_by_piece.items():
-                if piece_index == current_row:
+                if piece_index == current_row and not self._review_context_menu_is_open():
                     self._update_review_row_source_previews(piece_index, changed_rows, visible_only=True)
+                elif piece_index == current_row:
+                    self._queue_refresh_current_visible_dirty_source_previews()
         except Exception:
             pass
         try:
@@ -3239,6 +3405,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 lambda _checked=False, selected_rows=list(rows): self._translate_piece_rows_tooltips(selected_rows)
             )
             self._piece_list_context_menu = menu
+            self._set_review_context_menu_open(True)
             menu.aboutToHide.connect(lambda m=menu: self._clear_piece_list_context_menu(m))
             menu.popup(self.piece_list.viewport().mapToGlobal(pos))
         except Exception:
@@ -3248,6 +3415,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if getattr(self, "_piece_list_context_menu", None) is menu:
                 self._piece_list_context_menu = None
+            self._set_review_context_menu_open(False)
             menu.deleteLater()
         except Exception:
             pass
@@ -3281,7 +3449,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     rows[row_idx]["_source_preview_dirty"] = True
                     pending_rows.append(row_idx)
             if refresh and pending_rows:
-                self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)
+                if self._review_context_menu_is_open():
+                    self._queue_refresh_current_visible_dirty_source_previews()
+                else:
+                    self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)
         except Exception:
             pass
 
@@ -3477,7 +3648,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._write_machine_translation_entries(piece, rows_to_persist)
             if changed_rows:
                 if row == self._displayed_piece_row():
-                    self._update_review_row_source_previews(row, changed_rows, visible_only=True)
+                    if self._review_context_menu_is_open():
+                        for row_index in changed_rows:
+                            try:
+                                piece.get("rows", [])[row_index]["_source_preview_dirty"] = True
+                            except Exception:
+                                pass
+                        self._queue_refresh_current_visible_dirty_source_previews()
+                    else:
+                        self._update_review_row_source_previews(row, changed_rows, visible_only=True)
             if translations:
                 try:
                     self._last_machine_translation_signature = self._current_machine_translation_signature()
@@ -3625,7 +3804,19 @@ class SDLXLIFFReviewDialog(QDialog):
             inject_action = menu.addAction("\U0001f4e5  Inject Machine Translation")
             inject_action.triggered.connect(lambda _checked=False: inject_machine_translation_callback())
 
-        menu.exec(widget.mapToGlobal(pos))
+        self._review_text_context_menu = menu
+        self._set_review_context_menu_open(True)
+        menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
+        menu.popup(widget.mapToGlobal(pos))
+
+    def _clear_review_text_context_menu(self, menu):
+        try:
+            if getattr(self, "_review_text_context_menu", None) is menu:
+                self._review_text_context_menu = None
+            self._set_review_context_menu_open(False)
+            menu.deleteLater()
+        except Exception:
+            pass
 
     def _target_editor(self, piece_index, row_index, text, editable=True, height=None):
         editor = QPlainTextEdit(str(text or ""))
@@ -3899,7 +4090,7 @@ class SDLXLIFFReviewDialog(QDialog):
         layout.addWidget(label)
 
         preview_text = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else tooltip_translation
-        preview_label_text = preview_text if tooltip_pending else f"MT: {preview_text}"
+        preview_label_text = preview_text
         translated_label = QLabel(preview_label_text)
         translated_label.setObjectName(
             "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"

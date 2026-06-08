@@ -643,14 +643,79 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "QMenu::item { padding: 6px 18px 6px 12px; }" in source
     assert "Generate Google Translate Preview ({entry_count} entries)" in source
     assert "menu.popup(self.piece_list.viewport().mapToGlobal(pos))" in source
+    assert "QKeySequence, QShortcut" in source
+    assert "MANUAL_REFRESH_BUTTON_TEXT" in source
+    assert "self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)" in source
+    assert "self.refresh_review_btn.clicked.connect(self._manual_review_refresh)" in source
+    assert 'QShortcut(QKeySequence("F5"), self)' in source
+    assert "self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)" in source
+    manual_refresh_body = source[
+        source.index("def _manual_review_refresh"):
+        source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
+    ]
+    assert "self._silent_review_refresh()" in manual_refresh_body
+    assert "_review_context_menu_open" in source
+    assert "_set_review_context_menu_open(True)" in source
+    assert "_pause_review_preload_for_context_menu" in source
+    assert "_resume_review_background_after_context_menu" in source
     context_start = source.index("def _translate_piece_list_context_selection")
     context_end = source.index("def _clear_piece_list_context_menu", context_start)
     context_body = source[context_start:context_end]
     assert "setCurrentRow(clicked_row)" not in context_body
     assert "blockSignals(True)" in context_body
+    assert "_set_review_context_menu_open(True)" in context_body
+    text_menu_start = source.index("def _show_review_text_context_menu")
+    text_menu_end = source.index("def _clear_review_text_context_menu", text_menu_start)
+    text_menu_body = source[text_menu_start:text_menu_end]
+    assert "menu.exec(" not in text_menu_body
+    assert "menu.popup(widget.mapToGlobal(pos))" in text_menu_body
+    assert "self._review_text_context_menu = menu" in text_menu_body
+    assert "_set_review_context_menu_open(True)" in text_menu_body
+    silent_refresh_body = source[
+        source.index("def _silent_review_refresh"):
+        source.index("def refresh_review_data", source.index("def _silent_review_refresh"))
+    ]
+    assert "if self._review_context_menu_is_open():" in silent_refresh_body
+    preload_queue_body = source[
+        source.index("def _queue_review_page_preloads"):
+        source.index("def _start_next_review_preload", source.index("def _queue_review_page_preloads"))
+    ]
+    assert "if self._review_context_menu_is_open():" in preload_queue_body
+    preload_batch_body = source[
+        source.index("def _run_review_preload_batch"):
+        source.index("def _request_render_piece", source.index("def _run_review_preload_batch"))
+    ]
+    assert "if self._review_context_menu_is_open():" in preload_batch_body
+    dirty_refresh_body = source[
+        source.index("def _refresh_current_visible_dirty_source_previews"):
+        source.index("def _refresh_visible_review_row_source_previews", source.index("def _refresh_current_visible_dirty_source_previews"))
+    ]
+    assert "if self._review_context_menu_is_open():" in dirty_refresh_body
     assert "self.piece_list.selectAll()" in source
     assert "_translate_piece_rows_tooltips" in source
     assert "_start_piece_list_tooltip_translation" in source
+    assert "self.piece_list.setUniformItemSizes(True)" in source
+    assert "REVIEW_PRELOAD_RADIUS = 2" in source
+    assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
+    assert "REVIEW_PRELOAD_IDLE_MS = 350" in source
+    assert "REVIEW_MAX_CACHED_PAGES = 7" in source
+    assert "_last_review_selection_change = time.monotonic()" in source
+    assert "_review_selection_recently_changed" in source
+    assert "_queue_review_page_cache_trim" in source
+    assert "_trim_review_page_cache" in source
+    preload_order_body = source[
+        source.index("def _review_preload_order"):
+        source.index("def _queue_review_page_preloads", source.index("def _review_preload_order"))
+    ]
+    assert "range(1, self.REVIEW_PRELOAD_RADIUS + 1)" in preload_order_body
+    assert "range(len(self.pieces))" not in preload_order_body
+    assert "current_row + distance" in preload_order_body
+    assert "current_row - distance" in preload_order_body
+    assert "self._review_selection_recently_changed()" in preload_queue_body
+    assert "self._queue_review_page_cache_trim(current_row)" in preload_queue_body
+    assert "self.REVIEW_PRELOAD_BATCH_SIZE" in preload_batch_body
+    assert "self.REVIEW_PRELOAD_STEP_MS" in preload_batch_body
+    assert "self._review_selection_recently_changed()" in preload_batch_body
     assert "refresh=piece_index == current_row" in source
     assert "current_row = self._displayed_piece_row()" in source
     assert "if row == self._displayed_piece_row()" in source
@@ -871,7 +936,7 @@ def test_sdlxliff_review_source_preview_marks_identical_machine_translation(qtbo
     qtbot.addWidget(widget)
 
     labels = widget.findChildren(QLabel)
-    assert any(label.text() == "MT: Final Fantasy VI: The Novel" for label in labels)
+    assert any(label.text() == "Final Fantasy VI: The Novel" for label in labels)
 
 
 def test_sdlxliff_review_row_index_property_preserves_zero(qtbot):
