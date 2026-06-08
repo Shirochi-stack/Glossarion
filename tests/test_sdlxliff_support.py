@@ -1323,7 +1323,7 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY" in source
     assert "TWO_COLUMN_LAYOUT_BUTTON_TEXT" in source
     assert "TWO_COLUMN_LAYOUT_CONFIG_KEY" in source
-    assert 'TWO_COLUMN_LAYOUT_BUTTON_TEXT = "2 Columns"' in source
+    assert 'TWO_COLUMN_LAYOUT_BUTTON_TEXT = "Compact"' in source
     assert "LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY" in source
     assert "LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY" in source
     assert "self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)" in source

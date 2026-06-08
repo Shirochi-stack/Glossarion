@@ -189,7 +189,7 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_SYNC_RENDER_ROW_LIMIT = 80
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Machine Translation Preview"
     FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
-    TWO_COLUMN_LAYOUT_BUTTON_TEXT = "2 Columns"
+    TWO_COLUMN_LAYOUT_BUTTON_TEXT = "Compact"
     TWO_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_two_column_layout"
     LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_one_column_layout"
     LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
