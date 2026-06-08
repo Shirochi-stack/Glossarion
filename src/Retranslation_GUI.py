@@ -9,7 +9,9 @@ import json
 import re
 import html as html_lib
 import copy
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from difflib import SequenceMatcher
 from urllib.parse import unquote
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -307,8 +309,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list.installEventFilter(self)
         self.piece_list.viewport().installEventFilter(self)
         self.piece_list.setUniformItemSizes(True)
-        self.piece_list.setMinimumWidth(168)
-        self.piece_list.setMaximumWidth(220)
+        self.piece_list.setMinimumWidth(242)
+        self.piece_list.setMaximumWidth(286)
+        self.piece_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.piece_list.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         content_row.addWidget(self.piece_list, 0)
 
@@ -1587,14 +1590,64 @@ class SDLXLIFFReviewDialog(QDialog):
                 row["reason"] = "ok"
 
     @staticmethod
-    def _row_length_ratio(row):
+    def _row_expected_comparison_text(row):
         source_text = str((row or {}).get("source", "") or "").strip()
+        if not (row or {}).get("tooltip_translation_pending"):
+            source_text = str((row or {}).get("tooltip_translation", "") or "").strip() or source_text
+        return source_text
+
+    @staticmethod
+    def _comparison_tokens(text):
+        return re.findall(r"[a-z0-9']+|[\uac00-\ud7a3]+", str(text or "").lower())
+
+    @classmethod
+    def _row_skew_metrics(cls, row):
+        source_text = cls._row_expected_comparison_text(row)
         target_text = str((row or {}).get("target", "") or "").strip()
         if not source_text or not target_text:
             return None
         if not (row or {}).get("source_tag") or not (row or {}).get("target_tag"):
             return None
-        return len(target_text) / max(1, len(source_text))
+        source_len = len(source_text)
+        target_len = len(target_text)
+        ratio = target_len / max(1, source_len)
+        ratio_skew = max(ratio, 1.0 / max(ratio, 0.0001))
+        source_tokens = cls._comparison_tokens(source_text)
+        target_tokens = cls._comparison_tokens(target_text)
+        common_tokens = 0
+        if source_tokens and target_tokens:
+            common_tokens = sum((Counter(source_tokens) & Counter(target_tokens)).values())
+        source_latin_tokens = [token for token in source_tokens if re.search(r"[a-z0-9]", token)]
+        target_latin_tokens = [token for token in target_tokens if re.search(r"[a-z0-9]", token)]
+        common_latin_tokens = 0
+        if source_latin_tokens and target_latin_tokens:
+            common_latin_tokens = sum((Counter(source_latin_tokens) & Counter(target_latin_tokens)).values())
+        comparable_token_overlap = bool(source_latin_tokens and target_latin_tokens)
+        source_token_overlap = common_latin_tokens / max(1, len(source_latin_tokens))
+        unmatched_tokens = max(len(source_tokens), len(target_tokens)) - common_tokens
+        similarity = SequenceMatcher(None, source_text.lower(), target_text.lower()).ratio()
+        source_weight = max(0.25, min(1.0, source_len / 80.0))
+        score = (
+            ratio_skew * source_weight
+            + min(12.0, abs(target_len - source_len) / 35.0)
+            + min(12.0, unmatched_tokens / 2.5)
+            + (1.0 - similarity) * 2.0
+        )
+        return {
+            "ratio": ratio,
+            "source_len": source_len,
+            "source_token_count": len(source_tokens),
+            "target_len": target_len,
+            "target_token_count": len(target_tokens),
+            "comparable_token_overlap": comparable_token_overlap,
+            "source_token_overlap": source_token_overlap,
+            "score": score,
+        }
+
+    @classmethod
+    def _row_length_ratio(cls, row):
+        metrics = cls._row_skew_metrics(row)
+        return None if metrics is None else metrics["ratio"]
 
     def _promote_top_skewed_row_for_count_mismatch(self, rows, source_count, target_count):
         if source_count == target_count:
@@ -1602,27 +1655,85 @@ class SDLXLIFFReviewDialog(QDialog):
         if not any(row.get("status") == "red" for row in rows or []):
             return False
 
-        min_skew_score = 1.35
         best_row = None
         best_ratio = None
         best_score = None
-        target_added = target_count > source_count
+        candidates = []
         for row in rows or []:
             if row.get("status") not in {"green", "yellow"}:
                 continue
-            ratio = self._row_length_ratio(row)
-            if ratio is None:
+            metrics = self._row_skew_metrics(row)
+            if metrics is None:
                 continue
-            score = ratio if target_added else (1.0 / max(ratio, 0.0001))
+            candidates.append((row, metrics))
+
+        if not candidates:
+            return False
+
+        target_lengths = sorted(max(1, int(metrics.get("target_len") or 0)) for _row, metrics in candidates)
+        target_tokens = sorted(max(1, int(metrics.get("target_token_count") or 0)) for _row, metrics in candidates)
+        median_target_len = target_lengths[len(target_lengths) // 2]
+        median_target_tokens = target_tokens[len(target_tokens) // 2]
+        source_missing_from_output = source_count > target_count
+        output_added = target_count > source_count
+
+        for row, metrics in candidates:
+            ratio = metrics["ratio"]
+            source_len = max(1, int(metrics.get("source_len") or 0))
+            source_token_count = max(1, int(metrics.get("source_token_count") or 0))
+            target_len = max(1, int(metrics.get("target_len") or 0))
+            target_token_count = max(1, int(metrics.get("target_token_count") or 0))
+            target_len_outlier = target_len / max(1, median_target_len)
+            target_token_outlier = target_token_count / max(1, median_target_tokens)
+            if source_missing_from_output:
+                directional_len_delta = max(0, target_len - source_len)
+                directional_token_delta = max(0, target_token_count - source_token_count)
+                directional_ratio = max(0.0, ratio - 1.0)
+                directional_len_ratio = directional_len_delta / max(1, source_len)
+                directional_token_ratio = directional_token_delta / max(1, source_token_count)
+            elif output_added:
+                directional_len_delta = max(0, source_len - target_len)
+                directional_token_delta = max(0, source_token_count - target_token_count)
+                directional_ratio = max(0.0, (1.0 / max(ratio, 0.0001)) - 1.0)
+                directional_len_ratio = directional_len_delta / max(1, target_len)
+                directional_token_ratio = directional_token_delta / max(1, target_token_count)
+            else:
+                directional_len_delta = abs(target_len - source_len)
+                directional_token_delta = abs(target_token_count - source_token_count)
+                directional_ratio = max(ratio, 1.0 / max(ratio, 0.0001)) - 1.0
+                directional_len_ratio = directional_len_delta / max(1, min(source_len, target_len))
+                directional_token_ratio = directional_token_delta / max(1, min(source_token_count, target_token_count))
+            output_column_weight = (
+                target_len_outlier * 6.0
+                + target_token_outlier * 4.0
+                + min(8.0, target_len / 80.0)
+            )
+            ratio_multiplier = 1.0 + min(5.0, directional_ratio * 2.0)
+            anchor_factor = 1.0
+            if metrics.get("comparable_token_overlap") and directional_ratio > 0.0:
+                source_token_overlap = float(metrics.get("source_token_overlap") or 0.0)
+                anchor_factor = min(1.0, 0.10 + source_token_overlap * 1.20)
+            ratio_sensitive_score = (
+                min(6.0, directional_len_ratio) * 130.0
+                + min(6.0, directional_token_ratio) * 110.0
+                + min(6.0, directional_ratio) * 70.0
+                + min(240, directional_len_delta) * 0.35
+                + min(80, directional_token_delta) * 2.5
+                + output_column_weight * ratio_multiplier
+            )
+            score = (
+                ratio_sensitive_score * anchor_factor
+                + metrics["score"] * 0.15
+            )
             if best_score is None or score > best_score:
                 best_row = row
                 best_ratio = ratio
                 best_score = score
 
-        if not best_row or best_score is None or best_score < min_skew_score or best_row.get("status") != "green":
+        if not best_row or best_score is None or best_row.get("status") != "green":
             return False
         best_row["status"] = "yellow"
-        best_row["reason"] = f"top skewed ratio ({best_ratio:.2f}x)"
+        best_row["reason"] = f"top translated-column skew ({best_ratio:.2f}x)"
         best_row["_top_skew_promoted"] = True
         return True
 
@@ -1982,8 +2093,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 })
             source_count = len(source_review_units)
             target_count = len(target_review_units)
-            if self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count):
-                yellow_count += 1
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             piece = {
                 "path": path,
@@ -2004,6 +2113,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "rows": rows,
             }
             self._load_machine_translation_file_for_piece(piece)
+            self._refresh_piece_summary(piece)
             return piece
         except Exception as exc:
             return {
@@ -3413,22 +3523,39 @@ class SDLXLIFFReviewDialog(QDialog):
                 rows = piece.get("rows") or []
                 if not rows:
                     continue
-                before = [str(row_data.get("tooltip_translation") or "") for row_data in rows]
+                before = [
+                    (
+                        str(row_data.get("tooltip_translation") or ""),
+                        str(row_data.get("status") or ""),
+                        str(row_data.get("reason") or ""),
+                    )
+                    for row_data in rows
+                ]
                 for row_data in rows:
                     row_data.pop("tooltip_translation", None)
                 self._load_machine_translation_file_for_piece(piece)
+                self._refresh_piece_summary(piece)
                 changed_rows = []
                 for row_index, row_data in enumerate(rows):
-                    after = str(row_data.get("tooltip_translation") or "")
+                    after = (
+                        str(row_data.get("tooltip_translation") or ""),
+                        str(row_data.get("status") or ""),
+                        str(row_data.get("reason") or ""),
+                    )
                     if before[row_index] != after:
                         row_data["_source_preview_dirty"] = True
                         changed_rows.append(row_index)
                 if changed_rows:
                     self._invalidate_piece_render_model(piece, restart_preload=False)
+                    self._refresh_piece_list_item(piece_index)
                     changed_by_piece[piece_index] = changed_rows
 
             current_row = self._displayed_piece_row()
             for piece_index, changed_rows in changed_by_piece.items():
+                if piece_index == current_row:
+                    self._refresh_piece_header(piece_index)
+                    for row_index in changed_rows:
+                        self._refresh_visible_review_row_status(piece_index, row_index)
                 if piece_index == current_row and not self._review_context_menu_is_open():
                     self._update_review_row_source_previews(piece_index, changed_rows, visible_only=True)
                 elif piece_index == current_row:

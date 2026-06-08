@@ -633,11 +633,171 @@ def test_sdlxliff_review_count_mismatch_promotes_top_skewed_row_to_yellow(tmp_pa
     assert piece["mismatch"] is True
     assert piece["red_count"] == 1
     assert piece["yellow_count"] == 1
-    promoted = [row for row in piece["rows"] if row.get("reason", "").startswith("top skewed ratio")]
+    promoted = [row for row in piece["rows"] if row.get("reason", "").startswith("top translated-column skew")]
     assert len(promoted) == 1
     assert promoted[0]["source"] == "결국 그들은 경고를 지켰다."
     assert promoted[0]["status"] == "yellow"
     assert piece["rows"][-1]["status"] == "red"
+
+
+def test_sdlxliff_review_count_mismatch_always_promotes_highest_ratio_row(tmp_path):
+    sidecar = tmp_path / "response_chapter_one_missing.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>Source first row.</p>"
+        "<p>Source second row.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>Target first row.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_one_missing.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_one_missing.html"})
+
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 1
+    assert piece["red_count"] == 1
+    assert piece["yellow_count"] == 1
+    assert piece["rows"][0]["status"] == "yellow"
+    assert piece["rows"][0]["reason"].startswith("top translated-column skew")
+    assert piece["rows"][1]["status"] == "red"
+
+
+def test_sdlxliff_review_count_mismatch_prefers_translated_column_outlier():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    rows = [
+        {
+            "source_tag": "p",
+            "source": "In the end, they acted as if they had followed their warning.",
+            "tooltip_translation": "In the end, they acted as if they had followed their warning.",
+            "target_tag": "p",
+            "target": (
+                "In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
+                "they plucked out her own eyeball and made her swallow it, and her ear was torn off."
+            ),
+            "status": "green",
+            "reason": "ok",
+        },
+        {
+            "source_tag": "p",
+            "source": (
+                "They say beastmen meat gets more tender the more you feed them their own kind, right? "
+                "They even use it as medicine. The client specially requested it. The people handling "
+                "the order explained the whole process in uncomfortable detail, including why the meat "
+                "had to be prepared softly and why the client insisted on a young one."
+            ),
+            "tooltip_translation": (
+                "They say beastmen meat gets more tender the more you feed them their own kind, right? "
+                "They even use it as medicine. The client specially requested it. The people handling "
+                "the order explained the whole process in uncomfortable detail, including why the meat "
+                "had to be prepared softly and why the client insisted on a young one."
+            ),
+            "target_tag": "p",
+            "target": (
+                "They say beastmen meat gets more tender the more you feed them their own kind, right? "
+                "They even use it as medicine. The client specially requested it. Asked us to make a "
+                "plump and tender little one. The handlers described the request in detail and repeated "
+                "that the client wanted the finished product soft, young, and carefully prepared."
+            ),
+            "status": "green",
+            "reason": "ok",
+        },
+        {
+            "source_tag": "p",
+            "source": "Missing source row.",
+            "target_tag": "",
+            "target": "",
+            "status": "red",
+            "reason": "dropped/added",
+        },
+    ]
+
+    promoted = dialog._promote_top_skewed_row_for_count_mismatch(rows, 3, 2)
+
+    assert promoted is True
+    assert rows[0]["status"] == "yellow"
+    assert rows[0]["reason"].startswith("top translated-column skew")
+    assert rows[1]["status"] == "green"
+    assert len(rows[1]["target"]) > len(rows[0]["target"])
+    assert SDLXLIFFReviewDialog._row_length_ratio(rows[0]) > SDLXLIFFReviewDialog._row_length_ratio(rows[1])
+
+
+def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar_dir.mkdir()
+    output_name = "response_chapter_mt_skew.html"
+    sidecar = sidecar_dir / f"{output_name}.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>결국, 그들은 경고를 지키듯 행동했다.</p>"
+        "<p>“...따뜻해.”</p>"
+        "<p>피엘이 잊었다고 생각했던, 가장 오래된 집의 온기였다.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
+        "they plucked out her own eyeball and made her swallow it, and her ear was torn off.</p>"
+        "<p>It was the oldest warmth of 'home,' the one Piel thought she had forgotten.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_mt_skew.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._config = {"output_language": "English"}
+
+    first_piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+    dialog._write_machine_translation_entries(
+        first_piece,
+        [
+            (first_piece["rows"][0], "In the end, they acted as if they had followed their warning."),
+            (first_piece["rows"][1], "...It's warm."),
+            (
+                first_piece["rows"][2],
+                "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+            ),
+        ],
+    )
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": output_name})
+
+    promoted = [row for row in piece["rows"] if row.get("reason", "").startswith("top translated-column skew")]
+    assert len(promoted) == 1
+    assert promoted[0]["source"].startswith("결국")
+    assert piece["rows"][1]["status"] == "green"
+    assert piece["rows"][2]["status"] == "red"
 
 
 def test_sdlxliff_review_heading_to_paragraph_mismatch_is_yellow(tmp_path):
@@ -802,6 +962,9 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_translate_piece_rows_tooltips" in source
     assert "_start_piece_list_tooltip_translation" in source
     assert "self.piece_list.setUniformItemSizes(True)" in source
+    assert "self.piece_list.setMinimumWidth(242)" in source
+    assert "self.piece_list.setMaximumWidth(286)" in source
+    assert "self.piece_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
     assert "REVIEW_PRELOAD_RADIUS = 2" in source
     assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
     assert "REVIEW_PRELOAD_IDLE_MS = 350" in source
@@ -1154,9 +1317,11 @@ def test_sdlxliff_review_summary_updates_when_target_row_is_emptied():
     assert piece["source_count"] == 2
     assert piece["target_count"] == 1
     assert piece["red_count"] == 1
-    assert piece["yellow_count"] == 0
+    assert piece["yellow_count"] == 1
     assert piece["mismatch"] is True
     assert piece["count_ratio"] == 0.5
+    assert rows[0]["status"] == "yellow"
+    assert rows[0]["reason"].startswith("top translated-column skew")
 
 
 def test_retranslation_show_model_info_defaults_on_but_respects_saved_false():
