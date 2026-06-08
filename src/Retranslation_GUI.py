@@ -179,7 +179,7 @@ class SDLXLIFFReviewDialog(QDialog):
         "muted": "#94a3b8",
     }
     REVIEW_ROW_MIN_HEIGHT = 96
-    REVIEW_ROW_MAX_HEIGHT = 360
+    REVIEW_ROW_MAX_HEIGHT = 1600
     REVIEW_PRELOAD_RADIUS = 2
     REVIEW_PRELOAD_BATCH_SIZE = 8
     REVIEW_PRELOAD_IDLE_MS = 350
@@ -188,8 +188,10 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_SYNC_RENDER_ROW_LIMIT = 80
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
-    ONE_ROW_LAYOUT_BUTTON_TEXT = "1 Row Layout"
-    ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
+    TWO_COLUMN_LAYOUT_BUTTON_TEXT = "2 Columns"
+    TWO_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_two_column_layout"
+    LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_one_column_layout"
+    LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
     MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY = "sdlxliff_machine_translation_inaccuracy_threshold"
     MACHINE_TRANSLATION_INACCURACY_THRESHOLD = 150.0
     MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS = 1
@@ -266,7 +268,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._book_nav_updating = False
         self._last_review_signature = None
         self._last_machine_translation_signature = None
-        self._one_row_layout_enabled = self._review_one_row_layout_enabled()
+        self._two_column_layout_enabled = self._review_two_column_layout_enabled()
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
         self._review_data_loaded = False
@@ -373,19 +375,19 @@ class SDLXLIFFReviewDialog(QDialog):
         self.flag_accuracy_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         self.flag_accuracy_btn.customContextMenuRequested.connect(self._show_flag_accuracy_context_menu)
         self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)
-        self.one_row_layout_btn = QPushButton(self.ONE_ROW_LAYOUT_BUTTON_TEXT)
-        self.one_row_layout_btn.setCursor(Qt.PointingHandCursor)
-        self.one_row_layout_btn.setCheckable(True)
-        self.one_row_layout_btn.setChecked(bool(self._one_row_layout_enabled))
-        self.one_row_layout_btn.setToolTip("Stack source, machine preview, and output together in each review entry.")
-        self.one_row_layout_btn.setStyleSheet(
+        self.two_column_layout_btn = QPushButton(self.TWO_COLUMN_LAYOUT_BUTTON_TEXT)
+        self.two_column_layout_btn.setCursor(Qt.PointingHandCursor)
+        self.two_column_layout_btn.setCheckable(True)
+        self.two_column_layout_btn.setChecked(bool(self._two_column_layout_enabled))
+        self.two_column_layout_btn.setToolTip("Show text in the first column and row actions/status markers in the second column.")
+        self.two_column_layout_btn.setStyleSheet(
             "QPushButton { background-color:#253241; color:#d7ecff; border:1px solid #547596; "
             "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
             "QPushButton:hover { background-color:#324d68; border-color:#7bb3e0; }"
             "QPushButton:checked { background-color:#205f74; color:#e9fbff; border-color:#26a6c8; }"
             "QPushButton:checked:hover { background-color:#26738c; border-color:#5bc4df; }"
         )
-        self.one_row_layout_btn.toggled.connect(self._set_review_one_row_layout)
+        self.two_column_layout_btn.toggled.connect(self._set_review_two_column_layout)
         self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)
         self.refresh_review_btn.setCursor(Qt.PointingHandCursor)
         self.refresh_review_btn.setToolTip("Run the SDLXLIFF auto-refresh check now (F5).")
@@ -407,7 +409,7 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_row.addSpacing(24)
         legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter)
         legend_row.addWidget(self.flag_accuracy_btn, 0, Qt.AlignVCenter)
-        legend_row.addWidget(self.one_row_layout_btn, 0, Qt.AlignVCenter)
+        legend_row.addWidget(self.two_column_layout_btn, 0, Qt.AlignVCenter)
         legend_row.addStretch(1)
         legend_row.addWidget(self.refresh_review_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         detail_layout.addLayout(legend_row)
@@ -884,26 +886,34 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return float(self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
 
-    def _review_one_row_layout_enabled(self):
+    def _review_two_column_layout_enabled(self):
         try:
-            value = (self._config or {}).get(self.ONE_ROW_LAYOUT_CONFIG_KEY, False)
+            config = self._config or {}
+            if self.TWO_COLUMN_LAYOUT_CONFIG_KEY in config:
+                value = config.get(self.TWO_COLUMN_LAYOUT_CONFIG_KEY)
+            elif self.LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY in config:
+                value = config.get(self.LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY)
+            elif self.LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY in config:
+                value = config.get(self.LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY)
+            else:
+                return True
             if isinstance(value, str):
                 return value.strip().lower() in {"1", "true", "yes", "on"}
             return bool(value)
         except Exception:
-            return False
+            return True
 
-    def _set_review_one_row_layout(self, enabled):
+    def _set_review_two_column_layout(self, enabled):
         enabled = bool(enabled)
-        self._one_row_layout_enabled = enabled
+        self._two_column_layout_enabled = enabled
         try:
-            if getattr(self, "one_row_layout_btn", None) is not None and self.one_row_layout_btn.isChecked() != enabled:
-                self.one_row_layout_btn.blockSignals(True)
-                self.one_row_layout_btn.setChecked(enabled)
-                self.one_row_layout_btn.blockSignals(False)
+            if getattr(self, "two_column_layout_btn", None) is not None and self.two_column_layout_btn.isChecked() != enabled:
+                self.two_column_layout_btn.blockSignals(True)
+                self.two_column_layout_btn.setChecked(enabled)
+                self.two_column_layout_btn.blockSignals(False)
         except Exception:
             pass
-        self._persist_review_config_value(self.ONE_ROW_LAYOUT_CONFIG_KEY, enabled)
+        self._persist_review_config_value(self.TWO_COLUMN_LAYOUT_CONFIG_KEY, enabled)
         try:
             self._cancel_active_review_render()
             self._cancel_review_preload(discard_page=True)
@@ -2588,6 +2598,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     "source_index": src.get("index") if src else None,
                     "target_tag": tgt.get("tag", "") if tgt else "",
                     "target": tgt.get("text", "") if tgt else "",
+                    "target_original": tgt.get("text", "") if tgt else "",
                     "target_index": tgt.get("index") if tgt else None,
                     "status": status,
                     "reason": reason,
@@ -3023,6 +3034,52 @@ class SDLXLIFFReviewDialog(QDialog):
             "tooltip_translation_pending": bool(row_data.get("tooltip_translation_pending")),
         }
 
+    @staticmethod
+    def _review_wrapped_lines(value, line_chars):
+        text = str(value or "")
+        if not text:
+            return 1
+        line_chars = max(1, int(line_chars or 1))
+        wrapped_lines = 0
+        for part in text.splitlines() or [text]:
+            wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
+        return wrapped_lines
+
+    @classmethod
+    def _review_chars_per_line_for_width(cls, viewport_width=1200, two_column_layout=False):
+        viewport_width = max(700, int(viewport_width or 1200))
+        fixed_width = 92 + 180 + 26 + 180 + 20 + 50
+        if two_column_layout:
+            fixed_width = 92 + 250 + 46
+        text_column_width = max(180, (viewport_width - fixed_width) // 2)
+        if two_column_layout:
+            text_column_width = max(320, viewport_width - fixed_width)
+        return max(24, int(text_column_width / 9))
+
+    @classmethod
+    def _review_row_line_counts_for_width(
+        cls,
+        source_text,
+        target_text,
+        tooltip_translation=None,
+        tooltip_pending=False,
+        viewport_width=1200,
+        two_column_layout=False,
+    ):
+        chars_per_line = cls._review_chars_per_line_for_width(
+            viewport_width,
+            two_column_layout=two_column_layout,
+        )
+        source_lines = cls._review_wrapped_lines(source_text, chars_per_line)
+        target_lines = cls._review_wrapped_lines(target_text, chars_per_line)
+        tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
+        if tooltip_preview:
+            translated_chars_per_line = max(30, int(chars_per_line * 1.35))
+            tooltip_lines = min(18, cls._review_wrapped_lines(tooltip_preview, translated_chars_per_line))
+        else:
+            tooltip_lines = 0
+        return source_lines, target_lines, tooltip_lines
+
     @classmethod
     def _review_row_height_for_width(
         cls,
@@ -3031,47 +3088,25 @@ class SDLXLIFFReviewDialog(QDialog):
         tooltip_translation=None,
         tooltip_pending=False,
         viewport_width=1200,
-        one_row_layout=False,
+        two_column_layout=False,
     ):
-        viewport_width = max(700, int(viewport_width or 1200))
-        fixed_width = 92 + 180 + 26 + 180 + 20 + 50
-        if one_row_layout:
-            fixed_width = 92 + 180 + 26 + 180 + 60
-        text_column_width = max(180, (viewport_width - fixed_width) // 2)
-        if one_row_layout:
-            text_column_width = max(320, viewport_width - fixed_width)
-        chars_per_line = max(24, int(text_column_width / 9))
-        max_lines = 1
-
-        def _wrapped_lines(value, line_chars):
-            text = str(value or "")
-            if not text:
-                return 1
-            wrapped_lines = 0
-            for part in text.splitlines() or [text]:
-                wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
-            return wrapped_lines
-
-        source_lines = _wrapped_lines(source_text, chars_per_line)
-        target_lines = _wrapped_lines(target_text, chars_per_line)
-        max_lines = max(max_lines, source_lines)
-        max_lines = max(max_lines, target_lines)
+        source_lines, target_lines, tooltip_lines = cls._review_row_line_counts_for_width(
+            source_text,
+            target_text,
+            tooltip_translation,
+            tooltip_pending,
+            viewport_width,
+            two_column_layout=two_column_layout,
+        )
+        max_lines = max(1, source_lines, target_lines)
         tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
-        if tooltip_preview:
-            translated_chars_per_line = max(30, int(chars_per_line * 1.35))
-            tooltip_lines = min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
-            source_with_translation_lines = (
-                source_lines
-                + tooltip_lines
-            )
-            max_lines = max(max_lines, source_with_translation_lines)
-        else:
-            tooltip_lines = 0
-        if one_row_layout:
+        if tooltip_lines:
+            max_lines = max(max_lines, source_lines + tooltip_lines)
+        if two_column_layout:
             total_lines = source_lines + target_lines + tooltip_lines
-            height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(cls.REVIEW_ROW_MIN_HEIGHT, 84 + total_lines * 21))
+            height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(cls.REVIEW_ROW_MIN_HEIGHT, 126 + total_lines * 23))
             if tooltip_preview:
-                height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 42))
+                height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 72))
             return height
         extra_lines = max(0, min(12, max_lines - 1))
         height = min(cls.REVIEW_ROW_MAX_HEIGHT, cls.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
@@ -3080,7 +3115,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return height
 
     @classmethod
-    def _build_review_piece_render_model_from_rows(cls, row_snapshots, viewport_width, one_row_layout=False):
+    def _build_review_piece_render_model_from_rows(cls, row_snapshots, viewport_width, two_column_layout=False):
         rows = list(row_snapshots or [])
         max_len = max(
             [len(row.get("source", "")) for row in rows]
@@ -3093,6 +3128,14 @@ class SDLXLIFFReviewDialog(QDialog):
             target_text = row.get("target", "")
             tooltip_translation = row.get("tooltip_translation", "")
             tooltip_pending = bool(row.get("tooltip_translation_pending"))
+            source_lines, target_lines, tooltip_lines = cls._review_row_line_counts_for_width(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                viewport_width,
+                two_column_layout=two_column_layout,
+            )
             source_missing = not row.get("source_tag")
             target_missing = not row.get("target_tag")
             row_models.append({
@@ -3105,19 +3148,22 @@ class SDLXLIFFReviewDialog(QDialog):
                 "target_editable": (not source_missing or not target_missing),
                 "tooltip_translation": tooltip_translation,
                 "tooltip_pending": tooltip_pending,
-                "one_row_layout": bool(one_row_layout),
+                "two_column_layout": bool(two_column_layout),
+                "source_lines": source_lines,
+                "target_lines": target_lines,
+                "tooltip_lines": tooltip_lines,
                 "row_height": cls._review_row_height_for_width(
                     source_text,
                     target_text,
                     tooltip_translation,
                     tooltip_pending,
                     viewport_width,
-                    one_row_layout=one_row_layout,
+                    two_column_layout=two_column_layout,
                 ),
             })
         return {
             "viewport_width": int(max(700, viewport_width or 1200)),
-            "one_row_layout": bool(one_row_layout),
+            "two_column_layout": bool(two_column_layout),
             "row_count": len(rows),
             "max_len": max_len,
             "rows": row_models,
@@ -3132,19 +3178,19 @@ class SDLXLIFFReviewDialog(QDialog):
     def _review_piece_render_model(self, piece):
         rows = piece.get("rows") or []
         viewport_width = self._review_render_viewport_width()
-        one_row_layout = bool(getattr(self, "_one_row_layout_enabled", False))
+        two_column_layout = bool(getattr(self, "_two_column_layout_enabled", True))
         model = piece.get("_render_model") if isinstance(piece, dict) else None
         if (
             isinstance(model, dict)
             and int(model.get("row_count", -1)) == len(rows)
             and int(model.get("viewport_width", -1)) == viewport_width
-            and bool(model.get("one_row_layout", False)) == one_row_layout
+            and bool(model.get("two_column_layout", model.get("one_column_layout", model.get("one_row_layout", False)))) == two_column_layout
         ):
             return model
         model = self._build_review_piece_render_model_from_rows(
             self._piece_render_snapshot(piece),
             viewport_width,
-            one_row_layout=one_row_layout,
+            two_column_layout=two_column_layout,
         )
         piece["_render_model"] = model
         return model
@@ -3170,7 +3216,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
         token = self._review_data_preload_token
         viewport_width = self._review_render_viewport_width()
-        one_row_layout = bool(getattr(self, "_one_row_layout_enabled", False))
+        two_column_layout = bool(getattr(self, "_two_column_layout_enabled", True))
         snapshots = [
             (piece_index, self._piece_render_snapshot(piece))
             for piece_index, piece in enumerate(self.pieces)
@@ -3188,7 +3234,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     models[piece_index] = self._build_review_piece_render_model_from_rows(
                         row_snapshot,
                         viewport_width,
-                        one_row_layout=one_row_layout,
+                        two_column_layout=two_column_layout,
                     )
                     if ordinal % 50 == 0:
                         time.sleep(0.001)
@@ -3217,7 +3263,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     rows = self.pieces[piece_index].get("rows") or []
                     if (
                         int(model.get("row_count", -1)) == len(rows)
-                        and bool(model.get("one_row_layout", False)) == bool(getattr(self, "_one_row_layout_enabled", False))
+                        and bool(model.get("two_column_layout", model.get("one_column_layout", model.get("one_row_layout", False)))) == bool(getattr(self, "_two_column_layout_enabled", True))
                     ):
                         self.pieces[piece_index]["_render_model"] = model
         finally:
@@ -3680,12 +3726,43 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         try:
             if isinstance(editor, QPlainTextEdit) and not editor.isReadOnly():
-                editor.setPlainText(translated)
+                self._replace_editor_text_preserving_undo(editor, translated)
                 editor.setFocus(Qt.OtherFocusReason)
                 return
         except Exception:
             pass
         self._apply_target_edit(piece_index, row_index, translated)
+
+    @staticmethod
+    def _replace_editor_text_preserving_undo(editor, text):
+        if not isinstance(editor, QPlainTextEdit):
+            return False
+        cursor = editor.textCursor()
+        cursor.beginEditBlock()
+        try:
+            editor.selectAll()
+            editor.insertPlainText(str(text or ""))
+        finally:
+            cursor.endEditBlock()
+        return True
+
+    def _undo_all_target_edits(self, piece_index, row_index, editor=None):
+        original = ""
+        try:
+            if 0 <= piece_index < len(self.pieces):
+                rows = self.pieces[piece_index].get("rows") or []
+                if 0 <= row_index < len(rows):
+                    original = str(rows[row_index].get("target_original", "") or "")
+        except Exception:
+            original = ""
+        try:
+            if isinstance(editor, QPlainTextEdit) and not editor.isReadOnly():
+                self._replace_editor_text_preserving_undo(editor, original)
+                editor.setFocus(Qt.OtherFocusReason)
+                return
+        except Exception:
+            pass
+        self._apply_target_edit(piece_index, row_index, original)
 
     def _review_row_frame(self, piece_index, row_index):
         try:
@@ -3776,10 +3853,14 @@ class SDLXLIFFReviewDialog(QDialog):
                         self._inject_machine_translation_to_target(pi, ri, text, ed)
                 ) if tooltip_translation and target_editable and not tooltip_pending else None,
             )
-            if bool(frame.property("sdl_one_row_layout")):
-                source_label.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
-            else:
-                source_label.setMaximumHeight(max(24, row_height - 14))
+            source_lines, target_lines, tooltip_lines = self._review_row_line_counts_for_width(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                self._review_render_viewport_width(),
+                two_column_layout=bool(frame.property("sdl_two_column_layout")),
+            )
             source_label.setToolTip(self._wrapped_tooltip(source_text))
 
             if not self._replace_review_row_source_widget(frame, source_label):
@@ -3787,13 +3868,15 @@ class SDLXLIFFReviewDialog(QDialog):
 
             frame.setFixedHeight(row_height)
             if target_widget is not None:
-                try:
-                    if bool(frame.property("sdl_one_row_layout")):
-                        target_widget.setFixedHeight(max(32, min(170, row_height - source_label.maximumHeight() - 20)))
-                    else:
-                        target_widget.setFixedHeight(max(30, row_height - 14))
-                except Exception:
-                    pass
+                self._apply_review_row_text_geometry(
+                    frame,
+                    source_label,
+                    target_widget,
+                    row_height,
+                    source_lines=source_lines,
+                    target_lines=target_lines,
+                    tooltip_lines=tooltip_lines,
+                )
             frame.updateGeometry()
             frame.update()
             try:
@@ -3878,18 +3961,30 @@ class SDLXLIFFReviewDialog(QDialog):
                 inject_machine_translation_callback=inject_callback,
             )
 
+            source_lines, target_lines, tooltip_lines = self._review_row_line_counts_for_width(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                self._review_render_viewport_width(),
+                two_column_layout=bool(frame.property("sdl_two_column_layout")),
+            )
             row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
-            source_widget.setMaximumHeight(max(24, row_height - 14))
             frame.setFixedHeight(row_height)
             if target_widget is not None:
-                try:
-                    if bool(frame.property("sdl_one_row_layout")):
-                        source_widget.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
-                        target_widget.setFixedHeight(max(32, min(170, row_height - source_widget.maximumHeight() - 20)))
-                    else:
-                        target_widget.setFixedHeight(max(30, row_height - 14))
-                except Exception:
-                    pass
+                self._apply_review_row_text_geometry(
+                    frame,
+                    source_widget,
+                    target_widget,
+                    row_height,
+                    source_lines=source_lines,
+                    target_lines=target_lines,
+                    tooltip_lines=tooltip_lines,
+                )
+            self._update_review_row_inject_button(
+                frame,
+                bool(tooltip_translation) and bool(target_editable) and not tooltip_pending,
+            )
             frame.updateGeometry()
             frame.update()
             try:
@@ -4865,6 +4960,10 @@ class SDLXLIFFReviewDialog(QDialog):
             editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         except Exception:
             pass
+        try:
+            editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        except Exception:
+            pass
         editor.setToolTip(self._wrapped_tooltip(text))
         try:
             editor.viewport().setCursor(Qt.IBeamCursor)
@@ -5048,18 +5147,18 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _bar_widget(self, length, max_length, color, align_right=False):
+    def _bar_widget(self, length, max_length, color, align_right=False, width=180, max_bar_width=170):
         container = QWidget()
         container.setObjectName("SdlReviewBarContainer")
-        container.setFixedWidth(180)
+        container.setFixedWidth(max(12, int(width)))
         container.setStyleSheet("QWidget#SdlReviewBarContainer { background: transparent; }")
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        width = max(8, min(170, int(170 * (length / max(1, max_length)))))
+        bar_width = max(8, min(max(8, int(max_bar_width)), int(max(8, int(max_bar_width)) * (length / max(1, max_length)))))
         bar = QFrame()
         bar.setObjectName("SdlReviewLengthBar")
-        bar.setFixedSize(width, 10)
+        bar.setFixedSize(bar_width, 10)
         bar.setStyleSheet(f"QFrame#SdlReviewLengthBar {{ background-color: {color}; border-radius: 5px; }}")
         if align_right:
             layout.addStretch(1)
@@ -5068,6 +5167,175 @@ class SDLXLIFFReviewDialog(QDialog):
             layout.addWidget(bar)
             layout.addStretch(1)
         return container
+
+    def _review_row_action_button(self, text, tooltip, callback=None, enabled=True, action_name=""):
+        button = QPushButton(text)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setEnabled(bool(enabled))
+        button.setMinimumWidth(0)
+        button.setProperty("sdlRowAction", True)
+        if action_name:
+            button.setProperty("sdl_action", action_name)
+        button.setToolTip(tooltip)
+        button.setStyleSheet(
+            "QPushButton { background-color: #213447; color: #d7ecff; border: 1px solid #4d6f91; "
+            "border-radius: 4px; padding: 4px 7px; font-size: 8pt; font-weight: bold; text-align: left; }"
+            "QPushButton:hover { background-color: #2b4b66; border-color: #72acd9; }"
+            "QPushButton:disabled { background-color: #1f2933; color: #718096; border-color: #354658; }"
+        )
+        if callback is not None:
+            button.clicked.connect(lambda _checked=False: callback())
+        return button
+
+    def _review_row_text_heights(self, row_height, source_lines=1, target_lines=1, tooltip_lines=0):
+        source_lines = max(1, int(source_lines or 1))
+        target_lines = max(1, int(target_lines or 1))
+        tooltip_lines = max(0, int(tooltip_lines or 0))
+        source_height = max(34, (source_lines + tooltip_lines) * 22 + (30 if tooltip_lines else 12))
+        target_height = max(38, target_lines * 22 + 30)
+        available = max(38, int(row_height or self.REVIEW_ROW_MIN_HEIGHT) - 18)
+        return min(source_height, available), min(target_height, available)
+
+    def _apply_review_row_text_geometry(
+        self,
+        frame,
+        source_widget,
+        target_widget,
+        row_height,
+        source_lines=1,
+        target_lines=1,
+        tooltip_lines=0,
+    ):
+        two_column_layout = bool(frame.property("sdl_two_column_layout")) if frame is not None else False
+        try:
+            if two_column_layout:
+                source_height, target_height = self._review_row_text_heights(
+                    row_height,
+                    source_lines=source_lines,
+                    target_lines=target_lines,
+                    tooltip_lines=tooltip_lines,
+                )
+                if source_widget is not None:
+                    source_widget.setMaximumHeight(source_height)
+                if target_widget is not None:
+                    target_widget.setFixedHeight(target_height)
+            else:
+                if source_widget is not None:
+                    source_widget.setMaximumHeight(max(24, row_height - 14))
+                if target_widget is not None:
+                    target_widget.setFixedHeight(max(30, row_height - 14))
+        except Exception:
+            pass
+
+    def _review_row_controls_widget(
+        self,
+        piece,
+        row_data,
+        idx,
+        row_model,
+        max_len,
+        source_bar,
+        target_bar,
+        dot,
+        target_widget,
+        target_editable,
+        tooltip_translation,
+        tooltip_pending,
+    ):
+        controls = QWidget()
+        controls.setObjectName("SdlReviewTwoColumnControls")
+        controls.setFixedWidth(250)
+        controls.setStyleSheet("QWidget#SdlReviewTwoColumnControls { background: transparent; }")
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(5)
+
+        piece_index = piece["index"]
+        controls_layout.addWidget(
+            self._review_row_action_button(
+                "↩️ Undo All Edits",
+                "Restore this row to the target text loaded from the SDLXLIFF sidecar.",
+                callback=lambda pi=piece_index, ri=idx, ed=target_widget: self._undo_all_target_edits(pi, ri, ed),
+                enabled=target_editable,
+                action_name="undo_all_edits",
+            )
+        )
+        controls_layout.addWidget(
+            self._review_row_action_button(
+                "🌐 Generate Preview",
+                "Generate a Google Translate preview for this row.",
+                callback=lambda pi=piece_index, ri=idx: self._translate_single_row_tooltip(pi, ri),
+                enabled=bool(row_data.get("source")),
+                action_name="generate_preview",
+            )
+        )
+        inject_enabled = bool(tooltip_translation) and target_editable and not tooltip_pending
+        controls_layout.addWidget(
+            self._review_row_action_button(
+                "📥 Inject Machine Translation",
+                "Replace this row's output with the machine translation preview.",
+                callback=lambda pi=piece_index, ri=idx, ed=target_widget: self._inject_current_machine_translation_to_target(pi, ri, ed),
+                enabled=inject_enabled,
+                action_name="inject_machine_translation",
+            )
+        )
+
+        metrics = QWidget()
+        metrics.setObjectName("SdlReviewTwoColumnMetrics")
+        metrics.setStyleSheet("QWidget#SdlReviewTwoColumnMetrics { background: transparent; }")
+        metrics_layout = QHBoxLayout(metrics)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setSpacing(8)
+        metrics_layout.addWidget(
+            self._bar_widget(
+                row_model.get("source_len", len(row_data.get("source", ""))),
+                max_len,
+                source_bar,
+                align_right=True,
+                width=84,
+                max_bar_width=74,
+            )
+        )
+        metrics_layout.addWidget(dot, 0, Qt.AlignVCenter)
+        metrics_layout.addWidget(
+            self._bar_widget(
+                row_model.get("target_len", len(row_data.get("target", ""))),
+                max_len,
+                target_bar,
+                align_right=False,
+                width=84,
+                max_bar_width=74,
+            )
+        )
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(metrics)
+        controls_layout.addStretch(1)
+        return controls
+
+    def _inject_current_machine_translation_to_target(self, piece_index, row_index, editor=None):
+        try:
+            piece = self.pieces[piece_index]
+            row_data = (piece.get("rows") or [])[row_index]
+            translated = self._row_tooltip_translation(piece, row_data)
+            if not str(translated or "").strip():
+                self.save_status_label.setText("No machine translation preview")
+                return
+            self._inject_machine_translation_to_target(piece_index, row_index, translated, editor)
+        except Exception as exc:
+            try:
+                self.save_status_label.setText(f"Inject failed: {exc}")
+            except Exception:
+                pass
+
+    def _update_review_row_inject_button(self, frame, enabled):
+        try:
+            if frame is None:
+                return
+            for button in frame.findChildren(QPushButton):
+                if button.property("sdl_action") == "inject_machine_translation":
+                    button.setEnabled(bool(enabled))
+        except Exception:
+            pass
 
     def _text_label(
         self,
@@ -5188,7 +5456,7 @@ class SDLXLIFFReviewDialog(QDialog):
             tooltip_translation,
             tooltip_pending,
             self._review_render_viewport_width(),
-            one_row_layout=bool(getattr(self, "_one_row_layout_enabled", False)),
+            two_column_layout=bool(getattr(self, "_two_column_layout_enabled", True)),
         )
 
     def _review_row_source_widget(self, frame):
@@ -5228,8 +5496,8 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if frame is None or source_widget is None:
                 return False
-            if bool(frame.property("sdl_one_row_layout")):
-                content = frame.findChild(QWidget, "SdlReviewOneRowContent")
+            if bool(frame.property("sdl_two_column_layout")):
+                content = frame.findChild(QWidget, "SdlReviewTwoColumnText")
                 content_layout = content.layout() if content is not None else None
                 if content_layout is None:
                     return False
@@ -5264,12 +5532,12 @@ class SDLXLIFFReviewDialog(QDialog):
         tooltip_translation = row_model.get("tooltip_translation", self._row_tooltip_translation(piece, row_data))
         tooltip_pending = bool(row_model.get("tooltip_pending", row_data.get("tooltip_translation_pending")))
         row_height = int(row_model.get("row_height") or self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending))
-        one_row_layout = bool(row_model.get("one_row_layout", getattr(self, "_one_row_layout_enabled", False)))
+        two_column_layout = bool(row_model.get("two_column_layout", row_model.get("one_column_layout", row_model.get("one_row_layout", getattr(self, "_two_column_layout_enabled", True)))))
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
         frame.setProperty("sdl_status", row_data["status"])
         frame.setProperty("sdl_row_index", idx)
-        frame.setProperty("sdl_one_row_layout", one_row_layout)
+        frame.setProperty("sdl_two_column_layout", two_column_layout)
         frame.setFixedHeight(row_height)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
@@ -5280,15 +5548,11 @@ class SDLXLIFFReviewDialog(QDialog):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(0)
         grid.setColumnMinimumWidth(0, 92)
-        if one_row_layout:
+        if two_column_layout:
             grid.setColumnStretch(0, 0)
             grid.setColumnStretch(1, 1)
             grid.setColumnStretch(2, 0)
-            grid.setColumnStretch(3, 0)
-            grid.setColumnStretch(4, 0)
-            grid.setColumnMinimumWidth(2, 180)
-            grid.setColumnMinimumWidth(3, 26)
-            grid.setColumnMinimumWidth(4, 180)
+            grid.setColumnMinimumWidth(2, 250)
         else:
             grid.setColumnStretch(0, 0)
             grid.setColumnStretch(1, 1)
@@ -5337,24 +5601,43 @@ class SDLXLIFFReviewDialog(QDialog):
         dot.setToolTip(row_data.get("reason", ""))
 
         grid.addWidget(tag_label, 0, 0)
-        if one_row_layout:
+        if two_column_layout:
             content = QWidget()
-            content.setObjectName("SdlReviewOneRowContent")
+            content.setObjectName("SdlReviewTwoColumnText")
             content.setMinimumWidth(0)
             content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-            content.setStyleSheet("QWidget#SdlReviewOneRowContent { background: transparent; }")
+            content.setStyleSheet("QWidget#SdlReviewTwoColumnText { background: transparent; }")
             content_layout = QVBoxLayout(content)
             content_layout.setContentsMargins(0, 0, 0, 0)
-            content_layout.setSpacing(5)
-            source_label.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
-            target_widget.setFixedHeight(max(32, min(170, row_height - source_label.maximumHeight() - 20)))
+            content_layout.setSpacing(7)
+            self._apply_review_row_text_geometry(
+                frame,
+                source_label,
+                target_widget,
+                row_height,
+                source_lines=row_model.get("source_lines", 1),
+                target_lines=row_model.get("target_lines", 1),
+                tooltip_lines=row_model.get("tooltip_lines", 0),
+            )
             content_layout.addWidget(source_label)
             content_layout.addWidget(target_widget)
             content_layout.addStretch(1)
             grid.addWidget(content, 0, 1)
-            grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
-            grid.addWidget(dot, 0, 3)
-            grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
+            controls = self._review_row_controls_widget(
+                piece,
+                row_data,
+                idx,
+                row_model,
+                max_len,
+                source_bar,
+                target_bar,
+                dot,
+                target_widget,
+                target_editable,
+                tooltip_translation,
+                tooltip_pending,
+            )
+            grid.addWidget(controls, 0, 2)
         else:
             grid.addWidget(source_label, 0, 1)
             grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)

@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from lxml import etree
-from PySide6.QtWidgets import QFrame, QLabel
+from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
@@ -1095,7 +1095,7 @@ def test_sdlxliff_review_machine_accuracy_threshold_saves_to_parent_config():
     assert parent.save_calls == 1
 
 
-def test_sdlxliff_review_one_row_layout_toggle_saves_to_parent_config():
+def test_sdlxliff_review_two_column_layout_toggle_saves_to_parent_config():
     class Parent:
         def __init__(self):
             self.config = {}
@@ -1108,19 +1108,40 @@ def test_sdlxliff_review_one_row_layout_toggle_saves_to_parent_config():
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     dialog._config = {}
     dialog._context_parent = parent
-    dialog.one_row_layout_btn = None
+    dialog.two_column_layout_btn = None
     dialog.pieces = []
     dialog._piece_pages = {}
     dialog._piece_render_complete = set()
     dialog._review_data_preload_token = 0
     dialog.piece_list = None
 
-    dialog._set_review_one_row_layout(True)
+    dialog._set_review_two_column_layout(True)
 
-    assert dialog._one_row_layout_enabled is True
-    assert dialog._config[dialog.ONE_ROW_LAYOUT_CONFIG_KEY] is True
-    assert parent.config[dialog.ONE_ROW_LAYOUT_CONFIG_KEY] is True
+    assert dialog._two_column_layout_enabled is True
+    assert dialog._config[dialog.TWO_COLUMN_LAYOUT_CONFIG_KEY] is True
+    assert parent.config[dialog.TWO_COLUMN_LAYOUT_CONFIG_KEY] is True
     assert parent.save_calls == 1
+
+
+def test_sdlxliff_review_two_column_layout_defaults_on_and_reads_legacy_config():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._config = {}
+    assert dialog._review_two_column_layout_enabled() is True
+
+    dialog._config = {dialog.LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY: False}
+    assert dialog._review_two_column_layout_enabled() is False
+
+    dialog._config = {
+        dialog.LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY: False,
+        dialog.LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY: True,
+    }
+    assert dialog._review_two_column_layout_enabled() is True
+
+    dialog._config = {
+        dialog.LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY: False,
+        dialog.TWO_COLUMN_LAYOUT_CONFIG_KEY: True,
+    }
+    assert dialog._review_two_column_layout_enabled() is True
 
 
 def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
@@ -1291,17 +1312,26 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "MANUAL_REFRESH_BUTTON_TEXT" in source
     assert "FLAG_ACCURACY_BUTTON_TEXT" in source
     assert "MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY" in source
-    assert "ONE_ROW_LAYOUT_BUTTON_TEXT" in source
-    assert "ONE_ROW_LAYOUT_CONFIG_KEY" in source
+    assert "TWO_COLUMN_LAYOUT_BUTTON_TEXT" in source
+    assert "TWO_COLUMN_LAYOUT_CONFIG_KEY" in source
+    assert 'TWO_COLUMN_LAYOUT_BUTTON_TEXT = "2 Columns"' in source
+    assert "LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY" in source
+    assert "LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY" in source
     assert "self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)" in source
     assert "self.flag_accuracy_btn.setContextMenuPolicy(Qt.CustomContextMenu)" in source
     assert "self.flag_accuracy_btn.customContextMenuRequested.connect(self._show_flag_accuracy_context_menu)" in source
     assert "self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)" in source
-    assert "self.one_row_layout_btn = QPushButton(self.ONE_ROW_LAYOUT_BUTTON_TEXT)" in source
-    assert "self.one_row_layout_btn.setCheckable(True)" in source
-    assert "self.one_row_layout_btn.toggled.connect(self._set_review_one_row_layout)" in source
-    assert 'legend_row.addWidget(self.one_row_layout_btn, 0, Qt.AlignVCenter)' in source
-    assert "SdlReviewOneRowContent" in source
+    assert "self.two_column_layout_btn = QPushButton(self.TWO_COLUMN_LAYOUT_BUTTON_TEXT)" in source
+    assert "self.two_column_layout_btn.setCheckable(True)" in source
+    assert "self.two_column_layout_btn.toggled.connect(self._set_review_two_column_layout)" in source
+    assert 'legend_row.addWidget(self.two_column_layout_btn, 0, Qt.AlignVCenter)' in source
+    assert "SdlReviewTwoColumnText" in source
+    assert "SdlReviewTwoColumnControls" in source
+    assert "SdlReviewTwoColumnMetrics" in source
+    assert "Undo All Edits" in source
+    assert "Generate Preview" in source
+    assert "Inject Machine Translation" in source
+    assert "return True" in source[source.index("def _review_two_column_layout_enabled"):source.index("def _set_review_two_column_layout")]
     assert "_promote_inaccurate_machine_translation_rows" in source
     assert "_show_flag_accuracy_context_menu" in source
     assert "_prompt_machine_translation_threshold" in source
@@ -1526,6 +1556,18 @@ def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
     assert dialog._review_row_height("안녕하세요 독자님들.", "Hello, readers.", "Hello, readers.") >= (
         dialog.REVIEW_ROW_MIN_HEIGHT + 30
     )
+
+
+def test_sdlxliff_review_machine_translation_injection_preserves_editor_undo(qtbot):
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    editor = QPlainTextEdit("Original output")
+    qtbot.addWidget(editor)
+
+    dialog._inject_machine_translation_to_target(0, 0, "Machine output", editor)
+
+    assert editor.toPlainText() == "Machine output"
+    editor.undo()
+    assert editor.toPlainText() == "Original output"
 
 
 def test_sdlxliff_machine_translation_path_uses_machine_translation_subfolder(tmp_path):
