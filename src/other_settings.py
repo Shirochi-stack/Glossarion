@@ -3899,7 +3899,7 @@ def _create_response_handling_section(self, parent):
         "gemini_free_subchunk_prompt_chars_spin",
         "gemini_free_subchunk_prompt_chars",
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
-        60000,
+        7000,
         300,
         100000,
         0,
@@ -5929,9 +5929,61 @@ def configure_translation_chunk_prompt(self):
 
     # Enable + role controls
     options_box = QGroupBox("Chunk Prompt Options")
+    options_box.setStyleSheet("""
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+        QRadioButton {
+            color: white;
+            spacing: 5px;
+        }
+        QRadioButton::indicator {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #5a9fd4;
+            border-radius: 7px;
+            background-color: #2d2d2d;
+        }
+        QRadioButton::indicator:checked {
+            background-color: #5a9fd4;
+            border: 2px solid #5a9fd4;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QRadioButton:disabled {
+            color: #666666;
+        }
+        QRadioButton::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """)
     options_v = QVBoxLayout(options_box)
 
-    enable_cb = QCheckBox("Enable chunk prompt")
+    enable_cb = self._create_styled_checkbox("Enable chunk prompt")
     enable_cb.setChecked(bool(getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False))))
     self.enable_translation_chunk_prompt_checkbox = enable_cb
     options_v.addWidget(enable_cb)

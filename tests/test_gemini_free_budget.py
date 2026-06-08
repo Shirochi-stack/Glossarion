@@ -7,6 +7,8 @@ import time
 def _clear_gemini_free_budget_env(monkeypatch):
     for name in (
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
+        "GEMINI_FREE_AI_MODE_PROMPT_CHARS",
+        "GEMINI_FREE_FIXED_PROMPT_CHARS",
         "GEMINI_FREE_SUBCHUNK_URL_CHARS",
         "GEMINI_FREE_SUBCHUNK_SAFETY_CHARS",
         "GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS",
@@ -17,6 +19,7 @@ def _clear_gemini_free_budget_env(monkeypatch):
 def test_default_gemini_free_budget_allows_larger_single_request(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "15000")
+    monkeypatch.setenv("GEMINI_FREE_AI_MODE_PROMPT_CHARS", "15000")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_URL_CHARS", "15500")
     messages = [{"role": "user", "content": "x" * 14000}]
 
@@ -25,6 +28,69 @@ def test_default_gemini_free_budget_allows_larger_single_request(monkeypatch):
     assert prompt_chars > 14000
     assert url_chars < gemini_free._subchunk_url_chars()
     assert should_split is False
+
+
+def test_gemini_free_ai_mode_caps_legacy_prompt_target(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "15000")
+    messages = [{"role": "user", "content": "x" * 14000}]
+
+    should_split, prompt_chars, _url_chars = gemini_free._requires_adaptive_split(messages)
+
+    assert gemini_free._subchunk_prompt_chars() == 7000
+    assert prompt_chars > gemini_free._subchunk_prompt_chars()
+    assert should_split is True
+
+
+def test_gemini_free_compacts_large_fixed_prompt_for_ai_mode(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    messages = [
+        {"role": "system", "content": "rules " * 3000},
+        {"role": "user", "content": "Translate this:\n" + ("body text " * 300)},
+    ]
+
+    prepared = gemini_free._prepare_ai_mode_messages(messages)
+    prepared_prompt_chars = len(gemini_free._messages_to_prompt(prepared))
+
+    assert len(prepared[0]["content"]) <= gemini_free._fixed_prompt_chars()
+    assert prepared_prompt_chars < len(gemini_free._messages_to_prompt(messages))
+    assert "[... omitted" in prepared[0]["content"]
+
+
+def test_gemini_free_runtime_enforces_url_budget_after_compaction(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "14000")
+    calls = {"once": 0, "sequential": 0}
+    messages = [
+        {"role": "system", "content": "Translate Korean naturally. " * 500},
+        {"role": "user", "content": "Translate:\n" + ("그는 문을 열었다. " * 500)},
+    ]
+
+    def fake_once(*args, **kwargs):
+        calls["once"] += 1
+        raise AssertionError("Non-ASCII AI Mode request should be split before submit")
+
+    def fake_sequential(*args, **kwargs):
+        calls["sequential"] += 1
+        metadata = kwargs["split_metadata"]
+        assert metadata["url_budget_enforced"] is True
+        assert metadata["fixed_url_chars"] < metadata["url_limit_chars"]
+        for chunk in kwargs["chunks"]:
+            assert gemini_free._messages_to_search_url_chars(chunk) <= metadata["url_limit_chars"]
+        return {"content": "translated", "finish_reason": "stop", "raw_response": {}}
+
+    monkeypatch.setattr(gemini_free, "_run_search_subprocess_once", fake_once)
+    monkeypatch.setattr(gemini_free, "_run_search_subprocess_sequential", fake_sequential)
+
+    result = gemini_free._run_search_subprocess(
+        messages=messages,
+        model="gemini",
+        timeout=30,
+        max_tokens=None,
+    )
+
+    assert calls == {"once": 0, "sequential": 1}
+    assert result["content"] == "translated"
 
 
 def test_gemini_free_url_budget_can_use_encoded_url_length(monkeypatch):
@@ -84,6 +150,7 @@ def test_gemini_free_split_chunks_stay_under_prompt_and_url_budget(monkeypatch):
 def test_gemini_free_ai_mode_split_ignores_url_budget_and_limits_chunk_count(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "14000")
+    monkeypatch.setenv("GEMINI_FREE_AI_MODE_PROMPT_CHARS", "14000")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_URL_CHARS", "14500")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_SAFETY_CHARS", "600")
     monkeypatch.setenv("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", "80")
@@ -304,11 +371,11 @@ def test_gemini_free_text_node_parser_ignores_unnumbered_filler():
     assert parsed == {1: "Hello", 2: "world"}
 
 
-def test_gemini_free_subchunk_timeout_defaults_disabled(monkeypatch):
+def test_gemini_free_subchunk_timeout_defaults_to_request_timeout(monkeypatch):
     monkeypatch.delenv("GEMINI_FREE_SUBCHUNK_TIMEOUT", raising=False)
 
-    assert gemini_free._subchunk_timeout_seconds(90) == 0
-    assert gemini_free._timeout_label(gemini_free._subchunk_timeout_seconds(90), 0) == "disabled"
+    assert gemini_free._subchunk_timeout_seconds(90) == 90
+    assert gemini_free._timeout_label(gemini_free._subchunk_timeout_seconds(90), 0) == "90s"
 
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_TIMEOUT", "180")
     assert gemini_free._subchunk_timeout_seconds(90) == 180
@@ -381,6 +448,7 @@ def test_gemini_free_subprocess_uses_html_split_when_text_node_transport_still_o
 
 
 def test_gemini_free_subchunks_use_authnd_token_concurrency(monkeypatch):
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_CONCURRENCY_AUTO", "1")
     monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY_AUTO", "0")
     monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "2")
     monkeypatch.setenv("AUTHND_TOKEN_SUBPROCESS_CONCURRENCY", "8")
@@ -422,9 +490,7 @@ def test_gemini_free_subchunks_use_authnd_token_concurrency(monkeypatch):
 
 
 def test_gemini_free_subchunks_stagger_parallel_start(monkeypatch):
-    monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY_AUTO", "0")
-    monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "3")
-    monkeypatch.setenv("AUTHND_TOKEN_SUBPROCESS_CONCURRENCY", "8")
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_CONCURRENCY", "3")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_START_DELAY", "0.05")
     starts = []
     lock = threading.Lock()

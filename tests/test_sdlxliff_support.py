@@ -857,6 +857,62 @@ def test_sdlxliff_review_count_mismatch_marks_expanded_row_not_downstream_shift(
     assert SDLXLIFFReviewDialog._row_length_ratio(rows[1]) > SDLXLIFFReviewDialog._row_length_ratio(rows[0])
 
 
+def test_sdlxliff_review_manual_machine_accuracy_marks_all_inaccurate_rows_purple():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "결국, 그들은 경고를 지키듯 행동했다.",
+                "tooltip_translation": "In the end, they acted as if they had followed their warning.",
+                "target_tag": "p",
+                "target": (
+                    "In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
+                    "they plucked out her own eyeball and made her swallow it, and her ear was torn off."
+                ),
+                "status": "green",
+                "reason": "ok",
+            },
+            {
+                "source_tag": "p",
+                "source": "죽음 대신 다가온 건—",
+                "tooltip_translation": "What came instead of death—",
+                "target_tag": "p",
+                "target": '"...Warm."',
+                "status": "green",
+                "reason": "ok",
+            },
+            {
+                "source_tag": "p",
+                "source": "차갑고 검은 어둠이 점점 가까워졌다.",
+                "tooltip_translation": "The cold, black darkness is getting closer.",
+                "target_tag": "p",
+                "target": "The cold, black darkness drew nearer.",
+                "status": "green",
+                "reason": "ok",
+            },
+            {
+                "source_tag": "p",
+                "source": "피엘이 잊었다고 생각했던, 가장 오래된 집의 온기였다.",
+                "tooltip_translation": "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+                "target_tag": "",
+                "target": "",
+                "status": "red",
+                "reason": "dropped/added",
+            },
+        ],
+    }
+
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert promoted_indices == [0, 1]
+    assert piece["_machine_accuracy_review_active"] is True
+    assert piece["rows"][0]["status"] == "purple"
+    assert piece["rows"][0]["reason"].startswith("machine translation inaccurate")
+    assert piece["rows"][1]["status"] == "purple"
+    assert piece["rows"][2]["status"] == "green"
+
+
 def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
     sidecar_dir = tmp_path / "SDLXLIFF"
     sidecar_dir.mkdir()
@@ -1024,8 +1080,19 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "menu.popup(self.piece_list.viewport().mapToGlobal(pos))" in source
     assert "QKeySequence, QShortcut" in source
     assert "MANUAL_REFRESH_BUTTON_TEXT" in source
+    assert "FLAG_ACCURACY_BUTTON_TEXT" in source
+    assert "self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)" in source
+    assert "self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)" in source
+    assert "_promote_inaccurate_machine_translation_rows" in source
+    assert "MACHINE_TRANSLATION_INACCURACY_THRESHOLD" in source
+    assert "purple MT inaccurate" in source
+    assert "left = source   right = output   bar width ~= length" not in source
     assert "self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)" in source
     assert "self.refresh_review_btn.clicked.connect(self._manual_review_refresh)" in source
+    assert "_start_refresh_button_animation" in source
+    assert "_tick_refresh_button_animation" in source
+    assert "_stop_refresh_button_animation" in source
+    assert 'self.refresh_review_btn.setText(f"{frames[self._refresh_button_frame]} Refreshing")' in source
     assert 'QShortcut(QKeySequence("F5"), self)' in source
     assert "self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)" in source
     manual_refresh_body = source[

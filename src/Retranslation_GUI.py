@@ -172,6 +172,7 @@ class SDLXLIFFReviewDialog(QDialog):
         "info": "#17a2b8",
         "success": "#28a745",
         "warning": "#d39e00",
+        "purple": "#b967ff",
         "danger": "#dc3545",
         "text": "#ffffff",
         "muted": "#94a3b8",
@@ -185,6 +186,8 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_MAX_CACHED_PAGES = 7
     REVIEW_SYNC_RENDER_ROW_LIMIT = 80
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
+    FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
+    MACHINE_TRANSLATION_INACCURACY_THRESHOLD = 150.0
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     _SDLXLIFF_AUTOGEN_STATUSES = {
@@ -262,6 +265,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_text_context_menu = None
         self._piece_list_context_menu = None
         self._manual_refresh_shortcut = None
+        self._refresh_button_timer = None
+        self._refresh_button_stop_timer = None
+        self._refresh_button_frame = 0
         self._tooltip_translation_running = False
         self._tooltip_translation_batch_active = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
@@ -340,6 +346,16 @@ class SDLXLIFFReviewDialog(QDialog):
             "QPushButton:disabled { color:#94a3b8; background-color:#2a3b4d; border-color:#4a5568; }"
         )
         self.translate_tooltips_btn.clicked.connect(self._translate_current_piece_tooltips)
+        self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)
+        self.flag_accuracy_btn.setCursor(Qt.PointingHandCursor)
+        self.flag_accuracy_btn.setToolTip("Mark rows that fall below the Google Translate preview accuracy threshold.")
+        self.flag_accuracy_btn.setStyleSheet(
+            "QPushButton { background-color:#3b2450; color:#f0d9ff; border:1px solid #9c63d8; "
+            "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
+            "QPushButton:hover { background-color:#4c2d67; border-color:#b982f0; }"
+            "QPushButton:disabled { color:#a891b8; background-color:#2d2338; border-color:#604275; }"
+        )
+        self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)
         self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)
         self.refresh_review_btn.setCursor(Qt.PointingHandCursor)
         self.refresh_review_btn.setToolTip("Run the SDLXLIFF auto-refresh check now (F5).")
@@ -356,13 +372,11 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_row.setSpacing(10)
         legend_row.addWidget(self._legend_status_label("green ok", "green"))
         legend_row.addWidget(self._legend_status_label("yellow density/tag-level", "yellow"))
+        legend_row.addWidget(self._legend_status_label("purple MT inaccurate", "purple"))
         legend_row.addWidget(self._legend_status_label("red dropped/added/empty/untranslated", "red"))
-        legend_note = QLabel("left = source   right = output   bar width ~= length")
-        legend_note.setTextFormat(Qt.PlainText)
-        legend_note.setStyleSheet(f"color: {self.THEME['muted']}; font-size: 9pt; background: transparent;")
-        legend_row.addWidget(legend_note)
         legend_row.addSpacing(24)
         legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter)
+        legend_row.addWidget(self.flag_accuracy_btn, 0, Qt.AlignVCenter)
         legend_row.addStretch(1)
         legend_row.addWidget(self.refresh_review_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         detail_layout.addLayout(legend_row)
@@ -730,8 +744,59 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _tick_refresh_button_animation(self):
+        try:
+            frames = ("⟳", "◴", "◷", "◶", "◵")
+            self._refresh_button_frame = (int(self._refresh_button_frame or 0) + 1) % len(frames)
+            if self.refresh_review_btn is not None:
+                self.refresh_review_btn.setText(f"{frames[self._refresh_button_frame]} Refreshing")
+        except Exception:
+            pass
+
+    def _start_refresh_button_animation(self):
+        try:
+            if self._refresh_button_stop_timer is not None and self._refresh_button_stop_timer.isActive():
+                self._refresh_button_stop_timer.stop()
+            if self._refresh_button_timer is None:
+                timer = QTimer(self)
+                timer.setInterval(90)
+                timer.timeout.connect(self._tick_refresh_button_animation)
+                self._refresh_button_timer = timer
+            self._refresh_button_frame = -1
+            self._tick_refresh_button_animation()
+            if not self._refresh_button_timer.isActive():
+                self._refresh_button_timer.start()
+            if self.refresh_review_btn is not None:
+                self.refresh_review_btn.setEnabled(False)
+        except Exception:
+            pass
+
+    def _stop_refresh_button_animation(self):
+        try:
+            if self._refresh_button_timer is not None and self._refresh_button_timer.isActive():
+                self._refresh_button_timer.stop()
+            if self.refresh_review_btn is not None:
+                self.refresh_review_btn.setEnabled(True)
+                self.refresh_review_btn.setText(self.MANUAL_REFRESH_BUTTON_TEXT)
+        except Exception:
+            pass
+
+    def _queue_stop_refresh_button_animation(self, delay_ms=350):
+        try:
+            if self._refresh_button_stop_timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._stop_refresh_button_animation)
+                self._refresh_button_stop_timer = timer
+            self._refresh_button_stop_timer.start(max(0, int(delay_ms)))
+        except Exception:
+            self._stop_refresh_button_animation()
+
     def _manual_review_refresh(self):
+        self._start_refresh_button_animation()
         self._silent_review_refresh()
+        if not self._refreshing_review_data:
+            self._queue_stop_refresh_button_animation()
 
     def _silent_review_refresh(self):
         try:
@@ -837,6 +902,7 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         finally:
             self._refreshing_review_data = False
+            self._queue_stop_refresh_button_animation(150)
 
     def reopen_for_path(self, output_dir=None, current_path=None):
         output_changed = False
@@ -1410,6 +1476,7 @@ class SDLXLIFFReviewDialog(QDialog):
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
+            "purple": self.THEME["purple"],
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label = QLabel(text)
@@ -1586,13 +1653,15 @@ class SDLXLIFFReviewDialog(QDialog):
     def _clear_top_skew_promotions(rows):
         for row in rows or []:
             if row.pop("_top_skew_promoted", False):
+                if row.get("_machine_accuracy_promoted"):
+                    continue
                 row["status"] = "green"
                 row["reason"] = "ok"
 
     @staticmethod
-    def _row_expected_comparison_text(row):
+    def _row_expected_comparison_text(row, use_machine_translation=False):
         source_text = str((row or {}).get("source", "") or "").strip()
-        if not (row or {}).get("tooltip_translation_pending"):
+        if use_machine_translation and not (row or {}).get("tooltip_translation_pending"):
             source_text = str((row or {}).get("tooltip_translation", "") or "").strip() or source_text
         return source_text
 
@@ -1616,8 +1685,8 @@ class SDLXLIFFReviewDialog(QDialog):
         return True, common_tokens / max(1, len(source_tokens))
 
     @classmethod
-    def _row_skew_metrics(cls, row):
-        source_text = cls._row_expected_comparison_text(row)
+    def _row_skew_metrics(cls, row, use_machine_translation=False):
+        source_text = cls._row_expected_comparison_text(row, use_machine_translation=use_machine_translation)
         target_text = str((row or {}).get("target", "") or "").strip()
         if not source_text or not target_text:
             return None
@@ -1654,11 +1723,11 @@ class SDLXLIFFReviewDialog(QDialog):
         }
 
     @classmethod
-    def _row_length_ratio(cls, row):
-        metrics = cls._row_skew_metrics(row)
+    def _row_length_ratio(cls, row, use_machine_translation=False):
+        metrics = cls._row_skew_metrics(row, use_machine_translation=use_machine_translation)
         return None if metrics is None else metrics["ratio"]
 
-    def _promote_top_skewed_row_for_count_mismatch(self, rows, source_count, target_count):
+    def _promote_top_skewed_row_for_count_mismatch(self, rows, source_count, target_count, use_machine_translation=False):
         if source_count == target_count:
             return False
         if not any(row.get("status") == "red" for row in rows or []):
@@ -1671,7 +1740,7 @@ class SDLXLIFFReviewDialog(QDialog):
         for row_index, row in enumerate(rows or []):
             if row.get("status") not in {"green", "yellow"}:
                 continue
-            metrics = self._row_skew_metrics(row)
+            metrics = self._row_skew_metrics(row, use_machine_translation=use_machine_translation)
             if metrics is None:
                 continue
             candidates.append((row_index, row, metrics))
@@ -1727,7 +1796,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_token_overlap = float(metrics.get("source_token_overlap") or 0.0)
                 next_source_overlap = 0.0
                 for next_row in (rows or [])[row_index + 1:row_index + 3]:
-                    next_source_text = self._row_expected_comparison_text(next_row)
+                    next_source_text = self._row_expected_comparison_text(
+                        next_row,
+                        use_machine_translation=use_machine_translation,
+                    )
                     comparable, overlap = self._latin_token_overlap(next_source_text, row.get("target"))
                     if comparable:
                         next_source_overlap = max(next_source_overlap, overlap)
@@ -1756,6 +1828,121 @@ class SDLXLIFFReviewDialog(QDialog):
         best_row["reason"] = f"top translated-column skew ({best_ratio:.2f}x)"
         best_row["_top_skew_promoted"] = True
         return True
+
+    @staticmethod
+    def _clear_machine_accuracy_promotions(rows):
+        for row in rows or []:
+            if row.pop("_machine_accuracy_promoted", False):
+                row["status"] = row.pop("_machine_accuracy_previous_status", "green")
+                row["reason"] = row.pop("_machine_accuracy_previous_reason", "ok")
+            row.pop("_machine_accuracy_previous_status", None)
+            row.pop("_machine_accuracy_previous_reason", None)
+
+    def _machine_translation_accuracy_score(self, rows, row_index):
+        try:
+            row = rows[row_index]
+        except Exception:
+            return None
+        if row.get("status") == "red":
+            return None
+        if row.get("tooltip_translation_pending"):
+            return None
+        expected = str(row.get("tooltip_translation") or "").strip()
+        target = str(row.get("target") or "").strip()
+        if not expected or not target:
+            return None
+        if not row.get("source_tag") or not row.get("target_tag"):
+            return None
+
+        expected_tokens = self._comparison_tokens(expected)
+        target_tokens = self._comparison_tokens(target)
+        if expected_tokens and target_tokens:
+            common = sum((Counter(expected_tokens) & Counter(target_tokens)).values())
+            token_f1 = (2.0 * common) / max(1, len(expected_tokens) + len(target_tokens))
+        else:
+            token_f1 = 0.0
+        similarity = SequenceMatcher(None, expected.lower(), target.lower()).ratio()
+        expected_len = max(1, len(expected))
+        target_len = max(1, len(target))
+        length_ratio = max(expected_len, target_len) / max(1, min(expected_len, target_len))
+        expected_token_count = max(1, len(expected_tokens))
+        target_token_count = max(1, len(target_tokens))
+        token_ratio = max(expected_token_count, target_token_count) / max(1, min(expected_token_count, target_token_count))
+        return (
+            (1.0 - token_f1) * 120.0
+            + (1.0 - similarity) * 70.0
+            + min(6.0, length_ratio - 1.0) * 55.0
+            + min(6.0, token_ratio - 1.0) * 45.0
+        )
+
+    def _promote_inaccurate_machine_translation_rows(self, piece, threshold=None):
+        rows = piece.get("rows") or []
+        if not rows:
+            return None
+        threshold = float(threshold if threshold is not None else self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
+        self._clear_machine_accuracy_promotions(rows)
+        self._clear_top_skew_promotions(rows)
+
+        scored_rows = []
+        promoted_indices = []
+        for row_index, _row in enumerate(rows):
+            score = self._machine_translation_accuracy_score(rows, row_index)
+            if score is None:
+                continue
+            scored_rows.append((row_index, score))
+            if score >= threshold:
+                promoted_indices.append((row_index, score))
+
+        if not scored_rows:
+            piece.pop("_machine_accuracy_review_active", None)
+            return None
+
+        piece["_machine_accuracy_review_active"] = True
+        for row_index, score in promoted_indices:
+            row = rows[row_index]
+            row["_machine_accuracy_previous_status"] = row.get("status", "green")
+            row["_machine_accuracy_previous_reason"] = row.get("reason", "ok")
+            row["_machine_accuracy_promoted"] = True
+            row["status"] = "purple"
+            row["reason"] = f"machine translation inaccurate ({score:.0f} >= {threshold:.0f})"
+        return [row_index for row_index, _score in promoted_indices]
+
+    def _flag_current_piece_inaccurate_translations(self):
+        row = self._displayed_piece_row()
+        if row < 0 or row >= len(self.pieces):
+            return
+        piece = self.pieces[row]
+        rows = piece.get("rows") or []
+        before = [
+            (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+            for row_data in rows
+        ]
+        promoted_indices = self._promote_inaccurate_machine_translation_rows(piece)
+        if promoted_indices is None:
+            try:
+                self.save_status_label.setText("Generate Google Translate Preview first")
+            except Exception:
+                pass
+            return
+
+        self._refresh_piece_summary(piece)
+        changed_rows = [
+            row_index for row_index, row_data in enumerate(rows)
+            if row_index >= len(before)
+            or before[row_index] != (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+        ]
+        self._invalidate_piece_render_model(piece, restart_preload=False)
+        self._refresh_piece_list_item(row)
+        self._refresh_piece_header(row)
+        for row_index in changed_rows:
+            self._refresh_visible_review_row_status(row, row_index)
+        try:
+            if promoted_indices:
+                self.save_status_label.setText(f"Flagged {len(promoted_indices)} inaccurate machine translation row(s)")
+            else:
+                self.save_status_label.setText("No inaccurate machine translation rows found")
+        except Exception:
+            pass
 
     @staticmethod
     def _heading_tag_level_changed(source_tag, target_tag):
@@ -1863,13 +2050,20 @@ class SDLXLIFFReviewDialog(QDialog):
         source_count = self._review_piece_non_empty_count(rows, "source")
         target_count = self._review_piece_non_empty_count(rows, "target")
         self._clear_top_skew_promotions(rows)
-        self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count)
+        manual_accuracy_active = (
+            bool(piece.get("_machine_accuracy_review_active"))
+            or any(row.get("_machine_accuracy_promoted") for row in rows)
+        )
+        if not manual_accuracy_active:
+            self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count)
         red_count = sum(1 for row in rows if row.get("status") == "red")
         yellow_count = sum(1 for row in rows if row.get("status") == "yellow")
+        purple_count = sum(1 for row in rows if row.get("status") == "purple")
         piece["source_count"] = source_count
         piece["target_count"] = target_count
         piece["red_count"] = red_count
         piece["yellow_count"] = yellow_count
+        piece["purple_count"] = purple_count
         piece["count_ratio"] = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
         piece["mismatch"] = source_count != target_count or red_count > 0
         return piece
@@ -2086,6 +2280,7 @@ class SDLXLIFFReviewDialog(QDialog):
             rows = []
             red_count = 0
             yellow_count = 0
+            purple_count = 0
             aligned_units = self._align_review_units(source_review_units, target_review_units)
             for row_idx, (src, tgt) in enumerate(aligned_units):
                 status, reason = self._row_status(
@@ -2129,6 +2324,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "count_ratio": count_ratio,
                 "red_count": red_count,
                 "yellow_count": yellow_count,
+                "purple_count": purple_count,
                 "mismatch": source_count != target_count or red_count > 0,
                 "rows": rows,
             }
@@ -2149,6 +2345,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "count_ratio": 0.0,
                 "red_count": 1,
                 "yellow_count": 0,
+                "purple_count": 0,
                 "mismatch": True,
                 "error": str(exc),
                 "rows": [],
@@ -2247,6 +2444,8 @@ class SDLXLIFFReviewDialog(QDialog):
             item.setData(Qt.UserRole, row)
             if piece["mismatch"]:
                 item.setForeground(QColor(self.THEME["danger"]))
+            elif piece.get("purple_count"):
+                item.setForeground(QColor(self.THEME["purple"]))
             elif piece["yellow_count"]:
                 item.setForeground(QColor(self.THEME["warning"]))
             else:
@@ -2283,6 +2482,8 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             if piece["mismatch"]:
                 item.setForeground(QColor(self.THEME["danger"]))
+            elif piece.get("purple_count"):
+                item.setForeground(QColor(self.THEME["purple"]))
             elif piece["yellow_count"]:
                 item.setForeground(QColor(self.THEME["warning"]))
             else:
@@ -2297,8 +2498,9 @@ class SDLXLIFFReviewDialog(QDialog):
             if self.piece_list.currentRow() != piece_index:
                 return
             piece = self.pieces[piece_index]
-            status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
-            flagged = piece["red_count"] + piece["yellow_count"]
+            warning_count = piece.get("yellow_count", 0) + piece.get("purple_count", 0)
+            status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if warning_count else "OK")
+            flagged = piece["red_count"] + warning_count
             output_name = self._output_name_for_piece(piece)
             review_label = piece.get("review_label") or f"[{piece_index + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
             self.header_label.setText(
@@ -3068,6 +3270,7 @@ class SDLXLIFFReviewDialog(QDialog):
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
+            "purple": self.THEME["purple"],
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label.setStyleSheet(
@@ -3087,6 +3290,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return {
             "green": (self.THEME["panel"], self.THEME["accent"], self.THEME["info"], self.THEME["success"], self.THEME["border"]),
             "yellow": ("#3d3320", self.THEME["accent"], self.THEME["warning"], self.THEME["warning"], self.THEME["warning"]),
+            "purple": ("#32243f", self.THEME["accent"], self.THEME["purple"], self.THEME["purple"], self.THEME["purple"]),
             "red": ("#3a2428", self.THEME["accent"], self.THEME["danger"], self.THEME["danger"], self.THEME["danger"]),
         }
 
@@ -3126,6 +3330,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 tag_color = {
                     "green": self.THEME["success"],
                     "yellow": self.THEME["warning"],
+                    "purple": self.THEME["purple"],
                     "red": self.THEME["danger"],
                 }.get(row_data["status"], self.THEME["muted"])
                 tag_label.setStyleSheet(
@@ -4703,8 +4908,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._book_entries[self._book_index]["current_path"] = self.current_path
         except Exception:
             pass
-        status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if piece["yellow_count"] else "OK")
-        flagged = piece["red_count"] + piece["yellow_count"]
+        warning_count = piece.get("yellow_count", 0) + piece.get("purple_count", 0)
+        status_text = "MISMATCH" if piece["mismatch"] else ("WARN" if warning_count else "OK")
+        flagged = piece["red_count"] + warning_count
         output_name = self._output_name_for_piece(piece)
         review_label = piece.get("review_label") or f"[{row + 1:03d}] Ch.{self._format_chapter_number(piece.get('chapter_num'))} |"
         self.header_label.setText(

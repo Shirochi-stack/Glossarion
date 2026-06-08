@@ -18066,7 +18066,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
             'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',
             'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',
-            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 60000, 300, 100000),
+            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 7000, 300, 100000),
             'GEMINI_FREE_SUBCHUNK_URL_CHARS': _bounded_config_int('gemini_free_subchunk_url_chars_var', 'gemini_free_subchunk_url_chars', 14500, 1000, 200000),
             'GEMINI_FREE_SUBCHUNK_SAFETY_CHARS': _bounded_config_int('gemini_free_subchunk_safety_chars_var', 'gemini_free_subchunk_safety_chars', 600, 0, 20000),
             'GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS': _bounded_config_int('gemini_free_min_subchunk_body_chars_var', 'gemini_free_min_subchunk_body_chars', 80, 1, 50000),
@@ -27209,7 +27209,7 @@ Important rules:
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),
                 ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),
-                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 60000, lambda v: min(100000, max(300, safe_int(v, 60000)))),
+                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 7000, lambda v: min(100000, max(300, safe_int(v, 7000)))),
                 ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),
                 ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),
                 ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),
@@ -27642,7 +27642,7 @@ Important rules:
             env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', authnd_subprocess_limit))
             env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))
             env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))
-            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 60000, 300, 100000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 7000, 300, 100000)))
             env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_URL_CHARS', _config_int('gemini_free_subchunk_url_chars', 14500, 1000, 200000)))
             env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _config_int('gemini_free_subchunk_safety_chars', 600, 0, 20000)))
             env_vars_set.append(_update_env('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _config_int('gemini_free_min_subchunk_body_chars', 80, 1, 50000)))
@@ -28196,7 +28196,7 @@ Important rules:
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
                 ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),
                 ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),
-                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 60000, 300, 100000)),
+                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 7000, 300, 100000)),
                 ('GEMINI_FREE_SUBCHUNK_URL_CHARS', _int_config('gemini_free_subchunk_url_chars', 14500, 1000, 200000)),
                 ('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _int_config('gemini_free_subchunk_safety_chars', 600, 0, 20000)),
                 ('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _int_config('gemini_free_min_subchunk_body_chars', 80, 1, 50000)),

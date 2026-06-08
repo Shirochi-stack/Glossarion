@@ -40,9 +40,10 @@ DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
 DEFAULT_SUBMIT_MODE = "ui"
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 60000
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 7000
 DEFAULT_SUBCHUNK_URL_CHARS = 14500
 DEFAULT_SUBCHUNK_SAFETY_CHARS = 600
+DEFAULT_FIXED_PROMPT_CHARS = 3000
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
 DEFAULT_SUBCHUNK_TIMEOUT = 0
 DEFAULT_SUBCHUNK_START_DELAY = 5.0
@@ -524,6 +525,71 @@ def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _truncate_middle(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    max_chars = int(max_chars or 0)
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    marker = f"\n\n[... omitted {len(text) - max_chars:,} chars to fit Gemini Free AI Mode prompt budget ...]\n\n"
+    if len(marker) >= max_chars:
+        return text[:max_chars]
+    remaining = max_chars - len(marker)
+    head_chars = max(1, int(remaining * 0.65))
+    tail_chars = max(1, remaining - head_chars)
+    return f"{text[:head_chars].rstrip()}{marker}{text[-tail_chars:].lstrip()}"
+
+
+def _prepare_ai_mode_messages(
+    messages: Iterable[Dict[str, Any]],
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
+    if not source_messages:
+        return []
+    if len(_messages_to_prompt(source_messages)) <= _subchunk_prompt_chars():
+        return source_messages
+
+    user_indices = [
+        idx for idx, message in enumerate(source_messages)
+        if str(message.get("role") or "user").strip().lower() not in ("system", "assistant")
+    ]
+    if not user_indices:
+        return source_messages
+
+    split_idx = user_indices[-1]
+    fixed_indices = [idx for idx in range(len(source_messages)) if idx != split_idx]
+    fixed_texts = [
+        (idx, _content_to_text(source_messages[idx].get("content")))
+        for idx in fixed_indices
+        if _content_to_text(source_messages[idx].get("content")).strip()
+    ]
+    if not fixed_texts:
+        return source_messages
+
+    total_fixed_chars = sum(len(text) for _, text in fixed_texts)
+    fixed_budget = min(_fixed_prompt_chars(), max(500, _subchunk_prompt_chars() - 1500))
+    if total_fixed_chars <= fixed_budget:
+        return source_messages
+
+    compacted = [dict(message) for message in source_messages]
+    per_message_budget = max(100, fixed_budget // max(1, len(fixed_texts)))
+    for idx, text in fixed_texts:
+        compacted[idx]["content"] = _truncate_middle(text, min(len(text), per_message_budget))
+
+    before_prompt_chars = len(_messages_to_prompt(source_messages))
+    after_prompt_chars = len(_messages_to_prompt(compacted))
+    _log(
+        log_fn,
+        "Gemini Free: compacted fixed prompt for AI Mode "
+        f"({total_fixed_chars:,} fixed chars, {before_prompt_chars:,} -> {after_prompt_chars:,} prompt chars, "
+        f"fixed budget: {fixed_budget:,})",
+    )
+    return compacted
+
+
 def _messages_to_search_url_chars(messages: Iterable[Dict[str, Any]]) -> int:
     return len(_build_search_url(_messages_to_prompt(messages)))
 
@@ -564,6 +630,9 @@ def _subchunk_concurrency_limit() -> int:
     if explicit > 0:
         return max(1, explicit)
 
+    if not _env_bool("GEMINI_FREE_SUBCHUNK_CONCURRENCY_AUTO", False):
+        return 1
+
     if _env_bool("AUTHND_TOKEN_CONCURRENCY_AUTO", False):
         token_limit, subprocess_limit = _auto_token_limits()
     else:
@@ -573,7 +642,13 @@ def _subchunk_concurrency_limit() -> int:
 
 
 def _subchunk_prompt_chars() -> int:
-    return max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+    configured = max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+    ai_mode_ceiling = max(300, _env_int("GEMINI_FREE_AI_MODE_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+    return min(configured, ai_mode_ceiling)
+
+
+def _fixed_prompt_chars() -> int:
+    return max(500, _env_int("GEMINI_FREE_FIXED_PROMPT_CHARS", DEFAULT_FIXED_PROMPT_CHARS))
 
 
 def _subchunk_url_chars() -> int:
@@ -615,10 +690,10 @@ def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
 
 
 def _subchunk_timeout_seconds(request_timeout: int) -> int:
-    del request_timeout
     configured = _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT)
     if configured <= 0:
-        return 0
+        inherited = _timeout_seconds(request_timeout, DEFAULT_TIMEOUT)
+        return DEFAULT_TIMEOUT if inherited is None else max(30, int(inherited))
     return max(30, configured)
 
 
@@ -2060,6 +2135,7 @@ def _send_chat_completion_qt_once(
     if actual_model.lower() != DEFAULT_MODEL:
         raise RuntimeError(f"Gemini Free only supports search/{DEFAULT_MODEL}; got search/{actual_model}")
 
+    messages = _prepare_ai_mode_messages(messages, log_fn=log_fn)
     prompt = _messages_to_prompt(messages)
     if not prompt:
         raise RuntimeError("Gemini Free request has an empty prompt")
@@ -2130,12 +2206,14 @@ def _send_chat_completion_split(
     log_fn: Optional[Callable[[str], None]] = None,
     user_agent: Optional[str] = None,
     target_prompt_chars: Optional[int] = None,
+    enforce_url_budget: bool = True,
 ) -> Dict[str, Any]:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     max_prompt_chars = int(target_prompt_chars or _subchunk_prompt_chars())
     chunks, split_metadata = _split_messages_for_search_budget(
         source_messages,
         max_prompt_chars,
+        enforce_url_budget=enforce_url_budget,
         return_metadata=True,
     )
     if len(chunks) <= 1:
@@ -2233,13 +2311,14 @@ def _send_chat_completion_qt(
     log_fn: Optional[Callable[[str], None]] = None,
     user_agent: Optional[str] = None,
 ) -> Dict[str, Any]:
-    source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    should_split, prompt_chars, url_chars = _requires_adaptive_split(source_messages)
+    source_messages = _prepare_ai_mode_messages(messages, log_fn=log_fn)
+    should_split, prompt_chars, url_chars = _requires_adaptive_split(source_messages, enforce_url_budget=True)
     if _adaptive_split_enabled() and should_split:
         html_text_node_transport = _build_html_text_node_transport(source_messages)
         if html_text_node_transport:
             transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
-                html_text_node_transport["messages"]
+                html_text_node_transport["messages"],
+                enforce_url_budget=True,
             )
             if not transport_should_split:
                 _log(
@@ -2604,13 +2683,14 @@ def _run_search_subprocess(
     max_tokens: Optional[int],
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    message_list = [dict(message) for message in (messages or []) if isinstance(message, dict)]
-    should_split, prompt_chars, url_chars = _requires_adaptive_split(message_list)
+    message_list = _prepare_ai_mode_messages(messages, log_fn=log_fn)
+    should_split, prompt_chars, url_chars = _requires_adaptive_split(message_list, enforce_url_budget=True)
     if _adaptive_split_enabled() and should_split:
         html_text_node_transport = _build_html_text_node_transport(message_list)
         if html_text_node_transport:
             transport_should_split, transport_prompt_chars, transport_url_chars = _requires_adaptive_split(
-                html_text_node_transport["messages"]
+                html_text_node_transport["messages"],
+                enforce_url_budget=True,
             )
             if not transport_should_split:
                 _log(
@@ -2637,6 +2717,7 @@ def _run_search_subprocess(
         planned_chunks, split_metadata = _split_messages_for_search_budget(
             message_list,
             target_chars,
+            enforce_url_budget=True,
             return_metadata=True,
         )
         estimated_subchunks = max(1, len(planned_chunks))
@@ -2681,6 +2762,7 @@ def _run_search_subprocess(
         planned_chunks, split_metadata = _split_messages_for_search_budget(
             message_list,
             fallback_target,
+            enforce_url_budget=True,
             return_metadata=True,
         )
         if len(planned_chunks) <= 1:
