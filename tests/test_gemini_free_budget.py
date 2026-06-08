@@ -7,6 +7,7 @@ import time
 def _clear_gemini_free_budget_env(monkeypatch):
     for name in (
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
+        "GEMINI_FREE_AI_MODE_PROMPT_CHARS",
         "GEMINI_FREE_SUBCHUNK_URL_CHARS",
         "GEMINI_FREE_SUBCHUNK_SAFETY_CHARS",
         "GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS",
@@ -14,30 +15,30 @@ def _clear_gemini_free_budget_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_gemini_free_prompt_target_clamps_oversized_setting(monkeypatch):
+def test_default_gemini_free_budget_allows_larger_single_request(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "15000")
+    monkeypatch.setenv("GEMINI_FREE_AI_MODE_PROMPT_CHARS", "15000")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_URL_CHARS", "15500")
     messages = [{"role": "user", "content": "x" * 14000}]
 
     should_split, prompt_chars, url_chars = gemini_free._requires_adaptive_split(messages)
 
-    assert gemini_free._subchunk_prompt_chars() == gemini_free.DEFAULT_SUBCHUNK_PROMPT_CHARS
     assert prompt_chars > 14000
     assert url_chars < gemini_free._subchunk_url_chars()
-    assert should_split is True
+    assert should_split is False
 
 
-def test_gemini_free_prompt_target_uses_visible_setting_within_ceiling(monkeypatch):
+def test_gemini_free_ai_mode_caps_legacy_prompt_target(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
-    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "6500")
-    messages = [{"role": "user", "content": "x" * 6000}]
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "15000")
+    messages = [{"role": "user", "content": "x" * 14000}]
 
     should_split, prompt_chars, _url_chars = gemini_free._requires_adaptive_split(messages)
 
-    assert gemini_free._subchunk_prompt_chars() == 6500
-    assert prompt_chars < gemini_free._subchunk_prompt_chars()
-    assert should_split is False
+    assert gemini_free._subchunk_prompt_chars() == 7000
+    assert prompt_chars > gemini_free._subchunk_prompt_chars()
+    assert should_split is True
 
 
 def test_gemini_free_preserves_large_fixed_prompt_and_warns(monkeypatch):
@@ -151,6 +152,7 @@ def test_gemini_free_split_chunks_stay_under_prompt_and_url_budget(monkeypatch):
 def test_gemini_free_ai_mode_split_ignores_url_budget_and_limits_chunk_count(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "14000")
+    monkeypatch.setenv("GEMINI_FREE_AI_MODE_PROMPT_CHARS", "14000")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_URL_CHARS", "14500")
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_SAFETY_CHARS", "600")
     monkeypatch.setenv("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", "80")
@@ -166,11 +168,10 @@ def test_gemini_free_ai_mode_split_ignores_url_budget_and_limits_chunk_count(mon
         return_metadata=True,
     )
 
-    assert gemini_free._subchunk_prompt_chars() == gemini_free.DEFAULT_SUBCHUNK_PROMPT_CHARS
     assert metadata["fixed_prompt_chars"] > gemini_free._subchunk_prompt_chars()
     assert metadata["url_budget_enforced"] is False
     assert metadata["body_budget_chars"] > 80
-    assert len(chunks) <= 5
+    assert len(chunks) <= 4
     for chunk in chunks:
         assert len(gemini_free._messages_to_prompt(chunk)) <= metadata["prompt_limit_chars"]
 
@@ -363,6 +364,36 @@ def test_gemini_free_html_request_translates_text_nodes_and_restores_tags(monkey
     assert result["raw_response"]["html_text_node_translated"] == 3
 
 
+def test_gemini_free_html_text_node_transport_ignores_payload_text_override(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT", "text")
+
+    messages = [{
+        "role": "user",
+        "content": "<html><body><h1>Title</h1><p>Hello <b>world</b>.</p><p>Again.</p></body></html>",
+    }]
+
+    assert gemini_free._messages_expect_html_response(messages) is True
+    transport = gemini_free._build_html_text_node_transport(messages)
+    assert transport is not None
+    assert transport["count"] == 5
+
+
+def test_gemini_free_html_split_ignores_payload_text_override(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PAYLOAD_FORMAT", "text")
+
+    chunks, metadata = gemini_free._split_messages_for_search_budget(
+        [{"role": "user", "content": "<html><body><h1>Title</h1><p>Hello <b>world</b>.</p></body></html>"}],
+        gemini_free._subchunk_prompt_chars(),
+        return_metadata=True,
+    )
+
+    assert chunks
+    assert metadata["payload_format"] == "html"
+    assert metadata["splitter"] == "beautifulsoup4"
+
+
 def test_gemini_free_text_node_parser_ignores_unnumbered_filler():
     parsed = gemini_free._parse_html_text_node_translations(
         "[1] Hello\n[2] world\nPlease send more text if needed.",
@@ -372,11 +403,11 @@ def test_gemini_free_text_node_parser_ignores_unnumbered_filler():
     assert parsed == {1: "Hello", 2: "world"}
 
 
-def test_gemini_free_subchunk_timeout_zero_disables_timeout(monkeypatch):
+def test_gemini_free_subchunk_timeout_defaults_to_request_timeout(monkeypatch):
     monkeypatch.delenv("GEMINI_FREE_SUBCHUNK_TIMEOUT", raising=False)
 
-    assert gemini_free._subchunk_timeout_seconds(90) == 0
-    assert gemini_free._timeout_label(gemini_free._subchunk_timeout_seconds(90), 0) == "disabled"
+    assert gemini_free._subchunk_timeout_seconds(90) == 90
+    assert gemini_free._timeout_label(gemini_free._subchunk_timeout_seconds(90), 0) == "90s"
 
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_TIMEOUT", "180")
     assert gemini_free._subchunk_timeout_seconds(90) == 180
@@ -448,7 +479,7 @@ def test_gemini_free_subprocess_uses_html_split_when_text_node_transport_still_o
     assert result["content"] == "<div><p>split</p></div>"
 
 
-def test_gemini_free_subchunks_use_authnd_token_concurrency_when_override_zero(monkeypatch):
+def test_gemini_free_subchunks_use_authnd_token_concurrency(monkeypatch):
     monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY_AUTO", "0")
     monkeypatch.setenv("AUTHND_TOKEN_CONCURRENCY", "2")
     monkeypatch.setenv("AUTHND_TOKEN_SUBPROCESS_CONCURRENCY", "8")

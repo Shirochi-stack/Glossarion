@@ -619,7 +619,8 @@ def _subchunk_concurrency_limit() -> int:
 
 def _subchunk_prompt_chars() -> int:
     configured = max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
-    return min(configured, DEFAULT_SUBCHUNK_PROMPT_CHARS)
+    ai_mode_ceiling = max(300, _env_int("GEMINI_FREE_AI_MODE_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
+    return min(configured, ai_mode_ceiling)
 
 
 def _subchunk_url_chars() -> int:
@@ -663,7 +664,8 @@ def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
 def _subchunk_timeout_seconds(request_timeout: int) -> int:
     configured = _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT)
     if configured <= 0:
-        return 0
+        inherited = _timeout_seconds(request_timeout, DEFAULT_TIMEOUT)
+        return DEFAULT_TIMEOUT if inherited is None else max(30, int(inherited))
     return max(30, configured)
 
 
@@ -738,6 +740,19 @@ def _configured_text_extraction_method() -> str:
 def _looks_like_html_payload(text: str) -> bool:
     raw = str(text or "")
     return bool(re.search(r"<[A-Za-z][A-Za-z0-9:_-]*(?:\s[^<>]*)?/?>|</[A-Za-z][A-Za-z0-9:_-]*>", raw))
+
+
+def _content_looks_like_html_payload(text: str) -> bool:
+    raw = str(text or "")
+    if not raw:
+        return False
+    return bool(
+        re.search(
+            r"<(?:!doctype|html|head|body|article|section|main|div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)\b|</(?:div|p|h[1-6]|ul|ol|li|table|tr|td|blockquote)>",
+            raw,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _payload_format_for_split(text: str) -> str:
@@ -908,7 +923,7 @@ def _split_messages_for_search_budget(
     if not body.strip():
         return ([source_messages], {}) if return_metadata else [source_messages]
 
-    payload_format = _payload_format_for_split(body)
+    payload_format = "html" if _content_looks_like_html_payload(body) else _payload_format_for_split(body)
     splitter_name = _splitter_name_for_payload(payload_format)
     fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
     def make_messages(chunk_text: str) -> List[Dict[str, Any]]:
@@ -1090,7 +1105,7 @@ def _build_html_text_node_transport(messages: Iterable[Dict[str, Any]]) -> Optio
     original_user = source_messages[split_idx]
     user_text = _content_to_text(original_user.get("content"))
     prefix, body = _split_user_instruction_prefix(user_text)
-    if _payload_format_for_split(body) != "html":
+    if not _content_looks_like_html_payload(body):
         return None
 
     try:
@@ -1313,7 +1328,9 @@ def _messages_expect_html_response(messages: Iterable[Dict[str, Any]]) -> bool:
         role = str(message.get("role") or "user").strip().lower() or "user"
         if role in ("system", "assistant"):
             continue
-        if _payload_format_for_split(_content_to_text(message.get("content"))) == "html":
+        text = _content_to_text(message.get("content"))
+        _prefix, body = _split_user_instruction_prefix(text)
+        if _content_looks_like_html_payload(body):
             return True
     return False
 
