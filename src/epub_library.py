@@ -7115,6 +7115,39 @@ class EpubLibraryDialog(QDialog):
     def _cards_for_tab_key(self, tab_key: str) -> list[_BookCard]:
         return self._comp_cards if tab_key == "comp" else self._ip_cards
 
+    def _sync_card_size_from_combo(self) -> None:
+        combo = getattr(self, "_size_combo", None)
+        if combo is not None:
+            try:
+                size_key = combo.itemData(combo.currentIndex())
+                if size_key in _SIZE_PRESETS:
+                    self._card_size = size_key
+                    return
+            except Exception:
+                pass
+        if self._card_size not in _SIZE_PRESETS:
+            self._card_size = SIZE_COMPACT
+
+    def _start_visible_card_refresh(self) -> None:
+        self._sync_card_size_from_combo()
+        for widget in (
+            getattr(self, "_tabs", None),
+            getattr(self, "_ip_scroll", None),
+            getattr(self, "_comp_scroll", None),
+            getattr(self, "_ip_grid_container", None),
+            getattr(self, "_comp_grid_container", None),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.updateGeometry()
+                layout = widget.layout()
+                if layout is not None:
+                    layout.activate()
+            except Exception:
+                pass
+        self._refresh_view()
+
     def _populate_tab(self, tab_key: str) -> None:
         if tab_key == "comp":
             self._populate_completed(self._filtered(self._completed_books))
@@ -9002,6 +9035,7 @@ class EpubLibraryDialog(QDialog):
 
     def _refresh_view(self):
         """Re-filter + render the active tab first; defer the other tab."""
+        self._sync_card_size_from_combo()
         active = self._active_card_tab_key()
         inactive = self._other_card_tab_key(active)
         self._dirty_card_tabs.add(inactive)
@@ -9107,8 +9141,7 @@ class EpubLibraryDialog(QDialog):
             # Card columns depend on QScrollArea viewport width. Start the
             # stream after the tabs are visible so startup does not compute
             # a one-column grid from the hidden loading-overlay geometry.
-            QTimer.singleShot(0, self._refresh_view)
-            QTimer.singleShot(80, self._schedule_grid_reflow)
+            QTimer.singleShot(40, self._start_visible_card_refresh)
 
         QTimer.singleShot(0, _finish_initial_render)
 
