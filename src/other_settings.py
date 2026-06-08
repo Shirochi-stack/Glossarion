@@ -3883,6 +3883,24 @@ def _create_response_handling_section(self, parent):
     gemini_toggles_h.addStretch()
     section_v.addWidget(gemini_toggles_row)
 
+    gemini_advanced_row = QWidget()
+    gemini_advanced_h = QHBoxLayout(gemini_advanced_row)
+    gemini_advanced_h.setContentsMargins(16, 0, 0, 0)
+    gemini_advanced_h.setSpacing(6)
+    gemini_advanced_button = QPushButton("Show chunk tuning")
+    gemini_advanced_button.setCheckable(True)
+    gemini_advanced_metrics = QFontMetrics(gemini_advanced_button.font())
+    gemini_advanced_width = max(
+        gemini_advanced_metrics.horizontalAdvance("Show chunk tuning"),
+        gemini_advanced_metrics.horizontalAdvance("Hide chunk tuning"),
+    ) + 44
+    gemini_advanced_button.setFixedSize(gemini_advanced_width, 34)
+    gemini_advanced_button.setToolTip("Show or hide detailed Gemini Free browser chunking controls.")
+    setattr(self, "gemini_free_chunk_tuning_button", gemini_advanced_button)
+    gemini_advanced_h.addWidget(gemini_advanced_button, 0, Qt.AlignLeft)
+    gemini_advanced_h.addStretch()
+    section_v.addWidget(gemini_advanced_row)
+
     gemini_controls = QWidget()
     gemini_controls.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     gemini_grid = QGridLayout(gemini_controls)
@@ -3901,10 +3919,10 @@ def _create_response_handling_section(self, parent):
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
         7000,
         300,
-        100000,
+        7000,
         0,
         100,
-        "Target prompt character budget before Gemini Free adaptive splitting is used.",
+        "Target prompt character budget before Gemini Free adaptive splitting is used. Clamped to the AI Mode browser ceiling.",
     ), 0, 0, Qt.AlignLeft)
     gemini_grid.addWidget(_make_gemini_spin_control(
         "URL limit chars:",
@@ -4014,6 +4032,14 @@ def _create_response_handling_section(self, parent):
         ["balanced", "greedy"],
         "balanced spreads work evenly across the planned chunks; greedy keeps the old first-fit packing.",
     ), 4, 1, Qt.AlignLeft)
+    gemini_controls.setVisible(False)
+
+    def _toggle_gemini_chunk_tuning(checked):
+        visible = bool(checked)
+        gemini_controls.setVisible(visible)
+        gemini_advanced_button.setText("Hide chunk tuning" if visible else "Show chunk tuning")
+
+    gemini_advanced_button.toggled.connect(_toggle_gemini_chunk_tuning)
     section_v.addWidget(gemini_controls, 0, Qt.AlignLeft)
 
 

@@ -609,9 +609,6 @@ def _subchunk_concurrency_limit() -> int:
     if explicit > 0:
         return max(1, explicit)
 
-    if not _env_bool("GEMINI_FREE_SUBCHUNK_CONCURRENCY_AUTO", False):
-        return 1
-
     if _env_bool("AUTHND_TOKEN_CONCURRENCY_AUTO", False):
         token_limit, subprocess_limit = _auto_token_limits()
     else:
@@ -622,8 +619,7 @@ def _subchunk_concurrency_limit() -> int:
 
 def _subchunk_prompt_chars() -> int:
     configured = max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
-    ai_mode_ceiling = max(300, _env_int("GEMINI_FREE_AI_MODE_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
-    return min(configured, ai_mode_ceiling)
+    return min(configured, DEFAULT_SUBCHUNK_PROMPT_CHARS)
 
 
 def _subchunk_url_chars() -> int:
@@ -667,8 +663,7 @@ def _fallback_subchunk_prompt_chars(prompt_chars: int) -> int:
 def _subchunk_timeout_seconds(request_timeout: int) -> int:
     configured = _env_int("GEMINI_FREE_SUBCHUNK_TIMEOUT", DEFAULT_SUBCHUNK_TIMEOUT)
     if configured <= 0:
-        inherited = _timeout_seconds(request_timeout, DEFAULT_TIMEOUT)
-        return DEFAULT_TIMEOUT if inherited is None else max(30, int(inherited))
+        return 0
     return max(30, configured)
 
 
