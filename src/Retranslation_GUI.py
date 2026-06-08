@@ -9,7 +9,7 @@ import json
 import re
 import html as html_lib
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.parse import unquote
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -181,6 +181,7 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_PRELOAD_IDLE_MS = 350
     REVIEW_PRELOAD_STEP_MS = 90
     REVIEW_MAX_CACHED_PAGES = 7
+    REVIEW_SYNC_RENDER_ROW_LIMIT = 80
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
@@ -2081,14 +2082,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 executor.submit(self._build_piece, path, idx, metadata): idx
                 for idx, (path, metadata) in enumerate(work_items)
             }
-            for future in as_completed(futures):
-                idx = futures[future]
-                try:
-                    pieces[idx] = future.result()
-                except Exception as exc:
-                    path, metadata = work_items[idx]
-                    pieces[idx] = self._build_piece(path, idx, metadata)
-                    pieces[idx]["error"] = str(exc)
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=0.035, return_when=FIRST_COMPLETED)
+                if not done:
+                    self._pump_review_loading_events(max_ms=5)
+                    continue
+                for future in done:
+                    idx = futures[future]
+                    try:
+                        pieces[idx] = future.result()
+                    except Exception as exc:
+                        path, metadata = work_items[idx]
+                        pieces[idx] = self._build_piece(path, idx, metadata)
+                        pieces[idx]["error"] = str(exc)
+                self._pump_review_loading_events(max_ms=5)
         return self._filter_review_pieces(pieces)
 
     def _populate_piece_list(self):
@@ -2242,6 +2250,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 QApplication.processEvents(QEventLoop.AllEvents, 20)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _pump_review_loading_events(self, max_ms=8):
+        try:
+            self._spin_review_loading_icon()
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents(QEventLoop.AllEvents, max(1, int(max_ms)))
         except Exception:
             pass
 
@@ -4565,8 +4581,6 @@ class SDLXLIFFReviewDialog(QDialog):
         if cached_page is not None:
             self._discard_piece_page(row, cached_page)
 
-        if show_loading:
-            self._show_review_loading_page()
         page, layout = self._create_review_rows_page()
         self._piece_pages[row] = page
         self._piece_render_complete.discard(row)
@@ -4593,11 +4607,6 @@ class SDLXLIFFReviewDialog(QDialog):
             return
 
         rows = piece.get("rows") or []
-        render_model = self._review_piece_render_model(piece)
-        max_len = int(render_model.get("max_len", 1))
-        row_models = render_model.get("rows") or []
-        colors = self._review_status_colors()
-
         if not rows:
             empty = QLabel("No p/h1-h6 text units found in this sidecar.")
             empty.setTextFormat(Qt.PlainText)
@@ -4613,6 +4622,63 @@ class SDLXLIFFReviewDialog(QDialog):
             self._restore_review_scroll(row)
             self._queue_review_page_preloads(row)
             return
+
+        try:
+            render_model = self._review_piece_render_model(piece)
+            max_len = int(render_model.get("max_len", 1))
+            row_models = render_model.get("rows") or []
+            colors = self._review_status_colors()
+        except Exception as exc:
+            self._clear_rows(layout)
+            error = QLabel(f"Could not prepare SDLXLIFF review rows:\n{exc}")
+            error.setTextFormat(Qt.PlainText)
+            error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+            layout.addWidget(error)
+            layout.addStretch(1)
+            self._piece_render_complete.add(row)
+            self._active_render_row = None
+            self._active_render_page = None
+            self.rows_stack.setCurrentWidget(page)
+            self._finish_seamless_review_swap(page)
+            self._finish_rows_rebuild(final=True)
+            self._restore_review_scroll(row)
+            self._queue_review_page_preloads(row)
+            return
+
+        if len(rows) <= self.REVIEW_SYNC_RENDER_ROW_LIMIT:
+            try:
+                for idx, row_data in enumerate(rows):
+                    row_model = row_models[idx] if idx < len(row_models) else None
+                    self._add_review_row(piece, row_data, idx, max_len, colors, row_model=row_model)
+                layout.addStretch(1)
+                self._piece_render_complete.add(row)
+                self._active_render_row = None
+                self._active_render_page = None
+                self.rows_stack.setCurrentWidget(page)
+                self._finish_seamless_review_swap(page)
+                self._finish_rows_rebuild(final=True)
+                self._restore_review_scroll(row)
+                self._queue_review_page_preloads(row)
+                return
+            except Exception as exc:
+                self._clear_rows(layout)
+                error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
+                error.setTextFormat(Qt.PlainText)
+                error.setStyleSheet(f"color: {self.THEME['danger']}; font-size: 11pt; padding: 12px;")
+                layout.addWidget(error)
+                layout.addStretch(1)
+                self._piece_render_complete.add(row)
+                self._active_render_row = None
+                self._active_render_page = None
+                self.rows_stack.setCurrentWidget(page)
+                self._finish_seamless_review_swap(page)
+                self._finish_rows_rebuild(final=True)
+                self._restore_review_scroll(row)
+                self._queue_review_page_preloads(row)
+                return
+
+        if show_loading:
+            self._show_review_loading_page()
 
         render_timer = QTimer(self)
         render_timer.setSingleShot(True)

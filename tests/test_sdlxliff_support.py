@@ -806,6 +806,11 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
     assert "REVIEW_PRELOAD_IDLE_MS = 350" in source
     assert "REVIEW_MAX_CACHED_PAGES = 7" in source
+    assert "REVIEW_SYNC_RENDER_ROW_LIMIT = 80" in source
+    assert "wait(pending, timeout=0.035, return_when=FIRST_COMPLETED)" in source
+    assert "_pump_review_loading_events" in source
+    assert "len(rows) <= self.REVIEW_SYNC_RENDER_ROW_LIMIT" in source
+    assert "Could not prepare SDLXLIFF review rows" in source
     assert "_last_review_selection_change = time.monotonic()" in source
     assert "_review_selection_recently_changed" in source
     assert "_queue_review_page_cache_trim" in source
