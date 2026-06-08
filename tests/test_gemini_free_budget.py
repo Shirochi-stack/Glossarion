@@ -8,7 +8,6 @@ def _clear_gemini_free_budget_env(monkeypatch):
     for name in (
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
         "GEMINI_FREE_AI_MODE_PROMPT_CHARS",
-        "GEMINI_FREE_FIXED_PROMPT_CHARS",
         "GEMINI_FREE_SUBCHUNK_URL_CHARS",
         "GEMINI_FREE_SUBCHUNK_SAFETY_CHARS",
         "GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS",
@@ -42,27 +41,28 @@ def test_gemini_free_ai_mode_caps_legacy_prompt_target(monkeypatch):
     assert should_split is True
 
 
-def test_gemini_free_compacts_large_fixed_prompt_for_ai_mode(monkeypatch):
+def test_gemini_free_preserves_large_fixed_prompt_and_warns(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
+    warnings = []
     messages = [
         {"role": "system", "content": "rules " * 3000},
         {"role": "user", "content": "Translate this:\n" + ("body text " * 300)},
     ]
 
-    prepared = gemini_free._prepare_ai_mode_messages(messages)
-    prepared_prompt_chars = len(gemini_free._messages_to_prompt(prepared))
+    prepared = gemini_free._prepare_ai_mode_messages(messages, log_fn=warnings.append)
 
-    assert len(prepared[0]["content"]) <= gemini_free._fixed_prompt_chars()
-    assert prepared_prompt_chars < len(gemini_free._messages_to_prompt(messages))
-    assert "[... omitted" in prepared[0]["content"]
+    assert prepared[0]["content"] == messages[0]["content"]
+    assert prepared[1]["content"] == messages[1]["content"]
+    assert any("fixed/system prompt is larger" in warning for warning in warnings)
 
 
-def test_gemini_free_runtime_enforces_url_budget_after_compaction(monkeypatch):
+def test_gemini_free_runtime_enforces_user_budget_without_rewriting_fixed_prompt(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "14000")
     calls = {"once": 0, "sequential": 0}
+    system_prompt = "Translate Korean naturally. " * 300
     messages = [
-        {"role": "system", "content": "Translate Korean naturally. " * 500},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Translate:\n" + ("그는 문을 열었다. " * 500)},
     ]
 
@@ -74,8 +74,10 @@ def test_gemini_free_runtime_enforces_url_budget_after_compaction(monkeypatch):
         calls["sequential"] += 1
         metadata = kwargs["split_metadata"]
         assert metadata["url_budget_enforced"] is True
-        assert metadata["fixed_url_chars"] < metadata["url_limit_chars"]
+        assert metadata["fixed_prompt_over_budget"] is True
+        assert metadata["fixed_url_over_budget"] is False
         for chunk in kwargs["chunks"]:
+            assert chunk[0]["content"] == system_prompt
             assert gemini_free._messages_to_search_url_chars(chunk) <= metadata["url_limit_chars"]
         return {"content": "translated", "finish_reason": "stop", "raw_response": {}}
 

@@ -863,38 +863,35 @@ def test_sdlxliff_review_manual_machine_accuracy_marks_all_inaccurate_rows_purpl
         "rows": [
             {
                 "source_tag": "p",
-                "source": "결국, 그들은 경고를 지키듯 행동했다.",
-                "tooltip_translation": "In the end, they acted as if they had followed their warning.",
+                "source": "synthetic source alpha",
+                "tooltip_translation": "alpha beta gamma delta epsilon zeta eta theta iota kappa",
                 "target_tag": "p",
-                "target": (
-                    "In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
-                    "they plucked out her own eyeball and made her swallow it, and her ear was torn off."
-                ),
+                "target": "red blue green yellow orange purple silver bronze copper iron",
                 "status": "green",
                 "reason": "ok",
             },
             {
                 "source_tag": "p",
-                "source": "죽음 대신 다가온 건—",
-                "tooltip_translation": "What came instead of death—",
+                "source": "synthetic source bravo",
+                "tooltip_translation": "north south east west center inner outer upper lower",
                 "target_tag": "p",
-                "target": '"...Warm."',
+                "target": "circle square triangle diamond spiral ribbon anchor window",
                 "status": "green",
                 "reason": "ok",
             },
             {
                 "source_tag": "p",
-                "source": "차갑고 검은 어둠이 점점 가까워졌다.",
-                "tooltip_translation": "The cold, black darkness is getting closer.",
+                "source": "synthetic source charlie",
+                "tooltip_translation": "stable matching comparison text",
                 "target_tag": "p",
-                "target": "The cold, black darkness drew nearer.",
+                "target": "stable matching comparison text",
                 "status": "green",
                 "reason": "ok",
             },
             {
                 "source_tag": "p",
-                "source": "피엘이 잊었다고 생각했던, 가장 오래된 집의 온기였다.",
-                "tooltip_translation": "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+                "source": "synthetic source delta",
+                "tooltip_translation": "missing row comparison text",
                 "target_tag": "",
                 "target": "",
                 "status": "red",
@@ -913,6 +910,219 @@ def test_sdlxliff_review_manual_machine_accuracy_marks_all_inaccurate_rows_purpl
     assert piece["rows"][2]["status"] == "green"
 
 
+def test_sdlxliff_review_machine_accuracy_ignores_whitespace_only_differences():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source whitespace",
+                "tooltip_translation": "alpha,\u00a0beta\ngamma.",
+                "target_tag": "p",
+                "target": "alpha, beta   gamma.",
+                "status": "green",
+                "reason": "ok",
+            }
+        ],
+    }
+
+    score = dialog._machine_translation_accuracy_score(piece["rows"], 0)
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert score == 0.0
+    assert promoted_indices == []
+    assert piece["rows"][0]["status"] == "green"
+    assert piece["rows"][0]["reason"] == "ok"
+
+
+def test_sdlxliff_review_machine_accuracy_ignores_short_entries():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source short",
+                "tooltip_translation": "Brief.",
+                "target_tag": "p",
+                "target": "Tiny.",
+                "status": "green",
+                "reason": "ok",
+            }
+        ],
+    }
+
+    score = dialog._machine_translation_accuracy_score(piece["rows"], 0)
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert score == 0.0
+    assert promoted_indices == []
+    assert piece["rows"][0]["status"] == "green"
+    assert piece["rows"][0]["reason"] == "ok"
+
+
+def test_sdlxliff_review_machine_accuracy_scores_one_word_against_phrase():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source asymmetric short",
+                "tooltip_translation": "Marker.",
+                "target_tag": "p",
+                "target": "alpha beta gamma delta.",
+                "status": "green",
+                "reason": "ok",
+            }
+        ],
+    }
+
+    score = dialog._machine_translation_accuracy_score(piece["rows"], 0)
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert score >= dialog.MACHINE_TRANSLATION_INACCURACY_THRESHOLD
+    assert promoted_indices == [0]
+    assert piece["rows"][0]["status"] == "purple"
+    assert piece["rows"][0]["reason"].startswith("machine translation inaccurate")
+
+
+def test_sdlxliff_review_machine_accuracy_ignores_punctuation_only_short_entries():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source punctuation",
+                "tooltip_translation": "'...alpha.'",
+                "target_tag": "p",
+                "target": "\"... alpha.\"",
+                "status": "purple",
+                "reason": "machine translation inaccurate (old)",
+            }
+        ],
+    }
+
+    score = dialog._machine_translation_accuracy_score(piece["rows"], 0)
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert score == 0.0
+    assert promoted_indices == []
+    assert piece["rows"][0]["status"] == "green"
+    assert piece["rows"][0]["reason"] == "ok"
+
+
+def test_sdlxliff_review_machine_accuracy_flags_low_content_overlap():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source low overlap",
+                "tooltip_translation": (
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+                    "lambda mu nu xi omicron"
+                ),
+                "target_tag": "p",
+                "target": (
+                    "red blue green yellow orange purple silver bronze copper iron "
+                    "north south east west center"
+                ),
+                "status": "green",
+                "reason": "ok",
+            }
+        ],
+    }
+
+    score = dialog._machine_translation_accuracy_score(piece["rows"], 0)
+    promoted_indices = dialog._promote_inaccurate_machine_translation_rows(piece)
+
+    assert score >= dialog.MACHINE_TRANSLATION_INACCURACY_THRESHOLD
+    assert promoted_indices == [0]
+    assert piece["rows"][0]["status"] == "purple"
+    assert piece["rows"][0]["reason"].startswith("machine translation inaccurate")
+
+
+def test_sdlxliff_review_machine_accuracy_uses_saved_threshold():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {
+        "rows": [
+            {
+                "source_tag": "p",
+                "source": "synthetic source threshold",
+                "tooltip_translation": (
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+                    "lambda mu nu xi omicron"
+                ),
+                "target_tag": "p",
+                "target": (
+                    "red blue green yellow orange purple silver bronze copper iron "
+                    "north south east west center"
+                ),
+                "status": "green",
+                "reason": "ok",
+            }
+        ],
+    }
+
+    dialog._config = {dialog.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY: 1000}
+    assert dialog._promote_inaccurate_machine_translation_rows(piece) == []
+    assert piece["rows"][0]["status"] == "green"
+
+    dialog._config[dialog.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY] = 25
+    assert dialog._promote_inaccurate_machine_translation_rows(piece) == [0]
+    assert piece["rows"][0]["status"] == "purple"
+
+
+def test_sdlxliff_review_machine_accuracy_threshold_saves_to_parent_config():
+    class Parent:
+        def __init__(self):
+            self.config = {}
+            self.save_calls = 0
+
+        def save_config(self, show_message=True):
+            self.save_calls += 1
+
+    parent = Parent()
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._config = {}
+    dialog._context_parent = parent
+
+    threshold, saved = dialog._set_machine_translation_inaccuracy_threshold(175.4)
+
+    assert saved is True
+    assert threshold == 175.4
+    assert dialog._config[dialog.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY] == 175.4
+    assert parent.config[dialog.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY] == 175.4
+    assert parent.save_calls == 1
+
+
+def test_sdlxliff_review_one_row_layout_toggle_saves_to_parent_config():
+    class Parent:
+        def __init__(self):
+            self.config = {}
+            self.save_calls = 0
+
+        def save_config(self, show_message=True):
+            self.save_calls += 1
+
+    parent = Parent()
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._config = {}
+    dialog._context_parent = parent
+    dialog.one_row_layout_btn = None
+    dialog.pieces = []
+    dialog._piece_pages = {}
+    dialog._piece_render_complete = set()
+    dialog._review_data_preload_token = 0
+    dialog.piece_list = None
+
+    dialog._set_review_one_row_layout(True)
+
+    assert dialog._one_row_layout_enabled is True
+    assert dialog._config[dialog.ONE_ROW_LAYOUT_CONFIG_KEY] is True
+    assert parent.config[dialog.ONE_ROW_LAYOUT_CONFIG_KEY] is True
+    assert parent.save_calls == 1
+
+
 def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
     sidecar_dir = tmp_path / "SDLXLIFF"
     sidecar_dir.mkdir()
@@ -920,16 +1130,15 @@ def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
     sidecar = sidecar_dir / f"{output_name}.sdlxliff"
     source_html = (
         "<html><body>"
-        "<p>결국, 그들은 경고를 지키듯 행동했다.</p>"
-        "<p>“...따뜻해.”</p>"
-        "<p>피엘이 잊었다고 생각했던, 가장 오래된 집의 온기였다.</p>"
+        "<p>Synthetic source alpha.</p>"
+        "<p>Synthetic source beta.</p>"
+        "<p>Synthetic source gamma.</p>"
         "</body></html>"
     )
     target_html = (
         "<html><body>"
-        "<p>In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
-        "they plucked out her own eyeball and made her swallow it, and her ear was torn off.</p>"
-        "<p>It was the oldest warmth of 'home,' the one Piel thought she had forgotten.</p>"
+        "<p>Synthetic alpha output with many additional words that make this translated column expanded.</p>"
+        "<p>Synthetic gamma output.</p>"
         "</body></html>"
     )
     sidecar.write_text(
@@ -955,11 +1164,11 @@ def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
     dialog._write_machine_translation_entries(
         first_piece,
         [
-            (first_piece["rows"][0], "In the end, they acted as if they had followed their warning."),
-            (first_piece["rows"][1], "...It's warm."),
+            (first_piece["rows"][0], "Synthetic alpha output."),
+            (first_piece["rows"][1], "Synthetic beta output."),
             (
                 first_piece["rows"][2],
-                "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+                "Synthetic gamma output.",
             ),
         ],
     )
@@ -968,7 +1177,7 @@ def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):
 
     promoted = [row for row in piece["rows"] if row.get("reason", "").startswith("top translated-column skew")]
     assert len(promoted) == 1
-    assert promoted[0]["source"].startswith("결국")
+    assert promoted[0]["source"] == "Synthetic source alpha."
     assert piece["rows"][1]["status"] == "green"
     assert piece["rows"][2]["status"] == "red"
 
@@ -1081,9 +1290,25 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "QKeySequence, QShortcut" in source
     assert "MANUAL_REFRESH_BUTTON_TEXT" in source
     assert "FLAG_ACCURACY_BUTTON_TEXT" in source
+    assert "MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY" in source
+    assert "ONE_ROW_LAYOUT_BUTTON_TEXT" in source
+    assert "ONE_ROW_LAYOUT_CONFIG_KEY" in source
     assert "self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)" in source
+    assert "self.flag_accuracy_btn.setContextMenuPolicy(Qt.CustomContextMenu)" in source
+    assert "self.flag_accuracy_btn.customContextMenuRequested.connect(self._show_flag_accuracy_context_menu)" in source
     assert "self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)" in source
+    assert "self.one_row_layout_btn = QPushButton(self.ONE_ROW_LAYOUT_BUTTON_TEXT)" in source
+    assert "self.one_row_layout_btn.setCheckable(True)" in source
+    assert "self.one_row_layout_btn.toggled.connect(self._set_review_one_row_layout)" in source
+    assert 'legend_row.addWidget(self.one_row_layout_btn, 0, Qt.AlignVCenter)' in source
+    assert "SdlReviewOneRowContent" in source
     assert "_promote_inaccurate_machine_translation_rows" in source
+    assert "_show_flag_accuracy_context_menu" in source
+    assert "_prompt_machine_translation_threshold" in source
+    assert "_set_machine_translation_inaccuracy_threshold" in source
+    assert "_machine_translation_inaccuracy_threshold()" in source
+    assert "QInputDialog.getDouble" in source
+    assert "config.json" in source
     assert "MACHINE_TRANSLATION_INACCURACY_THRESHOLD" in source
     assert "purple MT inaccurate" in source
     assert "left = source   right = output   bar width ~= length" not in source
@@ -1093,6 +1318,11 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_tick_refresh_button_animation" in source
     assert "_stop_refresh_button_animation" in source
     assert 'self.refresh_review_btn.setText(f"{frames[self._refresh_button_frame]} Refreshing")' in source
+    assert "_start_flag_accuracy_button_animation" in source
+    assert "_tick_flag_accuracy_button_animation" in source
+    assert "_stop_flag_accuracy_button_animation" in source
+    assert "_queue_stop_flag_accuracy_button_animation" in source
+    assert 'self.flag_accuracy_btn.setText(f"{frames[self._flag_accuracy_button_frame]} Flagging")' in source
     assert 'QShortcut(QKeySequence("F5"), self)' in source
     assert "self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)" in source
     manual_refresh_body = source[
@@ -1100,6 +1330,12 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
     ]
     assert "self._silent_review_refresh()" in manual_refresh_body
+    flag_accuracy_body = source[
+        source.index("def _flag_current_piece_inaccurate_translations"):
+        source.index("@staticmethod", source.index("def _flag_current_piece_inaccurate_translations"))
+    ]
+    assert "self._start_flag_accuracy_button_animation()" in flag_accuracy_body
+    assert "self._queue_stop_flag_accuracy_button_animation()" in flag_accuracy_body
     assert "_review_context_menu_open" in source
     assert "_set_review_context_menu_open(True)" in source
     assert "_pause_review_preload_for_context_menu" in source
@@ -1417,13 +1653,40 @@ def test_sdlxliff_review_selected_piece_preview_jobs_include_row_zero():
 def test_sdlxliff_review_source_preview_marks_identical_machine_translation(qtbot):
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     widget = dialog._text_label(
-        "Final Fantasy VI: The Novel",
-        tooltip_translation="Final Fantasy VI: The Novel",
+        "Synthetic title row",
+        tooltip_translation="Synthetic title row",
     )
     qtbot.addWidget(widget)
 
     labels = widget.findChildren(QLabel)
-    assert any(label.text() == "Final Fantasy VI: The Novel" for label in labels)
+    assert any(label.text() == "Synthetic title row" for label in labels)
+
+
+def test_sdlxliff_review_rejects_untranslated_google_preview_batch():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    work = [
+        (0, "row-0", "Synthetic heading input", "h1"),
+        (1, "row-1", "Synthetic paragraph input with enough words for extraction.", "p"),
+    ]
+    raw_html = dialog._tooltip_batch_html(work)
+
+    parsed = dialog._extract_tooltip_batch_translations(raw_html, work)
+    valid, error = dialog._validate_tooltip_batch_translations(parsed, work)
+
+    assert parsed
+    assert valid == {}
+    assert "returned source text unchanged" in error
+    assert "refusing to save raw source" in error
+
+
+def test_sdlxliff_review_does_not_persist_identical_machine_translation():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    piece = {"rows": []}
+    row = {"source": "Synthetic paragraph input with enough words for extraction."}
+
+    dialog._set_row_tooltip_translation(piece, row, "Synthetic paragraph input with enough words for extraction.")
+
+    assert "tooltip_translation" not in row
 
 
 def test_sdlxliff_review_row_index_property_preserves_zero(qtbot):

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
-                                QPlainTextEdit, QStackedWidget, QComboBox)
+                                QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -29,6 +29,7 @@ import platform
 import time
 import threading
 import hashlib
+import unicodedata
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
@@ -187,7 +188,17 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_SYNC_RENDER_ROW_LIMIT = 80
     TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
     FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
+    ONE_ROW_LAYOUT_BUTTON_TEXT = "1 Row Layout"
+    ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
+    MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY = "sdlxliff_machine_translation_inaccuracy_threshold"
     MACHINE_TRANSLATION_INACCURACY_THRESHOLD = 150.0
+    MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS = 1
+    MACHINE_TRANSLATION_SHORT_TEXT_MAX_CHARS = 24
+    MACHINE_TRANSLATION_CONTENT_STOPWORDS = frozenset("""
+        a an and are as at be been being but by for from had has have he her hers him his i if in into is it
+        its me my of on or our ours she so some that the their theirs them then there they this to was were
+        while who whom whose will with would you your yours
+    """.split())
     MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     _SDLXLIFF_AUTOGEN_STATUSES = {
@@ -255,6 +266,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._book_nav_updating = False
         self._last_review_signature = None
         self._last_machine_translation_signature = None
+        self._one_row_layout_enabled = self._review_one_row_layout_enabled()
         self._auto_refresh_timer = None
         self._refreshing_review_data = False
         self._review_data_loaded = False
@@ -268,6 +280,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._refresh_button_timer = None
         self._refresh_button_stop_timer = None
         self._refresh_button_frame = 0
+        self._flag_accuracy_button_timer = None
+        self._flag_accuracy_button_stop_timer = None
+        self._flag_accuracy_button_frame = 0
         self._tooltip_translation_running = False
         self._tooltip_translation_batch_active = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
@@ -355,7 +370,22 @@ class SDLXLIFFReviewDialog(QDialog):
             "QPushButton:hover { background-color:#4c2d67; border-color:#b982f0; }"
             "QPushButton:disabled { color:#a891b8; background-color:#2d2338; border-color:#604275; }"
         )
+        self.flag_accuracy_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.flag_accuracy_btn.customContextMenuRequested.connect(self._show_flag_accuracy_context_menu)
         self.flag_accuracy_btn.clicked.connect(self._flag_current_piece_inaccurate_translations)
+        self.one_row_layout_btn = QPushButton(self.ONE_ROW_LAYOUT_BUTTON_TEXT)
+        self.one_row_layout_btn.setCursor(Qt.PointingHandCursor)
+        self.one_row_layout_btn.setCheckable(True)
+        self.one_row_layout_btn.setChecked(bool(self._one_row_layout_enabled))
+        self.one_row_layout_btn.setToolTip("Stack source, machine preview, and output together in each review entry.")
+        self.one_row_layout_btn.setStyleSheet(
+            "QPushButton { background-color:#253241; color:#d7ecff; border:1px solid #547596; "
+            "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
+            "QPushButton:hover { background-color:#324d68; border-color:#7bb3e0; }"
+            "QPushButton:checked { background-color:#205f74; color:#e9fbff; border-color:#26a6c8; }"
+            "QPushButton:checked:hover { background-color:#26738c; border-color:#5bc4df; }"
+        )
+        self.one_row_layout_btn.toggled.connect(self._set_review_one_row_layout)
         self.refresh_review_btn = QPushButton(self.MANUAL_REFRESH_BUTTON_TEXT)
         self.refresh_review_btn.setCursor(Qt.PointingHandCursor)
         self.refresh_review_btn.setToolTip("Run the SDLXLIFF auto-refresh check now (F5).")
@@ -377,6 +407,7 @@ class SDLXLIFFReviewDialog(QDialog):
         legend_row.addSpacing(24)
         legend_row.addWidget(self.translate_tooltips_btn, 0, Qt.AlignVCenter)
         legend_row.addWidget(self.flag_accuracy_btn, 0, Qt.AlignVCenter)
+        legend_row.addWidget(self.one_row_layout_btn, 0, Qt.AlignVCenter)
         legend_row.addStretch(1)
         legend_row.addWidget(self.refresh_review_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         detail_layout.addLayout(legend_row)
@@ -791,6 +822,210 @@ class SDLXLIFFReviewDialog(QDialog):
             self._refresh_button_stop_timer.start(max(0, int(delay_ms)))
         except Exception:
             self._stop_refresh_button_animation()
+
+    def _tick_flag_accuracy_button_animation(self):
+        try:
+            frames = ("🟣", "🟪", "💜", "🟪")
+            self._flag_accuracy_button_frame = (int(self._flag_accuracy_button_frame or 0) + 1) % len(frames)
+            if self.flag_accuracy_btn is not None:
+                self.flag_accuracy_btn.setText(f"{frames[self._flag_accuracy_button_frame]} Flagging")
+        except Exception:
+            pass
+
+    def _start_flag_accuracy_button_animation(self):
+        try:
+            if self._flag_accuracy_button_stop_timer is not None and self._flag_accuracy_button_stop_timer.isActive():
+                self._flag_accuracy_button_stop_timer.stop()
+            if self._flag_accuracy_button_timer is None:
+                timer = QTimer(self)
+                timer.setInterval(90)
+                timer.timeout.connect(self._tick_flag_accuracy_button_animation)
+                self._flag_accuracy_button_timer = timer
+            self._flag_accuracy_button_frame = -1
+            self._tick_flag_accuracy_button_animation()
+            if not self._flag_accuracy_button_timer.isActive():
+                self._flag_accuracy_button_timer.start()
+            if self.flag_accuracy_btn is not None:
+                self.flag_accuracy_btn.setEnabled(False)
+        except Exception:
+            pass
+
+    def _stop_flag_accuracy_button_animation(self):
+        try:
+            if self._flag_accuracy_button_timer is not None and self._flag_accuracy_button_timer.isActive():
+                self._flag_accuracy_button_timer.stop()
+            if self.flag_accuracy_btn is not None:
+                self.flag_accuracy_btn.setEnabled(True)
+                self.flag_accuracy_btn.setText(self.FLAG_ACCURACY_BUTTON_TEXT)
+        except Exception:
+            pass
+
+    def _queue_stop_flag_accuracy_button_animation(self, delay_ms=650):
+        try:
+            if self._flag_accuracy_button_stop_timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._stop_flag_accuracy_button_animation)
+                self._flag_accuracy_button_stop_timer = timer
+            self._flag_accuracy_button_stop_timer.start(max(0, int(delay_ms)))
+        except Exception:
+            self._stop_flag_accuracy_button_animation()
+
+    def _machine_translation_inaccuracy_threshold(self):
+        try:
+            value = (self._config or {}).get(
+                self.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY,
+                self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD,
+            )
+            value = float(value)
+            if value <= 0:
+                raise ValueError
+            return max(1.0, min(1000.0, value))
+        except Exception:
+            return float(self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
+
+    def _review_one_row_layout_enabled(self):
+        try:
+            value = (self._config or {}).get(self.ONE_ROW_LAYOUT_CONFIG_KEY, False)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+        except Exception:
+            return False
+
+    def _set_review_one_row_layout(self, enabled):
+        enabled = bool(enabled)
+        self._one_row_layout_enabled = enabled
+        try:
+            if getattr(self, "one_row_layout_btn", None) is not None and self.one_row_layout_btn.isChecked() != enabled:
+                self.one_row_layout_btn.blockSignals(True)
+                self.one_row_layout_btn.setChecked(enabled)
+                self.one_row_layout_btn.blockSignals(False)
+        except Exception:
+            pass
+        self._persist_review_config_value(self.ONE_ROW_LAYOUT_CONFIG_KEY, enabled)
+        try:
+            self._cancel_active_review_render()
+            self._cancel_review_preload(discard_page=True)
+            for row, page in list(self._piece_pages.items()):
+                self._discard_piece_page(row, page)
+            self._piece_pages.clear()
+            self._piece_render_complete.clear()
+            for piece in self.pieces:
+                if isinstance(piece, dict):
+                    piece.pop("_render_model", None)
+            self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
+            current_row = self.piece_list.currentRow() if getattr(self, "piece_list", None) is not None else -1
+            if 0 <= current_row < len(self.pieces):
+                QTimer.singleShot(0, lambda row=current_row: self._render_piece(row, show_loading=True))
+        except Exception:
+            pass
+
+    def _persist_review_config_value(self, key, value):
+        if isinstance(self._config, dict):
+            self._config[key] = value
+        parent = getattr(self, "_context_parent", None)
+        try:
+            parent_config = getattr(parent, "config", None)
+            if isinstance(parent_config, dict):
+                parent_config[key] = value
+        except Exception:
+            pass
+        try:
+            save_config = getattr(parent, "save_config", None)
+            if callable(save_config):
+                save_config(show_message=False)
+                return True
+        except TypeError:
+            try:
+                save_config(getattr(parent, "config", self._config), show_message=False)
+                return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        config_path = None
+        for attr in ("config_file_path", "config_file"):
+            try:
+                candidate = getattr(parent, attr, None)
+            except Exception:
+                candidate = None
+            if candidate:
+                config_path = candidate
+                break
+        if not config_path:
+            config_path = os.path.join(_get_app_dir(), "config.json")
+        try:
+            config_data = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    config_data = loaded
+            config_data[key] = value
+            os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+            tmp_path = f"{config_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, config_path)
+            return True
+        except Exception:
+            return False
+
+    def _set_machine_translation_inaccuracy_threshold(self, threshold):
+        try:
+            value = float(threshold)
+        except Exception:
+            value = float(self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
+        value = max(1.0, min(1000.0, value))
+        if abs(value - round(value)) < 0.05:
+            value = float(round(value))
+        return value, self._persist_review_config_value(self.MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY, value)
+
+    def _show_flag_accuracy_context_menu(self, pos):
+        try:
+            current = self._machine_translation_inaccuracy_threshold()
+            menu = QMenu(self)
+            menu.setStyleSheet(
+                "QMenu { padding: 4px 6px 4px 4px; }"
+                "QMenu::item { padding: 6px 20px 6px 12px; }"
+            )
+            set_action = menu.addAction(f"🟣 Set Score Threshold... ({current:g})")
+            reset_action = menu.addAction(f"↺ Reset Threshold ({self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD:g})")
+            set_action.triggered.connect(self._prompt_machine_translation_threshold)
+            reset_action.triggered.connect(self._reset_machine_translation_threshold)
+            menu.popup(self.flag_accuracy_btn.mapToGlobal(pos))
+        except Exception:
+            pass
+
+    def _prompt_machine_translation_threshold(self):
+        current = self._machine_translation_inaccuracy_threshold()
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Flag Inaccurate Threshold",
+            "Score threshold (lower flags more rows, higher flags fewer):",
+            current,
+            1.0,
+            1000.0,
+            1,
+        )
+        if not ok:
+            return
+        threshold, saved = self._set_machine_translation_inaccuracy_threshold(value)
+        try:
+            suffix = "" if saved else " (not saved to config.json)"
+            self.save_status_label.setText(f"MT inaccuracy threshold set to {threshold:g}{suffix}")
+        except Exception:
+            pass
+
+    def _reset_machine_translation_threshold(self):
+        threshold, saved = self._set_machine_translation_inaccuracy_threshold(self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
+        try:
+            suffix = "" if saved else " (not saved to config.json)"
+            self.save_status_label.setText(f"MT inaccuracy threshold reset to {threshold:g}{suffix}")
+        except Exception:
+            pass
 
     def _manual_review_refresh(self):
         self._start_refresh_button_animation()
@@ -1667,7 +1902,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
     @staticmethod
     def _comparison_tokens(text):
-        return re.findall(r"[a-z0-9']+|[\uac00-\ud7a3]+", str(text or "").lower())
+        return [
+            token for token in re.findall(r"[a-z0-9']+|[\uac00-\ud7a3]+", str(text or "").lower())
+            if re.search(r"[a-z0-9\uac00-\ud7a3]", token)
+        ]
 
     @classmethod
     def _latin_token_overlap(cls, source_text, target_text):
@@ -1835,6 +2073,9 @@ class SDLXLIFFReviewDialog(QDialog):
             if row.pop("_machine_accuracy_promoted", False):
                 row["status"] = row.pop("_machine_accuracy_previous_status", "green")
                 row["reason"] = row.pop("_machine_accuracy_previous_reason", "ok")
+            elif row.get("status") == "purple" and str(row.get("reason") or "").startswith("machine translation inaccurate"):
+                row["status"] = "green"
+                row["reason"] = "ok"
             row.pop("_machine_accuracy_previous_status", None)
             row.pop("_machine_accuracy_previous_reason", None)
 
@@ -1853,14 +2094,32 @@ class SDLXLIFFReviewDialog(QDialog):
             return None
         if not row.get("source_tag") or not row.get("target_tag"):
             return None
+        expected_normalized = self._normalized_machine_translation_text(expected)
+        target_normalized = self._normalized_machine_translation_text(target)
+        if expected_normalized == target_normalized:
+            return 0.0
+        if self._compact_machine_translation_text(expected_normalized) == self._compact_machine_translation_text(target_normalized):
+            return 0.0
+        expected = expected_normalized
+        target = target_normalized
 
         expected_tokens = self._comparison_tokens(expected)
         target_tokens = self._comparison_tokens(target)
+        if self._machine_translation_text_too_short_for_accuracy(expected, target, expected_tokens, target_tokens):
+            return 0.0
         if expected_tokens and target_tokens:
             common = sum((Counter(expected_tokens) & Counter(target_tokens)).values())
             token_f1 = (2.0 * common) / max(1, len(expected_tokens) + len(target_tokens))
         else:
             token_f1 = 0.0
+        expected_content_tokens = self._machine_translation_content_tokens(expected_tokens)
+        target_content_tokens = self._machine_translation_content_tokens(target_tokens)
+        content_penalty = 0.0
+        if len(expected_content_tokens) >= 4 and len(target_content_tokens) >= 4:
+            content_common = sum((Counter(expected_content_tokens) & Counter(target_content_tokens)).values())
+            content_f1 = (2.0 * content_common) / max(1, len(expected_content_tokens) + len(target_content_tokens))
+            if content_f1 < 0.45:
+                content_penalty = (0.45 - content_f1) * 165.0
         similarity = SequenceMatcher(None, expected.lower(), target.lower()).ratio()
         expected_len = max(1, len(expected))
         target_len = max(1, len(target))
@@ -1873,13 +2132,36 @@ class SDLXLIFFReviewDialog(QDialog):
             + (1.0 - similarity) * 70.0
             + min(6.0, length_ratio - 1.0) * 55.0
             + min(6.0, token_ratio - 1.0) * 45.0
+            + content_penalty
         )
+
+    @classmethod
+    def _machine_translation_text_too_short_for_accuracy(cls, expected, target, expected_tokens=None, target_tokens=None):
+        expected_tokens = expected_tokens if expected_tokens is not None else cls._comparison_tokens(expected)
+        target_tokens = target_tokens if target_tokens is not None else cls._comparison_tokens(target)
+        if not expected_tokens or not target_tokens:
+            return False
+        if (
+            len(expected_tokens) != cls.MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS
+            or len(target_tokens) != cls.MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS
+        ):
+            return False
+        expected_len = len(cls._compact_machine_translation_text(expected))
+        target_len = len(cls._compact_machine_translation_text(target))
+        return max(expected_len, target_len) <= cls.MACHINE_TRANSLATION_SHORT_TEXT_MAX_CHARS
+
+    @classmethod
+    def _machine_translation_content_tokens(cls, tokens):
+        return [
+            token for token in (tokens or [])
+            if token not in cls.MACHINE_TRANSLATION_CONTENT_STOPWORDS
+        ]
 
     def _promote_inaccurate_machine_translation_rows(self, piece, threshold=None):
         rows = piece.get("rows") or []
         if not rows:
             return None
-        threshold = float(threshold if threshold is not None else self.MACHINE_TRANSLATION_INACCURACY_THRESHOLD)
+        threshold = float(threshold if threshold is not None else self._machine_translation_inaccuracy_threshold())
         self._clear_machine_accuracy_promotions(rows)
         self._clear_top_skew_promotions(rows)
 
@@ -1911,38 +2193,42 @@ class SDLXLIFFReviewDialog(QDialog):
         row = self._displayed_piece_row()
         if row < 0 or row >= len(self.pieces):
             return
-        piece = self.pieces[row]
-        rows = piece.get("rows") or []
-        before = [
-            (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
-            for row_data in rows
-        ]
-        promoted_indices = self._promote_inaccurate_machine_translation_rows(piece)
-        if promoted_indices is None:
+        self._start_flag_accuracy_button_animation()
+        try:
+            piece = self.pieces[row]
+            rows = piece.get("rows") or []
+            before = [
+                (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+                for row_data in rows
+            ]
+            promoted_indices = self._promote_inaccurate_machine_translation_rows(piece)
+            if promoted_indices is None:
+                try:
+                    self.save_status_label.setText("Generate Google Translate Preview first")
+                except Exception:
+                    pass
+                return
+
+            self._refresh_piece_summary(piece)
+            changed_rows = [
+                row_index for row_index, row_data in enumerate(rows)
+                if row_index >= len(before)
+                or before[row_index] != (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+            ]
+            self._invalidate_piece_render_model(piece, restart_preload=False)
+            self._refresh_piece_list_item(row)
+            self._refresh_piece_header(row)
+            for row_index in changed_rows:
+                self._refresh_visible_review_row_status(row, row_index)
             try:
-                self.save_status_label.setText("Generate Google Translate Preview first")
+                if promoted_indices:
+                    self.save_status_label.setText(f"Flagged {len(promoted_indices)} inaccurate machine translation row(s)")
+                else:
+                    self.save_status_label.setText("No inaccurate machine translation rows found")
             except Exception:
                 pass
-            return
-
-        self._refresh_piece_summary(piece)
-        changed_rows = [
-            row_index for row_index, row_data in enumerate(rows)
-            if row_index >= len(before)
-            or before[row_index] != (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
-        ]
-        self._invalidate_piece_render_model(piece, restart_preload=False)
-        self._refresh_piece_list_item(row)
-        self._refresh_piece_header(row)
-        for row_index in changed_rows:
-            self._refresh_visible_review_row_status(row, row_index)
-        try:
-            if promoted_indices:
-                self.save_status_label.setText(f"Flagged {len(promoted_indices)} inaccurate machine translation row(s)")
-            else:
-                self.save_status_label.setText("No inaccurate machine translation rows found")
-        except Exception:
-            pass
+        finally:
+            self._queue_stop_flag_accuracy_button_animation()
 
     @staticmethod
     def _heading_tag_level_changed(source_tag, target_tag):
@@ -2738,10 +3024,22 @@ class SDLXLIFFReviewDialog(QDialog):
         }
 
     @classmethod
-    def _review_row_height_for_width(cls, source_text, target_text, tooltip_translation=None, tooltip_pending=False, viewport_width=1200):
+    def _review_row_height_for_width(
+        cls,
+        source_text,
+        target_text,
+        tooltip_translation=None,
+        tooltip_pending=False,
+        viewport_width=1200,
+        one_row_layout=False,
+    ):
         viewport_width = max(700, int(viewport_width or 1200))
         fixed_width = 92 + 180 + 26 + 180 + 20 + 50
+        if one_row_layout:
+            fixed_width = 92 + 180 + 26 + 180 + 60
         text_column_width = max(180, (viewport_width - fixed_width) // 2)
+        if one_row_layout:
+            text_column_width = max(320, viewport_width - fixed_width)
         chars_per_line = max(24, int(text_column_width / 9))
         max_lines = 1
 
@@ -2754,16 +3052,27 @@ class SDLXLIFFReviewDialog(QDialog):
                 wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
             return wrapped_lines
 
-        max_lines = max(max_lines, _wrapped_lines(source_text, chars_per_line))
-        max_lines = max(max_lines, _wrapped_lines(target_text, chars_per_line))
+        source_lines = _wrapped_lines(source_text, chars_per_line)
+        target_lines = _wrapped_lines(target_text, chars_per_line)
+        max_lines = max(max_lines, source_lines)
+        max_lines = max(max_lines, target_lines)
         tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
         if tooltip_preview:
             translated_chars_per_line = max(30, int(chars_per_line * 1.35))
+            tooltip_lines = min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
             source_with_translation_lines = (
-                _wrapped_lines(source_text, chars_per_line)
-                + min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
+                source_lines
+                + tooltip_lines
             )
             max_lines = max(max_lines, source_with_translation_lines)
+        else:
+            tooltip_lines = 0
+        if one_row_layout:
+            total_lines = source_lines + target_lines + tooltip_lines
+            height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(cls.REVIEW_ROW_MIN_HEIGHT, 84 + total_lines * 21))
+            if tooltip_preview:
+                height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 42))
+            return height
         extra_lines = max(0, min(12, max_lines - 1))
         height = min(cls.REVIEW_ROW_MAX_HEIGHT, cls.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
         if tooltip_preview:
@@ -2771,7 +3080,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return height
 
     @classmethod
-    def _build_review_piece_render_model_from_rows(cls, row_snapshots, viewport_width):
+    def _build_review_piece_render_model_from_rows(cls, row_snapshots, viewport_width, one_row_layout=False):
         rows = list(row_snapshots or [])
         max_len = max(
             [len(row.get("source", "")) for row in rows]
@@ -2796,16 +3105,19 @@ class SDLXLIFFReviewDialog(QDialog):
                 "target_editable": (not source_missing or not target_missing),
                 "tooltip_translation": tooltip_translation,
                 "tooltip_pending": tooltip_pending,
+                "one_row_layout": bool(one_row_layout),
                 "row_height": cls._review_row_height_for_width(
                     source_text,
                     target_text,
                     tooltip_translation,
                     tooltip_pending,
                     viewport_width,
+                    one_row_layout=one_row_layout,
                 ),
             })
         return {
             "viewport_width": int(max(700, viewport_width or 1200)),
+            "one_row_layout": bool(one_row_layout),
             "row_count": len(rows),
             "max_len": max_len,
             "rows": row_models,
@@ -2820,14 +3132,20 @@ class SDLXLIFFReviewDialog(QDialog):
     def _review_piece_render_model(self, piece):
         rows = piece.get("rows") or []
         viewport_width = self._review_render_viewport_width()
+        one_row_layout = bool(getattr(self, "_one_row_layout_enabled", False))
         model = piece.get("_render_model") if isinstance(piece, dict) else None
         if (
             isinstance(model, dict)
             and int(model.get("row_count", -1)) == len(rows)
             and int(model.get("viewport_width", -1)) == viewport_width
+            and bool(model.get("one_row_layout", False)) == one_row_layout
         ):
             return model
-        model = self._build_review_piece_render_model_from_rows(self._piece_render_snapshot(piece), viewport_width)
+        model = self._build_review_piece_render_model_from_rows(
+            self._piece_render_snapshot(piece),
+            viewport_width,
+            one_row_layout=one_row_layout,
+        )
         piece["_render_model"] = model
         return model
 
@@ -2852,6 +3170,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
         token = self._review_data_preload_token
         viewport_width = self._review_render_viewport_width()
+        one_row_layout = bool(getattr(self, "_one_row_layout_enabled", False))
         snapshots = [
             (piece_index, self._piece_render_snapshot(piece))
             for piece_index, piece in enumerate(self.pieces)
@@ -2866,7 +3185,11 @@ class SDLXLIFFReviewDialog(QDialog):
             models = {}
             try:
                 for ordinal, (piece_index, row_snapshot) in enumerate(snapshots, start=1):
-                    models[piece_index] = self._build_review_piece_render_model_from_rows(row_snapshot, viewport_width)
+                    models[piece_index] = self._build_review_piece_render_model_from_rows(
+                        row_snapshot,
+                        viewport_width,
+                        one_row_layout=one_row_layout,
+                    )
                     if ordinal % 50 == 0:
                         time.sleep(0.001)
             except Exception:
@@ -2892,7 +3215,10 @@ class SDLXLIFFReviewDialog(QDialog):
                     continue
                 if 0 <= piece_index < len(self.pieces) and isinstance(model, dict):
                     rows = self.pieces[piece_index].get("rows") or []
-                    if int(model.get("row_count", -1)) == len(rows):
+                    if (
+                        int(model.get("row_count", -1)) == len(rows)
+                        and bool(model.get("one_row_layout", False)) == bool(getattr(self, "_one_row_layout_enabled", False))
+                    ):
                         self.pieces[piece_index]["_render_model"] = model
         finally:
             if getattr(self, "_review_data_preload_requested", False):
@@ -3426,10 +3752,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if not isinstance(grid, QGridLayout):
                 return False
 
-            old_item = grid.itemAtPosition(0, 1)
-            old_widget = old_item.widget() if old_item is not None else None
-            target_item = grid.itemAtPosition(0, 5)
-            target_widget = target_item.widget() if target_item is not None else None
+            target_widget = self._review_row_target_widget(frame)
 
             source_text = row_data.get("source", "")
             target_text = row_data.get("target", "")
@@ -3453,20 +3776,22 @@ class SDLXLIFFReviewDialog(QDialog):
                         self._inject_machine_translation_to_target(pi, ri, text, ed)
                 ) if tooltip_translation and target_editable and not tooltip_pending else None,
             )
-            source_label.setMaximumHeight(max(24, row_height - 14))
+            if bool(frame.property("sdl_one_row_layout")):
+                source_label.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
+            else:
+                source_label.setMaximumHeight(max(24, row_height - 14))
             source_label.setToolTip(self._wrapped_tooltip(source_text))
 
-            if old_widget is not None:
-                grid.removeWidget(old_widget)
-                old_widget.hide()
-                old_widget.setParent(None)
-                old_widget.deleteLater()
-            grid.addWidget(source_label, 0, 1)
+            if not self._replace_review_row_source_widget(frame, source_label):
+                return False
 
             frame.setFixedHeight(row_height)
             if target_widget is not None:
                 try:
-                    target_widget.setFixedHeight(max(30, row_height - 14))
+                    if bool(frame.property("sdl_one_row_layout")):
+                        target_widget.setFixedHeight(max(32, min(170, row_height - source_label.maximumHeight() - 20)))
+                    else:
+                        target_widget.setFixedHeight(max(30, row_height - 14))
                 except Exception:
                     pass
             frame.updateGeometry()
@@ -3498,8 +3823,7 @@ class SDLXLIFFReviewDialog(QDialog):
             grid = frame.layout()
             if not isinstance(grid, QGridLayout):
                 return False
-            source_item = grid.itemAtPosition(0, 1)
-            source_widget = source_item.widget() if source_item is not None else None
+            source_widget = self._review_row_source_widget(frame)
             if source_widget is None or source_widget.objectName() != "SdlReviewSourceText":
                 return False
             translated_label = source_widget.findChild(QLabel, "SdlReviewMachineTranslationPending")
@@ -3508,8 +3832,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if translated_label is None:
                 return False
 
-            target_item = grid.itemAtPosition(0, 5)
-            target_widget = target_item.widget() if target_item is not None else None
+            target_widget = self._review_row_target_widget(frame)
             source_text = row_data.get("source", "")
             target_text = row_data.get("target", "")
             tooltip_translation = self._row_tooltip_translation(piece, row_data)
@@ -3560,7 +3883,11 @@ class SDLXLIFFReviewDialog(QDialog):
             frame.setFixedHeight(row_height)
             if target_widget is not None:
                 try:
-                    target_widget.setFixedHeight(max(30, row_height - 14))
+                    if bool(frame.property("sdl_one_row_layout")):
+                        source_widget.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
+                        target_widget.setFixedHeight(max(32, min(170, row_height - source_widget.maximumHeight() - 20)))
+                    else:
+                        target_widget.setFixedHeight(max(30, row_height - 14))
                 except Exception:
                     pass
             frame.updateGeometry()
@@ -3942,8 +4269,12 @@ class SDLXLIFFReviewDialog(QDialog):
 
     @staticmethod
     def _normalized_machine_translation_text(text):
-        text = html_lib.unescape(str(text or "")).strip().lower()
+        text = unicodedata.normalize("NFKC", html_lib.unescape(str(text or ""))).strip().lower()
         return re.sub(r"\s+", " ", text)
+
+    @classmethod
+    def _compact_machine_translation_text(cls, text):
+        return re.sub(r"\s+", "", cls._normalized_machine_translation_text(text))
 
     def _validate_tooltip_batch_translations(self, translations, work):
         if not translations:
@@ -4857,7 +5188,73 @@ class SDLXLIFFReviewDialog(QDialog):
             tooltip_translation,
             tooltip_pending,
             self._review_render_viewport_width(),
+            one_row_layout=bool(getattr(self, "_one_row_layout_enabled", False)),
         )
+
+    def _review_row_source_widget(self, frame):
+        try:
+            if frame is None:
+                return None
+            source_container = frame.findChild(QWidget, "SdlReviewSourceText")
+            if source_container is not None:
+                return source_container
+            source_label = frame.findChild(QLabel, "SdlReviewSourceRawText")
+            if source_label is not None:
+                return source_label
+            grid = frame.layout()
+            if isinstance(grid, QGridLayout):
+                item = grid.itemAtPosition(0, 1)
+                return item.widget() if item is not None else None
+        except Exception:
+            return None
+        return None
+
+    def _review_row_target_widget(self, frame):
+        try:
+            if frame is None:
+                return None
+            target = frame.findChild(QPlainTextEdit, "SdlReviewTargetEdit")
+            if target is not None:
+                return target
+            grid = frame.layout()
+            if isinstance(grid, QGridLayout):
+                item = grid.itemAtPosition(0, 5)
+                return item.widget() if item is not None else None
+        except Exception:
+            return None
+        return None
+
+    def _replace_review_row_source_widget(self, frame, source_widget):
+        try:
+            if frame is None or source_widget is None:
+                return False
+            if bool(frame.property("sdl_one_row_layout")):
+                content = frame.findChild(QWidget, "SdlReviewOneRowContent")
+                content_layout = content.layout() if content is not None else None
+                if content_layout is None:
+                    return False
+                old_widget = self._review_row_source_widget(frame)
+                if old_widget is not None:
+                    content_layout.removeWidget(old_widget)
+                    old_widget.hide()
+                    old_widget.setParent(None)
+                    old_widget.deleteLater()
+                content_layout.insertWidget(0, source_widget)
+                return True
+            grid = frame.layout()
+            if not isinstance(grid, QGridLayout):
+                return False
+            old_item = grid.itemAtPosition(0, 1)
+            old_widget = old_item.widget() if old_item is not None else None
+            if old_widget is not None:
+                grid.removeWidget(old_widget)
+                old_widget.hide()
+                old_widget.setParent(None)
+                old_widget.deleteLater()
+            grid.addWidget(source_widget, 0, 1)
+            return True
+        except Exception:
+            return False
 
     def _add_review_row(self, piece, row_data, idx, max_len, colors, row_model=None):
         bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
@@ -4867,10 +5264,12 @@ class SDLXLIFFReviewDialog(QDialog):
         tooltip_translation = row_model.get("tooltip_translation", self._row_tooltip_translation(piece, row_data))
         tooltip_pending = bool(row_model.get("tooltip_pending", row_data.get("tooltip_translation_pending")))
         row_height = int(row_model.get("row_height") or self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending))
+        one_row_layout = bool(row_model.get("one_row_layout", getattr(self, "_one_row_layout_enabled", False)))
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
         frame.setProperty("sdl_status", row_data["status"])
         frame.setProperty("sdl_row_index", idx)
+        frame.setProperty("sdl_one_row_layout", one_row_layout)
         frame.setFixedHeight(row_height)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row_style = f"QFrame#SdlReviewRow {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 3px; }}"
@@ -4880,16 +5279,26 @@ class SDLXLIFFReviewDialog(QDialog):
         grid.setContentsMargins(10, 5, 10, 5)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(0)
-        grid.setColumnStretch(0, 0)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
-        grid.setColumnStretch(3, 0)
-        grid.setColumnStretch(4, 0)
-        grid.setColumnStretch(5, 1)
         grid.setColumnMinimumWidth(0, 92)
-        grid.setColumnMinimumWidth(2, 180)
-        grid.setColumnMinimumWidth(3, 26)
-        grid.setColumnMinimumWidth(4, 180)
+        if one_row_layout:
+            grid.setColumnStretch(0, 0)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 0)
+            grid.setColumnStretch(3, 0)
+            grid.setColumnStretch(4, 0)
+            grid.setColumnMinimumWidth(2, 180)
+            grid.setColumnMinimumWidth(3, 26)
+            grid.setColumnMinimumWidth(4, 180)
+        else:
+            grid.setColumnStretch(0, 0)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 0)
+            grid.setColumnStretch(3, 0)
+            grid.setColumnStretch(4, 0)
+            grid.setColumnStretch(5, 1)
+            grid.setColumnMinimumWidth(2, 180)
+            grid.setColumnMinimumWidth(3, 26)
+            grid.setColumnMinimumWidth(4, 180)
 
         source_missing = bool(row_model.get("source_missing", not row_data.get("source_tag")))
         target_missing = bool(row_model.get("target_missing", not row_data.get("target_tag")))
@@ -4928,11 +5337,30 @@ class SDLXLIFFReviewDialog(QDialog):
         dot.setToolTip(row_data.get("reason", ""))
 
         grid.addWidget(tag_label, 0, 0)
-        grid.addWidget(source_label, 0, 1)
-        grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
-        grid.addWidget(dot, 0, 3)
-        grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
-        grid.addWidget(target_widget, 0, 5)
+        if one_row_layout:
+            content = QWidget()
+            content.setObjectName("SdlReviewOneRowContent")
+            content.setMinimumWidth(0)
+            content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            content.setStyleSheet("QWidget#SdlReviewOneRowContent { background: transparent; }")
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(5)
+            source_label.setMaximumHeight(max(24, min(row_height - 52, row_height // 2)))
+            target_widget.setFixedHeight(max(32, min(170, row_height - source_label.maximumHeight() - 20)))
+            content_layout.addWidget(source_label)
+            content_layout.addWidget(target_widget)
+            content_layout.addStretch(1)
+            grid.addWidget(content, 0, 1)
+            grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
+            grid.addWidget(dot, 0, 3)
+            grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
+        else:
+            grid.addWidget(source_label, 0, 1)
+            grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
+            grid.addWidget(dot, 0, 3)
+            grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
+            grid.addWidget(target_widget, 0, 5)
         self.rows_layout.addWidget(frame)
 
     def _render_piece(self, row, show_loading=True):
