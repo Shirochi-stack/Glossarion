@@ -5866,13 +5866,13 @@ def configure_translation_chunk_prompt(self):
         QButtonGroup,
         QCheckBox,
         QDialog,
+        QDoubleSpinBox,
         QGroupBox,
         QHBoxLayout,
         QLabel,
         QMessageBox,
         QPushButton,
         QRadioButton,
-        QSpinBox,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -5956,6 +5956,21 @@ def configure_translation_chunk_prompt(self):
             background-color: #1a1a1a;
             border-color: #3a3a3a;
         }
+        QDoubleSpinBox {
+            background-color: #2d2d2d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 2px 4px;
+        }
+        QDoubleSpinBox:focus {
+            border-color: #5a9fd4;
+        }
+        QDoubleSpinBox:disabled {
+            background-color: #242424;
+            color: #777777;
+            border-color: #3a3a3a;
+        }
         QRadioButton {
             color: white;
             spacing: 5px;
@@ -5985,6 +6000,10 @@ def configure_translation_chunk_prompt(self):
     options_v = QVBoxLayout(options_box)
 
     enable_cb = self._create_styled_checkbox("Enable chunk prompt")
+    enable_cb.setToolTip(
+        "Adds the chunk prompt template when a chapter is split into multiple chunks. "
+        "The selected Send as option controls whether it is sent as system, assistant, or user content."
+    )
     enable_cb.setChecked(bool(getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False))))
     self.enable_translation_chunk_prompt_checkbox = enable_cb
     options_v.addWidget(enable_cb)
@@ -5995,16 +6014,39 @@ def configure_translation_chunk_prompt(self):
     previous_h.setSpacing(8)
 
     include_previous_cb = self._create_styled_checkbox("Include previous chunk")
+    include_previous_cb.setToolTip(
+        "Adds context from the immediately previous chunk. "
+        "Uses the last N HTML tags when tags are found; otherwise falls back to the last N non-empty lines."
+    )
     include_previous_cb.setChecked(bool(getattr(self, 'include_previous_chunk_var', self.config.get('include_previous_chunk', False))))
     self.include_previous_chunk_checkbox = include_previous_cb
     previous_h.addWidget(include_previous_cb)
     previous_h.addSpacing(8)
-    previous_h.addWidget(QLabel("Tags/lines:"))
+    previous_limit_label = QLabel("HTML tags or lines:")
+    previous_limit_label.setToolTip(
+        "The previous chunk context limit. HTML tags are preferred; plain lines are used only when no HTML tags are found."
+    )
+    previous_h.addWidget(previous_limit_label)
 
-    previous_limit_spin = QSpinBox()
+    previous_limit_spin = QDoubleSpinBox()
     previous_limit_spin.setRange(-1, 1000)
-    previous_limit_spin.setToolTip("Use -1 to include the entire previous chunk.")
-    previous_limit_spin.setFixedWidth(88)
+    previous_limit_spin.setSingleStep(1)
+    previous_limit_spin.setDecimals(0)
+    previous_limit_spin.setToolTip(
+        "How much previous chunk context to include. "
+        "Uses the last N HTML tags, or the last N non-empty lines if no HTML tags are found. "
+        "Use -1 to include the entire previous chunk."
+    )
+    previous_limit_spin.setFixedSize(90, 26)
+    previous_limit_spin.setFocusPolicy(Qt.StrongFocus)
+    value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
+    previous_limit_spin.setAlignment(value_alignment)
+    previous_limit_spin.lineEdit().setAlignment(value_alignment)
+    previous_limit_spin.lineEdit().setTextMargins(0, 0, 0, 1)
+    try:
+        self._disable_spinbox_mousewheel(previous_limit_spin)
+    except Exception:
+        pass
     try:
         previous_limit = int(getattr(self, 'previous_chunk_context_limit_var', self.config.get('previous_chunk_context_limit', 3)))
     except Exception:

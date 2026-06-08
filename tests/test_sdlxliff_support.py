@@ -542,6 +542,7 @@ def test_translation_chunk_prompt_ui_and_paths_use_new_toggle_contract():
     assert "chunk_prompt_template =" not in transate_source
     assert "Enable chunk prompt" in dialog_source
     assert "Include previous chunk" in dialog_source
+    assert "HTML tags or lines" in dialog_source
     assert "previous_chunk_context_limit" in dialog_source
     assert "PREVIOUS_CHUNK_CONTEXT_LIMIT" in transate_source
     assert "translation_chunk_prompt_role" in dialog_source
