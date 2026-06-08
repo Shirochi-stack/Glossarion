@@ -3879,6 +3879,8 @@ class SDLXLIFFReviewDialog(QDialog):
         translated = str(translated or "").strip()
         if not translated:
             return
+        if self._normalized_machine_translation_text(translated) == self._normalized_machine_translation_text(row_data.get("source", "")):
+            return
         row_data["tooltip_translation"] = translated
         row_data["_source_preview_dirty"] = True
         self._invalidate_piece_render_model(piece, restart_preload=False)
@@ -3937,6 +3939,43 @@ class SDLXLIFFReviewDialog(QDialog):
             }
         except Exception:
             return {}
+
+    @staticmethod
+    def _normalized_machine_translation_text(text):
+        text = html_lib.unescape(str(text or "")).strip().lower()
+        return re.sub(r"\s+", " ", text)
+
+    def _validate_tooltip_batch_translations(self, translations, work):
+        if not translations:
+            return {}, "Google Translate Free returned no parseable tooltip translations."
+        source_by_key = {
+            key: str(source_text or "")
+            for _row_idx, key, source_text, _tag_name in (work or [])
+        }
+        valid = {}
+        unchanged = []
+        for key, translated in (translations or {}).items():
+            translated_text = str(translated or "").strip()
+            source_text = source_by_key.get(key, "")
+            if not translated_text:
+                continue
+            if self._normalized_machine_translation_text(translated_text) == self._normalized_machine_translation_text(source_text):
+                unchanged.append(key)
+                continue
+            valid[key] = translated_text
+        if not valid:
+            if unchanged:
+                return {}, (
+                    "Google Translate Free returned source text unchanged for "
+                    f"{len(unchanged)}/{len(work or [])} row(s); refusing to save raw source as preview."
+                )
+            return {}, "Google Translate Free returned no usable tooltip translations."
+        if unchanged:
+            return valid, (
+                "Google Translate Free returned source text unchanged for "
+                f"{len(unchanged)}/{len(work or [])} row(s); skipped those rows."
+            )
+        return valid, ""
 
     def _current_piece_row(self):
         try:
@@ -4127,10 +4166,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 translator = GoogleFreeTranslateNew("auto", target_code)
                 batch_html = self._tooltip_batch_html(work)
                 result = translator.translate(batch_html)
+                result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
                 translated_html = str(result.get("translatedText") or "").strip()
                 translations = self._extract_tooltip_batch_translations(translated_html, work)
-                if not translations:
-                    error = "Google Translate Free returned no parseable tooltip translations."
+                translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
+                if result_error:
+                    error = result_error
+                    translations = {}
+                elif validation_error:
+                    error = validation_error
                 self._tooltip_translation_progress.emit(1, 1)
             except Exception as exc:
                 error = str(exc)
@@ -4183,11 +4227,16 @@ class SDLXLIFFReviewDialog(QDialog):
                 try:
                     batch_html = self._tooltip_batch_html(work)
                     result = translator.translate(batch_html)
+                    result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
                     translated_html = str(result.get("translatedText") or "").strip()
                     translations = self._extract_tooltip_batch_translations(translated_html, work)
+                    translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
+                    if result_error:
+                        error = result_error
+                        translations = {}
+                    elif validation_error:
+                        error = validation_error
                     translated_count += len(translations)
-                    if not translations:
-                        error = "Google Translate Free returned no parseable tooltip translations."
                 except Exception as exc:
                     error = str(exc)
                 if error:
@@ -4278,7 +4327,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 if row_data.pop("tooltip_translation_pending", False):
                     changed_rows.add(row_index)
                 if key in translations:
-                    translated = translations[key]
+                    translated = str(translations[key] or "").strip()
+                    if self._normalized_machine_translation_text(translated) == self._normalized_machine_translation_text(row_data.get("source", "")):
+                        changed_rows.add(row_index)
+                        continue
                     self._set_row_tooltip_translation(piece, row_data, translated, persist=False)
                     rows_to_persist.append((row_data, translated))
                     changed_rows.add(row_index)

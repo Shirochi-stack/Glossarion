@@ -43,7 +43,6 @@ DEFAULT_SUBMIT_MODE = "ui"
 DEFAULT_SUBCHUNK_PROMPT_CHARS = 7000
 DEFAULT_SUBCHUNK_URL_CHARS = 14500
 DEFAULT_SUBCHUNK_SAFETY_CHARS = 600
-DEFAULT_FIXED_PROMPT_CHARS = 3000
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
 DEFAULT_SUBCHUNK_TIMEOUT = 0
 DEFAULT_SUBCHUNK_START_DELAY = 5.0
@@ -525,22 +524,6 @@ def _messages_to_prompt(messages: Iterable[Dict[str, Any]]) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _truncate_middle(value: str, max_chars: int) -> str:
-    text = str(value or "")
-    max_chars = int(max_chars or 0)
-    if max_chars <= 0:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    marker = f"\n\n[... omitted {len(text) - max_chars:,} chars to fit Gemini Free AI Mode prompt budget ...]\n\n"
-    if len(marker) >= max_chars:
-        return text[:max_chars]
-    remaining = max_chars - len(marker)
-    head_chars = max(1, int(remaining * 0.65))
-    tail_chars = max(1, remaining - head_chars)
-    return f"{text[:head_chars].rstrip()}{marker}{text[-tail_chars:].lstrip()}"
-
-
 def _prepare_ai_mode_messages(
     messages: Iterable[Dict[str, Any]],
     *,
@@ -549,8 +532,6 @@ def _prepare_ai_mode_messages(
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
     if not source_messages:
         return []
-    if len(_messages_to_prompt(source_messages)) <= _subchunk_prompt_chars():
-        return source_messages
 
     user_indices = [
         idx for idx, message in enumerate(source_messages)
@@ -560,34 +541,32 @@ def _prepare_ai_mode_messages(
         return source_messages
 
     split_idx = user_indices[-1]
-    fixed_indices = [idx for idx in range(len(source_messages)) if idx != split_idx]
-    fixed_texts = [
-        (idx, _content_to_text(source_messages[idx].get("content")))
-        for idx in fixed_indices
-        if _content_to_text(source_messages[idx].get("content")).strip()
-    ]
-    if not fixed_texts:
+    fixed_messages = [dict(message) for idx, message in enumerate(source_messages) if idx != split_idx]
+    if not fixed_messages:
         return source_messages
 
-    total_fixed_chars = sum(len(text) for _, text in fixed_texts)
-    fixed_budget = min(_fixed_prompt_chars(), max(500, _subchunk_prompt_chars() - 1500))
-    if total_fixed_chars <= fixed_budget:
-        return source_messages
-
-    compacted = [dict(message) for message in source_messages]
-    per_message_budget = max(100, fixed_budget // max(1, len(fixed_texts)))
-    for idx, text in fixed_texts:
-        compacted[idx]["content"] = _truncate_middle(text, min(len(text), per_message_budget))
-
-    before_prompt_chars = len(_messages_to_prompt(source_messages))
-    after_prompt_chars = len(_messages_to_prompt(compacted))
-    _log(
-        log_fn,
-        "Gemini Free: compacted fixed prompt for AI Mode "
-        f"({total_fixed_chars:,} fixed chars, {before_prompt_chars:,} -> {after_prompt_chars:,} prompt chars, "
-        f"fixed budget: {fixed_budget:,})",
-    )
-    return compacted
+    fixed_probe_user = dict(source_messages[split_idx])
+    fixed_probe_user["content"] = "x"
+    fixed_probe_messages = fixed_messages + [fixed_probe_user]
+    fixed_prompt_chars = max(0, len(_messages_to_prompt(fixed_probe_messages)) - 1)
+    fixed_url_chars = max(0, _messages_to_search_url_chars(fixed_probe_messages) - 1)
+    prompt_limit_chars = max(1, _subchunk_prompt_chars() - _subchunk_safety_chars())
+    url_limit_chars = _subchunk_url_chars()
+    if fixed_prompt_chars > prompt_limit_chars:
+        _log(
+            log_fn,
+            "⚠️ Gemini Free: fixed/system prompt is larger than the AI Mode planning budget; "
+            "it will be sent unchanged, but AI Mode may fail until you shorten it "
+            f"(fixed prompt chars: {fixed_prompt_chars:,}, budget: {prompt_limit_chars:,}).",
+        )
+    if fixed_url_chars > url_limit_chars:
+        _log(
+            log_fn,
+            "⚠️ Gemini Free: fixed/system prompt alone exceeds the encoded Google AI Mode URL budget; "
+            "it will be sent unchanged, but chunking user text cannot fully fix this "
+            f"(fixed URL chars: {fixed_url_chars:,}, budget: {url_limit_chars:,}).",
+        )
+    return source_messages
 
 
 def _messages_to_search_url_chars(messages: Iterable[Dict[str, Any]]) -> int:
@@ -645,10 +624,6 @@ def _subchunk_prompt_chars() -> int:
     configured = max(300, _env_int("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
     ai_mode_ceiling = max(300, _env_int("GEMINI_FREE_AI_MODE_PROMPT_CHARS", DEFAULT_SUBCHUNK_PROMPT_CHARS))
     return min(configured, ai_mode_ceiling)
-
-
-def _fixed_prompt_chars() -> int:
-    return max(500, _env_int("GEMINI_FREE_FIXED_PROMPT_CHARS", DEFAULT_FIXED_PROMPT_CHARS))
 
 
 def _subchunk_url_chars() -> int:
@@ -949,13 +924,16 @@ def _split_messages_for_search_budget(
 
     def fits_budget(chunk_text: str) -> bool:
         probe_messages = make_messages(chunk_text)
-        return (
-            len(_messages_to_prompt(probe_messages)) <= prompt_limit_chars
-            and (
-                not enforce_url_budget
-                or _messages_to_search_url_chars(probe_messages) <= url_limit_chars
-            )
+        chunk_chars = len(str(chunk_text or ""))
+        prompt_ok = len(_messages_to_prompt(probe_messages)) <= prompt_limit_chars or (
+            fixed_prompt_over_budget and chunk_chars <= body_budget
         )
+        url_ok = (
+            not enforce_url_budget
+            or _messages_to_search_url_chars(probe_messages) <= url_limit_chars
+            or (fixed_url_over_budget and chunk_chars <= body_budget)
+        )
+        return prompt_ok and url_ok
 
     units: List[str] = []
     fixed_probe = "x"
@@ -964,6 +942,8 @@ def _split_messages_for_search_budget(
     safety_chars = _subchunk_safety_chars()
     url_limit_chars = _subchunk_url_chars()
     prompt_limit_chars = max(1, max_prompt_chars - safety_chars)
+    fixed_prompt_over_budget = fixed_prompt_chars > prompt_limit_chars
+    fixed_url_over_budget = bool(enforce_url_budget and fixed_url_chars > url_limit_chars)
     available_body_chars = prompt_limit_chars - fixed_prompt_chars
     min_body_chars = _min_subchunk_body_chars()
     if available_body_chars <= 0:
@@ -973,6 +953,8 @@ def _split_messages_for_search_budget(
         )
     else:
         body_budget = max(1, available_body_chars)
+    if fixed_url_over_budget:
+        body_budget = min(body_budget, max(min_body_chars, max_prompt_chars // 8))
     if fixed_prompt_chars + body_budget > prompt_limit_chars:
         prompt_limit_chars = fixed_prompt_chars + body_budget
 
@@ -1055,6 +1037,8 @@ def _split_messages_for_search_budget(
         "prompt_limit_chars": prompt_limit_chars,
         "url_limit_chars": url_limit_chars,
         "url_budget_enforced": bool(enforce_url_budget),
+        "fixed_prompt_over_budget": fixed_prompt_over_budget,
+        "fixed_url_over_budget": fixed_url_over_budget,
         "available_body_chars": available_body_chars,
         "body_budget_chars": body_budget,
         "fixed_url_chars": fixed_url_chars,
