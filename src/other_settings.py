@@ -3899,7 +3899,7 @@ def _create_response_handling_section(self, parent):
         "gemini_free_subchunk_prompt_chars_spin",
         "gemini_free_subchunk_prompt_chars",
         "GEMINI_FREE_SUBCHUNK_PROMPT_CHARS",
-        14000,
+        60000,
         300,
         100000,
         0,
@@ -5862,7 +5862,20 @@ def show_ai_hunter_settings(self):
 
 def configure_translation_chunk_prompt(self):
     """Configure the prompt template for translation chunks (PySide6)"""
-    from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
+    from PySide6.QtWidgets import (
+        QButtonGroup,
+        QCheckBox,
+        QDialog,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QMessageBox,
+        QPushButton,
+        QRadioButton,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
 
@@ -5913,6 +5926,46 @@ def configure_translation_chunk_prompt(self):
     desc.setStyleSheet("color: gray; font-size: 10pt;")
     main_layout.addWidget(desc)
     main_layout.addSpacing(10)
+
+    # Enable + role controls
+    options_box = QGroupBox("Chunk Prompt Options")
+    options_v = QVBoxLayout(options_box)
+
+    enable_cb = QCheckBox("Enable chunk prompt")
+    enable_cb.setChecked(bool(getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False))))
+    self.enable_translation_chunk_prompt_checkbox = enable_cb
+    options_v.addWidget(enable_cb)
+
+    role_row = QWidget()
+    role_h = QHBoxLayout(role_row)
+    role_h.setContentsMargins(0, 0, 0, 0)
+    role_h.setSpacing(14)
+    role_h.addWidget(QLabel("Send as:"))
+
+    role_group = QButtonGroup(dialog)
+    role_buttons = {}
+    dialog._translation_chunk_prompt_role_group = role_group
+    dialog._translation_chunk_prompt_role_buttons = role_buttons
+    current_role = str(
+        getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant'))
+        or 'assistant'
+    ).strip().lower()
+    if current_role not in {'system', 'assistant', 'user'}:
+        current_role = 'assistant'
+    for role, label in (
+        ('system', 'System'),
+        ('assistant', 'Assistant'),
+        ('user', 'User'),
+    ):
+        rb = QRadioButton(label)
+        rb.setChecked(role == current_role)
+        rb.toggled.connect(lambda checked, role=role: setattr(self, 'translation_chunk_prompt_role_var', role) if checked else None)
+        role_group.addButton(rb)
+        role_buttons[role] = rb
+        role_h.addWidget(rb)
+    role_h.addStretch()
+    options_v.addWidget(role_row)
+    main_layout.addWidget(options_box)
     
     # Instructions
     instructions_box = QGroupBox("Available Placeholders")
@@ -5921,7 +5974,6 @@ def configure_translation_chunk_prompt(self):
     placeholders = [
         ("{chunk_idx}", "Current chunk number (1-based)"),
         ("{total_chunks}", "Total number of chunks"),
-        ("{chunk_html}", "The actual HTML content to translate")
     ]
     
     for placeholder, description in placeholders:
@@ -5957,13 +6009,16 @@ def configure_translation_chunk_prompt(self):
     def update_example():
         try:
             template = chunk_prompt_text.toPlainText()
-            example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '<p>Chapter content here...</p>')
+            example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '')
+            if not enable_cb.isChecked():
+                example = "[Chunk prompt disabled]"
             display_text = example[:200] + "..." if len(example) > 200 else example
             example_label.setText(display_text)
         except Exception:
             example_label.setText("[Invalid template]")
     
     chunk_prompt_text.textChanged.connect(update_example)
+    enable_cb.toggled.connect(lambda _checked: update_example())
     update_example()
     
     main_layout.addWidget(example_box)
@@ -5973,8 +6028,20 @@ def configure_translation_chunk_prompt(self):
     
     def save_chunk_prompt():
         self.translation_chunk_prompt = chunk_prompt_text.toPlainText().strip()
+        self.enable_translation_chunk_prompt_var = bool(enable_cb.isChecked())
+        selected_role = next((role for role, rb in role_buttons.items() if rb.isChecked()), 'assistant')
+        self.translation_chunk_prompt_role_var = selected_role
         self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-        QMessageBox.information(dialog, "Success", "Translation chunk prompt saved!")
+        self.config['enable_translation_chunk_prompt'] = self.enable_translation_chunk_prompt_var
+        self.config['translation_chunk_prompt_role'] = self.translation_chunk_prompt_role_var
+        os.environ['ENABLE_TRANSLATION_CHUNK_PROMPT'] = '1' if self.enable_translation_chunk_prompt_var else '0'
+        os.environ['TRANSLATION_CHUNK_PROMPT_ROLE'] = self.translation_chunk_prompt_role_var
+        os.environ['TRANSLATION_CHUNK_PROMPT'] = self.translation_chunk_prompt
+        try:
+            self.save_config(show_message=False)
+        except Exception:
+            pass
+        QMessageBox.information(dialog, "Success", "Translation chunk prompt settings saved!")
         dialog.hide()
     
     def reset_chunk_prompt():
@@ -5982,6 +6049,9 @@ def configure_translation_chunk_prompt(self):
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if result == QMessageBox.Yes:
             chunk_prompt_text.setPlainText(self.default_translation_chunk_prompt)
+            enable_cb.setChecked(False)
+            role_buttons['assistant'].setChecked(True)
+            self.translation_chunk_prompt_role_var = 'assistant'
             update_example()
     
     save_btn = QPushButton("Save")

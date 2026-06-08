@@ -1601,6 +1601,21 @@ class SDLXLIFFReviewDialog(QDialog):
         return re.findall(r"[a-z0-9']+|[\uac00-\ud7a3]+", str(text or "").lower())
 
     @classmethod
+    def _latin_token_overlap(cls, source_text, target_text):
+        source_tokens = [
+            token for token in cls._comparison_tokens(source_text)
+            if re.search(r"[a-z0-9]", token)
+        ]
+        target_tokens = [
+            token for token in cls._comparison_tokens(target_text)
+            if re.search(r"[a-z0-9]", token)
+        ]
+        if not source_tokens or not target_tokens:
+            return False, 0.0
+        common_tokens = sum((Counter(source_tokens) & Counter(target_tokens)).values())
+        return True, common_tokens / max(1, len(source_tokens))
+
+    @classmethod
     def _row_skew_metrics(cls, row):
         source_text = cls._row_expected_comparison_text(row)
         target_text = str((row or {}).get("target", "") or "").strip()
@@ -1617,13 +1632,7 @@ class SDLXLIFFReviewDialog(QDialog):
         common_tokens = 0
         if source_tokens and target_tokens:
             common_tokens = sum((Counter(source_tokens) & Counter(target_tokens)).values())
-        source_latin_tokens = [token for token in source_tokens if re.search(r"[a-z0-9]", token)]
-        target_latin_tokens = [token for token in target_tokens if re.search(r"[a-z0-9]", token)]
-        common_latin_tokens = 0
-        if source_latin_tokens and target_latin_tokens:
-            common_latin_tokens = sum((Counter(source_latin_tokens) & Counter(target_latin_tokens)).values())
-        comparable_token_overlap = bool(source_latin_tokens and target_latin_tokens)
-        source_token_overlap = common_latin_tokens / max(1, len(source_latin_tokens))
+        comparable_token_overlap, source_token_overlap = cls._latin_token_overlap(source_text, target_text)
         unmatched_tokens = max(len(source_tokens), len(target_tokens)) - common_tokens
         similarity = SequenceMatcher(None, source_text.lower(), target_text.lower()).ratio()
         source_weight = max(0.25, min(1.0, source_len / 80.0))
@@ -1659,25 +1668,25 @@ class SDLXLIFFReviewDialog(QDialog):
         best_ratio = None
         best_score = None
         candidates = []
-        for row in rows or []:
+        for row_index, row in enumerate(rows or []):
             if row.get("status") not in {"green", "yellow"}:
                 continue
             metrics = self._row_skew_metrics(row)
             if metrics is None:
                 continue
-            candidates.append((row, metrics))
+            candidates.append((row_index, row, metrics))
 
         if not candidates:
             return False
 
-        target_lengths = sorted(max(1, int(metrics.get("target_len") or 0)) for _row, metrics in candidates)
-        target_tokens = sorted(max(1, int(metrics.get("target_token_count") or 0)) for _row, metrics in candidates)
+        target_lengths = sorted(max(1, int(metrics.get("target_len") or 0)) for _index, _row, metrics in candidates)
+        target_tokens = sorted(max(1, int(metrics.get("target_token_count") or 0)) for _index, _row, metrics in candidates)
         median_target_len = target_lengths[len(target_lengths) // 2]
         median_target_tokens = target_tokens[len(target_tokens) // 2]
         source_missing_from_output = source_count > target_count
         output_added = target_count > source_count
 
-        for row, metrics in candidates:
+        for row_index, row, metrics in candidates:
             ratio = metrics["ratio"]
             source_len = max(1, int(metrics.get("source_len") or 0))
             source_token_count = max(1, int(metrics.get("source_token_count") or 0))
@@ -1713,6 +1722,17 @@ class SDLXLIFFReviewDialog(QDialog):
             if metrics.get("comparable_token_overlap") and directional_ratio > 0.0:
                 source_token_overlap = float(metrics.get("source_token_overlap") or 0.0)
                 anchor_factor = min(1.0, 0.10 + source_token_overlap * 1.20)
+            downstream_shift_factor = 1.0
+            if source_missing_from_output and metrics.get("comparable_token_overlap") and directional_ratio > 0.0:
+                source_token_overlap = float(metrics.get("source_token_overlap") or 0.0)
+                next_source_overlap = 0.0
+                for next_row in (rows or [])[row_index + 1:row_index + 3]:
+                    next_source_text = self._row_expected_comparison_text(next_row)
+                    comparable, overlap = self._latin_token_overlap(next_source_text, row.get("target"))
+                    if comparable:
+                        next_source_overlap = max(next_source_overlap, overlap)
+                if next_source_overlap >= 0.45 and source_token_overlap < 0.35:
+                    downstream_shift_factor = 0.05
             ratio_sensitive_score = (
                 min(6.0, directional_len_ratio) * 130.0
                 + min(6.0, directional_token_ratio) * 110.0
@@ -1724,7 +1744,7 @@ class SDLXLIFFReviewDialog(QDialog):
             score = (
                 ratio_sensitive_score * anchor_factor
                 + metrics["score"] * 0.15
-            )
+            ) * downstream_shift_factor
             if best_score is None or score > best_score:
                 best_row = row
                 best_ratio = ratio

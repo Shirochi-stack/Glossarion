@@ -27,7 +27,7 @@ def test_default_gemini_free_budget_allows_larger_single_request(monkeypatch):
     assert should_split is False
 
 
-def test_gemini_free_budget_uses_encoded_url_length(monkeypatch):
+def test_gemini_free_url_budget_can_use_encoded_url_length(monkeypatch):
     _clear_gemini_free_budget_env(monkeypatch)
     messages = [{"role": "user", "content": "界" * 6000}]
 
@@ -35,6 +35,12 @@ def test_gemini_free_budget_uses_encoded_url_length(monkeypatch):
 
     assert prompt_chars < gemini_free._subchunk_prompt_chars()
     assert url_chars > gemini_free._subchunk_url_chars()
+    assert should_split is False
+
+    should_split, prompt_chars, url_chars = gemini_free._requires_adaptive_split(
+        messages,
+        enforce_url_budget=True,
+    )
     assert should_split is True
 
 
@@ -64,13 +70,41 @@ def test_gemini_free_split_chunks_stay_under_prompt_and_url_budget(monkeypatch):
     chunks, metadata = gemini_free._split_messages_for_search_budget(
         messages,
         gemini_free._subchunk_prompt_chars(),
+        enforce_url_budget=True,
         return_metadata=True,
     )
 
     assert len(chunks) > 1
+    assert metadata["url_budget_enforced"] is True
     for chunk in chunks:
         assert len(gemini_free._messages_to_prompt(chunk)) <= metadata["prompt_limit_chars"]
         assert gemini_free._messages_to_search_url_chars(chunk) <= metadata["url_limit_chars"]
+
+
+def test_gemini_free_ai_mode_split_ignores_url_budget_and_limits_chunk_count(monkeypatch):
+    _clear_gemini_free_budget_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_PROMPT_CHARS", "14000")
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_URL_CHARS", "14500")
+    monkeypatch.setenv("GEMINI_FREE_SUBCHUNK_SAFETY_CHARS", "600")
+    monkeypatch.setenv("GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS", "80")
+
+    messages = [
+        {"role": "system", "content": "s" * 14200},
+        {"role": "user", "content": "Translate this:\n" + ("body text " * 600)},
+    ]
+
+    chunks, metadata = gemini_free._split_messages_for_search_budget(
+        messages,
+        gemini_free._subchunk_prompt_chars(),
+        return_metadata=True,
+    )
+
+    assert metadata["fixed_prompt_chars"] > gemini_free._subchunk_prompt_chars()
+    assert metadata["url_budget_enforced"] is False
+    assert metadata["body_budget_chars"] > 80
+    assert len(chunks) <= 4
+    for chunk in chunks:
+        assert len(gemini_free._messages_to_prompt(chunk)) <= metadata["prompt_limit_chars"]
 
 
 def test_gemini_free_accepts_plain_text_for_html_request():
@@ -186,13 +220,13 @@ def test_gemini_free_html_subchunks_are_balanced_on_block_boundaries(monkeypatch
         assert len(gemini_free._messages_to_prompt(chunk)) <= metadata["prompt_limit_chars"]
 
 
-def test_gemini_free_url_load_failure_falls_back_to_ui_submit(monkeypatch):
+def test_gemini_free_always_uses_ai_mode_ui_submit(monkeypatch):
     monkeypatch.setenv("GEMINI_FREE_SUBMIT_MODE", "url")
     calls = {"url": 0, "ui": 0}
 
     def fail_url_load(*args, **kwargs):
         calls["url"] += 1
-        raise RuntimeError("Qt WebEngine failed to load https://www.google.com/search?q=too-long")
+        raise AssertionError("URL submit mode should not be used")
 
     def ui_submit(*args, **kwargs):
         calls["ui"] += 1
@@ -215,22 +249,26 @@ def test_gemini_free_url_load_failure_falls_back_to_ui_submit(monkeypatch):
         timeout=5,
     )
 
-    assert calls == {"url": 1, "ui": 1}
+    assert calls == {"url": 0, "ui": 1}
     assert result["content"] == "fallback answer"
-    assert result["raw_response"]["submit_mode"] == "ui_fallback"
-    assert result["raw_response"]["url_load_fallback"] is True
+    assert result["raw_response"]["submit_mode"] == "ui"
+    assert result["raw_response"]["url_load_fallback"] is False
 
 
 def test_gemini_free_html_request_translates_text_nodes_and_restores_tags(monkeypatch):
     monkeypatch.setenv("GEMINI_FREE_SUBMIT_MODE", "url")
-    calls = {"url": 0}
+    calls = {"url": 0, "ui": 0}
 
-    def text_node_answer(url, *args, **kwargs):
+    def fail_url_load(*args, **kwargs):
         calls["url"] += 1
-        assert "%3Cdiv" not in url
-        assert "%3Cp" not in url
+        raise AssertionError("URL submit mode should not be used")
+
+    def text_node_answer(prompt, *args, **kwargs):
+        calls["ui"] += 1
+        assert "<div" not in prompt
+        assert "<p" not in prompt
         return {
-            "submit_mode": "url",
+            "submit_mode": "ui",
             "url": "https://www.google.com/search?q=segments",
             "title": "plain",
             "ready": "complete",
@@ -240,7 +278,8 @@ def test_gemini_free_html_request_translates_text_nodes_and_restores_tags(monkey
             "text": "You said:\nsegments\n[1] Hello\n[2] world\n[3] again",
         }
 
-    monkeypatch.setattr(gemini_free, "load_rendered_page_text", text_node_answer)
+    monkeypatch.setattr(gemini_free, "load_rendered_page_text", fail_url_load)
+    monkeypatch.setattr(gemini_free, "load_ai_mode_prompt_text", text_node_answer)
 
     result = gemini_free._send_chat_completion_qt_once(
         messages=[{"role": "user", "content": "<div><p>안녕 <b>세계</b>.</p></div>"}],
@@ -248,9 +287,9 @@ def test_gemini_free_html_request_translates_text_nodes_and_restores_tags(monkey
         timeout=5,
     )
 
-    assert calls == {"url": 1}
+    assert calls == {"url": 0, "ui": 1}
     assert result["content"] == "<div><p>Hello <b>world</b>again</p></div>"
-    assert result["raw_response"]["submit_mode"] == "url"
+    assert result["raw_response"]["submit_mode"] == "ui"
     assert result["raw_response"]["html_text_node_transport"] is True
     assert result["raw_response"]["html_text_node_count"] == 3
     assert result["raw_response"]["html_text_node_translated"] == 3

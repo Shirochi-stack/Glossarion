@@ -2413,7 +2413,7 @@ Text to analyze:
         
         
         # Default prompts
-        self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
+        self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_vision_ocr_prompt = (
             "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
@@ -3903,6 +3903,10 @@ Recent translations to summarize:
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
+        self.enable_translation_chunk_prompt_var = bool(self.config.get('enable_translation_chunk_prompt', False))
+        self.translation_chunk_prompt_role_var = str(self.config.get('translation_chunk_prompt_role', 'assistant') or 'assistant').strip().lower()
+        if self.translation_chunk_prompt_role_var not in {'system', 'assistant', 'user'}:
+            self.translation_chunk_prompt_role_var = 'assistant'
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
         if not self.vision_ocr_prompt or not str(self.vision_ocr_prompt).strip():
@@ -17961,6 +17965,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GEMINI_API_KEY': api_key,
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
+            'ENABLE_TRANSLATION_CHUNK_PROMPT': '1' if getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False)) else '0',
+            'TRANSLATION_CHUNK_PROMPT_ROLE': str(getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant')) or 'assistant').strip().lower(),
+            'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', self.config.get('translation_chunk_prompt', ''))),
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
             'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
@@ -18059,7 +18066,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
             'GEMINI_FREE_ADAPTIVE_SPLIT': '1' if _bool_config_value('gemini_free_adaptive_split_var', 'gemini_free_adaptive_split', True) else '0',
             'GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT': '1' if _bool_config_value('gemini_free_html_text_node_transport_var', 'gemini_free_html_text_node_transport', True) else '0',
-            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 14000, 300, 100000),
+            'GEMINI_FREE_SUBCHUNK_PROMPT_CHARS': _bounded_config_int('gemini_free_subchunk_prompt_chars_var', 'gemini_free_subchunk_prompt_chars', 60000, 300, 100000),
             'GEMINI_FREE_SUBCHUNK_URL_CHARS': _bounded_config_int('gemini_free_subchunk_url_chars_var', 'gemini_free_subchunk_url_chars', 14500, 1000, 200000),
             'GEMINI_FREE_SUBCHUNK_SAFETY_CHARS': _bounded_config_int('gemini_free_subchunk_safety_chars_var', 'gemini_free_subchunk_safety_chars', 600, 0, 20000),
             'GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS': _bounded_config_int('gemini_free_min_subchunk_body_chars_var', 'gemini_free_min_subchunk_body_chars', 80, 1, 50000),
@@ -27072,6 +27079,8 @@ Important rules:
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('allow_ai_markdown_headers', ['allow_ai_markdown_headers_var'], False, bool),
+                ('enable_translation_chunk_prompt', ['enable_translation_chunk_prompt_checkbox', 'enable_translation_chunk_prompt_var'], False, bool),
+                ('translation_chunk_prompt_role', ['translation_chunk_prompt_role_var'], 'assistant', str),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
                 ('vision_ocr_skip_translation', ['vision_ocr_skip_translation_var'], False, bool),
@@ -27200,7 +27209,7 @@ Important rules:
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('gemini_free_adaptive_split', ['gemini_free_adaptive_split_checkbox', 'gemini_free_adaptive_split_var'], True, bool),
                 ('gemini_free_html_text_node_transport', ['gemini_free_html_text_node_transport_checkbox', 'gemini_free_html_text_node_transport_var'], True, bool),
-                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 14000, lambda v: min(100000, max(300, safe_int(v, 14000)))),
+                ('gemini_free_subchunk_prompt_chars', ['gemini_free_subchunk_prompt_chars_var'], 60000, lambda v: min(100000, max(300, safe_int(v, 60000)))),
                 ('gemini_free_subchunk_url_chars', ['gemini_free_subchunk_url_chars_var'], 14500, lambda v: min(200000, max(1000, safe_int(v, 14500)))),
                 ('gemini_free_subchunk_safety_chars', ['gemini_free_subchunk_safety_chars_var'], 600, lambda v: min(20000, max(0, safe_int(v, 600)))),
                 ('gemini_free_min_subchunk_body_chars', ['gemini_free_min_subchunk_body_chars_var'], 80, lambda v: min(50000, max(1, safe_int(v, 80)))),
@@ -27565,6 +27574,8 @@ Important rules:
             self.config.setdefault('save_prohibited_results', False)
             self.config.setdefault('disable_empty_safety_heuristic', False)
             self.config.setdefault('missing_finish_as_prohibited', self.config.get('unknown_finish_as_prohibited', False))
+            self.config.setdefault('enable_translation_chunk_prompt', False)
+            self.config.setdefault('translation_chunk_prompt_role', 'assistant')
             # Image compression defaults
             compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
             for key, val in compression_defaults.items():
@@ -27631,7 +27642,7 @@ Important rules:
             env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', authnd_subprocess_limit))
             env_vars_set.append(_update_env('GEMINI_FREE_ADAPTIVE_SPLIT', _config_bool('gemini_free_adaptive_split', True), is_bool=True))
             env_vars_set.append(_update_env('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', _config_bool('gemini_free_html_text_node_transport', True), is_bool=True))
-            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 14000, 300, 100000)))
+            env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _config_int('gemini_free_subchunk_prompt_chars', 60000, 300, 100000)))
             env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_URL_CHARS', _config_int('gemini_free_subchunk_url_chars', 14500, 1000, 200000)))
             env_vars_set.append(_update_env('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _config_int('gemini_free_subchunk_safety_chars', 600, 0, 20000)))
             env_vars_set.append(_update_env('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _config_int('gemini_free_min_subchunk_body_chars', 80, 1, 50000)))
@@ -28185,7 +28196,7 @@ Important rules:
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
                 ('GEMINI_FREE_ADAPTIVE_SPLIT', '1' if _bool_config('gemini_free_adaptive_split', True) else '0'),
                 ('GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT', '1' if _bool_config('gemini_free_html_text_node_transport', True) else '0'),
-                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 14000, 300, 100000)),
+                ('GEMINI_FREE_SUBCHUNK_PROMPT_CHARS', _int_config('gemini_free_subchunk_prompt_chars', 60000, 300, 100000)),
                 ('GEMINI_FREE_SUBCHUNK_URL_CHARS', _int_config('gemini_free_subchunk_url_chars', 14500, 1000, 200000)),
                 ('GEMINI_FREE_SUBCHUNK_SAFETY_CHARS', _int_config('gemini_free_subchunk_safety_chars', 600, 0, 20000)),
                 ('GEMINI_FREE_MIN_SUBCHUNK_BODY_CHARS', _int_config('gemini_free_min_subchunk_body_chars', 80, 1, 50000)),
@@ -28493,6 +28504,8 @@ Important rules:
                 ('NANOGPT_VIDEO_RESOLUTION', str(getattr(self, 'nanogpt_video_resolution_var', '720p'))),
 
                 # Prompts
+                ('ENABLE_TRANSLATION_CHUNK_PROMPT', '1' if getattr(self, 'enable_translation_chunk_prompt_var', self.config.get('enable_translation_chunk_prompt', False)) else '0'),
+                ('TRANSLATION_CHUNK_PROMPT_ROLE', str(getattr(self, 'translation_chunk_prompt_role_var', self.config.get('translation_chunk_prompt_role', 'assistant')) or 'assistant').strip().lower()),
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
                 ('VISION_OCR_COMBINED_CONTEXT_PROMPT', str(getattr(self, 'vision_ocr_combined_context_prompt', ''))),

@@ -905,6 +905,14 @@ class TranslationConfig:
         self.REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT = partial_b2_system_prompt
         self.REFINEMENT_PARTIAL_B2_USER_PROMPT = partial_b2_user_prompt
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
+        self.TRANSLATION_CHUNK_PROMPT = os.getenv(
+            "TRANSLATION_CHUNK_PROMPT",
+            DEFAULT_TRANSLATION_CHUNK_PROMPT,
+        ).strip()
+        self.ENABLE_TRANSLATION_CHUNK_PROMPT = os.getenv("ENABLE_TRANSLATION_CHUNK_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
+        self.TRANSLATION_CHUNK_PROMPT_ROLE = _normalize_translation_chunk_prompt_role(
+            os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
+        )
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
         # Read merge count early so we can use it for placeholder handling
@@ -1132,6 +1140,72 @@ class TranslationConfig:
             return self.SYSTEM_PROMPT + "\n\n" + split_instr
         
         return self.SYSTEM_PROMPT
+
+
+DEFAULT_TRANSLATION_CHUNK_PROMPT = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
+_TRANSLATION_CHUNK_PROMPT_ROLES = {"system", "assistant", "user"}
+
+
+def _normalize_translation_chunk_prompt_role(role):
+    role = str(role or "assistant").strip().lower()
+    return role if role in _TRANSLATION_CHUNK_PROMPT_ROLES else "assistant"
+
+
+def _format_translation_chunk_prompt(template, chunk_idx, total_chunks):
+    """Format chunk metadata only; actual chunk HTML is always sent as user content."""
+    text = str(template or "")
+    return (
+        text.replace("{chunk_idx}", str(chunk_idx))
+        .replace("{total_chunks}", str(total_chunks))
+        .replace("{chunk_html}", "")
+        .strip()
+    )
+
+
+def _build_translation_chunk_prompt_parts(
+    system_content,
+    chunk_html,
+    chunk_idx,
+    total_chunks,
+    config=None,
+):
+    """Return updated system content, optional prompt messages, and final user prompt."""
+    user_prompt = chunk_html
+    chunk_prompt_msgs = []
+    try:
+        has_multiple_chunks = int(total_chunks or 0) > 1
+    except Exception:
+        has_multiple_chunks = False
+    if not has_multiple_chunks:
+        return system_content, chunk_prompt_msgs, user_prompt
+
+    if config is None:
+        enabled = os.getenv("ENABLE_TRANSLATION_CHUNK_PROMPT", "0").strip().lower() in ("1", "true", "yes", "on")
+    else:
+        enabled = bool(getattr(config, "ENABLE_TRANSLATION_CHUNK_PROMPT", False))
+    if not enabled:
+        return system_content, chunk_prompt_msgs, user_prompt
+
+    template = getattr(config, "TRANSLATION_CHUNK_PROMPT", None)
+    if template is None:
+        template = os.getenv("TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
+    prompt = _format_translation_chunk_prompt(template, chunk_idx, total_chunks)
+    if not prompt:
+        return system_content, chunk_prompt_msgs, user_prompt
+
+    role = _normalize_translation_chunk_prompt_role(
+        getattr(config, "TRANSLATION_CHUNK_PROMPT_ROLE", None)
+        or os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
+    )
+    if role == "system":
+        base = str(system_content or "").rstrip()
+        system_content = f"{base}\n\n{prompt}" if base else prompt
+    elif role == "user":
+        user_prompt = f"{prompt}\n{chunk_html}" if chunk_html else prompt
+    else:
+        chunk_prompt_msgs = [{"role": "assistant", "content": prompt}]
+
+    return system_content, chunk_prompt_msgs, user_prompt
 
 
 # =====================================================
@@ -6198,18 +6272,9 @@ class BatchTranslationProcessor:
                         return None, chunk_idx, None, False, "cancelled"
                     # If wait_for_chunks is enabled, continue processing
                 
-                # Build user prompt for this chunk
                 # Apply emergency glossary compliance pre-edit
                 chunk_html = apply_emergency_glossary_compliance(chunk_html, self.out_dir)
-                if total_chunks > 1:
-                    chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\\n{chunk_html}")
-                    user_prompt = chunk_prompt_template.format(
-                        chunk_idx=chunk_idx,
-                        total_chunks=total_chunks,
-                        chunk_html=chunk_html
-                    )
-                else:
-                    user_prompt = chunk_html
+                user_prompt = chunk_html
                 
                 # Build history-based memory when contextual translation is enabled
                 memory_msgs = []
@@ -6325,11 +6390,19 @@ class BatchTranslationProcessor:
                     source_text=chunk_html,
                     chapter_ref=chapter_ref,
                 )
+                current_chapter_system_prompt, chunk_prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+                    current_chapter_system_prompt,
+                    chunk_html,
+                    chunk_idx,
+                    total_chunks,
+                    self.config,
+                )
 
                 chapter_msgs = (
                     [{"role": "system", "content": current_chapter_system_prompt}]
                     + rolling_summary_msgs
                     + memory_msgs
+                    + chunk_prompt_msgs
                     + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
@@ -22500,18 +22573,6 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
                         
-                # Get custom chunk prompt template from environment; send as a separate assistant message
-                chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]")
-                chunk_prompt_msg = []
-                if total_chunks > 1:
-                    chunk_prompt_msg = [{
-                        "role": "assistant",
-                        "content": chunk_prompt_template.format(
-                            chunk_idx=chunk_idx,
-                            total_chunks=total_chunks,
-                            chunk_html=""  # Provide empty string for backward compatibility
-                        )
-                    }]
                 # Apply emergency glossary compliance pre-edit
                 chunk_html = apply_emergency_glossary_compliance(chunk_html, out)
                 user_prompt = chunk_html
@@ -22612,7 +22673,13 @@ def main(log_callback=None, stop_callback=None):
                         source_text=None,
                         chapter_ref=current_chapter_ref,
                     )
-                
+                current_system_content, chunk_prompt_msg, user_prompt = _build_translation_chunk_prompt_parts(
+                    current_system_content,
+                    chunk_html,
+                    chunk_idx,
+                    total_chunks,
+                    config,
+                )
                 current_base = [{"role": "system", "content": current_system_content}]
 
                 # Inject rolling_summary.txt verbatim as an assistant message.

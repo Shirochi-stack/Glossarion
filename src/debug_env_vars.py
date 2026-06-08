@@ -336,6 +336,8 @@ def print_env_var_status():
 
     # Prompts and safety
     prompt_vars = {
+        'ENABLE_TRANSLATION_CHUNK_PROMPT': 'Enable translation chunk prompt',
+        'TRANSLATION_CHUNK_PROMPT_ROLE': 'Translation chunk prompt role',
         'TRANSLATION_CHUNK_PROMPT': 'Translation chunk prompt',
         'IMAGE_CHUNK_PROMPT': 'Image chunk prompt',
         'DISABLE_GEMINI_SAFETY': 'Disable Gemini safety checks',

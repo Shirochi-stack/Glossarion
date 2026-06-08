@@ -5,6 +5,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -400,6 +401,78 @@ def test_sdlxliff_and_empty_attribute_settings_are_single_global_toggles():
     assert "fix_empty_attr_tags_bs_var = self.fix_empty_attr_tags_extract_var" in gui_source
 
 
+def test_translation_chunk_prompt_parts_keep_chunk_html_in_user_message():
+    from TransateKRtoEN import _build_translation_chunk_prompt_parts
+
+    cfg = SimpleNamespace(
+        ENABLE_TRANSLATION_CHUNK_PROMPT=False,
+        TRANSLATION_CHUNK_PROMPT_ROLE="assistant",
+        TRANSLATION_CHUNK_PROMPT="Part {chunk_idx}/{total_chunks} {chunk_html}",
+    )
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Chunk HTML</p>",
+        2,
+        5,
+        cfg,
+    )
+    assert system == "system base"
+    assert prompt_msgs == []
+    assert user_prompt == "<p>Chunk HTML</p>"
+
+    cfg.ENABLE_TRANSLATION_CHUNK_PROMPT = True
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Chunk HTML</p>",
+        2,
+        5,
+        cfg,
+    )
+    assert system == "system base"
+    assert prompt_msgs == [{"role": "assistant", "content": "Part 2/5"}]
+    assert user_prompt == "<p>Chunk HTML</p>"
+
+    cfg.TRANSLATION_CHUNK_PROMPT_ROLE = "system"
+    cfg.TRANSLATION_CHUNK_PROMPT = "Part {chunk_idx}/{total_chunks}"
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Chunk HTML</p>",
+        2,
+        5,
+        cfg,
+    )
+    assert system == "system base\n\nPart 2/5"
+    assert prompt_msgs == []
+    assert user_prompt == "<p>Chunk HTML</p>"
+
+    cfg.TRANSLATION_CHUNK_PROMPT_ROLE = "user"
+    system, prompt_msgs, user_prompt = _build_translation_chunk_prompt_parts(
+        "system base",
+        "<p>Chunk HTML</p>",
+        2,
+        5,
+        cfg,
+    )
+    assert system == "system base"
+    assert prompt_msgs == []
+    assert user_prompt == "Part 2/5\n<p>Chunk HTML</p>"
+
+
+def test_translation_chunk_prompt_ui_and_paths_use_new_toggle_contract():
+    transate_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
+    settings_source = (SRC / "other_settings.py").read_text(encoding="utf-8")
+    dialog_source = settings_source[
+        settings_source.index("def configure_translation_chunk_prompt"):
+        settings_source.index("def configure_image_chunk_prompt")
+    ]
+
+    assert transate_source.count("_build_translation_chunk_prompt_parts(") >= 3
+    assert "chunk_prompt_template =" not in transate_source
+    assert "Enable chunk prompt" in dialog_source
+    assert "translation_chunk_prompt_role" in dialog_source
+    assert '"{chunk_html}"' not in dialog_source
+
+
 def test_sdlxliff_review_button_is_not_extraction_mode_gated():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
 
@@ -738,6 +811,50 @@ def test_sdlxliff_review_count_mismatch_prefers_translated_column_outlier():
     assert rows[1]["status"] == "green"
     assert len(rows[1]["target"]) > len(rows[0]["target"])
     assert SDLXLIFFReviewDialog._row_length_ratio(rows[0]) > SDLXLIFFReviewDialog._row_length_ratio(rows[1])
+
+
+def test_sdlxliff_review_count_mismatch_marks_expanded_row_not_downstream_shift():
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    rows = [
+        {
+            "source_tag": "p",
+            "source": "결국, 그들은 경고를 지키듯 행동했다.",
+            "tooltip_translation": "In the end, they acted as if they had followed their warning.",
+            "target_tag": "p",
+            "target": (
+                "In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
+                "they plucked out her own eyeball and made her swallow it, and her ear was torn off."
+            ),
+            "status": "green",
+            "reason": "ok",
+        },
+        {
+            "source_tag": "p",
+            "source": "“...따뜻해.”",
+            "tooltip_translation": "...It's warm.",
+            "target_tag": "p",
+            "target": "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+            "status": "green",
+            "reason": "ok",
+        },
+        {
+            "source_tag": "p",
+            "source": "피엘이 잊었다고 생각했던, 가장 오래된 집의 온기였다.",
+            "tooltip_translation": "It was the oldest warmth of 'home,' the one Piel thought she had forgotten.",
+            "target_tag": "",
+            "target": "",
+            "status": "red",
+            "reason": "dropped/added",
+        },
+    ]
+
+    promoted = dialog._promote_top_skewed_row_for_count_mismatch(rows, 3, 2)
+
+    assert promoted is True
+    assert rows[0]["status"] == "yellow"
+    assert rows[0]["reason"].startswith("top translated-column skew")
+    assert rows[1]["status"] == "green"
+    assert SDLXLIFFReviewDialog._row_length_ratio(rows[1]) > SDLXLIFFReviewDialog._row_length_ratio(rows[0])
 
 
 def test_sdlxliff_review_build_uses_machine_translation_for_top_skew(tmp_path):

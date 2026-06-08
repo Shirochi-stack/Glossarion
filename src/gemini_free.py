@@ -39,8 +39,8 @@ DEFAULT_SEARCH_PARAMS = {
 DEFAULT_URL = f"{SEARCH_BASE_URL}?{urlencode(DEFAULT_SEARCH_PARAMS)}"
 DEFAULT_MODEL = "gemini"
 DEFAULT_TIMEOUT = 90
-DEFAULT_SUBMIT_MODE = "url"
-DEFAULT_SUBCHUNK_PROMPT_CHARS = 14000
+DEFAULT_SUBMIT_MODE = "ui"
+DEFAULT_SUBCHUNK_PROMPT_CHARS = 60000
 DEFAULT_SUBCHUNK_URL_CHARS = 14500
 DEFAULT_SUBCHUNK_SAFETY_CHARS = 600
 DEFAULT_MIN_SUBCHUNK_BODY_CHARS = 80
@@ -541,10 +541,6 @@ def _adaptive_split_enabled() -> bool:
     return os.getenv("GEMINI_FREE_ADAPTIVE_SPLIT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _url_load_fallback_enabled() -> bool:
-    return os.getenv("GEMINI_FREE_URL_LOAD_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
-
-
 def _html_text_node_transport_enabled() -> bool:
     return os.getenv("GEMINI_FREE_HTML_TEXT_NODE_TRANSPORT", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -598,10 +594,14 @@ def _message_budget_usage(messages: Iterable[Dict[str, Any]]) -> tuple[int, int]
     return prompt_chars, url_chars
 
 
-def _requires_adaptive_split(messages: Iterable[Dict[str, Any]]) -> tuple[bool, int, int]:
+def _requires_adaptive_split(
+    messages: Iterable[Dict[str, Any]],
+    *,
+    enforce_url_budget: bool = False,
+) -> tuple[bool, int, int]:
     prompt_chars, url_chars = _message_budget_usage(messages)
     return (
-        prompt_chars > _subchunk_prompt_chars() or url_chars > _subchunk_url_chars(),
+        prompt_chars > _subchunk_prompt_chars() or (enforce_url_budget and url_chars > _subchunk_url_chars()),
         prompt_chars,
         url_chars,
     )
@@ -843,6 +843,7 @@ def _split_messages_for_search_budget(
     messages: Iterable[Dict[str, Any]],
     max_prompt_chars: int,
     *,
+    enforce_url_budget: bool = False,
     return_metadata: bool = False,
 ) -> Any:
     source_messages = [dict(message) for message in (messages or []) if isinstance(message, dict)]
@@ -875,7 +876,10 @@ def _split_messages_for_search_budget(
         probe_messages = make_messages(chunk_text)
         return (
             len(_messages_to_prompt(probe_messages)) <= prompt_limit_chars
-            and _messages_to_search_url_chars(probe_messages) <= url_limit_chars
+            and (
+                not enforce_url_budget
+                or _messages_to_search_url_chars(probe_messages) <= url_limit_chars
+            )
         )
 
     units: List[str] = []
@@ -884,13 +888,16 @@ def _split_messages_for_search_budget(
     fixed_url_chars = max(0, _messages_to_search_url_chars(make_messages(fixed_probe)) - len(fixed_probe))
     safety_chars = _subchunk_safety_chars()
     url_limit_chars = _subchunk_url_chars()
-    available_body_chars = max_prompt_chars - fixed_prompt_chars - safety_chars
+    prompt_limit_chars = max(1, max_prompt_chars - safety_chars)
+    available_body_chars = prompt_limit_chars - fixed_prompt_chars
     min_body_chars = _min_subchunk_body_chars()
     if available_body_chars <= 0:
-        body_budget = min_body_chars
+        body_budget = max(
+            min_body_chars,
+            min(len(body), max(min_body_chars, max_prompt_chars // 4)),
+        )
     else:
         body_budget = max(1, available_body_chars)
-    prompt_limit_chars = max(1, max_prompt_chars - safety_chars)
     if fixed_prompt_chars + body_budget > prompt_limit_chars:
         prompt_limit_chars = fixed_prompt_chars + body_budget
 
@@ -972,6 +979,7 @@ def _split_messages_for_search_budget(
         "safety_chars": safety_chars,
         "prompt_limit_chars": prompt_limit_chars,
         "url_limit_chars": url_limit_chars,
+        "url_budget_enforced": bool(enforce_url_budget),
         "available_body_chars": available_body_chars,
         "body_budget_chars": body_budget,
         "fixed_url_chars": fixed_url_chars,
@@ -2061,44 +2069,14 @@ def _send_chat_completion_qt_once(
     send_messages = html_text_node_transport["messages"] if html_text_node_transport else messages
     prompt = _messages_to_prompt(send_messages)
 
-    submit_mode = os.getenv("GEMINI_FREE_SUBMIT_MODE", DEFAULT_SUBMIT_MODE).strip().lower() or DEFAULT_SUBMIT_MODE
-    url_load_fallback = False
-    if submit_mode in ("url", "query", "q"):
-        search_url = _build_search_url(prompt)
-        _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=url)")
-        _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
-        try:
-            page_data = load_rendered_page_text(
-                search_url,
-                prompt=prompt,
-                timeout=timeout,
-                user_agent=user_agent,
-            )
-        except RuntimeError as exc:
-            if not _url_load_fallback_enabled() or "failed to load" not in str(exc).lower():
-                raise
-            url_load_fallback = True
-            _log(
-                log_fn,
-                "Gemini Free: URL-mode page load failed; retrying through AI Mode UI submit "
-                f"(URL chars: {len(search_url):,})"
-            )
-            search_url = _build_search_base_url()
-            page_data = load_ai_mode_prompt_text(
-                prompt,
-                timeout=timeout,
-                user_agent=user_agent,
-            )
-            page_data["submit_mode"] = "ui_fallback"
-    else:
-        search_url = _build_search_base_url()
-        _log(log_fn, f"Gemini Free: opening Google Search browser route (model={actual_model}, mode=ui)")
-        _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
-        page_data = load_ai_mode_prompt_text(
-            prompt,
-            timeout=timeout,
-            user_agent=user_agent,
-        )
+    search_url = _build_search_base_url()
+    _log(log_fn, f"Gemini Free: opening Google Search AI Mode UI route (model={actual_model})")
+    _log(log_fn, f"Gemini Free debug URL: {search_url[:1000]}", debug_only=True)
+    page_data = load_ai_mode_prompt_text(
+        prompt,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
     content = _extract_rendered_content(
         page_data,
         prompt=prompt,
@@ -2124,7 +2102,7 @@ def _send_chat_completion_qt_once(
         },
         "raw_response": {
             "model": actual_model,
-            "submit_mode": page_data.get("submit_mode") or submit_mode,
+            "submit_mode": page_data.get("submit_mode") or DEFAULT_SUBMIT_MODE,
             "search_url": _safe_url_for_log(search_url),
             "page_url": _safe_url_for_log(page_data.get("url")),
             "page_url_chars": len(str(page_data.get("url") or "")),
@@ -2138,7 +2116,7 @@ def _send_chat_completion_qt_once(
             "html_text_node_transport": bool(html_text_node_transport),
             "html_text_node_count": html_text_node_count,
             "html_text_node_translated": html_text_node_translated,
-            "url_load_fallback": url_load_fallback,
+            "url_load_fallback": False,
         },
     }
 
@@ -2179,6 +2157,7 @@ def _send_chat_completion_split(
         f"balancer: {split_metadata.get('subchunk_balancer')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
         f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+        f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
         f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
         f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
         f"body budget chars: {split_metadata.get('body_budget_chars')})"
@@ -2232,6 +2211,7 @@ def _send_chat_completion_split(
             "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
             "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
             "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
+            "subchunk_url_budget_enforced": split_metadata.get("url_budget_enforced"),
             "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
             "subchunk_safety_chars": split_metadata.get("safety_chars"),
             "subchunk_payload_format": split_metadata.get("payload_format"),
@@ -2498,6 +2478,7 @@ def _run_search_subprocess_sequential(
         f"balancer: {split_metadata.get('subchunk_balancer')}, "
         f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
         f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+        f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
         f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
         f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
         f"body budget chars: {split_metadata.get('body_budget_chars')})"
@@ -2602,6 +2583,7 @@ def _run_search_subprocess_sequential(
             "subchunk_fixed_url_chars": split_metadata.get("fixed_url_chars"),
             "subchunk_prompt_limit_chars": split_metadata.get("prompt_limit_chars"),
             "subchunk_url_limit_chars": split_metadata.get("url_limit_chars"),
+            "subchunk_url_budget_enforced": split_metadata.get("url_budget_enforced"),
             "subchunk_body_budget_chars": split_metadata.get("body_budget_chars"),
             "subchunk_safety_chars": split_metadata.get("safety_chars"),
             "subchunk_payload_format": split_metadata.get("payload_format"),
@@ -2668,6 +2650,7 @@ def _run_search_subprocess(
             f"balancer: {split_metadata.get('subchunk_balancer')}, "
             f"limit chars: {split_metadata.get('prompt_limit_chars')}, "
             f"url limit chars: {split_metadata.get('url_limit_chars')}, "
+            f"url budget enforced: {split_metadata.get('url_budget_enforced')}, "
             f"fixed prompt chars: {split_metadata.get('fixed_prompt_chars')}, "
             f"fixed url chars: {split_metadata.get('fixed_url_chars')}, "
             f"body budget chars: {split_metadata.get('body_budget_chars')})"
