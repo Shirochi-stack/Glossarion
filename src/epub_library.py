@@ -3396,10 +3396,11 @@ class _LibraryScannerThread(QThread):
     still depend on the merged scan. The tabbed dialog uses
     :class:`_DualScannerThread` instead.
     """
-    finished = Signal(list)
+    scan_finished = Signal(list)
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
+        self.setObjectName("LibraryScannerThread")
         self._config = config or {}
 
     def run(self):
@@ -3408,7 +3409,7 @@ class _LibraryScannerThread(QThread):
         except Exception:
             logger.debug("Library scan failed: %s", traceback.format_exc())
             results = []
-        self.finished.emit(results)
+        self.scan_finished.emit(results)
 
 
 def _attach_cross_location_duplicates(completed: list[dict],
@@ -3499,10 +3500,11 @@ class _DualScannerThread(QThread):
     Entries whose compiled EPUB already lives in the Library folder are
     deduped (library entry wins) so the same book can't appear twice.
     """
-    finished = Signal(list, list)
+    scan_finished = Signal(list, list)
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
+        self.setObjectName("DualLibraryScannerThread")
         self._config = config or {}
 
     def run(self):
@@ -3957,7 +3959,7 @@ class _DualScannerThread(QThread):
         # never saw any indication that two physical copies exist.
         _attach_cross_location_duplicates(completed, output_rows)
 
-        self.finished.emit(in_progress, completed)
+        self.scan_finished.emit(in_progress, completed)
 
 
 class _LibraryDeleteThread(QThread):
@@ -3973,6 +3975,7 @@ class _LibraryDeleteThread(QThread):
 
     def __init__(self, targets: list[tuple[str, str, bool]], parent=None):
         super().__init__(parent)
+        self.setObjectName("LibraryDeleteThread")
         self._targets = list(targets or [])
 
     @staticmethod
@@ -4038,12 +4041,13 @@ class _LibraryDeleteThread(QThread):
 
 
 class _CoverLoader(QThread):
-    finished = Signal(str, str)
+    result_ready = Signal(str, str)
 
     def __init__(self, file_path: str, file_type: str = "epub", config: dict | None = None,
                  original_path: str | None = None, raw_source_path: str | None = None,
                  parent=None):
         super().__init__(parent)
+        self.setObjectName("LibraryCoverLoader")
         self._file_path = file_path
         self._file_type = file_type
         self._config = config or {}
@@ -4051,10 +4055,30 @@ class _CoverLoader(QThread):
         # For in-progress cards the output folder has no images yet, so the
         # thumbnail must be pulled directly from the resolved raw source EPUB.
         self._raw_source_path = raw_source_path or ""
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
+        if self._should_stop():
+            return
         if self._file_type == "epub":
             cover = _extract_cover(self._file_path)
+            if self._should_stop():
+                return
             # Fallback 1: try the raw source EPUB (e.g. compiled EPUB in
             # Library/Translated may lack an embedded cover, but the
             # original raw EPUB typically has one).
@@ -4062,17 +4086,23 @@ class _CoverLoader(QThread):
                 if (self._raw_source_path.lower().endswith(".epub")
                         and os.path.isfile(self._raw_source_path)):
                     cover = _extract_cover(self._raw_source_path)
+                    if self._should_stop():
+                        return
             # Fallback 2: cover image sitting alongside the EPUB
             # (e.g. output folder with cover.jpg or images/ subfolder).
             if not cover:
                 parent_dir = os.path.dirname(self._file_path)
                 if parent_dir and os.path.isdir(parent_dir):
                     cover = _find_cover_in_dir(parent_dir)
+                    if self._should_stop():
+                        return
             # Fallback 3: broader search via original_path / output roots.
             if not cover:
                 cover = _find_folder_cover(
                     self._file_path, config=self._config,
                     original_path=self._original_path)
+                if self._should_stop():
+                    return
         elif self._file_type == "in_progress":
             # For an in-progress card the "path" is the output folder itself.
             cover = None
@@ -4084,18 +4114,26 @@ class _CoverLoader(QThread):
                     and self._raw_source_path.lower().endswith(".epub")
                     and os.path.isfile(self._raw_source_path)):
                 cover = _extract_cover(self._raw_source_path)
+                if self._should_stop():
+                    return
             # Secondary: images the translator has produced in the output
             # folder so far (mid-translation or retranslation runs).
             if not cover:
                 cover = _find_cover_in_dir(self._file_path)
+                if self._should_stop():
+                    return
             # Tertiary: compiled output EPUB (if any) for finished-but-not-
             # organized novels.
             if not cover:
                 try:
                     for entry in os.scandir(self._file_path):
+                        if self._should_stop():
+                            return
                         if (entry.is_file(follow_symlinks=False)
                                 and entry.name.lower().endswith(".epub")):
                             cover = _extract_cover(entry.path)
+                            if self._should_stop():
+                                return
                             if cover:
                                 break
                 except (PermissionError, OSError):
@@ -4103,7 +4141,10 @@ class _CoverLoader(QThread):
         else:
             cover = _find_folder_cover(self._file_path, config=self._config,
                                        original_path=self._original_path)
-        self.finished.emit(self._file_path, cover or "")
+            if self._should_stop():
+                return
+        if not self._should_stop():
+            self.result_ready.emit(self._file_path, cover or "")
 
 
 class _SelectableGrid(QWidget):
@@ -4960,6 +5001,7 @@ class _RawScanWorker(QThread):
                  books: list[dict], mode: str, threshold: int,
                  prewalked: list | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("RawScanWorker")
         self._folder = scan_folder
         self._suffixes = ext_suffixes
         self._tracking = tracking_names
@@ -4971,6 +5013,10 @@ class _RawScanWorker(QThread):
 
     def cancel(self) -> None:
         self._cancelled = True
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
 
     def _classify(self, root_dir: str,
                   files: list[str]) -> list[tuple[str, str]]:
@@ -6145,13 +6191,11 @@ class _ScanForRawDialog(QDialog):
         deleted C++ widget and crash the interpreter.
         """
         if self._scan_worker is not None:
-            try:
-                self._scan_worker.cancel()
-                self._scan_worker.results.disconnect()
-                self._scan_worker.quit()
-                self._scan_worker.wait(250)
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                self._scan_worker,
+                timeout_ms=1200,
+                signal_names=("results",),
+            )
             self._scan_worker = None
         super().closeEvent(event)
 
@@ -9211,7 +9255,7 @@ class EpubLibraryDialog(QDialog):
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._scanner_thread = _DualScannerThread(self._config, self)
-        self._scanner_thread.finished.connect(self._on_auto_scan_done)
+        self._scanner_thread.scan_finished.connect(self._on_auto_scan_done)
         self._scanner_thread.start()
 
     def _on_auto_scan_done(self, in_progress: list[dict], completed: list[dict]):
@@ -9272,7 +9316,7 @@ class EpubLibraryDialog(QDialog):
         self._show_loading()
         self._initial_scan_started = True
         self._scanner_thread = _DualScannerThread(self._config, self)
-        self._scanner_thread.finished.connect(self._on_initial_scan_done)
+        self._scanner_thread.scan_finished.connect(self._on_initial_scan_done)
         self._scanner_thread.start()
 
     def _on_initial_scan_done(self, in_progress: list[dict], completed: list[dict]):
@@ -9415,9 +9459,11 @@ class EpubLibraryDialog(QDialog):
             )
             loader._library_cover_generation = job.get(
                 "generation", self._cover_generation)
-            loader.finished.connect(
+            loader.result_ready.connect(
                 lambda book_path, cover_path, ldr=loader: self._on_cover_loaded(
                     book_path, cover_path, ldr))
+            loader.finished.connect(
+                lambda ldr=loader: self._on_cover_thread_finished(ldr))
             self._cover_active_loaders[loader] = path
             self._cover_active_paths.add(path)
             self._cover_threads.append(loader)
@@ -9483,7 +9529,7 @@ class EpubLibraryDialog(QDialog):
             return
         for thread in list(getattr(self, "_cover_threads", []) or []):
             _stop_qthread_safely(
-                thread, timeout_ms=500, signal_names=("finished",))
+                thread, timeout_ms=500, signal_names=("result_ready",))
         self._cover_threads.clear()
         self._cover_active_loaders.clear()
         self._cover_active_paths.clear()
@@ -9961,17 +10007,6 @@ class EpubLibraryDialog(QDialog):
 
     def _on_cover_loaded(self, book_path: str, cover_path: str, loader=None):
         if loader is not None:
-            self._cover_active_loaders.pop(loader, None)
-            self._cover_active_paths.discard(book_path)
-            try:
-                if loader in self._cover_threads:
-                    self._cover_threads.remove(loader)
-            except Exception:
-                pass
-            try:
-                loader.deleteLater()
-            except Exception:
-                pass
             if getattr(loader, "_library_cover_generation", None) != self._cover_generation:
                 self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
                 return
@@ -9988,6 +10023,30 @@ class EpubLibraryDialog(QDialog):
         self._queue_cover_apply(
             book_path, cover_path,
             priority=self._cover_apply_is_active_priority(book_path))
+        self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
+
+    def _on_cover_thread_finished(self, loader=None) -> None:
+        if loader is None:
+            return
+        path = None
+        try:
+            path = self._cover_active_loaders.pop(loader, None)
+        except Exception:
+            path = None
+        if path:
+            try:
+                self._cover_active_paths.discard(path)
+            except Exception:
+                pass
+        try:
+            if loader in self._cover_threads:
+                self._cover_threads.remove(loader)
+        except Exception:
+            pass
+        try:
+            loader.deleteLater()
+        except Exception:
+            pass
         self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
 
     def _apply_filter(self, text):
@@ -11540,7 +11599,7 @@ class EpubLibraryDialog(QDialog):
         _stop_qthread_safely(
             getattr(self, "_scanner_thread", None),
             timeout_ms=1500,
-            signal_names=("finished",),
+            signal_names=("scan_finished",),
         )
         self._scanner_thread = None
         _stop_qthread_safely(
@@ -12068,6 +12127,7 @@ class _BookDetailsLoader(QThread):
 
     def __init__(self, book: dict, config: dict | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("BookDetailsLoader")
         self._book = book
         self._config = config or {}
         self._cancelled = False
@@ -12507,6 +12567,7 @@ class _ChapterRowPrepThread(QThread):
     def __init__(self, generation: int, infos, show_raw_title: bool = False,
                  parent=None):
         super().__init__(parent)
+        self.setObjectName("ChapterRowPrepThread")
         self._generation = int(generation)
         self._infos = [dict(info or {}) for info in (infos or [])]
         self._show_raw_title = bool(show_raw_title)
@@ -15043,6 +15104,7 @@ class _EpubCacheLoaderThread(QThread):
     def __init__(self, epub_path: str, show_special_files: bool = True,
                  config: dict | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("EpubCacheLoaderThread")
         self._epub_path = epub_path
         self._show_special_files = bool(show_special_files)
         self._config = config or {}
@@ -15109,6 +15171,7 @@ class _OverlayMergeThread(QThread):
     def __init__(self, raw_chapters, images, filenames, overlay_map,
                  extra_image_dirs, config: dict | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("OverlayMergeThread")
         self._raw_chapters = list(raw_chapters or [])
         self._images = dict(images or {})
         self._filenames = list(filenames or [])
@@ -15283,6 +15346,7 @@ class _EpubSearchThread(QThread):
     def __init__(self, search_id: int, query: str, chapters,
                  config: dict | None = None, parent=None):
         super().__init__(parent)
+        self.setObjectName("EpubSearchThread")
         self._search_id = int(search_id)
         self._query = query or ""
         self._chapters = list(chapters or [])
@@ -15570,6 +15634,7 @@ class _EpubLoaderThread(QThread):
                  show_special_files: bool = True,
                  config: dict | None = None):
         super().__init__(parent)
+        self.setObjectName("EpubLoaderThread")
         self._epub_path = epub_path
         # When False, spine items flagged by the configured special-file
         # keywords are excluded from the
