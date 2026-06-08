@@ -1431,14 +1431,18 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "REVIEW_PRELOAD_IDLE_MS = 350" in source
     assert "REVIEW_MAX_CACHED_PAGES = 7" in source
     assert "REVIEW_SYNC_RENDER_ROW_LIMIT = 80" in source
-    assert "wait(pending, timeout=0.035, return_when=FIRST_COMPLETED)" in source
+    assert "wait(pending, timeout=0.025, return_when=FIRST_COMPLETED)" in source
     assert "_pump_review_loading_events" in source
     assert "self.pieces = self._load_pieces(stream_sidebar=not seamless)" in source
+    assert "if not self._streamed_piece_list_populated:" in source
     assert "def _prepare_streaming_piece_list" in source
     assert "def _stream_piece_list_item" in source
+    assert "def _finish_streaming_piece_list" in source
     assert "_prepare_streaming_piece_list(work_items)" in source
-    assert "_stream_piece_list_item(idx, pieces[idx])" in source
-    assert 'QListWidgetItem(f"{label} loading...")' in source
+    assert "_stream_piece_list_item(next_stream_index, pieces[next_stream_index])" in source
+    assert "_finish_streaming_piece_list()" in source
+    assert 'QListWidgetItem(f"{label} loading...")' not in source
+    assert "flush_streamed_pieces(limit=12)" in source
     assert "len(rows) <= self.REVIEW_SYNC_RENDER_ROW_LIMIT" in source
     assert "Could not prepare SDLXLIFF review rows" in source
     assert "_last_review_selection_change = time.monotonic()" in source

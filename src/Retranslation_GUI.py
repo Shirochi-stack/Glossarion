@@ -1361,9 +1361,11 @@ class SDLXLIFFReviewDialog(QDialog):
             else:
                 self._seamless_review_old_page = None
             self._clear_cached_review_pages()
+            self._streamed_piece_list_populated = False
             self.pieces = self._load_pieces(stream_sidebar=not seamless)
             self._review_data_loaded = True
-            self._populate_piece_list()
+            if not self._streamed_piece_list_populated:
+                self._populate_piece_list()
             self._start_review_data_preload()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
@@ -2827,57 +2829,69 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         try:
-            previous_updates = self.piece_list.updatesEnabled()
-        except Exception:
-            previous_updates = True
-        try:
-            self.piece_list.setUpdatesEnabled(False)
             self.piece_list.clear()
-            selected_row = 0
-            current_norm = os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
-            for row, (path, metadata) in enumerate(work_items):
-                output_name = metadata.get("output_name") or self._sidecar_output_name(path)
-                label = metadata.get("label") or self._review_label_from_metadata(metadata)
-                item = QListWidgetItem(f"{label} loading...")
-                item.setToolTip(f"{output_name}\nloading SDLXLIFF...\n{path}")
-                item.setData(Qt.UserRole, row)
-                item.setForeground(QColor(self.THEME["muted"]))
-                self.piece_list.addItem(item)
-                if current_norm and os.path.normcase(os.path.abspath(path)) == current_norm:
-                    selected_row = row
-            if work_items:
-                previous_block = self.piece_list.blockSignals(True)
-                self.piece_list.setCurrentRow(selected_row)
-                self.piece_list.blockSignals(previous_block)
+            self._streaming_piece_selected_path = (
+                os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
+            )
+            self._streaming_piece_selected_row = 0
+            self._streaming_piece_visible_count = 0
+            self._streaming_piece_last_pump = time.monotonic()
         except Exception:
             return False
-        finally:
-            try:
-                self.piece_list.setUpdatesEnabled(previous_updates)
-                self.piece_list.update()
-            except Exception:
-                pass
-        self._pump_review_loading_events(max_ms=8)
+        self.piece_list.update()
+        self._pump_review_loading_events(max_ms=5)
         return True
 
     def _stream_piece_list_item(self, original_index, piece):
         try:
-            item = self.piece_list.item(original_index)
-            if item is None:
-                return
             if self._review_piece_is_empty_sidecar(piece):
-                item.setHidden(True)
                 return
-            item.setHidden(False)
-            item.setText(self._sidebar_label_for_piece(piece, original_index))
-            output_name = self._output_name_for_piece(piece)
-            item.setToolTip(
-                f"{output_name}\nsource {piece['source_count']} -> output {piece['target_count']}\n{piece.get('path', '')}"
-            )
-            item.setData(Qt.UserRole, original_index)
-            self._apply_piece_list_item_style(item, piece)
+            visible_row = int(getattr(self, "_streaming_piece_visible_count", 0) or 0)
+            item = self._piece_list_item_for_piece(piece, visible_row)
+            self.piece_list.addItem(item)
+            self._streaming_piece_visible_count = visible_row + 1
+            try:
+                piece_norm = os.path.normcase(os.path.abspath(piece.get("path") or ""))
+                if self._streaming_piece_selected_path and piece_norm == self._streaming_piece_selected_path:
+                    self._streaming_piece_selected_row = visible_row
+            except Exception:
+                pass
+            self.piece_list.update()
+            last_pump = float(getattr(self, "_streaming_piece_last_pump", 0.0) or 0.0)
+            if time.monotonic() - last_pump >= 0.012:
+                self._streaming_piece_last_pump = time.monotonic()
+                self._pump_review_loading_events(max_ms=2)
         except Exception:
             pass
+
+    def _finish_streaming_piece_list(self):
+        try:
+            self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
+        except Exception:
+            pass
+        try:
+            self.piece_list.currentRowChanged.connect(self._request_render_piece)
+        except Exception:
+            pass
+        try:
+            selected_row = int(getattr(self, "_streaming_piece_selected_row", 0) or 0)
+            if self.piece_list.count() > 0:
+                selected_row = max(0, min(selected_row, self.piece_list.count() - 1))
+                previous_block = self.piece_list.blockSignals(True)
+                self.piece_list.setCurrentRow(selected_row)
+                self.piece_list.blockSignals(previous_block)
+                self._initial_piece_row = selected_row
+            else:
+                self.header_label.setText("No SDLXLIFF review files found")
+                try:
+                    self.loading_label.setText("No SDLXLIFF review files found")
+                except Exception:
+                    pass
+            self._streamed_piece_list_populated = True
+            self.piece_list.update()
+            return True
+        except Exception:
+            return False
 
     def _build_piece(self, path, index, metadata=None):
         metadata = dict(metadata or {})
@@ -3014,15 +3028,31 @@ class SDLXLIFFReviewDialog(QDialog):
         if stream_sidebar:
             stream_sidebar = self._prepare_streaming_piece_list(work_items)
 
+        def flush_streamed_pieces(limit=None):
+            if not stream_sidebar:
+                return 0
+            flushed = 0
+            nonlocal next_stream_index
+            while next_stream_index < len(pieces) and pieces[next_stream_index] is not None:
+                self._stream_piece_list_item(next_stream_index, pieces[next_stream_index])
+                next_stream_index += 1
+                flushed += 1
+                if limit is not None and flushed >= limit:
+                    break
+            if flushed:
+                self._pump_review_loading_events(max_ms=4)
+            return flushed
+
+        pieces = []
+        next_stream_index = 0
         if len(work_items) <= 1:
             pieces = [
                 self._build_piece(path, idx, metadata)
                 for idx, (path, metadata) in enumerate(work_items)
             ]
             if stream_sidebar:
-                for idx, piece in enumerate(pieces):
-                    self._stream_piece_list_item(idx, piece)
-                self._pump_review_loading_events(max_ms=5)
+                flush_streamed_pieces()
+                self._finish_streaming_piece_list()
             return self._filter_review_pieces(pieces)
 
         pieces = [None] * len(work_items)
@@ -3033,10 +3063,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 for idx, (path, metadata) in enumerate(work_items)
             }
             pending = set(futures)
-            while pending:
-                done, pending = wait(pending, timeout=0.035, return_when=FIRST_COMPLETED)
+            while pending or (stream_sidebar and next_stream_index < len(pieces)):
+                if stream_sidebar and flush_streamed_pieces(limit=12):
+                    continue
+                if not pending:
+                    break
+                done, pending = wait(pending, timeout=0.025, return_when=FIRST_COMPLETED)
                 if not done:
-                    self._pump_review_loading_events(max_ms=5)
+                    self._pump_review_loading_events(max_ms=4)
                     continue
                 for future in done:
                     idx = futures[future]
@@ -3046,9 +3080,11 @@ class SDLXLIFFReviewDialog(QDialog):
                         path, metadata = work_items[idx]
                         pieces[idx] = self._build_piece(path, idx, metadata)
                         pieces[idx]["error"] = str(exc)
-                    if stream_sidebar:
-                        self._stream_piece_list_item(idx, pieces[idx])
-                self._pump_review_loading_events(max_ms=5)
+                flush_streamed_pieces(limit=12)
+                self._pump_review_loading_events(max_ms=4)
+        if stream_sidebar:
+            flush_streamed_pieces()
+            self._finish_streaming_piece_list()
         return self._filter_review_pieces(pieces)
 
     def _populate_piece_list(self):
