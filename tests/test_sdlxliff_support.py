@@ -1368,7 +1368,9 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
         source.index("def _manual_review_refresh"):
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
     ]
-    assert "self._silent_review_refresh()" in manual_refresh_body
+    assert "self._queue_review_refresh(" in manual_refresh_body
+    assert "force=True" in manual_refresh_body
+    assert "self._silent_review_refresh()" not in manual_refresh_body
     flag_accuracy_body = source[
         source.index("def _flag_current_piece_inaccurate_translations"):
         source.index("@staticmethod", source.index("def _flag_current_piece_inaccurate_translations"))
@@ -2347,6 +2349,49 @@ def test_sdlxliff_review_autorefresh_regenerates_sidecar_from_changed_output(tmp
     assert piece["mismatch"] is True
     assert piece["rows"][-1]["target"] == "Added output entry."
     assert piece["rows"][-1]["source"] == ""
+
+
+def test_sdlxliff_review_autorefresh_regenerates_deleted_sidecar_folder(tmp_path, monkeypatch):
+    import shutil
+
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output.name,
+                        "original_basename": source.name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._last_autogen_signature = None
+    dialog._sdlxliff_autogen_owner = mixin
+
+    assert dialog._maybe_regenerate_review_sidecars(force=True) is True
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar = sidecar_dir / "response_chapter0001.html.sdlxliff"
+    assert sidecar.is_file()
+
+    dialog._last_autogen_signature = dialog._current_review_autogen_signature()
+    shutil.rmtree(sidecar_dir)
+
+    assert dialog._maybe_regenerate_review_sidecars(force=False) is True
+    assert sidecar.is_file()
 
 
 def test_qa_sdlxliff_tag_check_flags_added_output_text_units():

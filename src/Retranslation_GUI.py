@@ -679,6 +679,28 @@ class SDLXLIFFReviewDialog(QDialog):
         return sorted(set(changed))
 
     @staticmethod
+    def _review_autogen_output_names(autogen_signature):
+        output_names = []
+        for entry in autogen_signature or ():
+            if not entry or entry[0] != "output_html":
+                continue
+            output_name = entry[2] if len(entry) > 2 else ""
+            if output_name:
+                output_names.append(output_name)
+        return sorted(set(output_names))
+
+    def _missing_review_sidecar_outputs(self, output_dir, autogen_signature):
+        expected = self._review_autogen_output_names(autogen_signature)
+        if not expected:
+            return []
+        existing = set()
+        for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
+            output_name = self._sidecar_output_name(path)
+            if output_name:
+                existing.add(output_name.lower())
+        return sorted(name for name in expected if name.lower() not in existing)
+
+    @staticmethod
     def _review_normalized_unit_text(text):
         return " ".join(str(text or "").split())
 
@@ -733,13 +755,14 @@ class SDLXLIFFReviewDialog(QDialog):
             signature = ()
 
         invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
+        missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
         invalid_regen_key = None
         if invalid_outputs:
             invalid_regen_key = self._invalid_review_sidecar_regen_key(invalid_outputs, signature)
             if not force and invalid_regen_key == getattr(self, "_last_invalid_sidecar_regen_key", None):
                 invalid_outputs = []
 
-        if not force and signature == previous_signature and not invalid_outputs:
+        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
             return False
         self._last_autogen_signature = signature
 
@@ -758,7 +781,7 @@ class SDLXLIFFReviewDialog(QDialog):
         output_files = None
         if not force:
             changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
-            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []))) or None
+            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or []))) or None
 
         try:
             stats = generator(
@@ -1249,10 +1272,10 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _manual_review_refresh(self):
+        if self._refreshing_review_data or self._queued_review_refresh:
+            return
         self._start_refresh_button_animation()
-        self._silent_review_refresh()
-        if not self._refreshing_review_data:
-            self._queue_stop_refresh_button_animation()
+        self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=0)
 
     def _silent_review_refresh(self):
         try:
