@@ -1551,6 +1551,65 @@ class SDLXLIFFReviewDialog(QDialog):
         return "red", "tag mismatch"
 
     @staticmethod
+    def _review_unit_is_heading(unit):
+        tag = str((unit or {}).get("tag", "") or "").strip().lower()
+        return bool(re.fullmatch(r"h[1-6]", tag))
+
+    @staticmethod
+    def _review_unit_is_paragraph(unit):
+        return str((unit or {}).get("tag", "") or "").strip().lower() == "p"
+
+    def _review_units_are_compatible(self, source_unit, target_unit):
+        source_tag = str((source_unit or {}).get("tag", "") or "").strip().lower()
+        target_tag = str((target_unit or {}).get("tag", "") or "").strip().lower()
+        if source_tag == target_tag:
+            return True
+        return self._heading_tag_level_changed(source_tag, target_tag)
+
+    def _align_review_units(self, source_units, target_units):
+        source_units = list(source_units or [])
+        target_units = list(target_units or [])
+        rows = []
+        i = 0
+        j = 0
+        while i < len(source_units) or j < len(target_units):
+            src = source_units[i] if i < len(source_units) else None
+            tgt = target_units[j] if j < len(target_units) else None
+            if src is None:
+                rows.append((None, tgt))
+                j += 1
+                continue
+            if tgt is None:
+                rows.append((src, None))
+                i += 1
+                continue
+            if self._review_units_are_compatible(src, tgt):
+                rows.append((src, tgt))
+                i += 1
+                j += 1
+                continue
+
+            next_src = source_units[i + 1] if i + 1 < len(source_units) else None
+            next_tgt = target_units[j + 1] if j + 1 < len(target_units) else None
+
+            if self._review_unit_is_heading(src) and self._review_unit_is_paragraph(tgt):
+                if next_src is not None and self._review_units_are_compatible(next_src, tgt):
+                    rows.append((src, None))
+                    i += 1
+                    continue
+
+            if self._review_unit_is_paragraph(src) and self._review_unit_is_heading(tgt):
+                if next_tgt is not None and self._review_units_are_compatible(src, next_tgt):
+                    rows.append((None, tgt))
+                    j += 1
+                    continue
+
+            rows.append((src, tgt))
+            i += 1
+            j += 1
+        return rows
+
+    @staticmethod
     def _review_piece_non_empty_count(rows, side):
         text_key = "source" if side == "source" else "target"
         tag_key = "source_tag" if side == "source" else "target_tag"
@@ -1788,9 +1847,8 @@ class SDLXLIFFReviewDialog(QDialog):
             rows = []
             red_count = 0
             yellow_count = 0
-            for row_idx in range(max(len(source_review_units), len(target_review_units))):
-                src = source_review_units[row_idx] if row_idx < len(source_review_units) else None
-                tgt = target_review_units[row_idx] if row_idx < len(target_review_units) else None
+            aligned_units = self._align_review_units(source_review_units, target_review_units)
+            for row_idx, (src, tgt) in enumerate(aligned_units):
                 status, reason = self._row_status(
                     src.get("text") if src else "",
                     tgt.get("text") if tgt else "",
@@ -4089,40 +4147,50 @@ class SDLXLIFFReviewDialog(QDialog):
             self._queue_review_page_preloads(row)
             return
 
+        render_timer = QTimer(self)
+        render_timer.setSingleShot(True)
         row_state = {"idx": 0}
-        batch_size = 96
+        batch_size = 24
 
-        def _start_render_stream():
+        def _finish_active_render_timer():
+            if self._active_render_timer is render_timer:
+                self._active_render_timer = None
+            try:
+                render_timer.stop()
+                render_timer.deleteLater()
+            except Exception:
+                pass
+
+        def _discard_active_render_page():
+            self._discard_piece_page(row, page)
+            if self._active_render_page is page:
+                self._active_render_row = None
+                self._active_render_page = None
+
+        def _run_render_batch():
+            if self._active_render_timer is not render_timer:
+                return
             if render_token != self._render_token:
-                self._discard_piece_page(row, page)
-                if self._active_render_page is page:
-                    self._active_render_row = None
-                    self._active_render_page = None
+                _finish_active_render_timer()
+                _discard_active_render_page()
                 return
             try:
-                from PySide6.QtWidgets import QApplication
-                while row_state["idx"] < len(rows):
-                    if render_token != self._render_token:
-                        self._discard_piece_page(row, page)
-                        if self._active_render_page is page:
-                            self._active_render_row = None
-                            self._active_render_page = None
-                        return
-                    self.rows_widget = page
-                    self.rows_layout = layout
-                    start = row_state["idx"]
-                    end = min(len(rows), start + batch_size)
-                    for idx in range(start, end):
-                        self._add_review_row(piece, rows[idx], idx, max_len, colors)
-                    row_state["idx"] = end
-                    self._spin_review_loading_icon()
-                    QApplication.processEvents(QEventLoop.AllEvents, 10)
+                self.rows_widget = page
+                self.rows_layout = layout
+                start = row_state["idx"]
+                end = min(len(rows), start + batch_size)
+                for idx in range(start, end):
+                    self._add_review_row(piece, rows[idx], idx, max_len, colors)
+                row_state["idx"] = end
+                self._spin_review_loading_icon()
+
+                if row_state["idx"] < len(rows):
+                    render_timer.start(1)
+                    return
 
                 if render_token != self._render_token:
-                    self._discard_piece_page(row, page)
-                    if self._active_render_page is page:
-                        self._active_render_row = None
-                        self._active_render_page = None
+                    _finish_active_render_timer()
+                    _discard_active_render_page()
                     return
                 layout.addStretch(1)
                 self._piece_render_complete.add(row)
@@ -4133,8 +4201,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
+                _finish_active_render_timer()
                 self._queue_review_page_preloads(row)
             except Exception as exc:
+                _finish_active_render_timer()
                 if render_token == self._render_token:
                     self._clear_rows(layout)
                     error = QLabel(f"Could not render SDLXLIFF review rows:\n{exc}")
@@ -4152,21 +4222,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._active_render_row = None
                     self._active_render_page = None
 
-        render_timer = QTimer(self)
-        render_timer.setSingleShot(True)
-
-        def _run_render_stream():
-            if self._active_render_timer is render_timer:
-                self._active_render_timer = None
-            try:
-                _start_render_stream()
-            finally:
-                try:
-                    render_timer.deleteLater()
-                except Exception:
-                    pass
-
-        render_timer.timeout.connect(_run_render_stream)
+        render_timer.timeout.connect(_run_render_batch)
         self._active_render_timer = render_timer
         render_timer.start(self._review_loading_minimum_ms)
 

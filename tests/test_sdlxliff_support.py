@@ -497,6 +497,100 @@ def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):
     assert piece["rows"][0]["reason"] == "heading level changed"
 
 
+def test_sdlxliff_review_missing_initial_heading_does_not_offset_paragraphs(tmp_path):
+    sidecar = tmp_path / "response_chapter_missing_heading.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<h1>Source heading</h1>"
+        "<p>Source paragraph one</p>"
+        "<p>Source paragraph two</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>Translated paragraph one</p>"
+        "<p>Translated paragraph two</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_heading.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_missing_heading.html"})
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 2
+    assert piece["rows"][0]["source_tag"] == "h1"
+    assert piece["rows"][0]["target_tag"] == ""
+    assert piece["rows"][0]["status"] == "red"
+    assert piece["rows"][1]["source_tag"] == "p"
+    assert piece["rows"][1]["target_tag"] == "p"
+    assert piece["rows"][1]["source"] == "Source paragraph one"
+    assert piece["rows"][1]["target"] == "Translated paragraph one"
+    assert piece["rows"][2]["source"] == "Source paragraph two"
+    assert piece["rows"][2]["target"] == "Translated paragraph two"
+
+
+def test_sdlxliff_review_extra_initial_heading_does_not_offset_paragraphs(tmp_path):
+    sidecar = tmp_path / "response_chapter_extra_heading.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>Source paragraph one</p>"
+        "<p>Source paragraph two</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<h2>Added translated heading</h2>"
+        "<p>Translated paragraph one</p>"
+        "<p>Translated paragraph two</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_heading.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_extra_heading.html"})
+
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 3
+    assert piece["rows"][0]["source_tag"] == ""
+    assert piece["rows"][0]["target_tag"] == "h2"
+    assert piece["rows"][0]["status"] == "red"
+    assert piece["rows"][1]["source_tag"] == "p"
+    assert piece["rows"][1]["target_tag"] == "p"
+    assert piece["rows"][1]["source"] == "Source paragraph one"
+    assert piece["rows"][1]["target"] == "Translated paragraph one"
+    assert piece["rows"][2]["source"] == "Source paragraph two"
+    assert piece["rows"][2]["target"] == "Translated paragraph two"
+
+
 def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
     sidecar = tmp_path / "response_chapter_heading_to_p.html.sdlxliff"
     source_html = "<html><body><h1>Source heading</h1></body></html>"
@@ -574,6 +668,13 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "self.refresh_review_data(" in source
     assert "_write_machine_translation_entries" in source
     assert "persist=False" in source
+    render_start = source.index("def _render_piece")
+    render_end = source.index("\n\nclass RetranslationMixin", render_start)
+    render_body = source[render_start:render_end]
+    assert "while row_state[\"idx\"] < len(rows)" not in render_body
+    assert "batch_size = 24" in render_body
+    assert "render_timer.start(1)" in render_body
+    assert "QApplication.processEvents(QEventLoop.AllEvents, 10)" not in render_body
     assert "self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)" in source
     assert "self._update_review_row_source_previews(row, changed_rows, visible_only=True)" in source
     assert "Google Translate \\u2192" in source
