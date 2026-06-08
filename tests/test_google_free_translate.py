@@ -290,3 +290,120 @@ def test_argos_fallback_sanitizes_plain_text_tag_fragments(monkeypatch):
 
     assert result["provider"] == "argos"
     assert result["translatedText"] == "First sentence. News Second Third"
+
+
+def test_deepl_provider_requires_api_key_without_raw_fallback(monkeypatch):
+    monkeypatch.delenv("DEEPL_API_KEY", raising=False)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="English", provider="deepl")
+    result = translator.translate("Hello")
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == ""
+    assert "API key is not configured" in result["error"]
+
+
+def test_deepl_provider_uses_auth_key_and_html_tag_handling(monkeypatch):
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append((url, dict(data or {}), dict(headers or {}), timeout))
+        return FakeResponse(
+            200,
+            {
+                "translations": [
+                    {
+                        "text": '<p data-sdl-tip="0">Hello</p>',
+                        "detected_source_language": "KO",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        provider="deepl",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://api-free.deepl.com/v2/translate"
+    assert calls[0][1]["tag_handling"] == "html"
+    assert calls[0][1]["target_lang"] == "EN-US"
+    assert calls[0][2]["Authorization"] == "DeepL-Auth-Key deepl-key:fx"
+
+
+def test_bing_provider_uses_subscription_key_and_html_mode(monkeypatch):
+    calls = []
+
+    def fake_post(url, params=None, headers=None, json=None, timeout=None):
+        calls.append((url, dict(params or {}), dict(headers or {}), json, timeout))
+        return FakeResponse(
+            200,
+            [
+                {
+                    "detectedLanguage": {"language": "ko"},
+                    "translations": [{"text": '<p data-sdl-tip="0">Hello</p>', "to": "en"}],
+                }
+            ],
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="auto",
+        target_language="English",
+        provider="bing",
+        api_keys={"bing": {"api_key": "bing-key", "region": "eastus"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "bing"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://api.cognitive.microsofttranslator.com/translate"
+    assert calls[0][1]["textType"] == "html"
+    assert calls[0][1]["to"] == "en"
+    assert calls[0][2]["Ocp-Apim-Subscription-Key"] == "bing-key"
+    assert calls[0][2]["Ocp-Apim-Subscription-Region"] == "eastus"
+    assert calls[0][3] == [{"Text": '<p data-sdl-tip="0">안녕</p>'}]
+
+
+def test_yandex_provider_uses_api_key_and_folder_id(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, dict(headers or {}), dict(json or {}), timeout))
+        return FakeResponse(
+            200,
+            {
+                "translations": [
+                    {
+                        "text": '<p data-sdl-tip="0">Hello</p>',
+                        "detectedLanguageCode": "ko",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        provider="yandex",
+        api_keys={"yandex": {"api_key": "yandex-key", "folder_id": "folder-123"}},
+    )
+    result = translator.translate('<p data-sdl-tip="0">안녕</p>')
+
+    assert result["provider"] == "yandex"
+    assert result["translatedText"] == '<p data-sdl-tip="0">Hello</p>'
+    assert calls[0][0] == "https://translate.api.cloud.yandex.net/translate/v2/translate"
+    assert calls[0][1]["Authorization"] == "Api-Key yandex-key"
+    assert calls[0][2]["folderId"] == "folder-123"
+    assert calls[0][2]["format"] == "HTML"
+    assert calls[0][2]["texts"] == ['<p data-sdl-tip="0">안녕</p>']

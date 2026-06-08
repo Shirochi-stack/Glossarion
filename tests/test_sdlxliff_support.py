@@ -1286,13 +1286,22 @@ def test_sdlxliff_review_heading_to_paragraph_does_not_offset_following_paragrap
     assert piece["rows"][2]["target"] == "Translated paragraph two"
 
 
-def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
+def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
 
-    assert "🌐 Generate Google Translate Preview" in source
-    assert "google-translate-free" in source
+    assert "🌐 Generate Machine Translation Preview" in source
+    assert "MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY" in source
+    assert "MACHINE_TRANSLATION_PROVIDER_LABELS" in source
+    assert '"deepl": "DeepL"' in source
+    assert '"bing": "Bing"' in source
+    assert '"yandex": "Yandex"' in source
+    assert "customContextMenuRequested.connect(self._show_machine_translation_provider_menu)" in source
+    assert "_set_machine_translation_provider" in source
+    assert "_prompt_machine_translation_credentials" in source
+    assert "_machine_translation_translator" in source
+    assert "QLineEdit.Password" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
-    assert 'name="sdlxliff-tooltip-google-translate-free"' in source
+    assert 'name="sdlxliff-machine-translation-preview"' in source
     assert "batch_html = self._tooltip_batch_html(work)" in source
     assert "result = translator.translate(batch_html)" in source
     assert 'data-sdl-tip="' in source
@@ -1306,7 +1315,7 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "event_type == QEvent.MouseButtonPress and event.button() == Qt.RightButton" in source
     assert "QMenu(self)" in source
     assert "QMenu::item { padding: 6px 18px 6px 12px; }" in source
-    assert "Generate Google Translate Preview ({entry_count} entries)" in source
+    assert "Generate Machine Translation Preview ({entry_count} entries)" in source
     assert "menu.popup(self.piece_list.viewport().mapToGlobal(pos))" in source
     assert "QKeySequence, QShortcut" in source
     assert "MANUAL_REFRESH_BUTTON_TEXT" in source
@@ -1495,14 +1504,15 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "QApplication.processEvents(QEventLoop.AllEvents, 10)" not in render_body
     assert "self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)" in source
     assert "self._update_review_row_source_previews(row, changed_rows, visible_only=True)" in source
-    assert "Google Translate \\u2192" in source
+    assert "Machine Translation \\u2192" in source
     assert "_open_google_translate" not in source
     assert "Translate tooltip" not in source
     assert "Retranslate tooltip" not in source
     assert "Inject Machine Translation" in source
     assert "inject_machine_translation_callback" in source
     assert "tooltip_translation_pending" in source
-    assert "⏳ Translating with Google Translate..." in source
+    assert "_machine_translation_pending_text" in source
+    assert "Translating with {self._machine_translation_provider_label()}" in source
     assert "SdlReviewSourceText" in source
     assert "SdlReviewMachineTranslation" in source
     assert "SdlReviewMachineTranslationPending" in source

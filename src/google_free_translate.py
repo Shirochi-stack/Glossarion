@@ -8,6 +8,7 @@ import threading
 import time
 import json
 import html as html_lib
+import os
 import re
 import requests
 from typing import Optional, Dict, Any
@@ -141,10 +142,19 @@ class GoogleFreeTranslateNew:
     free = True
     endpoint: str = GOOGLE_TRANSLATE_CO_IN_ENDPOINT
     
-    def __init__(self, source_language: str = "auto", target_language: str = "en", logger=None):
+    def __init__(
+        self,
+        source_language: str = "auto",
+        target_language: str = "en",
+        logger=None,
+        provider: str = "auto",
+        api_keys: Optional[Dict[str, Any]] = None,
+    ):
         self.source_language = source_language
         self.target_language = target_language
         self.logger = logger or logging.getLogger(__name__)
+        self.provider = self._normalize_provider(provider)
+        self.api_keys = dict(api_keys or {})
         self.cache = {}  # Simple in-memory cache
         self.cache_lock = threading.Lock()
         self.request_lock = threading.Lock()
@@ -173,6 +183,93 @@ class GoogleFreeTranslateNew:
         """Get the target language code."""
         return google_translate_language_code(self.target_language, default=self.target_language)
 
+    @staticmethod
+    def _normalize_provider(provider: Any) -> str:
+        normalized = str(provider or "auto").strip().lower().replace("_", "-").replace(" ", "-")
+        aliases = {
+            "": "auto",
+            "machine": "auto",
+            "machine-translation": "auto",
+            "google-free": "google",
+            "google-translate": "google",
+            "google-translate-free": "google",
+            "argos-translate": "argos",
+            "argostranslate": "argos",
+            "microsoft": "bing",
+            "microsoft-translator": "bing",
+            "azure": "bing",
+            "azure-translator": "bing",
+            "yandex-translate": "yandex",
+        }
+        normalized = aliases.get(normalized, normalized)
+        return normalized if normalized in {"auto", "google", "deepl", "bing", "argos", "yandex"} else "auto"
+
+    @staticmethod
+    def _is_marked_html_batch(text: str) -> bool:
+        return "data-sdl-tip" in str(text or "")
+
+    @staticmethod
+    def _deepl_target_language_code(target_lang: str) -> str:
+        code = google_translate_language_code(target_lang, default=target_lang).upper()
+        mapping = {
+            "ZH-CN": "ZH-HANS",
+            "ZH-TW": "ZH-HANT",
+            "PT-BR": "PT-BR",
+            "PT-PT": "PT-PT",
+            "EN": "EN-US",
+        }
+        return mapping.get(code, code)
+
+    @staticmethod
+    def _yandex_language_code(lang: str) -> str:
+        code = google_translate_language_code(lang, default=lang)
+        aliases = {
+            "zh-CN": "zh",
+            "zh-TW": "zh",
+        }
+        return aliases.get(code, str(code or "").split("-", 1)[0].lower())
+
+    def _api_option(self, provider: str, option: str, env_name: str = "") -> str:
+        value = None
+        provider_value = self.api_keys.get(provider)
+        if isinstance(provider_value, dict):
+            value = provider_value.get(option)
+            if value is None and option == "api_key":
+                value = provider_value.get("key")
+        elif option == "api_key":
+            value = provider_value
+        if value is None:
+            value = self.api_keys.get(f"{provider}_{option}")
+        if value is None and env_name:
+            value = os.environ.get(env_name, "")
+        return str(value or "").strip()
+
+    def _api_key(self, provider: str, *env_names: str) -> str:
+        value = self.api_keys.get(provider)
+        if isinstance(value, dict):
+            value = value.get("api_key") or value.get("key")
+        elif value is None:
+            value = self.api_keys.get(f"{provider}_api_key")
+        for env_name in env_names:
+            if value:
+                break
+            value = os.environ.get(env_name, "")
+        value = str(value or "").strip()
+        if not value:
+            raise ValueError(f"{provider} API key is not configured")
+        return value
+
+    def _folder_id(self, provider: str, env_name: str) -> str:
+        value = self.api_keys.get(provider)
+        if isinstance(value, dict):
+            value = value.get("folder_id") or value.get("folderId")
+        else:
+            value = self.api_keys.get(f"{provider}_folder_id")
+        value = str(value or os.environ.get(env_name, "") or "").strip()
+        if not value:
+            raise ValueError(f"{provider} folder id is not configured")
+        return value
+
     def get_headers(self):
         """Get request headers that mimic a browser with random user agent."""
         return {
@@ -187,7 +284,41 @@ class GoogleFreeTranslateNew:
         
     def _get_cache_key(self, text: str) -> str:
         """Generate cache key for the translation."""
-        return f"{self.source_language}_{self.target_language}_{hash(text)}"
+        return f"{self.provider}_{self.source_language}_{self.target_language}_{hash(text)}"
+
+    def _cache_translation_result(self, cache_key: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        with self.cache_lock:
+            self.cache[cache_key] = result
+            if len(self.cache) > 1000:
+                oldest_keys = list(self.cache.keys())[:100]
+                for key in oldest_keys:
+                    del self.cache[key]
+        return result
+
+    def _translation_error_result(self, provider: str, error: Any) -> Dict[str, Any]:
+        return {
+            'translatedText': '',
+            'detectedSourceLanguage': self.source_language,
+            'provider': provider,
+            'error': str(error),
+        }
+
+    def _translate_via_configured_provider(
+        self,
+        provider: str,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> Optional[Dict[str, Any]]:
+        if provider == "argos":
+            return self._translate_via_argos(text, source_lang, target_lang)
+        if provider == "deepl":
+            return self._translate_via_deepl(text, source_lang, target_lang)
+        if provider == "bing":
+            return self._translate_via_bing(text, source_lang, target_lang)
+        if provider == "yandex":
+            return self._translate_via_yandex(text, source_lang, target_lang)
+        raise ValueError(f"Unknown machine translation provider: {provider}")
     
     def _rate_limit_delay(self):
         """Ensure rate limiting between requests."""
@@ -222,8 +353,23 @@ class GoogleFreeTranslateNew:
                 self.logger.debug(f"Cache hit for translation: {text[:50]}...")
                 return self.cache[cache_key]
         
-        # If we've already determined Google is blocking us, skip straight to fallback
-        if GoogleFreeTranslateNew._use_fallback_only:
+        provider = self.provider
+        source_lang = self._get_source_code()
+        target_lang = self._get_target_code()
+
+        if provider in {"argos", "deepl", "bing", "yandex"}:
+            try:
+                result = self._translate_via_configured_provider(provider, text, source_lang, target_lang)
+                if result and str(result.get("translatedText") or "").strip():
+                    return self._cache_translation_result(cache_key, result)
+                raise Exception(f"{provider} returned no translation")
+            except Exception as e:
+                self.logger.error(f"❌ {provider} translation failed: {e}")
+                return self._translation_error_result(provider, e)
+
+        # If we've already determined Google is blocking us, skip straight to fallback.
+        # Explicit Google mode should still try Google and report Google failures.
+        if provider == "auto" and GoogleFreeTranslateNew._use_fallback_only:
             try:
                 # Prepare source lang for fallback logic (convert 'auto' if needed)
                 # Note: _translate_via_argos handles 'auto' logic internally, so just pass self.source_language
@@ -253,11 +399,7 @@ class GoogleFreeTranslateNew:
             except Exception as e:
                 # If fallback fails, log error and return original text
                 self.logger.error(f"❌ Permanent fallback failed: {e}")
-                return {
-                    'translatedText': text,
-                    'detectedSourceLanguage': self.source_language,
-                    'error': str(e)
-                }
+                return self._translation_error_result("argos", e)
 
         # Log start for Google endpoints (pre-call)
         try:
@@ -280,9 +422,6 @@ class GoogleFreeTranslateNew:
         
         try:
             # Prepare request data
-            source_lang = self._get_source_code()
-            target_lang = self._get_target_code()
-            
             # Try multiple FREE endpoint formats (no credentials needed).
             # Keep the requested translate.google.co.in host first; it accepts longer POST bodies.
             endpoints_to_try = [
@@ -323,14 +462,7 @@ class GoogleFreeTranslateNew:
                         
                     if result:
                         # Cache successful result
-                        with self.cache_lock:
-                            self.cache[cache_key] = result
-                            # Limit cache size
-                            if len(self.cache) > 1000:
-                                # Remove oldest entries
-                                oldest_keys = list(self.cache.keys())[:100]
-                                for key in oldest_keys:
-                                    del self.cache[key]
+                        self._cache_translation_result(cache_key, result)
                         
                         # Honor stop flag after a successful call (before returning)
                         if _stop_requested():
@@ -347,6 +479,9 @@ class GoogleFreeTranslateNew:
             error_summary = "\n".join(f"  • {err}" for err in all_errors)
             detailed_error = f"All Google Translate endpoints failed:\n{error_summary}"
             self.logger.error(detailed_error)
+
+            if provider == "google":
+                raise Exception(detailed_error)
             
             # Fallback to Argos Translate
             self.logger.info("🔄 All Google endpoints failed. Switching to permanent Argos Translate fallback...")
@@ -367,12 +502,7 @@ class GoogleFreeTranslateNew:
             # Only log if it's not already logged above
             if "All Google Translate endpoints failed" not in str(e):
                 self.logger.error(f"❌ Translation failed: {e}")
-            # Return original text as fallback
-            return {
-                'translatedText': text,
-                'detectedSourceLanguage': self.source_language,
-                'error': str(e)
-            }
+            return self._translation_error_result(provider, e)
 
     @staticmethod
     def _sanitize_argos_text_tag_fragments(source_text: str, translated_text: str) -> str:
@@ -551,6 +681,166 @@ class GoogleFreeTranslateNew:
             self.logger.error(f"❌ Argos fallback failed: {e}")
             return None
     
+    @staticmethod
+    def _http_error_message(provider: str, response) -> str:
+        try:
+            body = response.text or ""
+        except Exception:
+            body = ""
+        body = re.sub(r"\s+", " ", str(body or "")).strip()
+        if len(body) > 240:
+            body = body[:237] + "..."
+        suffix = f": {body}" if body else ""
+        return f"{provider} HTTP {getattr(response, 'status_code', 'unknown')}{suffix}"
+
+    def _translate_via_deepl(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
+        api_key = self._api_key("deepl", "DEEPL_API_KEY")
+        provider_value = self.api_keys.get("deepl")
+        endpoint = ""
+        if isinstance(provider_value, dict):
+            endpoint = str(provider_value.get("endpoint") or "").strip()
+        endpoint = endpoint or self._api_option("deepl", "endpoint", "DEEPL_API_ENDPOINT")
+        if not endpoint:
+            endpoint = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+
+        data = {
+            "text": text,
+            "target_lang": self._deepl_target_language_code(target_lang),
+        }
+        source_code = google_translate_language_code(source_lang, default=source_lang).upper()
+        if source_code and source_code != "AUTO":
+            data["source_lang"] = source_code.split("-", 1)[0]
+        if self._is_marked_html_batch(text):
+            data["tag_handling"] = "html"
+
+        response = requests.post(
+            endpoint,
+            data=data,
+            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+            timeout=20,
+        )
+        if response.status_code != 200:
+            raise Exception(self._http_error_message("DeepL", response))
+        payload = response.json()
+        translations = payload.get("translations") if isinstance(payload, dict) else None
+        if not translations:
+            raise Exception("DeepL returned no translations")
+        first = translations[0] or {}
+        translated_text = str(first.get("text") or "").strip()
+        if not translated_text:
+            raise Exception("DeepL returned an empty translation")
+        if not self._is_marked_html_batch(text):
+            translated_text = self._sanitize_argos_text_tag_fragments(text, translated_text)
+        return {
+            "translatedText": translated_text,
+            "detectedSourceLanguage": str(first.get("detected_source_language") or source_lang),
+            "provider": "deepl",
+            "endpoint": endpoint,
+        }
+
+    def _translate_via_bing(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
+        api_key = self._api_key("bing", "BING_TRANSLATOR_API_KEY", "AZURE_TRANSLATOR_KEY")
+        provider_value = self.api_keys.get("bing")
+        endpoint = ""
+        if isinstance(provider_value, dict):
+            endpoint = str(provider_value.get("endpoint") or "").strip()
+        endpoint = endpoint or self._api_option("bing", "endpoint", "AZURE_TRANSLATOR_ENDPOINT")
+        endpoint = endpoint or "https://api.cognitive.microsofttranslator.com/translate"
+        region = self._api_option("bing", "region", "AZURE_TRANSLATOR_REGION")
+
+        params = {
+            "api-version": "3.0",
+            "to": google_translate_language_code(target_lang, default=target_lang),
+        }
+        source_code = google_translate_language_code(source_lang, default=source_lang)
+        if source_code and source_code != "auto":
+            params["from"] = source_code
+        if self._is_marked_html_batch(text):
+            params["textType"] = "html"
+
+        headers = {
+            "Ocp-Apim-Subscription-Key": api_key,
+            "Content-Type": "application/json",
+        }
+        if region:
+            headers["Ocp-Apim-Subscription-Region"] = region
+
+        response = requests.post(
+            endpoint,
+            params=params,
+            headers=headers,
+            json=[{"Text": text}],
+            timeout=20,
+        )
+        if response.status_code != 200:
+            raise Exception(self._http_error_message("Microsoft Translator", response))
+        payload = response.json()
+        if not isinstance(payload, list) or not payload:
+            raise Exception("Microsoft Translator returned no translations")
+        translations = (payload[0] or {}).get("translations") or []
+        if not translations:
+            raise Exception("Microsoft Translator returned no translations")
+        translated_text = str((translations[0] or {}).get("text") or "").strip()
+        if not translated_text:
+            raise Exception("Microsoft Translator returned an empty translation")
+        if not self._is_marked_html_batch(text):
+            translated_text = self._sanitize_argos_text_tag_fragments(text, translated_text)
+        detected = (payload[0] or {}).get("detectedLanguage") or {}
+        return {
+            "translatedText": translated_text,
+            "detectedSourceLanguage": str(detected.get("language") or source_lang),
+            "provider": "bing",
+            "endpoint": endpoint,
+        }
+
+    def _translate_via_yandex(self, text: str, source_lang: str, target_lang: str) -> Optional[Dict[str, Any]]:
+        api_key = self._api_key("yandex", "YANDEX_TRANSLATE_API_KEY")
+        folder_id = self._folder_id("yandex", "YANDEX_FOLDER_ID")
+        provider_value = self.api_keys.get("yandex")
+        endpoint = ""
+        if isinstance(provider_value, dict):
+            endpoint = str(provider_value.get("endpoint") or "").strip()
+        endpoint = endpoint or self._api_option("yandex", "endpoint", "YANDEX_TRANSLATE_ENDPOINT")
+        endpoint = endpoint or "https://translate.api.cloud.yandex.net/translate/v2/translate"
+
+        body = {
+            "targetLanguageCode": self._yandex_language_code(target_lang),
+            "texts": [text],
+            "folderId": folder_id,
+            "format": "HTML" if self._is_marked_html_batch(text) else "PLAIN_TEXT",
+        }
+        source_code = self._yandex_language_code(source_lang)
+        if source_code and source_code != "auto":
+            body["sourceLanguageCode"] = source_code
+
+        response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Api-Key {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=20,
+        )
+        if response.status_code != 200:
+            raise Exception(self._http_error_message("Yandex Translate", response))
+        payload = response.json()
+        translations = payload.get("translations") if isinstance(payload, dict) else None
+        if not translations:
+            raise Exception("Yandex Translate returned no translations")
+        first = translations[0] or {}
+        translated_text = str(first.get("text") or "").strip()
+        if not translated_text:
+            raise Exception("Yandex Translate returned an empty translation")
+        if not self._is_marked_html_batch(text):
+            translated_text = self._sanitize_argos_text_tag_fragments(text, translated_text)
+        return {
+            "translatedText": translated_text,
+            "detectedSourceLanguage": str(first.get("detectedLanguageCode") or source_lang),
+            "provider": "yandex",
+            "endpoint": endpoint,
+        }
+
     def _translate_via_googletrans_ajax(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the tokenless Ajax route used by py-googletrans."""
         params = {

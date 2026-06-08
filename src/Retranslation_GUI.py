@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
-                                QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog)
+                                QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
+                                QLineEdit)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -186,12 +187,26 @@ class SDLXLIFFReviewDialog(QDialog):
     REVIEW_PRELOAD_STEP_MS = 90
     REVIEW_MAX_CACHED_PAGES = 7
     REVIEW_SYNC_RENDER_ROW_LIMIT = 80
-    TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Google Translate Preview"
+    TRANSLATE_TOOLTIPS_BUTTON_TEXT = "🌐 Generate Machine Translation Preview"
     FLAG_ACCURACY_BUTTON_TEXT = "🟣 Flag Inaccurate"
     TWO_COLUMN_LAYOUT_BUTTON_TEXT = "2 Columns"
     TWO_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_two_column_layout"
     LEGACY_ONE_COLUMN_LAYOUT_CONFIG_KEY = "sdlxliff_one_column_layout"
     LEGACY_ONE_ROW_LAYOUT_CONFIG_KEY = "sdlxliff_one_row_layout"
+    MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY = "sdlxliff_machine_translation_provider"
+    MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY = "sdlxliff_machine_translation_deepl_api_key"
+    MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY = "sdlxliff_machine_translation_bing_api_key"
+    MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY = "sdlxliff_machine_translation_bing_region"
+    MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY = "sdlxliff_machine_translation_yandex_api_key"
+    MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY = "sdlxliff_machine_translation_yandex_folder_id"
+    MACHINE_TRANSLATION_PROVIDER_LABELS = {
+        "auto": "Auto",
+        "google": "Google",
+        "deepl": "DeepL",
+        "bing": "Bing",
+        "argos": "Argos Translate",
+        "yandex": "Yandex",
+    }
     MACHINE_TRANSLATION_THRESHOLD_CONFIG_KEY = "sdlxliff_machine_translation_inaccuracy_threshold"
     MACHINE_TRANSLATION_INACCURACY_THRESHOLD = 150.0
     MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS = 1
@@ -201,7 +216,7 @@ class SDLXLIFFReviewDialog(QDialog):
         its me my of on or our ours she so some that the their theirs them then there they this to was were
         while who whom whose will with would you your yours
     """.split())
-    MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Translating with Google Translate..."
+    MACHINE_TRANSLATION_PENDING_TEXT = "⏳ Generating machine translation preview..."
     MANUAL_REFRESH_BUTTON_TEXT = "↻ Refresh"
     _SDLXLIFF_AUTOGEN_STATUSES = {
         "completed",
@@ -278,6 +293,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_context_menu_open = False
         self._review_text_context_menu = None
         self._piece_list_context_menu = None
+        self._machine_translation_provider_menu = None
         self._manual_refresh_shortcut = None
         self._refresh_button_timer = None
         self._refresh_button_stop_timer = None
@@ -355,17 +371,20 @@ class SDLXLIFFReviewDialog(QDialog):
         header_row.addWidget(self.header_label, 1)
         self.translate_tooltips_btn = QPushButton(self.TRANSLATE_TOOLTIPS_BUTTON_TEXT)
         self.translate_tooltips_btn.setCursor(Qt.PointingHandCursor)
-        self.translate_tooltips_btn.setToolTip("Translate source-row tooltips with google-translate-free.")
+        self.translate_tooltips_btn.setToolTip("Generate source-row machine translation previews. Right-click to choose the provider.")
         self.translate_tooltips_btn.setStyleSheet(
             "QPushButton { background-color:#2b4f6f; color:#d7ecff; border:1px solid #5a9fd4; "
             "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
             "QPushButton:hover { background-color:#356b96; border-color:#7bb3e0; }"
             "QPushButton:disabled { color:#94a3b8; background-color:#2a3b4d; border-color:#4a5568; }"
         )
+        self.translate_tooltips_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.translate_tooltips_btn.customContextMenuRequested.connect(self._show_machine_translation_provider_menu)
         self.translate_tooltips_btn.clicked.connect(self._translate_current_piece_tooltips)
+        self._update_machine_translation_button_tooltip()
         self.flag_accuracy_btn = QPushButton(self.FLAG_ACCURACY_BUTTON_TEXT)
         self.flag_accuracy_btn.setCursor(Qt.PointingHandCursor)
-        self.flag_accuracy_btn.setToolTip("Mark rows that fall below the Google Translate preview accuracy threshold.")
+        self.flag_accuracy_btn.setToolTip("Mark rows that fall below the machine translation preview accuracy threshold.")
         self.flag_accuracy_btn.setStyleSheet(
             "QPushButton { background-color:#3b2450; color:#f0d9ff; border:1px solid #9c63d8; "
             "border-radius:4px; padding:4px 10px; font-size:9pt; font-weight:bold; }"
@@ -982,6 +1001,198 @@ class SDLXLIFFReviewDialog(QDialog):
             return True
         except Exception:
             return False
+
+    @classmethod
+    def _normalize_machine_translation_provider(cls, provider):
+        value = str(provider or "auto").strip().lower().replace("_", "-").replace(" ", "-")
+        aliases = {
+            "": "auto",
+            "machine": "auto",
+            "machine-translation": "auto",
+            "google-free": "google",
+            "google-translate": "google",
+            "google-translate-free": "google",
+            "argos": "argos",
+            "argos-translate": "argos",
+            "argostranslate": "argos",
+            "microsoft": "bing",
+            "microsoft-translator": "bing",
+            "azure": "bing",
+            "azure-translator": "bing",
+            "yandex-translate": "yandex",
+        }
+        value = aliases.get(value, value)
+        return value if value in cls.MACHINE_TRANSLATION_PROVIDER_LABELS else "auto"
+
+    def _machine_translation_provider(self):
+        try:
+            return self._normalize_machine_translation_provider(
+                (self._config or {}).get(self.MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY, "auto")
+            )
+        except Exception:
+            return "auto"
+
+    def _machine_translation_provider_label(self, provider=None):
+        provider = self._normalize_machine_translation_provider(provider or self._machine_translation_provider())
+        return self.MACHINE_TRANSLATION_PROVIDER_LABELS.get(provider, "Auto")
+
+    def _machine_translation_pending_text(self):
+        return f"⏳ Translating with {self._machine_translation_provider_label()}..."
+
+    def _update_machine_translation_button_tooltip(self):
+        try:
+            provider_label = self._machine_translation_provider_label()
+            self.translate_tooltips_btn.setToolTip(
+                f"Generate source-row machine translation previews. Provider: {provider_label}. Right-click to choose."
+            )
+        except Exception:
+            pass
+
+    def _set_machine_translation_provider(self, provider):
+        provider = self._normalize_machine_translation_provider(provider)
+        if provider in {"deepl", "bing", "yandex"} and not self._prompt_machine_translation_credentials(provider):
+            return
+        saved = self._persist_review_config_value(self.MACHINE_TRANSLATION_PROVIDER_CONFIG_KEY, provider)
+        self._update_machine_translation_button_tooltip()
+        try:
+            suffix = "" if saved else " (not saved to config.json)"
+            self.save_status_label.setText(f"Machine translation provider: {self._machine_translation_provider_label(provider)}{suffix}")
+        except Exception:
+            pass
+
+    def _machine_translation_api_options(self):
+        config = self._config or {}
+        options = {}
+        deepl_key = str(config.get(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, "") or "").strip()
+        if deepl_key:
+            options["deepl"] = {"api_key": deepl_key}
+        bing_key = str(config.get(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, "") or "").strip()
+        if bing_key:
+            bing_options = {"api_key": bing_key}
+            region = str(config.get(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, "") or "").strip()
+            if region:
+                bing_options["region"] = region
+            options["bing"] = bing_options
+        yandex_key = str(config.get(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY, "") or "").strip()
+        yandex_folder_id = str(config.get(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY, "") or "").strip()
+        if yandex_key or yandex_folder_id:
+            options["yandex"] = {
+                "api_key": yandex_key,
+                "folder_id": yandex_folder_id,
+            }
+        return options
+
+    def _machine_translation_translator(self, target_code):
+        from google_free_translate import GoogleFreeTranslateNew
+        return GoogleFreeTranslateNew(
+            "auto",
+            target_code,
+            provider=self._machine_translation_provider(),
+            api_keys=self._machine_translation_api_options(),
+        )
+
+    def _prompt_secret_text(self, title, label, current=""):
+        value, ok = QInputDialog.getText(
+            self,
+            title,
+            label,
+            QLineEdit.Password,
+            str(current or ""),
+        )
+        if not ok:
+            return None
+        return str(value or "").strip()
+
+    def _prompt_plain_text(self, title, label, current=""):
+        value, ok = QInputDialog.getText(
+            self,
+            title,
+            label,
+            QLineEdit.Normal,
+            str(current or ""),
+        )
+        if not ok:
+            return None
+        return str(value or "").strip()
+
+    def _prompt_machine_translation_credentials(self, provider, force=False):
+        provider = self._normalize_machine_translation_provider(provider)
+        config = self._config or {}
+        if provider == "deepl":
+            current = str(config.get(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, "") or "").strip()
+            if current and not force:
+                return True
+            key = self._prompt_secret_text("DeepL API Key", "DeepL API key:", current)
+            if not key:
+                self.save_status_label.setText("DeepL requires an API key")
+                return False
+            self._persist_review_config_value(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, key)
+            return True
+        if provider == "bing":
+            current = str(config.get(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, "") or "").strip()
+            if not current or force:
+                key = self._prompt_secret_text("Bing / Microsoft Translator API Key", "Microsoft Translator API key:", current)
+                if not key:
+                    self.save_status_label.setText("Bing requires a Microsoft Translator API key")
+                    return False
+                self._persist_review_config_value(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, key)
+            current_region = str(config.get(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, "") or "").strip()
+            if force:
+                region = self._prompt_plain_text("Bing / Microsoft Translator Region", "Azure region (optional):", current_region)
+                if region is not None:
+                    self._persist_review_config_value(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, region)
+            return True
+        if provider == "yandex":
+            current_key = str(config.get(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY, "") or "").strip()
+            current_folder = str(config.get(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY, "") or "").strip()
+            if current_key and current_folder and not force:
+                return True
+            key = self._prompt_secret_text("Yandex Translate API Key", "Yandex Cloud API key:", current_key)
+            if not key:
+                self.save_status_label.setText("Yandex requires an API key")
+                return False
+            folder_id = self._prompt_plain_text("Yandex Translate Folder ID", "Yandex Cloud folder ID:", current_folder)
+            if not folder_id:
+                self.save_status_label.setText("Yandex requires a folder ID")
+                return False
+            self._persist_review_config_value(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY, key)
+            self._persist_review_config_value(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY, folder_id)
+            return True
+        return True
+
+    def _show_machine_translation_provider_menu(self, pos):
+        try:
+            current = self._machine_translation_provider()
+            menu = QMenu(self)
+            menu.setStyleSheet(
+                "QMenu { padding: 4px 8px 4px 4px; }"
+                "QMenu::item { padding: 6px 24px 6px 12px; }"
+            )
+            for provider, label in self.MACHINE_TRANSLATION_PROVIDER_LABELS.items():
+                action = menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(provider == current)
+                action.triggered.connect(lambda _checked=False, p=provider: self._set_machine_translation_provider(p))
+            menu.addSeparator()
+            deepl_action = menu.addAction("🔑 Configure DeepL API Key...")
+            deepl_action.triggered.connect(lambda _checked=False: self._prompt_machine_translation_credentials("deepl", force=True))
+            bing_action = menu.addAction("🔑 Configure Bing API Key...")
+            bing_action.triggered.connect(lambda _checked=False: self._prompt_machine_translation_credentials("bing", force=True))
+            yandex_action = menu.addAction("🔑 Configure Yandex API Key...")
+            yandex_action.triggered.connect(lambda _checked=False: self._prompt_machine_translation_credentials("yandex", force=True))
+            self._machine_translation_provider_menu = menu
+            menu.aboutToHide.connect(lambda m=menu: self._clear_machine_translation_provider_menu(m))
+            menu.popup(self.translate_tooltips_btn.mapToGlobal(pos))
+        except Exception:
+            pass
+
+    def _clear_machine_translation_provider_menu(self, menu):
+        try:
+            if getattr(self, "_machine_translation_provider_menu", None) is menu:
+                self._machine_translation_provider_menu = None
+            menu.deleteLater()
+        except Exception:
+            pass
 
     def _set_machine_translation_inaccuracy_threshold(self, threshold):
         try:
@@ -2214,7 +2425,7 @@ class SDLXLIFFReviewDialog(QDialog):
             promoted_indices = self._promote_inaccurate_machine_translation_rows(piece)
             if promoted_indices is None:
                 try:
-                    self.save_status_label.setText("Generate Google Translate Preview first")
+                    self.save_status_label.setText("Generate Machine Translation Preview first")
                 except Exception:
                     pass
                 return
@@ -3644,7 +3855,7 @@ class SDLXLIFFReviewDialog(QDialog):
         label.setObjectName("SdlReviewTagLabel")
         label.setTextFormat(Qt.PlainText)
         label.setAlignment(Qt.AlignCenter)
-        label.setFixedWidth(48)
+        label.setFixedWidth(36)
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
@@ -3652,7 +3863,7 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label.setStyleSheet(
-            f"color: {color}; background: transparent; font: 16pt Consolas, 'Courier New', monospace;"
+            f"color: {color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace;"
         )
         return label
 
@@ -3712,7 +3923,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     "red": self.THEME["danger"],
                 }.get(row_data["status"], self.THEME["muted"])
                 tag_label.setStyleSheet(
-                    f"color: {tag_color}; background: transparent; font: 16pt Consolas, 'Courier New', monospace;"
+                    f"color: {tag_color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace;"
                 )
                 tag_label.setToolTip(row_data.get("reason", ""))
 
@@ -3926,7 +4137,7 @@ class SDLXLIFFReviewDialog(QDialog):
             target_text = row_data.get("target", "")
             tooltip_translation = self._row_tooltip_translation(piece, row_data)
             tooltip_pending = bool(row_data.get("tooltip_translation_pending"))
-            preview_text = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else tooltip_translation
+            preview_text = self._machine_translation_pending_text() if tooltip_pending else tooltip_translation
             if not str(preview_text or "").strip():
                 return False
             translated_label.setObjectName(
@@ -3934,7 +4145,7 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             translated_label.setText(preview_text)
             if tooltip_pending:
-                translated_label.setToolTip("Google Translate preview is being generated.")
+                translated_label.setToolTip(f"Machine translation preview is being generated with {self._machine_translation_provider_label()}.")
                 translated_label.setStyleSheet(
                     "QLabel#SdlReviewMachineTranslationPending { "
                     "color: #d8c99b; background: rgba(54, 45, 23, 180); "
@@ -4387,7 +4598,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _validate_tooltip_batch_translations(self, translations, work):
         if not translations:
-            return {}, "Google Translate Free returned no parseable tooltip translations."
+            return {}, "Machine translation returned no parseable preview translations."
         source_by_key = {
             key: str(source_text or "")
             for _row_idx, key, source_text, _tag_name in (work or [])
@@ -4406,13 +4617,13 @@ class SDLXLIFFReviewDialog(QDialog):
         if not valid:
             if unchanged:
                 return {}, (
-                    "Google Translate Free returned source text unchanged for "
+                    "Machine translation returned source text unchanged for "
                     f"{len(unchanged)}/{len(work or [])} row(s); refusing to save raw source as preview."
                 )
-            return {}, "Google Translate Free returned no usable tooltip translations."
+            return {}, "Machine translation returned no usable preview translations."
         if unchanged:
             return valid, (
-                "Google Translate Free returned source text unchanged for "
+                "Machine translation returned source text unchanged for "
                 f"{len(unchanged)}/{len(work or [])} row(s); skipped those rows."
             )
         return valid, ""
@@ -4510,9 +4721,9 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             entry_count = len(rows)
             action_text = (
-                f"🌐 Generate Google Translate Preview ({entry_count} entries)"
+                f"🌐 Generate Machine Translation Preview ({entry_count} entries)"
                 if entry_count != 1
-                else "🌐 Generate Google Translate Preview"
+                else "🌐 Generate Machine Translation Preview"
             )
             translate_action = menu.addAction(action_text)
             translate_action.setEnabled(not self._tooltip_translation_running)
@@ -4602,8 +4813,7 @@ class SDLXLIFFReviewDialog(QDialog):
             translations = {}
             error = ""
             try:
-                from google_free_translate import GoogleFreeTranslateNew
-                translator = GoogleFreeTranslateNew("auto", target_code)
+                translator = self._machine_translation_translator(target_code)
                 batch_html = self._tooltip_batch_html(work)
                 result = translator.translate(batch_html)
                 result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
@@ -4620,7 +4830,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 error = str(exc)
             self._tooltip_translation_finished.emit(row, translations, error)
 
-        threading.Thread(target=_worker, name="sdlxliff-tooltip-google-translate-free", daemon=True).start()
+        threading.Thread(target=_worker, name="sdlxliff-machine-translation-preview", daemon=True).start()
         return True
 
     def _start_piece_list_tooltip_translation(self, jobs):
@@ -4655,8 +4865,7 @@ class SDLXLIFFReviewDialog(QDialog):
             translated_count = 0
             last_error = ""
             try:
-                from google_free_translate import GoogleFreeTranslateNew
-                translator = GoogleFreeTranslateNew("auto", target_code)
+                translator = self._machine_translation_translator(target_code)
             except Exception as exc:
                 self._tooltip_translation_batch_finished.emit(0, total_jobs, str(exc))
                 return
@@ -4685,7 +4894,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._tooltip_translation_progress.emit(done, total_jobs)
             self._tooltip_translation_batch_finished.emit(translated_count, total_jobs, last_error)
 
-        threading.Thread(target=_worker, name="sdlxliff-piece-list-google-translate-free", daemon=True).start()
+        threading.Thread(target=_worker, name="sdlxliff-piece-list-machine-translation-preview", daemon=True).start()
         return True
 
     def _translate_piece_rows_tooltips(self, piece_rows):
@@ -4796,12 +5005,13 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         if error and not translations:
             try:
-                self.save_status_label.setText(f"Tooltip translation failed: {error}")
+                self.save_status_label.setText(f"Machine translation preview failed: {error}")
             except Exception:
                 pass
         elif translations:
             try:
-                self.save_status_label.setText(f"Translated {len(translations)} tooltips")
+                provider_label = self._machine_translation_provider_label()
+                self.save_status_label.setText(f"Generated {len(translations)} {provider_label} machine translation preview(s)")
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             except Exception:
                 pass
@@ -4821,11 +5031,11 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             if int(translated_count or 0) > 0:
                 self.save_status_label.setText(
-                    f"Translated {int(translated_count)} tooltips across {int(piece_count or 0)} entries"
+                    f"Generated {int(translated_count)} {self._machine_translation_provider_label()} machine translation preview(s) across {int(piece_count or 0)} entries"
                 )
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             elif error:
-                self.save_status_label.setText(f"Tooltip translation failed: {error}")
+                self.save_status_label.setText(f"Machine translation preview failed: {error}")
         except Exception:
             pass
 
@@ -4926,7 +5136,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         if translate_tooltip_callback is not None:
             menu.addSeparator()
-            tooltip_action = menu.addAction(f"\U0001f310  Google Translate \u2192 {target_lang}")
+            tooltip_action = menu.addAction(f"\U0001f310  Machine Translation \u2192 {target_lang}")
             tooltip_action.setEnabled(not self._tooltip_translation_running and bool(self._all_text_for_widget(widget).strip()))
             tooltip_action.triggered.connect(lambda _checked=False: translate_tooltip_callback())
 
@@ -5277,7 +5487,7 @@ class SDLXLIFFReviewDialog(QDialog):
         controls_layout.addWidget(
             self._review_row_action_button(
                 "🌐 Generate Preview",
-                "Generate a Google Translate preview for this row.",
+                "Generate a machine translation preview for this row.",
                 callback=lambda pi=piece_index, ri=idx: self._translate_single_row_tooltip(pi, ri),
                 enabled=bool(row_data.get("source")),
                 action_name="generate_preview",
@@ -5393,7 +5603,7 @@ class SDLXLIFFReviewDialog(QDialog):
         layout.addStretch(1)
         layout.addWidget(label)
 
-        preview_text = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else tooltip_translation
+        preview_text = self._machine_translation_pending_text() if tooltip_pending else tooltip_translation
         preview_label_text = preview_text
         translated_label = QLabel(preview_label_text)
         translated_label.setObjectName(
@@ -5406,7 +5616,7 @@ class SDLXLIFFReviewDialog(QDialog):
         translated_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         translated_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         if tooltip_pending:
-            translated_label.setToolTip("Google Translate preview is being generated.")
+            translated_label.setToolTip(f"Machine translation preview is being generated with {self._machine_translation_provider_label()}.")
             translated_label.setStyleSheet(
                 "QLabel#SdlReviewMachineTranslationPending { "
                 "color: #d8c99b; background: rgba(54, 45, 23, 180); "
