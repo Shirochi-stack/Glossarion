@@ -4377,12 +4377,18 @@ class _BookCard(QFrame):
     _BASE_STYLE = (
         "QFrame#bookCard { background: #1e1e2e; border: 2px solid #2a2a3e;"
         " border-radius: 6px; }"
-        "QFrame#bookCard:hover { border: 2px solid #6c63ff; background: #252540; }"
+    )
+    _HOVER_STYLE = (
+        "QFrame#bookCard { background: #252540; border: 2px solid #6c63ff;"
+        " border-radius: 6px; }"
     )
     _SELECTED_STYLE = (
         "QFrame#bookCard { background: #2a2d5a; border: 2px solid #a097ff;"
         " border-radius: 6px; }"
-        "QFrame#bookCard:hover { border: 2px solid #c0b8ff; background: #343670; }"
+    )
+    _SELECTED_HOVER_STYLE = (
+        "QFrame#bookCard { background: #343670; border: 2px solid #c0b8ff;"
+        " border-radius: 6px; }"
     )
 
     def __init__(self, book: dict, preset: dict | None = None, parent=None,
@@ -4394,12 +4400,14 @@ class _BookCard(QFrame):
         self._cover_h = p["cover_h"]
         self._has_cover = False
         self._selected = False
+        self._hovered = False
+        self._applied_style = ""
         self._show_raw_title = bool(show_raw_title)
 
         self.setObjectName("bookCard")
         self.setFixedWidth(self._card_w)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(self._BASE_STYLE)
+        self._apply_card_style()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -4813,7 +4821,7 @@ class _BookCard(QFrame):
         if new_value == self._selected:
             return
         self._selected = new_value
-        self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
+        self._apply_card_style()
         # Force an immediate repaint so the stylesheet swap is painted on
         # the current tick rather than waiting for the next synthetic event.
         self.update()
@@ -4821,6 +4829,26 @@ class _BookCard(QFrame):
     @property
     def selected(self) -> bool:
         return self._selected
+
+    def _apply_card_style(self) -> None:
+        if self._selected:
+            style = self._SELECTED_HOVER_STYLE if self._hovered else self._SELECTED_STYLE
+        else:
+            style = self._HOVER_STYLE if self._hovered else self._BASE_STYLE
+        if style == self._applied_style:
+            return
+        self._applied_style = style
+        self.setStyleSheet(style)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_card_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_card_style()
+        super().leaveEvent(event)
 
     def _set_fallback_icon(self, icon_path: str):
         try:
@@ -14604,11 +14632,15 @@ class _ChapterRow(QFrame):
     # Borders are 2 px in both states to avoid layout shift on selection.
     _BASE_STYLE = (
         "QFrame#chapterRow { background: #1a1a2a; border: 2px solid #242438; border-radius: 6px; }"
-        "QFrame#chapterRow:hover { border: 2px solid #6c63ff; background: #232340; }"
+    )
+    _HOVER_STYLE = (
+        "QFrame#chapterRow { background: #232340; border: 2px solid #6c63ff; border-radius: 6px; }"
     )
     _SELECTED_STYLE = (
         "QFrame#chapterRow { background: #2a2d5a; border: 2px solid #a097ff; border-radius: 6px; }"
-        "QFrame#chapterRow:hover { border: 2px solid #c0b8ff; background: #343670; }"
+    )
+    _SELECTED_HOVER_STYLE = (
+        "QFrame#chapterRow { background: #343670; border: 2px solid #c0b8ff; border-radius: 6px; }"
     )
 
     def __init__(self, info: dict, parent=None, show_raw_title: bool = False,
@@ -14618,12 +14650,14 @@ class _ChapterRow(QFrame):
             row_spec = _prepare_chapter_row_spec(info, show_raw_title)
         self.info = row_spec.get("info", info)
         self._selected = False
+        self._hovered = False
+        self._applied_style = ""
         self.setObjectName("chapterRow")
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(
             "Click to select — double-click to open this chapter in the reader"
         )
-        self.setStyleSheet(self._BASE_STYLE)
+        self._apply_row_style()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -14657,12 +14691,32 @@ class _ChapterRow(QFrame):
         if new_value == self._selected:
             return
         self._selected = new_value
-        self.setStyleSheet(self._SELECTED_STYLE if new_value else self._BASE_STYLE)
+        self._apply_row_style()
         self.update()
 
     @property
     def selected(self) -> bool:
         return self._selected
+
+    def _apply_row_style(self) -> None:
+        if self._selected:
+            style = self._SELECTED_HOVER_STYLE if self._hovered else self._SELECTED_STYLE
+        else:
+            style = self._HOVER_STYLE if self._hovered else self._BASE_STYLE
+        if style == self._applied_style:
+            return
+        self._applied_style = style
+        self.setStyleSheet(style)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_row_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_row_style()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         # Single left-click = focus/select. Actual activation happens on
