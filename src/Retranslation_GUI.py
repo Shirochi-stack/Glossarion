@@ -158,6 +158,7 @@ class SDLXLIFFReviewDialog(QDialog):
     _tooltip_translation_finished = Signal(int, object, str)
     _tooltip_translation_progress = Signal(int, int)
     _tooltip_translation_batch_finished = Signal(int, int, str)
+    _review_data_preload_finished = Signal(int, object)
 
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
     THEME = {
@@ -230,6 +231,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._preload_start_queued = False
         self._review_page_cache_trim_queued = False
         self._last_review_selection_change = 0.0
+        self._review_data_preload_token = 0
+        self._review_data_preload_running = False
+        self._review_data_preload_requested = False
         self._sdl_review_loading_icon_timer = None
         self._sdl_review_loading_icon = None
         self._sdl_review_loading_original_pixmap = None
@@ -260,6 +264,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
+        self._review_data_preload_finished.connect(self._apply_review_data_preload)
         try:
             self._last_review_signature = self._current_review_signature()
             self._last_machine_translation_signature = self._current_machine_translation_signature()
@@ -811,6 +816,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.pieces = self._load_pieces()
             self._review_data_loaded = True
             self._populate_piece_list()
+            self._start_review_data_preload()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
                 self._last_machine_translation_signature = self._current_machine_translation_signature()
@@ -1143,6 +1149,8 @@ class SDLXLIFFReviewDialog(QDialog):
             self._book_nav_updating = False
 
     def _clear_cached_review_pages(self):
+        self._review_data_preload_token += 1
+        self._review_data_preload_requested = False
         self._cancel_active_review_render()
         self._cancel_review_preload(discard_page=True)
         for row, page in list(self._piece_pages.items()):
@@ -1578,9 +1586,21 @@ class SDLXLIFFReviewDialog(QDialog):
             return False
         return bool(re.fullmatch(r"h[1-6]", source_tag) and re.fullmatch(r"h[1-6]", target_tag))
 
+    @staticmethod
+    def _heading_paragraph_tag_changed(source_tag, target_tag):
+        source_tag = str(source_tag or "").strip().lower()
+        target_tag = str(target_tag or "").strip().lower()
+        if source_tag == target_tag:
+            return False
+        source_heading = bool(re.fullmatch(r"h[1-6]", source_tag))
+        target_heading = bool(re.fullmatch(r"h[1-6]", target_tag))
+        return (source_heading and target_tag == "p") or (source_tag == "p" and target_heading)
+
     def _tag_mismatch_status(self, source_tag, target_tag):
         if self._heading_tag_level_changed(source_tag, target_tag):
             return "yellow", "heading level changed"
+        if self._heading_paragraph_tag_changed(source_tag, target_tag):
+            return "yellow", "heading/paragraph tag changed"
         return "red", "tag mismatch"
 
     @staticmethod
@@ -1597,7 +1617,10 @@ class SDLXLIFFReviewDialog(QDialog):
         target_tag = str((target_unit or {}).get("tag", "") or "").strip().lower()
         if source_tag == target_tag:
             return True
-        return self._heading_tag_level_changed(source_tag, target_tag)
+        return (
+            self._heading_tag_level_changed(source_tag, target_tag)
+            or self._heading_paragraph_tag_changed(source_tag, target_tag)
+        )
 
     def _align_review_units(self, source_units, target_units):
         source_units = list(source_units or [])
@@ -1616,26 +1639,28 @@ class SDLXLIFFReviewDialog(QDialog):
                 rows.append((src, None))
                 i += 1
                 continue
-            if self._review_units_are_compatible(src, tgt):
-                rows.append((src, tgt))
-                i += 1
-                j += 1
-                continue
-
             next_src = source_units[i + 1] if i + 1 < len(source_units) else None
             next_tgt = target_units[j + 1] if j + 1 < len(target_units) else None
+            source_remaining = len(source_units) - i
+            target_remaining = len(target_units) - j
 
             if self._review_unit_is_heading(src) and self._review_unit_is_paragraph(tgt):
-                if next_src is not None and self._review_units_are_compatible(next_src, tgt):
+                if source_remaining > target_remaining and next_src is not None and self._review_units_are_compatible(next_src, tgt):
                     rows.append((src, None))
                     i += 1
                     continue
 
             if self._review_unit_is_paragraph(src) and self._review_unit_is_heading(tgt):
-                if next_tgt is not None and self._review_units_are_compatible(src, next_tgt):
+                if target_remaining > source_remaining and next_tgt is not None and self._review_units_are_compatible(src, next_tgt):
                     rows.append((None, tgt))
                     j += 1
                     continue
+
+            if self._review_units_are_compatible(src, tgt):
+                rows.append((src, tgt))
+                i += 1
+                j += 1
+                continue
 
             rows.append((src, tgt))
             i += 1
@@ -2294,6 +2319,187 @@ class SDLXLIFFReviewDialog(QDialog):
         else:
             self._resume_review_background_after_context_menu()
 
+    def _review_render_viewport_width(self):
+        try:
+            return max(700, int(self.scroll.viewport().width()))
+        except Exception:
+            return 1200
+
+    @staticmethod
+    def _review_row_snapshot(row_data):
+        row_data = row_data if isinstance(row_data, dict) else {}
+        return {
+            "source": str(row_data.get("source", "") or ""),
+            "target": str(row_data.get("target", "") or ""),
+            "source_tag": str(row_data.get("source_tag", "") or ""),
+            "target_tag": str(row_data.get("target_tag", "") or ""),
+            "status": str(row_data.get("status", "green") or "green"),
+            "tooltip_translation": str(row_data.get("tooltip_translation", "") or ""),
+            "tooltip_translation_pending": bool(row_data.get("tooltip_translation_pending")),
+        }
+
+    @classmethod
+    def _review_row_height_for_width(cls, source_text, target_text, tooltip_translation=None, tooltip_pending=False, viewport_width=1200):
+        viewport_width = max(700, int(viewport_width or 1200))
+        fixed_width = 92 + 180 + 26 + 180 + 20 + 50
+        text_column_width = max(180, (viewport_width - fixed_width) // 2)
+        chars_per_line = max(24, int(text_column_width / 9))
+        max_lines = 1
+
+        def _wrapped_lines(value, line_chars):
+            text = str(value or "")
+            if not text:
+                return 1
+            wrapped_lines = 0
+            for part in text.splitlines() or [text]:
+                wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
+            return wrapped_lines
+
+        max_lines = max(max_lines, _wrapped_lines(source_text, chars_per_line))
+        max_lines = max(max_lines, _wrapped_lines(target_text, chars_per_line))
+        tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
+        if tooltip_preview:
+            translated_chars_per_line = max(30, int(chars_per_line * 1.35))
+            source_with_translation_lines = (
+                _wrapped_lines(source_text, chars_per_line)
+                + min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
+            )
+            max_lines = max(max_lines, source_with_translation_lines)
+        extra_lines = max(0, min(12, max_lines - 1))
+        height = min(cls.REVIEW_ROW_MAX_HEIGHT, cls.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
+        if tooltip_preview:
+            height = min(cls.REVIEW_ROW_MAX_HEIGHT, max(height, cls.REVIEW_ROW_MIN_HEIGHT + 30))
+        return height
+
+    @classmethod
+    def _build_review_piece_render_model_from_rows(cls, row_snapshots, viewport_width):
+        rows = list(row_snapshots or [])
+        max_len = max(
+            [len(row.get("source", "")) for row in rows]
+            + [len(row.get("target", "")) for row in rows]
+            + [1]
+        )
+        row_models = []
+        for row in rows:
+            source_text = row.get("source", "")
+            target_text = row.get("target", "")
+            tooltip_translation = row.get("tooltip_translation", "")
+            tooltip_pending = bool(row.get("tooltip_translation_pending"))
+            source_missing = not row.get("source_tag")
+            target_missing = not row.get("target_tag")
+            row_models.append({
+                "source_text": source_text,
+                "target_text": target_text,
+                "source_len": len(source_text),
+                "target_len": len(target_text),
+                "source_missing": source_missing,
+                "target_missing": target_missing,
+                "target_editable": (not source_missing or not target_missing),
+                "tooltip_translation": tooltip_translation,
+                "tooltip_pending": tooltip_pending,
+                "row_height": cls._review_row_height_for_width(
+                    source_text,
+                    target_text,
+                    tooltip_translation,
+                    tooltip_pending,
+                    viewport_width,
+                ),
+            })
+        return {
+            "viewport_width": int(max(700, viewport_width or 1200)),
+            "row_count": len(rows),
+            "max_len": max_len,
+            "rows": row_models,
+        }
+
+    def _piece_render_snapshot(self, piece):
+        return [
+            self._review_row_snapshot(row_data)
+            for row_data in (piece.get("rows") or [])
+        ]
+
+    def _review_piece_render_model(self, piece):
+        rows = piece.get("rows") or []
+        viewport_width = self._review_render_viewport_width()
+        model = piece.get("_render_model") if isinstance(piece, dict) else None
+        if (
+            isinstance(model, dict)
+            and int(model.get("row_count", -1)) == len(rows)
+            and int(model.get("viewport_width", -1)) == viewport_width
+        ):
+            return model
+        model = self._build_review_piece_render_model_from_rows(self._piece_render_snapshot(piece), viewport_width)
+        piece["_render_model"] = model
+        return model
+
+    def _invalidate_piece_render_model(self, piece=None, restart_preload=True):
+        try:
+            if isinstance(piece, dict):
+                piece.pop("_render_model", None)
+            self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
+            if restart_preload and getattr(self, "_review_data_loaded", False):
+                self._review_data_preload_requested = True
+                if not getattr(self, "_review_data_preload_running", False):
+                    QTimer.singleShot(250, self._start_review_data_preload)
+        except Exception:
+            pass
+
+    def _start_review_data_preload(self):
+        if not getattr(self, "_review_data_loaded", False) or not self.pieces:
+            return
+        if getattr(self, "_review_data_preload_running", False):
+            self._review_data_preload_requested = True
+            return
+        self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
+        token = self._review_data_preload_token
+        viewport_width = self._review_render_viewport_width()
+        snapshots = [
+            (piece_index, self._piece_render_snapshot(piece))
+            for piece_index, piece in enumerate(self.pieces)
+            if isinstance(piece, dict) and not piece.get("error")
+        ]
+        if not snapshots:
+            return
+        self._review_data_preload_running = True
+        self._review_data_preload_requested = False
+
+        def _worker():
+            models = {}
+            try:
+                for ordinal, (piece_index, row_snapshot) in enumerate(snapshots, start=1):
+                    models[piece_index] = self._build_review_piece_render_model_from_rows(row_snapshot, viewport_width)
+                    if ordinal % 50 == 0:
+                        time.sleep(0.001)
+            except Exception:
+                models = {}
+            self._review_data_preload_finished.emit(token, models)
+
+        threading.Thread(target=_worker, name="sdlxliff-review-data-preload", daemon=True).start()
+
+    def _apply_review_data_preload(self, token, models):
+        self._review_data_preload_running = False
+        try:
+            if int(token) != int(getattr(self, "_review_data_preload_token", -1)):
+                if getattr(self, "_review_data_preload_requested", False):
+                    self._review_data_preload_requested = False
+                    self._start_review_data_preload()
+                return
+            if not isinstance(models, dict):
+                return
+            for piece_index, model in models.items():
+                try:
+                    piece_index = int(piece_index)
+                except Exception:
+                    continue
+                if 0 <= piece_index < len(self.pieces) and isinstance(model, dict):
+                    rows = self.pieces[piece_index].get("rows") or []
+                    if int(model.get("row_count", -1)) == len(rows):
+                        self.pieces[piece_index]["_render_model"] = model
+        finally:
+            if getattr(self, "_review_data_preload_requested", False):
+                self._review_data_preload_requested = False
+                QTimer.singleShot(0, self._start_review_data_preload)
+
     def _review_selection_recently_changed(self):
         try:
             return (time.monotonic() - float(self._last_review_selection_change or 0.0)) < (
@@ -2401,13 +2607,15 @@ class SDLXLIFFReviewDialog(QDialog):
             QTimer.singleShot(60, self._start_next_review_preload)
             return
 
-        max_len = max([len(r.get("source", "")) for r in rows] + [len(r.get("target", "")) for r in rows] + [1])
+        render_model = self._review_piece_render_model(piece)
+        max_len = int(render_model.get("max_len", 1))
         self._preload_render_row = row
         self._preload_render_page = page
         self._preload_render_state = {
             "idx": 0,
             "layout": layout,
             "rows": rows,
+            "row_models": render_model.get("rows") or [],
             "max_len": max_len,
             "colors": self._review_status_colors(),
         }
@@ -2456,6 +2664,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 return
 
             rows = state.get("rows") or []
+            row_models = state.get("row_models") or []
             layout = state.get("layout")
             old_widget, old_layout = self.rows_widget, self.rows_layout
             self.rows_widget, self.rows_layout = page, layout
@@ -2464,7 +2673,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 end = min(len(rows), start + self.REVIEW_PRELOAD_BATCH_SIZE)
                 piece = self.pieces[row]
                 for idx in range(start, end):
-                    self._add_review_row(piece, rows[idx], idx, state.get("max_len", 1), state.get("colors") or self._review_status_colors())
+                    row_model = row_models[idx] if idx < len(row_models) else None
+                    self._add_review_row(
+                        piece,
+                        rows[idx],
+                        idx,
+                        state.get("max_len", 1),
+                        state.get("colors") or self._review_status_colors(),
+                        row_model=row_model,
+                    )
                 state["idx"] = end
             finally:
                 self.rows_widget, self.rows_layout = old_widget, old_layout
@@ -3142,6 +3359,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         row_data["_source_preview_dirty"] = True
                         changed_rows.append(row_index)
                 if changed_rows:
+                    self._invalidate_piece_render_model(piece, restart_preload=False)
                     changed_by_piece[piece_index] = changed_rows
 
             current_row = self._displayed_piece_row()
@@ -3246,6 +3464,7 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         row_data["tooltip_translation"] = translated
         row_data["_source_preview_dirty"] = True
+        self._invalidate_piece_render_model(piece, restart_preload=False)
         if persist:
             self._write_machine_translation_entry(piece, row_data, translated)
 
@@ -3448,6 +3667,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     rows[row_idx]["tooltip_translation_pending"] = True
                     rows[row_idx]["_source_preview_dirty"] = True
                     pending_rows.append(row_idx)
+            if pending_rows:
+                self._invalidate_piece_render_model(self.pieces[piece_index], restart_preload=False)
             if refresh and pending_rows:
                 if self._review_context_menu_is_open():
                     self._queue_refresh_current_visible_dirty_source_previews()
@@ -3972,6 +4193,7 @@ class SDLXLIFFReviewDialog(QDialog):
             status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
         row_data["status"] = status
         row_data["reason"] = reason
+        self._invalidate_piece_render_model(piece, restart_preload=False)
         self._refresh_piece_summary(piece)
         self._refresh_piece_list_item(piece_index)
         self._refresh_piece_header(piece_index)
@@ -4132,47 +4354,22 @@ class SDLXLIFFReviewDialog(QDialog):
         return container
 
     def _review_row_height(self, source_text, target_text, tooltip_translation=None, tooltip_pending=False):
-        try:
-            viewport_width = max(700, self.scroll.viewport().width())
-        except Exception:
-            viewport_width = 1200
-        fixed_width = 92 + 180 + 26 + 180 + 20 + 50
-        text_column_width = max(180, (viewport_width - fixed_width) // 2)
-        chars_per_line = max(24, int(text_column_width / 9))
-        max_lines = 1
+        return self._review_row_height_for_width(
+            source_text,
+            target_text,
+            tooltip_translation,
+            tooltip_pending,
+            self._review_render_viewport_width(),
+        )
 
-        def _wrapped_lines(value, line_chars):
-            text = str(value or "")
-            if not text:
-                return 1
-            wrapped_lines = 0
-            for part in text.splitlines() or [text]:
-                wrapped_lines += max(1, (len(part) + line_chars - 1) // line_chars)
-            return wrapped_lines
-
-        max_lines = max(max_lines, _wrapped_lines(source_text, chars_per_line))
-        max_lines = max(max_lines, _wrapped_lines(target_text, chars_per_line))
-        tooltip_preview = self.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
-        if tooltip_preview:
-            translated_chars_per_line = max(30, int(chars_per_line * 1.35))
-            source_with_translation_lines = (
-                _wrapped_lines(source_text, chars_per_line)
-                + min(10, _wrapped_lines(tooltip_preview, translated_chars_per_line))
-            )
-            max_lines = max(max_lines, source_with_translation_lines)
-        extra_lines = max(0, min(12, max_lines - 1))
-        height = min(self.REVIEW_ROW_MAX_HEIGHT, self.REVIEW_ROW_MIN_HEIGHT + extra_lines * 22)
-        if tooltip_preview:
-            height = min(self.REVIEW_ROW_MAX_HEIGHT, max(height, self.REVIEW_ROW_MIN_HEIGHT + 30))
-        return height
-
-    def _add_review_row(self, piece, row_data, idx, max_len, colors):
+    def _add_review_row(self, piece, row_data, idx, max_len, colors, row_model=None):
         bg, source_bar, target_bar, dot_color, border_color = colors.get(row_data["status"], colors["green"])
-        source_text = row_data.get("source", "")
-        target_text = row_data.get("target", "")
-        tooltip_translation = self._row_tooltip_translation(piece, row_data)
-        tooltip_pending = bool(row_data.get("tooltip_translation_pending"))
-        row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
+        row_model = row_model if isinstance(row_model, dict) else {}
+        source_text = row_model.get("source_text", row_data.get("source", ""))
+        target_text = row_model.get("target_text", row_data.get("target", ""))
+        tooltip_translation = row_model.get("tooltip_translation", self._row_tooltip_translation(piece, row_data))
+        tooltip_pending = bool(row_model.get("tooltip_pending", row_data.get("tooltip_translation_pending")))
+        row_height = int(row_model.get("row_height") or self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending))
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
         frame.setProperty("sdl_status", row_data["status"])
@@ -4197,9 +4394,9 @@ class SDLXLIFFReviewDialog(QDialog):
         grid.setColumnMinimumWidth(3, 26)
         grid.setColumnMinimumWidth(4, 180)
 
-        source_missing = not row_data.get("source_tag")
-        target_missing = not row_data.get("target_tag")
-        target_editable = not source_missing or not target_missing
+        source_missing = bool(row_model.get("source_missing", not row_data.get("source_tag")))
+        target_missing = bool(row_model.get("target_missing", not row_data.get("target_tag")))
+        target_editable = bool(row_model.get("target_editable", not source_missing or not target_missing))
 
         tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
         tag_label.setToolTip(row_data.get("reason", ""))
@@ -4235,9 +4432,9 @@ class SDLXLIFFReviewDialog(QDialog):
 
         grid.addWidget(tag_label, 0, 0)
         grid.addWidget(source_label, 0, 1)
-        grid.addWidget(self._bar_widget(len(source_text), max_len, source_bar, align_right=True), 0, 2)
+        grid.addWidget(self._bar_widget(row_model.get("source_len", len(source_text)), max_len, source_bar, align_right=True), 0, 2)
         grid.addWidget(dot, 0, 3)
-        grid.addWidget(self._bar_widget(len(target_text), max_len, target_bar, align_right=False), 0, 4)
+        grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
         grid.addWidget(target_widget, 0, 5)
         self.rows_layout.addWidget(frame)
 
@@ -4319,7 +4516,9 @@ class SDLXLIFFReviewDialog(QDialog):
             return
 
         rows = piece.get("rows") or []
-        max_len = max([len(r.get("source", "")) for r in rows] + [len(r.get("target", "")) for r in rows] + [1])
+        render_model = self._review_piece_render_model(piece)
+        max_len = int(render_model.get("max_len", 1))
+        row_models = render_model.get("rows") or []
         colors = self._review_status_colors()
 
         if not rows:
@@ -4371,7 +4570,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 start = row_state["idx"]
                 end = min(len(rows), start + batch_size)
                 for idx in range(start, end):
-                    self._add_review_row(piece, rows[idx], idx, max_len, colors)
+                    row_model = row_models[idx] if idx < len(row_models) else None
+                    self._add_review_row(piece, rows[idx], idx, max_len, colors, row_model=row_model)
                 row_state["idx"] = end
                 self._spin_review_loading_icon()
 

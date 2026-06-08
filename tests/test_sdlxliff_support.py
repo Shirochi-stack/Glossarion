@@ -591,7 +591,7 @@ def test_sdlxliff_review_extra_initial_heading_does_not_offset_paragraphs(tmp_pa
     assert piece["rows"][2]["target"] == "Translated paragraph two"
 
 
-def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
+def test_sdlxliff_review_heading_to_paragraph_mismatch_is_yellow(tmp_path):
     sidecar = tmp_path / "response_chapter_heading_to_p.html.sdlxliff"
     source_html = "<html><body><h1>Source heading</h1></body></html>"
     target_html = "<html><body><p>Translated heading</p></body></html>"
@@ -614,11 +614,64 @@ def test_sdlxliff_review_heading_to_paragraph_mismatch_stays_red(tmp_path):
 
     piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_heading_to_p.html"})
 
-    assert piece["mismatch"] is True
-    assert piece["red_count"] == 1
-    assert piece["yellow_count"] == 0
-    assert piece["rows"][0]["status"] == "red"
-    assert piece["rows"][0]["reason"] == "tag mismatch"
+    assert piece["mismatch"] is False
+    assert piece["red_count"] == 0
+    assert piece["yellow_count"] == 1
+    assert piece["rows"][0]["source_tag"] == "h1"
+    assert piece["rows"][0]["target_tag"] == "p"
+    assert piece["rows"][0]["status"] == "yellow"
+    assert piece["rows"][0]["reason"] == "heading/paragraph tag changed"
+
+
+def test_sdlxliff_review_heading_to_paragraph_does_not_offset_following_paragraphs(tmp_path):
+    sidecar = tmp_path / "response_chapter_heading_to_p_sequence.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<h2>Source heading</h2>"
+        "<p>Source paragraph one</p>"
+        "<p>Source paragraph two</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>Translated heading</p>"
+        "<p>Translated paragraph one</p>"
+        "<p>Translated paragraph two</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_heading.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_heading_to_p_sequence.html"})
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert piece["red_count"] == 0
+    assert piece["yellow_count"] == 1
+    assert piece["rows"][0]["source_tag"] == "h2"
+    assert piece["rows"][0]["target_tag"] == "p"
+    assert piece["rows"][0]["status"] == "yellow"
+    assert piece["rows"][0]["reason"] == "heading/paragraph tag changed"
+    assert piece["rows"][1]["source_tag"] == "p"
+    assert piece["rows"][1]["target_tag"] == "p"
+    assert piece["rows"][1]["source"] == "Source paragraph one"
+    assert piece["rows"][1]["target"] == "Translated paragraph one"
+    assert piece["rows"][2]["source"] == "Source paragraph two"
+    assert piece["rows"][2]["target"] == "Translated paragraph two"
 
 
 def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
@@ -703,6 +756,25 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "_review_selection_recently_changed" in source
     assert "_queue_review_page_cache_trim" in source
     assert "_trim_review_page_cache" in source
+    assert "_review_data_preload_finished = Signal(int, object)" in source
+    assert "_review_data_preload_finished.connect(self._apply_review_data_preload)" in source
+    assert "self._start_review_data_preload()" in source
+    assert "_build_review_piece_render_model_from_rows" in source
+    assert "_review_piece_render_model" in source
+    assert "_piece_render_snapshot" in source
+    assert "name=\"sdlxliff-review-data-preload\"" in source
+    assert "row_model=None" in source
+    assert "row_model=row_model" in source
+    data_preload_body = source[
+        source.index("def _start_review_data_preload"):
+        source.index("def _apply_review_data_preload", source.index("def _start_review_data_preload"))
+    ]
+    assert "threading.Thread" in data_preload_body
+    assert "_build_review_piece_render_model_from_rows" in data_preload_body
+    assert "time.sleep(0.001)" in data_preload_body
+    assert "QLabel(" not in data_preload_body
+    assert "QFrame(" not in data_preload_body
+    assert "QPlainTextEdit(" not in data_preload_body
     preload_order_body = source[
         source.index("def _review_preload_order"):
         source.index("def _queue_review_page_preloads", source.index("def _review_preload_order"))
@@ -716,6 +788,15 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     assert "self.REVIEW_PRELOAD_BATCH_SIZE" in preload_batch_body
     assert "self.REVIEW_PRELOAD_STEP_MS" in preload_batch_body
     assert "self._review_selection_recently_changed()" in preload_batch_body
+    assert "_heading_paragraph_tag_changed" in source
+    assert "heading/paragraph tag changed" in source
+    align_body = source[
+        source.index("def _align_review_units"):
+        source.index("def _review_piece_non_empty_count", source.index("def _align_review_units"))
+    ]
+    assert align_body.index("source_remaining = len(source_units) - i") < align_body.index("if self._review_units_are_compatible(src, tgt):")
+    assert "source_remaining > target_remaining" in align_body
+    assert "target_remaining > source_remaining" in align_body
     assert "refresh=piece_index == current_row" in source
     assert "current_row = self._displayed_piece_row()" in source
     assert "if row == self._displayed_piece_row()" in source
