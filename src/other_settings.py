@@ -5956,21 +5956,6 @@ def configure_translation_chunk_prompt(self):
             background-color: #1a1a1a;
             border-color: #3a3a3a;
         }
-        QDoubleSpinBox {
-            background-color: #2d2d2d;
-            color: white;
-            border: 1px solid #4a5568;
-            border-radius: 3px;
-            padding: 2px 4px;
-        }
-        QDoubleSpinBox:focus {
-            border-color: #5a9fd4;
-        }
-        QDoubleSpinBox:disabled {
-            background-color: #242424;
-            color: #777777;
-            border-color: #3a3a3a;
-        }
         QRadioButton {
             color: white;
             spacing: 5px;
@@ -6024,7 +6009,9 @@ def configure_translation_chunk_prompt(self):
     previous_h.addSpacing(8)
     previous_limit_label = QLabel("HTML tags or lines:")
     previous_limit_label.setToolTip(
+        "<p style='white-space:normal; width:260px;'>"
         "The previous chunk context limit. HTML tags are preferred; plain lines are used only when no HTML tags are found."
+        "</p>"
     )
     previous_h.addWidget(previous_limit_label)
 
@@ -6033,16 +6020,13 @@ def configure_translation_chunk_prompt(self):
     previous_limit_spin.setSingleStep(1)
     previous_limit_spin.setDecimals(0)
     previous_limit_spin.setToolTip(
-        "How much previous chunk context to include. "
-        "Uses the last N HTML tags, or the last N non-empty lines if no HTML tags are found. "
-        "Use -1 to include the entire previous chunk."
+        "<p style='white-space:normal; width:320px;'>"
+        "How much previous chunk context to include. Uses the last N HTML tags, "
+        "or the last N non-empty lines if no HTML tags are found."
+        "</p>"
     )
-    previous_limit_spin.setFixedSize(90, 26)
+    previous_limit_spin.setFixedWidth(80)
     previous_limit_spin.setFocusPolicy(Qt.StrongFocus)
-    value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
-    previous_limit_spin.setAlignment(value_alignment)
-    previous_limit_spin.lineEdit().setAlignment(value_alignment)
-    previous_limit_spin.lineEdit().setTextMargins(0, 0, 0, 1)
     try:
         self._disable_spinbox_mousewheel(previous_limit_spin)
     except Exception:
@@ -6054,6 +6038,14 @@ def configure_translation_chunk_prompt(self):
     previous_limit_spin.setValue(max(-1, previous_limit))
     self.previous_chunk_context_limit_spin = previous_limit_spin
     previous_h.addWidget(previous_limit_spin)
+    previous_limit_hint = QLabel("-1 = entire previous chunk")
+    previous_limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    previous_limit_hint.setToolTip(
+        "<p style='white-space:normal; width:260px;'>"
+        "Set the limit to -1 to include the full immediately previous chunk as memory context."
+        "</p>"
+    )
+    previous_h.addWidget(previous_limit_hint)
     previous_h.addStretch()
     options_v.addWidget(previous_row)
 
