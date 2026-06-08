@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QApplication, QMenu, QComboBox, QStackedWidget, QStyledItemDelegate,
     QStyle, QStyleOptionViewItem
 )
-from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
 try:
@@ -4364,6 +4364,7 @@ def _card_raw_title(book: dict) -> str:
 class _BookCard(QFrame):
     clicked = Signal(dict)
     context_menu_requested = Signal(dict, object)
+    hover_changed = Signal(object, bool)
     # Emitted on left-click so the parent dialog can manage multi-selection
     # (Ctrl-click toggles, plain click replaces). Payload: (book, modifiers).
     select_requested = Signal(dict, object)
@@ -4830,6 +4831,14 @@ class _BookCard(QFrame):
     def selected(self) -> bool:
         return self._selected
 
+    def set_hovered(self, hovered: bool) -> None:
+        new_value = bool(hovered)
+        if new_value == self._hovered:
+            return
+        self._hovered = new_value
+        self._apply_card_style()
+        self.update()
+
     def _apply_card_style(self) -> None:
         if self._selected:
             style = self._SELECTED_HOVER_STYLE if self._hovered else self._SELECTED_STYLE
@@ -4841,13 +4850,13 @@ class _BookCard(QFrame):
         self.setStyleSheet(style)
 
     def enterEvent(self, event):
-        self._hovered = True
-        self._apply_card_style()
+        self.set_hovered(True)
+        self.hover_changed.emit(self, True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._hovered = False
-        self._apply_card_style()
+        self.set_hovered(False)
+        self.hover_changed.emit(self, False)
         super().leaveEvent(event)
 
     def _set_fallback_icon(self, icon_path: str):
@@ -6202,6 +6211,8 @@ class EpubLibraryDialog(QDialog):
     _COVER_APPLY_BATCH_SIZE = 1
     _COVER_APPLY_TICK_MS = 16
     _INACTIVE_TAB_IDLE_MS = 1200
+    _CARD_HOVER_RECONCILE_MS = 50
+    _CARD_HOVER_SETTLE_MS = 6000
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -6258,6 +6269,8 @@ class EpubLibraryDialog(QDialog):
         self._cover_apply_queue = deque()
         self._cover_apply_pending_paths: set[str] = set()
         self._cover_generation = 0
+        self._hovered_card: _BookCard | None = None
+        self._card_hover_reconcile_until = 0.0
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
@@ -6301,6 +6314,12 @@ class EpubLibraryDialog(QDialog):
         self._cover_apply_timer.setSingleShot(False)
         self._cover_apply_timer.setInterval(self._COVER_APPLY_TICK_MS)
         self._cover_apply_timer.timeout.connect(self._apply_cover_batch)
+        self._card_hover_reconcile_timer = QTimer(self)
+        self._card_hover_reconcile_timer.setSingleShot(False)
+        self._card_hover_reconcile_timer.setInterval(
+            self._CARD_HOVER_RECONCILE_MS)
+        self._card_hover_reconcile_timer.timeout.connect(
+            self._reconcile_card_hover)
         # Flip the dialog into its loading state BEFORE the caller
         # shows it. Previously ``_show_loading`` was called by the
         # deferred :meth:`_load_books` tick, which meant the dialog's
@@ -6369,6 +6388,92 @@ class EpubLibraryDialog(QDialog):
             )
         except Exception:
             pass
+
+    def _book_card_from_widget(self, widget) -> _BookCard | None:
+        while widget is not None:
+            if isinstance(widget, _BookCard):
+                return widget
+            if widget is self:
+                break
+            try:
+                widget = widget.parentWidget()
+            except Exception:
+                break
+        return None
+
+    def _set_hovered_card(self, card: _BookCard | None) -> None:
+        if card is not None and not card.isVisible():
+            card = None
+        old = getattr(self, "_hovered_card", None)
+        if old is card:
+            return
+        self._hovered_card = card
+        if old is not None:
+            try:
+                old.set_hovered(False)
+            except RuntimeError:
+                pass
+        if card is not None:
+            try:
+                card.set_hovered(True)
+            except RuntimeError:
+                self._hovered_card = None
+
+    def _on_card_hover_changed(self, card: _BookCard, hovered: bool) -> None:
+        if hovered:
+            self._set_hovered_card(card)
+        elif getattr(self, "_hovered_card", None) is card:
+            self._set_hovered_card(None)
+
+    def _request_card_hover_reconcile(self, settle_ms: int | None = None) -> None:
+        if not self.isVisible():
+            return
+        ms = self._CARD_HOVER_SETTLE_MS if settle_ms is None else max(0, int(settle_ms))
+        self._card_hover_reconcile_until = max(
+            getattr(self, "_card_hover_reconcile_until", 0.0),
+            time.perf_counter() + (ms / 1000.0),
+        )
+        timer = getattr(self, "_card_hover_reconcile_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _reconcile_card_hover(self) -> None:
+        card = None
+        if self.isVisible():
+            try:
+                widget = QApplication.widgetAt(QCursor.pos())
+            except Exception:
+                widget = None
+            try:
+                if widget is not None and (widget is self or self.isAncestorOf(widget)):
+                    card = self._book_card_from_widget(widget)
+            except Exception:
+                card = None
+        self._set_hovered_card(card)
+
+        busy = (
+            self._is_card_stream_active()
+            or bool(getattr(self, "_cover_queue", None))
+            or bool(getattr(self, "_cover_active_loaders", None))
+            or bool(getattr(self, "_cover_apply_queue", None))
+        )
+        now = time.perf_counter()
+        if busy:
+            self._card_hover_reconcile_until = max(
+                getattr(self, "_card_hover_reconcile_until", 0.0),
+                now + 0.35,
+            )
+        if now >= getattr(self, "_card_hover_reconcile_until", 0.0):
+            timer = getattr(self, "_card_hover_reconcile_timer", None)
+            if timer is not None:
+                timer.stop()
+
+    def _clear_card_hover(self) -> None:
+        self._card_hover_reconcile_until = 0.0
+        timer = getattr(self, "_card_hover_reconcile_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._set_hovered_card(None)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -9327,6 +9432,7 @@ class EpubLibraryDialog(QDialog):
                 if card.book.get("path") == book_path:
                     card.set_cover(cover_path)
             processed += 1
+        self._request_card_hover_reconcile(750)
         if not self._cover_apply_queue:
             self._cover_apply_timer.stop()
             self._schedule_inactive_tab_population()
@@ -9401,6 +9507,12 @@ class EpubLibraryDialog(QDialog):
                 run_loader = True
             if run_loader and path:
                 self._queue_cover_load(book, priority=priority_cover)
+        if not getattr(card, "_library_hover_connected", False):
+            try:
+                card.hover_changed.connect(self._on_card_hover_changed)
+                card._library_hover_connected = True
+            except Exception:
+                pass
         card_cache[path] = (card, sig, preset_key, show_raw_title)
         card.set_selected(path in selected_paths)
         state["card_list"].append(card)
@@ -9451,6 +9563,7 @@ class EpubLibraryDialog(QDialog):
         state["idx"] = end
         if state.get("loading_visible"):
             self._pump_loading_events()
+        self._request_card_hover_reconcile(750)
         if end >= len(books):
             self._finish_card_grid_stream(stream_key)
 
@@ -9486,6 +9599,8 @@ class EpubLibraryDialog(QDialog):
                 pass
         if state.get("loading_visible"):
             self._pump_loading_events()
+        self._request_card_hover_reconcile(1500)
+        self._reconcile_card_hover()
         if stream_key in getattr(self, "_pending_card_reflow", set()):
             self._grid_reflow_timer.start(90)
         if stream_key == self._active_card_tab_key():
@@ -9526,6 +9641,8 @@ class EpubLibraryDialog(QDialog):
         gone).
         """
         stream_key = stream_key or "grid"
+        self._set_hovered_card(None)
+        self._request_card_hover_reconcile()
         for other_key in list(getattr(self, "_card_stream_states", {}).keys()):
             if other_key != stream_key:
                 self._stop_card_stream(other_key)
@@ -11342,6 +11459,7 @@ class EpubLibraryDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._reposition_overlays()
+        self._request_card_hover_reconcile()
         if not getattr(self, "_initial_scan_started", False):
             QTimer.singleShot(0, self._load_books)
         else:
@@ -11356,6 +11474,7 @@ class EpubLibraryDialog(QDialog):
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self._clear_card_hover()
         try:
             self._auto_refresh_timer.stop()
         except Exception:
@@ -11380,6 +11499,7 @@ class EpubLibraryDialog(QDialog):
             self._auto_refresh_timer.stop()
         except Exception:
             pass
+        self._clear_card_hover()
         self._stop_card_stream()
         self._clear_cover_work(stop_active=True)
         _stop_qthread_safely(
@@ -12628,6 +12748,8 @@ class BookDetailsDialog(QDialog):
         self._chapter_row_prep_threads: list[_ChapterRowPrepThread] = []
         self._chapter_row_prep_thread: _ChapterRowPrepThread | None = None
         self._chapter_page = 0
+        self._chapter_list_defer_clear = False
+        self._chapter_list_transition_pending = False
         self._details_config_persist_timer: QTimer | None = None
         # Single-selected chapter row (by spine index). ``None`` means no
         # row currently has focus.
@@ -13101,6 +13223,10 @@ class BookDetailsDialog(QDialog):
         self._chap_list.setObjectName("chapterList")
         self._chap_list.clicked.connect(self._on_chapter_virtual_clicked)
         self._chap_list.activated.connect(self._on_chapter_activated)
+        self._chap_list_opacity = QGraphicsOpacityEffect(self._chap_list)
+        self._chap_list_opacity.setOpacity(1.0)
+        self._chap_list.setGraphicsEffect(self._chap_list_opacity)
+        self._chap_list_anim = None
         self._chap_list.hide()
         body_layout.addWidget(self._chap_list)
 
@@ -13238,6 +13364,10 @@ class BookDetailsDialog(QDialog):
             self._chap_container.hide()
         chap_list = getattr(self, "_chap_list", None)
         if chap_list is not None:
+            self._chapter_list_defer_clear = False
+            self._chapter_list_transition_pending = False
+            self._stop_chapter_list_animation()
+            self._set_chapter_list_opacity(1.0)
             chap_list.clear()
             chap_list.hide()
         if getattr(self, "_toc_bottom_pager", None) is not None:
@@ -13694,6 +13824,54 @@ class BookDetailsDialog(QDialog):
             self._details_config_persist_timer = timer
         timer.start(750)
 
+    def _stop_chapter_list_animation(self) -> None:
+        anim = getattr(self, "_chap_list_anim", None)
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+        self._chap_list_anim = None
+
+    def _set_chapter_list_opacity(self, opacity: float) -> None:
+        effect = getattr(self, "_chap_list_opacity", None)
+        if effect is not None:
+            effect.setOpacity(max(0.0, min(1.0, float(opacity))))
+
+    def _begin_chapter_page_transition(self) -> None:
+        self._stop_chapter_list_animation()
+        self._set_chapter_list_opacity(0.62)
+
+    def _commit_chapter_page_transition_swap(self) -> None:
+        if not bool(getattr(self, "_chapter_list_defer_clear", False)):
+            return
+        chap_list = getattr(self, "_chap_list", None)
+        if chap_list is not None:
+            chap_list.clear()
+            chap_list.show()
+        self._chapter_list_defer_clear = False
+        self._chapter_list_transition_pending = True
+        self._set_chapter_list_opacity(0.0)
+
+    def _finish_chapter_page_transition(self) -> None:
+        if not bool(getattr(self, "_chapter_list_transition_pending", False)):
+            self._set_chapter_list_opacity(1.0)
+            return
+        effect = getattr(self, "_chap_list_opacity", None)
+        if effect is None:
+            self._chapter_list_transition_pending = False
+            return
+        self._stop_chapter_list_animation()
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(110)
+        anim.setStartValue(max(0.0, min(1.0, float(effect.opacity()))))
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(
+            lambda: setattr(self, "_chapter_list_transition_pending", False))
+        self._chap_list_anim = anim
+        anim.start()
+
     # Per-tick batch size for :meth:`_populate_chapters` — small enough
     # The virtual list path is used for every page-size option so
     # 250 / 500 / All don't regress into hundreds of live child widgets.
@@ -13755,6 +13933,16 @@ class BookDetailsDialog(QDialog):
         # isVisible() would incorrectly report "collapsed" on every load.
         target_visible = True
         use_list_view = True
+        chap_list = getattr(self, "_chap_list", None)
+        defer_list_clear = bool(
+            silent
+            and use_list_view
+            and chap_list is not None
+            and chap_list.count() > 0
+            and chap_list.isVisible()
+        )
+        self._chapter_list_defer_clear = defer_list_clear
+        self._chapter_list_transition_pending = False
         # Initial loads used to hide the container until the final batch,
         # which made large books feel stuck. Now the placeholder disappears
         # once row data exists and every batch paints as soon as it is
@@ -13777,9 +13965,13 @@ class BookDetailsDialog(QDialog):
             if w:
                 w.setParent(None)
                 w.deleteLater()
-        chap_list = getattr(self, "_chap_list", None)
         if chap_list is not None:
-            chap_list.clear()
+            if defer_list_clear:
+                self._begin_chapter_page_transition()
+            else:
+                self._stop_chapter_list_animation()
+                chap_list.clear()
+                self._set_chapter_list_opacity(1.0)
             chap_list.setVisible(bool(target_visible and use_list_view))
         if getattr(self, "_chap_container", None) is not None:
             self._chap_container.setVisible(
@@ -13803,6 +13995,7 @@ class BookDetailsDialog(QDialog):
         self._last_chapter_geometry_refresh = 0.0
 
         if not populate_infos:
+            self._commit_chapter_page_transition_swap()
             self._populate_prep_done = True
             self._finish_chapter_population()
             return
@@ -13932,6 +14125,8 @@ class BookDetailsDialog(QDialog):
                 if getattr(self, "_toc_bottom_pager", None) is not None:
                     self._toc_bottom_pager.show()
         self._chapters_loaded = True
+        if use_list_view:
+            self._finish_chapter_page_transition()
         self._refresh_chapter_stream_geometry(final=True)
 
     def _on_chapter_virtual_clicked(self, idx: int) -> None:
@@ -13964,6 +14159,9 @@ class BookDetailsDialog(QDialog):
             if chap_list is None:
                 self._finish_chapter_population()
                 return
+            first_transition_batch = bool(
+                getattr(self, "_chapter_list_defer_clear", False))
+            self._commit_chapter_page_transition_swap()
             batch = []
             for i in range(start, end_limit):
                 batch.append(specs[i])
@@ -13971,6 +14169,8 @@ class BookDetailsDialog(QDialog):
                 if end > start and time.perf_counter() >= deadline:
                     break
             chap_list.append_specs(batch, selected_idx)
+            if first_transition_batch:
+                self._finish_chapter_page_transition()
         else:
             for i in range(start, end_limit):
                 row_spec = specs[i]
