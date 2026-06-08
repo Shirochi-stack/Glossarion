@@ -9100,19 +9100,17 @@ class EpubLibraryDialog(QDialog):
         self._completed_books = completed
         self._set_loading_text("Loading books\u2026")
         self._pump_loading_events()
-        self._refresh_view()
         self._update_organize_counts()
 
         def _finish_initial_render():
             self._hide_loading()
+            # Card columns depend on QScrollArea viewport width. Start the
+            # stream after the tabs are visible so startup does not compute
+            # a one-column grid from the hidden loading-overlay geometry.
+            QTimer.singleShot(0, self._refresh_view)
+            QTimer.singleShot(80, self._schedule_grid_reflow)
 
         QTimer.singleShot(0, _finish_initial_render)
-        # Schedule deferred re-layouts so the grid sees the scroll
-        # viewport's real dimensions after Qt finishes processing the
-        # pending show / layout events. Without this the initial column
-        # count can be computed from a stale width and the cards don't
-        # fill the viewport until the user triggers a manual resize.
-        self._schedule_grid_reflow()
 
     @staticmethod
     def _card_signature(book: dict) -> tuple:
@@ -9572,13 +9570,24 @@ class EpubLibraryDialog(QDialog):
             viewport_w = int(viewport.width()) if viewport is not None else 0
         except Exception:
             viewport_w = 0
+        try:
+            scroll_w = int(scroll_area.width()) if scroll_area is not None else 0
+        except Exception:
+            scroll_w = 0
         if viewport_w <= 0:
             try:
                 viewport_w = int(grid_widget.width()) if grid_widget else 0
             except Exception:
                 viewport_w = 0
+        # During first open the scroll viewport can briefly report a tiny
+        # positive width even after the tab widget is shown. Treat that as
+        # stale geometry and fall back to the surrounding visible widths so
+        # the streamed grid does not start as a single vertical column.
+        dialog_w = max(0, self.width() - 40)
+        if viewport_w < max(1, min(dialog_w, preset_card_w * 2 + spacing)):
+            viewport_w = max(viewport_w, scroll_w, dialog_w)
         if viewport_w <= 0:
-            viewport_w = max(0, self.width() - 40)
+            viewport_w = dialog_w
         # Reserve room for the vertical scrollbar. The scroll area's
         # stylesheet fixes it to an 8 px track and we need to subtract
         # it ahead of time because the scrollbar only pops in once the
