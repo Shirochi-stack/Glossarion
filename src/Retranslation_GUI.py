@@ -3194,16 +3194,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 lambda pi=piece_index, ri=row_index, text=tooltip_translation, ed=target_widget:
                     self._inject_machine_translation_to_target(pi, ri, text, ed)
             ) if tooltip_translation and target_editable and not tooltip_pending else None
-            try:
-                translated_label.customContextMenuRequested.disconnect()
-            except Exception:
-                pass
-            translated_label.customContextMenuRequested.connect(
-                lambda pos, lbl=translated_label, cb=inject_callback: self._show_review_text_context_menu(
-                    lbl,
-                    pos,
-                    inject_machine_translation_callback=cb,
-                )
+            raw_label = source_widget.findChild(QLabel, "SdlReviewSourceRawText")
+            self._wire_source_preview_context_menu(
+                raw_label or translated_label,
+                [source_widget, raw_label, translated_label],
+                translate_tooltip_callback=(
+                    lambda pi=piece_index, ri=row_index: self._translate_single_row_tooltip(pi, ri)
+                ) if source_text else None,
+                inject_machine_translation_callback=inject_callback,
             )
 
             row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
@@ -4021,6 +4019,8 @@ class SDLXLIFFReviewDialog(QDialog):
         edit_callback=None,
         translate_tooltip_callback=None,
         inject_machine_translation_callback=None,
+        popup_widget=None,
+        popup_pos=None,
     ):
         selected = self._selected_text_for_widget(widget).strip()
         has_selection = bool(selected)
@@ -4079,7 +4079,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_text_context_menu = menu
         self._set_review_context_menu_open(True)
         menu.aboutToHide.connect(lambda m=menu: self._clear_review_text_context_menu(m))
-        menu.popup(widget.mapToGlobal(pos))
+        anchor_widget = popup_widget or widget
+        anchor_pos = popup_pos if popup_pos is not None else pos
+        menu.popup(anchor_widget.mapToGlobal(anchor_pos))
 
     def _clear_review_text_context_menu(self, menu):
         try:
@@ -4326,27 +4328,25 @@ class SDLXLIFFReviewDialog(QDialog):
         inject_machine_translation_callback=None,
     ):
         label = QLabel(text if text else ("[missing]" if missing else "[empty]"))
+        label.setObjectName("SdlReviewSourceRawText")
         label.setTextFormat(Qt.PlainText)
         label.setWordWrap(True)
         label.setMinimumWidth(0)
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        label.setContextMenuPolicy(Qt.CustomContextMenu)
-        label.customContextMenuRequested.connect(
-            lambda pos, lbl=label: self._show_review_text_context_menu(
-                lbl,
-                pos,
-                translate_tooltip_callback=translate_tooltip_callback,
-                inject_machine_translation_callback=inject_machine_translation_callback,
-            )
-        )
         label.setStyleSheet(f"color: #cbd5e1; background: transparent; font-size: 10pt;")
         label.setToolTip(self._wrapped_tooltip(text))
 
         tooltip_translation = str(tooltip_translation or "").strip()
         tooltip_pending = bool(tooltip_pending)
         if not tooltip_translation and not tooltip_pending:
+            self._wire_source_preview_context_menu(
+                label,
+                [label],
+                translate_tooltip_callback=translate_tooltip_callback,
+                inject_machine_translation_callback=inject_machine_translation_callback,
+            )
             return label
 
         container = QWidget()
@@ -4374,14 +4374,6 @@ class SDLXLIFFReviewDialog(QDialog):
         translated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         translated_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         translated_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        translated_label.setContextMenuPolicy(Qt.CustomContextMenu)
-        translated_label.customContextMenuRequested.connect(
-            lambda pos, lbl=translated_label: self._show_review_text_context_menu(
-                lbl,
-                pos,
-                inject_machine_translation_callback=None if tooltip_pending else inject_machine_translation_callback,
-            )
-        )
         if tooltip_pending:
             translated_label.setToolTip("Google Translate preview is being generated.")
             translated_label.setStyleSheet(
@@ -4402,7 +4394,41 @@ class SDLXLIFFReviewDialog(QDialog):
             )
         layout.addWidget(translated_label)
         layout.addStretch(1)
+        self._wire_source_preview_context_menu(
+            label,
+            [container, label, translated_label],
+            translate_tooltip_callback=translate_tooltip_callback,
+            inject_machine_translation_callback=None if tooltip_pending else inject_machine_translation_callback,
+        )
         return container
+
+    def _wire_source_preview_context_menu(
+        self,
+        text_widget,
+        anchors,
+        translate_tooltip_callback=None,
+        inject_machine_translation_callback=None,
+    ):
+        for anchor in anchors or []:
+            if anchor is None:
+                continue
+            if anchor.property("sdl_source_context_menu_wired"):
+                try:
+                    anchor.customContextMenuRequested.disconnect()
+                except Exception:
+                    pass
+            anchor.setContextMenuPolicy(Qt.CustomContextMenu)
+            anchor.customContextMenuRequested.connect(
+                lambda pos, text_widget=text_widget, anchor=anchor: self._show_review_text_context_menu(
+                    text_widget,
+                    pos,
+                    translate_tooltip_callback=translate_tooltip_callback,
+                    inject_machine_translation_callback=inject_machine_translation_callback,
+                    popup_widget=anchor,
+                    popup_pos=pos,
+                )
+            )
+            anchor.setProperty("sdl_source_context_menu_wired", True)
 
     def _review_row_height(self, source_text, target_text, tooltip_translation=None, tooltip_pending=False):
         return self._review_row_height_for_width(

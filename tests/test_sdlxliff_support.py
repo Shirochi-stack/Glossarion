@@ -770,9 +770,14 @@ def test_sdlxliff_review_translate_tooltips_uses_google_translate_free():
     text_menu_end = source.index("def _clear_review_text_context_menu", text_menu_start)
     text_menu_body = source[text_menu_start:text_menu_end]
     assert "menu.exec(" not in text_menu_body
-    assert "menu.popup(widget.mapToGlobal(pos))" in text_menu_body
+    assert "menu.popup(anchor_widget.mapToGlobal(anchor_pos))" in text_menu_body
+    assert "popup_widget=None" in text_menu_body
+    assert "popup_pos=None" in text_menu_body
     assert "self._review_text_context_menu = menu" in text_menu_body
     assert "_set_review_context_menu_open(True)" in text_menu_body
+    assert "def _wire_source_preview_context_menu" in source
+    assert 'container.setObjectName("SdlReviewSourceText")' in source
+    assert 'label.setObjectName("SdlReviewSourceRawText")' in source
     silent_refresh_body = source[
         source.index("def _silent_review_refresh"):
         source.index("def refresh_review_data", source.index("def _silent_review_refresh"))
