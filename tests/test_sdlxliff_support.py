@@ -1501,11 +1501,13 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     render_end = source.index("\n\nclass RetranslationMixin", render_start)
     render_body = source[render_start:render_end]
     assert "while row_state[\"idx\"] < len(rows)" not in render_body
-    assert "batch_size = 24" in render_body
+    assert "batch_size = 12" in render_body
     assert "render_timer.start(1)" in render_body
     assert "if show_loading:\n            self._show_review_loading_page()" not in render_body
     assert "if show_loading:\n            self.rows_stack.setCurrentWidget(page)" in render_body
     assert "self._finish_rows_rebuild(final=False)" in render_body
+    assert "widget.setUpdatesEnabled(False)" in render_body
+    assert "widget.setUpdatesEnabled(True)" in render_body
     assert "QApplication.processEvents(QEventLoop.AllEvents, 10)" not in render_body
     assert "self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)" in source
     assert "self._update_review_row_source_previews(row, changed_rows, visible_only=True)" in source

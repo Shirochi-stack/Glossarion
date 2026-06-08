@@ -6040,7 +6040,7 @@ class SDLXLIFFReviewDialog(QDialog):
         render_timer = QTimer(self)
         render_timer.setSingleShot(True)
         row_state = {"idx": 0}
-        batch_size = 24
+        batch_size = 12
 
         if show_loading:
             self.rows_stack.setCurrentWidget(page)
@@ -6069,7 +6069,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 _finish_active_render_timer()
                 _discard_active_render_page()
                 return
+            visible_stream = self.rows_stack.currentWidget() is page
+            stream_widgets = (page, self.scroll.viewport()) if visible_stream else ()
             try:
+                for widget in stream_widgets:
+                    try:
+                        widget.setUpdatesEnabled(False)
+                    except Exception:
+                        pass
                 self.rows_widget = page
                 self.rows_layout = layout
                 start = row_state["idx"]
@@ -6078,7 +6085,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     row_model = row_models[idx] if idx < len(row_models) else None
                     self._add_review_row(piece, rows[idx], idx, max_len, colors, row_model=row_model)
                 row_state["idx"] = end
-                if self.rows_stack.currentWidget() is page:
+                for widget in stream_widgets:
+                    try:
+                        widget.setUpdatesEnabled(True)
+                    except Exception:
+                        pass
+                if visible_stream:
                     self._finish_rows_rebuild(final=False)
 
                 if row_state["idx"] < len(rows):
@@ -6101,6 +6113,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 _finish_active_render_timer()
                 self._queue_review_page_preloads(row)
             except Exception as exc:
+                for widget in stream_widgets:
+                    try:
+                        widget.setUpdatesEnabled(True)
+                    except Exception:
+                        pass
                 _finish_active_render_timer()
                 if render_token == self._render_token:
                     self._clear_rows(layout)
