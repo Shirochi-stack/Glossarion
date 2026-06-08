@@ -19,6 +19,7 @@ import tempfile
 import platform
 import traceback
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -6170,6 +6171,9 @@ class EpubLibraryDialog(QDialog):
     _CARD_STREAM_BATCH_SIZE = 2
     _CARD_STREAM_TICK_MS = 16
     _CARD_STREAM_FRAME_BUDGET_SEC = 0.007
+    _COVER_APPLY_BATCH_SIZE = 1
+    _COVER_APPLY_TICK_MS = 16
+    _INACTIVE_TAB_IDLE_MS = 1200
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -6216,6 +6220,16 @@ class EpubLibraryDialog(QDialog):
         self._card_stream_generation: dict[str, int] = {}
         self._card_stream_states: dict[str, dict] = {}
         self._card_stream_timers: dict[str, QTimer] = {}
+        self._active_card_stream_key: str | None = None
+        self._dirty_card_tabs: set[str] = {"ip", "comp"}
+        self._pending_card_reflow: set[str] = set()
+        self._cover_queue = deque()
+        self._cover_queued_paths: set[str] = set()
+        self._cover_active_loaders: dict[_CoverLoader, str] = {}
+        self._cover_active_paths: set[str] = set()
+        self._cover_apply_queue = deque()
+        self._cover_apply_pending_paths: set[str] = set()
+        self._cover_generation = 0
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
@@ -6248,6 +6262,17 @@ class EpubLibraryDialog(QDialog):
         # "Import EPUB" button (see :meth:`_import_paths_into_library`).
         self.setAcceptDrops(True)
         self._setup_ui()
+        self._grid_reflow_timer = QTimer(self)
+        self._grid_reflow_timer.setSingleShot(True)
+        self._grid_reflow_timer.timeout.connect(self._run_pending_grid_reflow)
+        self._inactive_tab_populate_timer = QTimer(self)
+        self._inactive_tab_populate_timer.setSingleShot(True)
+        self._inactive_tab_populate_timer.timeout.connect(
+            self._populate_inactive_tab_if_idle)
+        self._cover_apply_timer = QTimer(self)
+        self._cover_apply_timer.setSingleShot(False)
+        self._cover_apply_timer.setInterval(self._COVER_APPLY_TICK_MS)
+        self._cover_apply_timer.timeout.connect(self._apply_cover_batch)
         # Flip the dialog into its loading state BEFORE the caller
         # shows it. Previously ``_show_loading`` was called by the
         # deferred :meth:`_load_books` tick, which meant the dialog's
@@ -7065,10 +7090,100 @@ class EpubLibraryDialog(QDialog):
         if app is not None:
             app.processEvents(QEventLoop.ExcludeUserInputEvents)
 
-    def _schedule_grid_reflow(self):
-        """Refresh card columns after Qt has settled scroll-area geometry."""
-        for delay in (0, 50, 150):
-            QTimer.singleShot(delay, self._refresh_view)
+    def _tab_key_for_index(self, index: int | None = None) -> str:
+        if index is None:
+            index = int(getattr(self, "_current_tab", 0) or 0)
+        return "comp" if int(index) == 1 else "ip"
+
+    def _active_card_tab_key(self) -> str:
+        tabs = getattr(self, "_tabs", None)
+        if tabs is None:
+            return self._tab_key_for_index(getattr(self, "_current_tab", 0))
+        try:
+            index = int(tabs.currentIndex())
+        except Exception:
+            index = int(getattr(self, "_current_tab", 0) or 0)
+        scan_tab_index = int(getattr(self, "_scan_tab_index", -1) or -1)
+        if index == scan_tab_index:
+            index = int(getattr(self, "_prev_content_tab", 0) or 0)
+        return self._tab_key_for_index(index)
+
+    @staticmethod
+    def _other_card_tab_key(tab_key: str) -> str:
+        return "comp" if tab_key == "ip" else "ip"
+
+    def _cards_for_tab_key(self, tab_key: str) -> list[_BookCard]:
+        return self._comp_cards if tab_key == "comp" else self._ip_cards
+
+    def _populate_tab(self, tab_key: str) -> None:
+        if tab_key == "comp":
+            self._populate_completed(self._filtered(self._completed_books))
+        else:
+            self._populate_in_progress(self._filtered(self._in_progress_books))
+            tab_key = "ip"
+        self._dirty_card_tabs.discard(tab_key)
+
+    def _is_card_stream_active(self, tab_key: str | None = None) -> bool:
+        states = getattr(self, "_card_stream_states", {}) or {}
+        if tab_key:
+            return tab_key in states
+        return bool(states)
+
+    def _schedule_grid_reflow(self, tab_key: str | None = None):
+        """Debounce grid reflow without restarting active card streams."""
+        key = tab_key or self._active_card_tab_key()
+        self._pending_card_reflow.add(key)
+        if self._is_card_stream_active(key):
+            return
+        self._grid_reflow_timer.start(90)
+
+    def _run_pending_grid_reflow(self) -> None:
+        pending = list(getattr(self, "_pending_card_reflow", set()) or set())
+        if not pending:
+            return
+        for key in pending:
+            if self._is_card_stream_active():
+                break
+            self._pending_card_reflow.discard(key)
+            self._populate_tab(key)
+            break
+        if self._pending_card_reflow:
+            self._grid_reflow_timer.start(90)
+        else:
+            self._schedule_inactive_tab_population()
+
+    def _schedule_inactive_tab_population(self) -> None:
+        if not self.isVisible():
+            return
+        if self._is_card_stream_active():
+            return
+        if self._pending_card_reflow:
+            self._inactive_tab_populate_timer.start(self._INACTIVE_TAB_IDLE_MS)
+            return
+        if (self._cover_queue or self._cover_active_loaders
+                or self._cover_apply_queue):
+            self._inactive_tab_populate_timer.start(self._INACTIVE_TAB_IDLE_MS)
+            return
+        inactive = self._other_card_tab_key(self._active_card_tab_key())
+        if inactive in self._dirty_card_tabs:
+            self._inactive_tab_populate_timer.start(self._INACTIVE_TAB_IDLE_MS)
+
+    def _populate_inactive_tab_if_idle(self) -> None:
+        if not self.isVisible():
+            return
+        if self._is_card_stream_active():
+            self._schedule_inactive_tab_population()
+            return
+        if self._pending_card_reflow:
+            self._schedule_inactive_tab_population()
+            return
+        if (self._cover_queue or self._cover_active_loaders
+                or self._cover_apply_queue):
+            self._schedule_inactive_tab_population()
+            return
+        inactive = self._other_card_tab_key(self._active_card_tab_key())
+        if inactive in self._dirty_card_tabs:
+            self._populate_tab(inactive)
 
     def _set_sort(self, mode):
         self._sort_mode = mode
@@ -7192,8 +7307,11 @@ class EpubLibraryDialog(QDialog):
         self._prev_content_tab = index
         self._current_tab = index
         self._config["epub_library_tab"] = index
-        if self._ip_cards or self._comp_cards:
-            self._schedule_grid_reflow()
+        tab_key = self._tab_key_for_index(index)
+        if tab_key in getattr(self, "_dirty_card_tabs", set()):
+            self._populate_tab(tab_key)
+        elif self._cards_for_tab_key(tab_key):
+            self._schedule_grid_reflow(tab_key)
 
     # -- Actions ------------------------------------------------------------
 
@@ -8883,9 +9001,11 @@ class EpubLibraryDialog(QDialog):
         self._load_books()
 
     def _refresh_view(self):
-        """Re-filter + re-render both tab grids from the cached scan data."""
-        self._populate_in_progress(self._filtered(self._in_progress_books))
-        self._populate_completed(self._filtered(self._completed_books))
+        """Re-filter + render the active tab first; defer the other tab."""
+        active = self._active_card_tab_key()
+        inactive = self._other_card_tab_key(active)
+        self._dirty_card_tabs.add(inactive)
+        self._populate_tab(active)
 
     def _filtered(self, books: list[dict]) -> list[dict]:
         query = self._search.text().strip().lower()
@@ -8966,13 +9086,7 @@ class EpubLibraryDialog(QDialog):
         if (self._delete_thread is not None
                 and self._delete_thread.isRunning()):
             return
-        for t in self._cover_threads:
-            try:
-                t.quit()
-                t.wait(100)
-            except Exception:
-                pass
-        self._cover_threads.clear()
+        self._clear_cover_work(stop_active=True)
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._show_loading()
@@ -9043,6 +9157,8 @@ class EpubLibraryDialog(QDialog):
             if timer is not None and timer.isActive():
                 timer.stop()
             getattr(self, "_card_stream_states", {}).pop(key, None)
+            if getattr(self, "_active_card_stream_key", None) == key:
+                self._active_card_stream_key = None
 
     def _card_stream_timer(self, stream_key: str) -> QTimer:
         timers = getattr(self, "_card_stream_timers", None)
@@ -9059,6 +9175,120 @@ class EpubLibraryDialog(QDialog):
             timers[stream_key] = timer
         return timer
 
+    def _cover_worker_limit(self) -> int:
+        total = (
+            len(getattr(self, "_cover_queue", ()) or ())
+            + len(getattr(self, "_cover_active_loaders", {}) or {})
+        )
+        return max(1, _reader_worker_count(max(1, total), self._config))
+
+    def _queue_cover_load(self, book: dict, *, priority: bool = False) -> None:
+        path = book.get("path", "") or ""
+        if not path:
+            return
+        if path in self._cover_queued_paths or path in self._cover_active_paths:
+            return
+        job = {
+            "generation": self._cover_generation,
+            "path": path,
+            "file_type": book.get("type", "epub"),
+            "original_path": book.get("original_path"),
+            "raw_source_path": book.get("raw_source_path"),
+        }
+        if priority:
+            self._cover_queue.appendleft(job)
+        else:
+            self._cover_queue.append(job)
+        self._cover_queued_paths.add(path)
+        self._pump_cover_queue()
+
+    def _pump_cover_queue(self) -> None:
+        limit = self._cover_worker_limit()
+        while self._cover_queue and len(self._cover_active_loaders) < limit:
+            job = self._cover_queue.popleft()
+            path = job.get("path", "") or ""
+            self._cover_queued_paths.discard(path)
+            if not path or path in self._cover_active_paths:
+                continue
+            loader = _CoverLoader(
+                path,
+                file_type=job.get("file_type", "epub"),
+                config=self._config,
+                original_path=job.get("original_path"),
+                raw_source_path=job.get("raw_source_path"),
+                parent=self,
+            )
+            loader._library_cover_generation = job.get(
+                "generation", self._cover_generation)
+            loader.finished.connect(
+                lambda book_path, cover_path, ldr=loader: self._on_cover_loaded(
+                    book_path, cover_path, ldr))
+            self._cover_active_loaders[loader] = path
+            self._cover_active_paths.add(path)
+            self._cover_threads.append(loader)
+            loader.start()
+
+    def _queue_cover_apply(
+        self,
+        book_path: str,
+        cover_path: str,
+        *,
+        priority: bool = False,
+    ) -> None:
+        if not book_path or not cover_path:
+            return
+        if book_path in self._cover_apply_pending_paths:
+            return
+        item = (book_path, cover_path)
+        if priority:
+            self._cover_apply_queue.appendleft(item)
+        else:
+            self._cover_apply_queue.append(item)
+        self._cover_apply_pending_paths.add(book_path)
+        if not self._cover_apply_timer.isActive():
+            self._cover_apply_timer.start()
+
+    def _cover_apply_is_active_priority(self, book_path: str) -> bool:
+        active_key = self._active_card_tab_key()
+        for card in self._cards_for_tab_key(active_key):
+            if card.book.get("path") == book_path:
+                return True
+        return False
+
+    def _apply_cover_batch(self) -> None:
+        if not self._cover_apply_queue:
+            self._cover_apply_timer.stop()
+            self._schedule_inactive_tab_population()
+            return
+        processed = 0
+        while self._cover_apply_queue and processed < self._COVER_APPLY_BATCH_SIZE:
+            book_path, cover_path = self._cover_apply_queue.popleft()
+            self._cover_apply_pending_paths.discard(book_path)
+            for card in (*self._ip_cards, *self._comp_cards):
+                if card.book.get("path") == book_path:
+                    card.set_cover(cover_path)
+            processed += 1
+        if not self._cover_apply_queue:
+            self._cover_apply_timer.stop()
+            self._schedule_inactive_tab_population()
+
+    def _clear_cover_work(self, *, stop_active: bool = False) -> None:
+        self._cover_generation += 1
+        self._cover_queue.clear()
+        self._cover_queued_paths.clear()
+        self._cover_apply_queue.clear()
+        self._cover_apply_pending_paths.clear()
+        if self._cover_apply_timer.isActive():
+            self._cover_apply_timer.stop()
+        if not stop_active:
+            return
+        for thread in list(getattr(self, "_cover_threads", []) or []):
+            _stop_qthread_safely(
+                thread, timeout_ms=500, signal_names=("finished",))
+        self._cover_threads.clear()
+        self._cover_active_loaders.clear()
+        self._cover_active_paths.clear()
+
     def _add_streamed_card(self, state: dict, idx: int, book: dict) -> None:
         path = book.get("path", "") or ""
         card_cache = state["card_cache"]
@@ -9073,12 +9303,19 @@ class EpubLibraryDialog(QDialog):
             and cached[2] == preset_key
             and cached[3] == show_raw_title
         )
+        priority_cover = state.get("stream_key") == self._active_card_tab_key()
         if reuse:
             card = cached[0]
             try:
                 card.book = book
             except Exception:
                 pass
+            cached_cover = self._cover_path_cache.get(path)
+            if (cached_cover and cached_cover != "_none_"
+                    and os.path.isfile(cached_cover)
+                    and not getattr(card, "_has_cover", False)):
+                self._queue_cover_apply(
+                    path, cached_cover, priority=priority_cover)
         else:
             if cached:
                 try:
@@ -9096,24 +9333,15 @@ class EpubLibraryDialog(QDialog):
             run_loader = False
             if cached_cover is not None:
                 if cached_cover and cached_cover != "_none_" and os.path.isfile(cached_cover):
-                    card.set_cover(cached_cover)
+                    self._queue_cover_apply(
+                        path, cached_cover, priority=priority_cover)
                 elif cached_cover == "" and book.get("type", "epub") in ("epub", "in_progress"):
                     self._cover_path_cache[path] = "_none_"
                     run_loader = True
             else:
                 run_loader = True
             if run_loader and path:
-                loader = _CoverLoader(
-                    path,
-                    file_type=book.get("type", "epub"),
-                    config=self._config,
-                    original_path=book.get("original_path"),
-                    raw_source_path=book.get("raw_source_path"),
-                    parent=self,
-                )
-                loader.finished.connect(self._on_cover_loaded)
-                self._cover_threads.append(loader)
-                loader.start()
+                self._queue_cover_load(book, priority=priority_cover)
         card_cache[path] = (card, sig, preset_key, show_raw_title)
         card.set_selected(path in selected_paths)
         state["card_list"].append(card)
@@ -9172,6 +9400,8 @@ class EpubLibraryDialog(QDialog):
         timer = getattr(self, "_card_stream_timers", {}).get(stream_key)
         if timer is not None:
             timer.stop()
+        if getattr(self, "_active_card_stream_key", None) == stream_key:
+            self._active_card_stream_key = None
         if not state:
             return
         grid_layout = state["grid_layout"]
@@ -9197,6 +9427,10 @@ class EpubLibraryDialog(QDialog):
                 pass
         if state.get("loading_visible"):
             self._pump_loading_events()
+        if stream_key in getattr(self, "_pending_card_reflow", set()):
+            self._grid_reflow_timer.start(90)
+        if stream_key == self._active_card_tab_key():
+            self._schedule_inactive_tab_population()
 
     def _populate_grid_common(
         self,
@@ -9233,6 +9467,10 @@ class EpubLibraryDialog(QDialog):
         gone).
         """
         stream_key = stream_key or "grid"
+        for other_key in list(getattr(self, "_card_stream_states", {}).keys()):
+            if other_key != stream_key:
+                self._stop_card_stream(other_key)
+                self._dirty_card_tabs.add(other_key)
         self._stop_card_stream(stream_key)
         self._card_stream_generation[stream_key] = (
             int(self._card_stream_generation.get(stream_key, 0) or 0) + 1
@@ -9382,6 +9620,7 @@ class EpubLibraryDialog(QDialog):
             except Exception:
                 pass
 
+        self._active_card_stream_key = stream_key
         self._card_stream_states[stream_key] = {
             "generation": generation,
             "books": list(books),
@@ -9396,6 +9635,7 @@ class EpubLibraryDialog(QDialog):
             "show_raw_title": show_raw_title,
             "cols": cols,
             "loading_visible": loading_visible,
+            "stream_key": stream_key,
         }
         self._card_stream_timer(stream_key).start()
         if loading_visible:
@@ -9497,21 +9737,36 @@ class EpubLibraryDialog(QDialog):
         for c in cards:
             c.set_selected(c.book.get("path", "") in selected)
 
-    def _on_cover_loaded(self, book_path: str, cover_path: str):
-        # Cache every loader result — including empty strings for
-        # books with no cover — so a subsequent View-size change
-        # can skip the loader entirely. When the cache holds the
-        # "_none_" retry sentinel and the loader still came back
-        # empty, keep the sentinel so we don't re-retry forever.
+    def _on_cover_loaded(self, book_path: str, cover_path: str, loader=None):
+        if loader is not None:
+            self._cover_active_loaders.pop(loader, None)
+            self._cover_active_paths.discard(book_path)
+            try:
+                if loader in self._cover_threads:
+                    self._cover_threads.remove(loader)
+            except Exception:
+                pass
+            try:
+                loader.deleteLater()
+            except Exception:
+                pass
+            if getattr(loader, "_library_cover_generation", None) != self._cover_generation:
+                self._pump_cover_queue()
+                return
+        # Cache every loader result, including empty strings for books
+        # with no cover, so subsequent card rebuilds can skip extraction.
         if cover_path:
             self._cover_path_cache[book_path] = cover_path
         elif self._cover_path_cache.get(book_path) != "_none_":
             self._cover_path_cache[book_path] = ""
         if not cover_path:
+            self._pump_cover_queue()
+            self._schedule_inactive_tab_population()
             return
-        for card in (*self._ip_cards, *self._comp_cards):
-            if card.book.get("path") == book_path:
-                card.set_cover(cover_path)
+        self._queue_cover_apply(
+            book_path, cover_path,
+            priority=self._cover_apply_is_active_priority(book_path))
+        self._pump_cover_queue()
 
     def _apply_filter(self, text):
         self._refresh_view()
@@ -10990,7 +11245,7 @@ class EpubLibraryDialog(QDialog):
         if not hasattr(self, '_resize_timer'):
             self._resize_timer = QTimer(self)
             self._resize_timer.setSingleShot(True)
-            self._resize_timer.timeout.connect(self._refresh_view)
+            self._resize_timer.timeout.connect(self._schedule_grid_reflow)
         self._resize_timer.start(300)
 
     def _reposition_overlays(self):
@@ -11035,6 +11290,8 @@ class EpubLibraryDialog(QDialog):
             self._auto_refresh_timer.stop()
         except Exception:
             pass
+        self._stop_card_stream()
+        self._clear_cover_work(stop_active=True)
 
     def shutdown(self) -> None:
         """Close owned dialogs and stop workers before the app exits."""
@@ -11054,6 +11311,7 @@ class EpubLibraryDialog(QDialog):
         except Exception:
             pass
         self._stop_card_stream()
+        self._clear_cover_work(stop_active=True)
         _stop_qthread_safely(
             getattr(self, "_scanner_thread", None),
             timeout_ms=1500,
@@ -11066,12 +11324,6 @@ class EpubLibraryDialog(QDialog):
             signal_names=("progress", "delete_finished"),
         )
         self._delete_thread = None
-        for thread in list(getattr(self, "_cover_threads", []) or []):
-            _stop_qthread_safely(
-                thread, timeout_ms=500,
-                signal_names=("finished",),
-            )
-        self._cover_threads.clear()
         _persist_config_via_parent(self)
 
     def closeEvent(self, event):
