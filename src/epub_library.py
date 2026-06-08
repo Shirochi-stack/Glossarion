@@ -1045,16 +1045,24 @@ def _extract_cover(epub_path: str) -> str | None:
             # --- Step 5: First <img> in first HTML chapter ---
             if not cover_data:
                 try:
-                    from bs4 import BeautifulSoup
+                    from html import unescape
                     html_exts = (".xhtml", ".html", ".htm")
                     for zname in sorted(names):
                         if any(zname.lower().endswith(ext) for ext in html_exts):
                             html = zf.read(zname).decode("utf-8", errors="replace")
-                            soup = BeautifulSoup(html, "html.parser")
-                            img_tag = soup.find("img")
-                            if img_tag and img_tag.get("src"):
+                            img_match = re.search(
+                                r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^'\"\s>]+))",
+                                html,
+                                re.IGNORECASE,
+                            )
+                            if img_match:
+                                src = next(
+                                    (g for g in img_match.groups() if g),
+                                    "",
+                                )
                                 html_dir = posixpath.dirname(zname)
-                                img_path = posixpath.normpath(posixpath.join(html_dir, img_tag["src"]))
+                                img_path = posixpath.normpath(
+                                    posixpath.join(html_dir, unescape(src)))
                                 if img_path in names_set:
                                     cover_data = zf.read(img_path)
                                     break
@@ -6210,6 +6218,8 @@ class EpubLibraryDialog(QDialog):
     _CARD_STREAM_FRAME_BUDGET_SEC = 0.007
     _COVER_APPLY_BATCH_SIZE = 1
     _COVER_APPLY_TICK_MS = 16
+    _COVER_PUMP_IDLE_MS = 450
+    _COVER_PUMP_BUSY_MS = 140
     _INACTIVE_TAB_IDLE_MS = 1200
     _CARD_HOVER_RECONCILE_MS = 50
     _CARD_HOVER_SETTLE_MS = 6000
@@ -6314,6 +6324,9 @@ class EpubLibraryDialog(QDialog):
         self._cover_apply_timer.setSingleShot(False)
         self._cover_apply_timer.setInterval(self._COVER_APPLY_TICK_MS)
         self._cover_apply_timer.timeout.connect(self._apply_cover_batch)
+        self._cover_pump_timer = QTimer(self)
+        self._cover_pump_timer.setSingleShot(True)
+        self._cover_pump_timer.timeout.connect(self._pump_cover_queue)
         self._card_hover_reconcile_timer = QTimer(self)
         self._card_hover_reconcile_timer.setSingleShot(False)
         self._card_hover_reconcile_timer.setInterval(
@@ -9346,6 +9359,21 @@ class EpubLibraryDialog(QDialog):
         )
         return max(1, _reader_worker_count(max(1, total), self._config))
 
+    def _schedule_cover_pump(self, delay_ms: int | None = None) -> None:
+        if not getattr(self, "_cover_queue", None):
+            return
+        timer = getattr(self, "_cover_pump_timer", None)
+        if timer is None:
+            self._pump_cover_queue()
+            return
+        if delay_ms is None:
+            delay_ms = (
+                self._COVER_PUMP_BUSY_MS
+                if self._is_card_stream_active()
+                else self._COVER_PUMP_IDLE_MS
+            )
+        timer.start(max(0, int(delay_ms)))
+
     def _queue_cover_load(self, book: dict, *, priority: bool = False) -> None:
         path = book.get("path", "") or ""
         if not path:
@@ -9364,9 +9392,12 @@ class EpubLibraryDialog(QDialog):
         else:
             self._cover_queue.append(job)
         self._cover_queued_paths.add(path)
-        self._pump_cover_queue()
+        self._schedule_cover_pump()
 
     def _pump_cover_queue(self) -> None:
+        if self._is_card_stream_active():
+            self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
+            return
         limit = self._cover_worker_limit()
         while self._cover_queue and len(self._cover_active_loaders) < limit:
             job = self._cover_queue.popleft()
@@ -9445,6 +9476,9 @@ class EpubLibraryDialog(QDialog):
         self._cover_apply_pending_paths.clear()
         if self._cover_apply_timer.isActive():
             self._cover_apply_timer.stop()
+        cover_pump_timer = getattr(self, "_cover_pump_timer", None)
+        if cover_pump_timer is not None and cover_pump_timer.isActive():
+            cover_pump_timer.stop()
         if not stop_active:
             return
         for thread in list(getattr(self, "_cover_threads", []) or []):
@@ -9604,6 +9638,7 @@ class EpubLibraryDialog(QDialog):
         if stream_key in getattr(self, "_pending_card_reflow", set()):
             self._grid_reflow_timer.start(90)
         if stream_key == self._active_card_tab_key():
+            self._schedule_cover_pump(self._COVER_PUMP_IDLE_MS)
             self._schedule_inactive_tab_population()
 
     def _populate_grid_common(
@@ -9938,7 +9973,7 @@ class EpubLibraryDialog(QDialog):
             except Exception:
                 pass
             if getattr(loader, "_library_cover_generation", None) != self._cover_generation:
-                self._pump_cover_queue()
+                self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
                 return
         # Cache every loader result, including empty strings for books
         # with no cover, so subsequent card rebuilds can skip extraction.
@@ -9947,13 +9982,13 @@ class EpubLibraryDialog(QDialog):
         elif self._cover_path_cache.get(book_path) != "_none_":
             self._cover_path_cache[book_path] = ""
         if not cover_path:
-            self._pump_cover_queue()
+            self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
             self._schedule_inactive_tab_population()
             return
         self._queue_cover_apply(
             book_path, cover_path,
             priority=self._cover_apply_is_active_priority(book_path))
-        self._pump_cover_queue()
+        self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
 
     def _apply_filter(self, text):
         self._refresh_view()
