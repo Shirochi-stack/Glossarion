@@ -10130,7 +10130,13 @@ class EpubLibraryDialog(QDialog):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
-            dialog = BookDetailsDialog(book, config=self._config, parent=self)
+            details_book = dict(book or {})
+            book_path = details_book.get("path", "") or ""
+            cached_cover = self._cover_path_cache.get(book_path)
+            if (cached_cover and cached_cover != "_none_"
+                    and os.path.isfile(cached_cover)):
+                details_book["_cached_cover_path"] = cached_cover
+            dialog = BookDetailsDialog(details_book, config=self._config, parent=self)
             QApplication.restoreOverrideCursor()
             dialog.setModal(False)
             dialog.setAttribute(Qt.WA_DeleteOnClose)
@@ -13096,10 +13102,12 @@ class BookDetailsDialog(QDialog):
         self._cover_lbl.setStyleSheet(
             "background: #2a2a3e; border-radius: 6px; color: #555; font-size: 32pt;"
         )
-        # Initial placeholder: Halgakos brand icon (or emoji as last resort).
-        # ``_apply_halgakos_fallback`` is reused by ``_on_details_ready`` so
-        # the same defensive rendering path runs when cover extraction fails.
-        self._apply_halgakos_fallback()
+        # Use the already-resolved card thumbnail when the library has one.
+        # This prevents the details page from flashing the fallback before the
+        # background metadata loader emits its preview payload.
+        self._current_cover_path = ""
+        if not self._apply_cover_path(self._book.get("_cached_cover_path", "")):
+            self._apply_halgakos_fallback()
         hero.addWidget(self._cover_lbl, 0, Qt.AlignTop)
 
         # Center column: title, author, actions, synopsis
@@ -13524,6 +13532,30 @@ class BookDetailsDialog(QDialog):
         if getattr(self, "_chap_loading_lbl", None) is not None:
             self._chap_loading_lbl.show()
 
+    def _apply_cover_path(self, cover_path: str) -> bool:
+        """Paint a real cover path into the hero cover label."""
+        cover_path = str(cover_path or "")
+        if not cover_path:
+            return False
+        try:
+            pm = QPixmap(cover_path)
+            if pm.isNull():
+                return False
+            scaled = pm.scaled(
+                self._cover_lbl.width(),
+                self._cover_lbl.height(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self._cover_lbl.setPixmap(scaled)
+            self._cover_lbl.setText("")
+            self._current_cover_path = cover_path
+            return True
+        except Exception:
+            logger.debug("Cover pixmap load failed for %s: %s",
+                         cover_path, traceback.format_exc())
+            return False
+
     def _apply_halgakos_fallback(self):
         """Render the Halgakos brand icon into the cover label.
 
@@ -13567,19 +13599,10 @@ class BookDetailsDialog(QDialog):
         self._details = payload.get("details", self._details) or self._details
         self._metadata_json = payload.get("metadata_json", self._metadata_json) or self._metadata_json
         cover_path = payload.get("cover", "")
-        cover_applied = False
-        if cover_path:
-            try:
-                pm = QPixmap(cover_path)
-                if not pm.isNull():
-                    scaled = pm.scaled(self._cover_lbl.width(), self._cover_lbl.height(),
-                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    self._cover_lbl.setPixmap(scaled)
-                    self._cover_lbl.setText("")
-                    cover_applied = True
-            except Exception:
-                logger.debug("Cover pixmap load failed for %s: %s",
-                             cover_path, traceback.format_exc())
+        cover_applied = self._apply_cover_path(cover_path)
+        if not cover_applied:
+            cover_applied = self._apply_cover_path(
+                self._book.get("_cached_cover_path", ""))
         if not cover_applied:
             # No real cover could be extracted — keep the Halgakos branding
             # in place so the details dialog never shows an empty box.
