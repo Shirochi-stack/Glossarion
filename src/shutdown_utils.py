@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import shutil
 import concurrent.futures
+import uuid
 from contextlib import contextmanager
 from typing import Callable, Iterable, Optional
 
@@ -20,6 +21,16 @@ from typing import Callable, Iterable, Optional
 _last_qt_shutdown_drain_at = 0.0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
 _WINDOWS_SW_HIDE = 0
+_BROWSER_STATE_CLEANUP_DIRS = (
+    "authnd_browser",
+    "gemini_free_browser",
+    "qtwebengine_requests",
+)
+_BROWSER_STATE_CLEANUP_HANDOFF_DIR = ".startup_cleanup_deleting"
+_BROWSER_STATE_HELPER_ENV_VARS = (
+    "AUTHND_TOKEN_HELPER",
+    "GEMINI_FREE_HELPER",
+)
 
 
 def subprocess_no_window_kwargs(**kwargs):
@@ -130,6 +141,210 @@ def _run_cleanup_fns(cleanup_fns: Optional[Iterable[Callable[[], None]]]) -> Non
         except Exception:
             # Best-effort cleanup
             pass
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_browser_state_helper_process() -> bool:
+    return any(_truthy_env(name) for name in _BROWSER_STATE_HELPER_ENV_VARS)
+
+
+def _add_glossarion_state_candidate(candidates, base, *parts) -> None:
+    if not base:
+        return
+    try:
+        path = os.path.join(os.path.expandvars(os.path.expanduser(str(base))), *parts)
+        candidates.append(os.path.abspath(path))
+    except Exception:
+        pass
+
+
+def glossarion_state_roots_for_shutdown() -> list[str]:
+    """Return existing user-state roots that may contain browser-generated files."""
+    candidates = []
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        _add_glossarion_state_candidate(candidates, home, ".glossarion")
+        _add_glossarion_state_candidate(candidates, home, "Library", "Application Support", "Glossarion")
+        _add_glossarion_state_candidate(candidates, home, ".local", "share", "Glossarion")
+        _add_glossarion_state_candidate(candidates, home, ".config", "Glossarion")
+
+    for env_name in ("APPDATA", "LOCALAPPDATA", "XDG_DATA_HOME", "XDG_CONFIG_HOME"):
+        _add_glossarion_state_candidate(candidates, os.environ.get(env_name), "Glossarion")
+
+    roots = []
+    seen = set()
+    for path in candidates:
+        try:
+            if not os.path.isdir(path):
+                continue
+            key = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+        except Exception:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(path)
+    return roots
+
+
+def _path_is_under_root(path: str, root: str) -> bool:
+    try:
+        path_abs = os.path.abspath(path)
+        root_abs = os.path.abspath(root)
+        return os.path.commonpath([path_abs, root_abs]) == root_abs
+    except Exception:
+        return False
+
+
+def _browser_cleanup_target(root: str, dirname: str) -> Optional[str]:
+    if dirname not in _BROWSER_STATE_CLEANUP_DIRS:
+        return None
+    try:
+        root_abs = os.path.abspath(root)
+        target = os.path.abspath(os.path.join(root_abs, dirname))
+        if os.path.basename(target) != dirname:
+            return None
+        if not _path_is_under_root(target, root_abs):
+            return None
+        return target
+    except Exception:
+        return None
+
+
+def _rmtree_onerror(func, path, exc_info) -> None:
+    del exc_info
+    try:
+        os.chmod(path, 0o700)
+    except Exception:
+        pass
+    func(path)
+
+
+def _remove_path_once(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        if os.path.islink(path) or os.path.isfile(path):
+            os.remove(path)
+            return True
+        if os.path.isdir(path):
+            shutil.rmtree(path, onerror=_rmtree_onerror)
+            return True
+    except FileNotFoundError:
+        return False
+    return False
+
+
+def _unique_cleanup_handoff_path(root: str, dirname: str) -> str:
+    handoff_root = os.path.join(root, _BROWSER_STATE_CLEANUP_HANDOFF_DIR)
+    os.makedirs(handoff_root, exist_ok=True)
+    safe_name = os.path.basename(dirname.rstrip("/\\") or "cleanup")
+    return os.path.join(handoff_root, f"{safe_name}-{os.getpid()}-{uuid.uuid4().hex}")
+
+
+def _sweep_browser_cleanup_handoff(root: str, stats: dict) -> None:
+    handoff_root = os.path.join(root, _BROWSER_STATE_CLEANUP_HANDOFF_DIR)
+    try:
+        entries = os.listdir(handoff_root)
+    except FileNotFoundError:
+        return
+    except Exception:
+        stats["failed"] += 1
+        return
+
+    for entry in entries:
+        path = os.path.abspath(os.path.join(handoff_root, entry))
+        if not _path_is_under_root(path, handoff_root):
+            stats["failed"] += 1
+            continue
+        try:
+            if _remove_path_once(path):
+                stats["removed"] += 1
+            elif os.path.lexists(path):
+                stats["failed"] += 1
+        except Exception:
+            stats["failed"] += 1
+
+    try:
+        os.rmdir(handoff_root)
+    except OSError:
+        pass
+    except Exception:
+        pass
+
+
+def _remove_or_handoff_browser_state(root: str, target: str, stats: dict) -> None:
+    if not os.path.lexists(target):
+        return
+
+    try:
+        if _remove_path_once(target):
+            stats["removed"] += 1
+            return
+    except Exception:
+        pass
+
+    try:
+        handoff_path = _unique_cleanup_handoff_path(root, os.path.basename(target))
+        os.rename(target, handoff_path)
+        stats["moved"] += 1
+    except FileNotFoundError:
+        return
+    except Exception:
+        stats["failed"] += 1
+        return
+
+    try:
+        if _remove_path_once(handoff_path):
+            stats["removed"] += 1
+        elif os.path.lexists(handoff_path):
+            stats["failed"] += 1
+    except Exception:
+        stats["failed"] += 1
+    try:
+        os.rmdir(os.path.dirname(handoff_path))
+    except OSError:
+        pass
+    except Exception:
+        pass
+
+
+def cleanup_browser_generated_state_for_shutdown() -> dict:
+    """Remove generated Qt/Chromium browser state without touching user config."""
+    stats = {
+        "roots": 0,
+        "removed": 0,
+        "moved": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    if _is_browser_state_helper_process():
+        stats["skipped"] = 1
+        return stats
+
+    roots = glossarion_state_roots_for_shutdown()
+    stats["roots"] = len(roots)
+    for root in roots:
+        _sweep_browser_cleanup_handoff(root, stats)
+        for dirname in _BROWSER_STATE_CLEANUP_DIRS:
+            target = _browser_cleanup_target(root, dirname)
+            if not target:
+                continue
+            _remove_or_handoff_browser_state(root, target, stats)
+
+    if stats["removed"] or stats["moved"] or stats["failed"]:
+        try:
+            print(
+                "[CLOSE] Browser state cleanup: "
+                f"removed={stats['removed']}, moved={stats['moved']}, "
+                f"failed={stats['failed']}, roots={stats['roots']}"
+            )
+        except Exception:
+            pass
+    return stats
 
 
 def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> None:
@@ -1137,6 +1352,7 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     # bootloader tries to rmtree it after we return. The helper includes a
     # native Windows fallback for Lite builds where psutil is missing/broken.
     _terminate_all_children_for_shutdown(timeout=1.5)
+    cleanup_browser_generated_state_for_shutdown()
     _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
     # Disabled by default. Killing our own process tree with taskkill can
     # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and

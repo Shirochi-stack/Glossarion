@@ -591,6 +591,55 @@ def test_sdlxliff_review_extra_initial_heading_does_not_offset_paragraphs(tmp_pa
     assert piece["rows"][2]["target"] == "Translated paragraph two"
 
 
+def test_sdlxliff_review_count_mismatch_promotes_top_skewed_row_to_yellow(tmp_path):
+    sidecar = tmp_path / "response_chapter_skewed_extra.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>그들은 경고를 지켰다.</p>"
+        "<p>결국 그들은 경고를 지켰다.</p>"
+        "<p>마지막 문장입니다.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>They kept the warning.</p>"
+        "<p>In the end, they acted as if keeping their warning. Instead of her mother's eyes, "
+        "they plucked out her own eyeball and made her swallow it, and her ear was torn off.</p>"
+        "<p>This is the closing line.</p>"
+        "<p>This is an added target row.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_skewed.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_skewed_extra.html"})
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 4
+    assert piece["mismatch"] is True
+    assert piece["red_count"] == 1
+    assert piece["yellow_count"] == 1
+    promoted = [row for row in piece["rows"] if row.get("reason", "").startswith("top skewed ratio")]
+    assert len(promoted) == 1
+    assert promoted[0]["source"] == "결국 그들은 경고를 지켰다."
+    assert promoted[0]["status"] == "yellow"
+    assert piece["rows"][-1]["status"] == "red"
+
+
 def test_sdlxliff_review_heading_to_paragraph_mismatch_is_yellow(tmp_path):
     sidecar = tmp_path / "response_chapter_heading_to_p.html.sdlxliff"
     source_html = "<html><body><h1>Source heading</h1></body></html>"

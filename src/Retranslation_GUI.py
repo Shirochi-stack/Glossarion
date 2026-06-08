@@ -1579,6 +1579,53 @@ class SDLXLIFFReviewDialog(QDialog):
         return "green", "ok"
 
     @staticmethod
+    def _clear_top_skew_promotions(rows):
+        for row in rows or []:
+            if row.pop("_top_skew_promoted", False):
+                row["status"] = "green"
+                row["reason"] = "ok"
+
+    @staticmethod
+    def _row_length_ratio(row):
+        source_text = str((row or {}).get("source", "") or "").strip()
+        target_text = str((row or {}).get("target", "") or "").strip()
+        if not source_text or not target_text:
+            return None
+        if not (row or {}).get("source_tag") or not (row or {}).get("target_tag"):
+            return None
+        return len(target_text) / max(1, len(source_text))
+
+    def _promote_top_skewed_row_for_count_mismatch(self, rows, source_count, target_count):
+        if source_count == target_count:
+            return False
+        if not any(row.get("status") == "red" for row in rows or []):
+            return False
+
+        min_skew_score = 1.35
+        best_row = None
+        best_ratio = None
+        best_score = None
+        target_added = target_count > source_count
+        for row in rows or []:
+            if row.get("status") not in {"green", "yellow"}:
+                continue
+            ratio = self._row_length_ratio(row)
+            if ratio is None:
+                continue
+            score = ratio if target_added else (1.0 / max(ratio, 0.0001))
+            if best_score is None or score > best_score:
+                best_row = row
+                best_ratio = ratio
+                best_score = score
+
+        if not best_row or best_score is None or best_score < min_skew_score or best_row.get("status") != "green":
+            return False
+        best_row["status"] = "yellow"
+        best_row["reason"] = f"top skewed ratio ({best_ratio:.2f}x)"
+        best_row["_top_skew_promoted"] = True
+        return True
+
+    @staticmethod
     def _heading_tag_level_changed(source_tag, target_tag):
         source_tag = str(source_tag or "").strip().lower()
         target_tag = str(target_tag or "").strip().lower()
@@ -1683,6 +1730,8 @@ class SDLXLIFFReviewDialog(QDialog):
         rows = piece.get("rows") or []
         source_count = self._review_piece_non_empty_count(rows, "source")
         target_count = self._review_piece_non_empty_count(rows, "target")
+        self._clear_top_skew_promotions(rows)
+        self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count)
         red_count = sum(1 for row in rows if row.get("status") == "red")
         yellow_count = sum(1 for row in rows if row.get("status") == "yellow")
         piece["source_count"] = source_count
@@ -1932,6 +1981,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 })
             source_count = len(source_review_units)
             target_count = len(target_review_units)
+            if self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count):
+                yellow_count += 1
             count_ratio = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
             piece = {
                 "path": path,
