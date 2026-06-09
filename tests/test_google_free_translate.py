@@ -302,6 +302,49 @@ def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
     )
 
 
+def test_auto_argos_fallback_reports_failed_google_endpoints(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+    _install_fake_argos(monkeypatch, lambda _text: "Hello")
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        raise RuntimeError(f"blocked {url}")
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        raise RuntimeError(f"blocked {url}")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+    monkeypatch.setattr("google_free_translate.requests.get", fake_get)
+
+    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    translator.rate_limit = 0
+
+    result = translator.translate("안녕")
+
+    assert result["provider"] == "argos"
+    assert result["translatedText"] == "Hello"
+    assert result["fallback_from_provider"] == "google"
+    assert result["fallback_failed_endpoints"] == [
+        "translate.google.co.in/single",
+        "translate.google.com/single",
+        "clients5.google.com/t",
+        "clients5.google.com/single",
+        "clients1.google.com/single",
+        "clients3.google.com/t",
+        "translate.googleapis.com/single",
+    ]
+    assert result["fallback_note"] == (
+        "Auto fell back to Argos after Google endpoints failed: "
+        "translate.google.co.in/single, translate.google.com/single, clients5.google.com/t, "
+        "clients5.google.com/single, clients1.google.com/single, clients3.google.com/t, "
+        "translate.googleapis.com/single"
+    )
+
+
 def test_argos_fallback_translates_marked_html_segments_without_tag_bleed(monkeypatch):
     monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", True, raising=False)
     calls = _install_fake_argos(

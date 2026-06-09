@@ -1385,6 +1385,10 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "self._review_loading_minimum_ms = 10" in source
     assert "_start_tooltip_translation" in source
     assert "_translate_single_row_tooltip" in source
+    assert "_machine_translation_result_note" in source
+    assert "_append_machine_translation_note" in source
+    assert "fallback_note" in source
+    assert "fallback_failed_endpoints" in source
     assert "setSelectionMode(QAbstractItemView.ExtendedSelection)" in source
     assert "setContextMenuPolicy(Qt.NoContextMenu)" in source
     assert "self.piece_list.viewport().installEventFilter(self)" in source
@@ -1676,10 +1680,15 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_refresh_visible_review_row_source_previews" not in apply_body
     assert "_discard_piece_page" not in apply_body
     assert "_render_piece" not in apply_body
+    assert "message = f\"Generated {len(translations)} {provider_label} machine translation preview(s)\"" in apply_body
+    assert "if error:" in apply_body
+    assert "message = f\"{message}. {error}\"" in apply_body
     batch_start = source.index("def _start_piece_list_tooltip_translation")
     batch_end = source.index("def _translate_piece_rows_tooltips", batch_start)
     batch_body = source[batch_start:batch_end]
     assert "_discard_piece_page" not in batch_body
+    assert "result_note = self._machine_translation_result_note(result)" in batch_body
+    assert "error = self._append_machine_translation_note(error, result_note)" in batch_body
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():

@@ -1268,6 +1268,28 @@ class SDLXLIFFReviewDialog(QDialog):
     def _machine_translation_pending_text(self):
         return f"⏳ Translating with {self._machine_translation_provider_label()}..."
 
+    @staticmethod
+    def _machine_translation_result_note(result):
+        if not isinstance(result, dict):
+            return ""
+        note = str(result.get("fallback_note") or "").strip()
+        if note:
+            return note
+        endpoints = result.get("fallback_failed_endpoints")
+        if isinstance(endpoints, (list, tuple)) and endpoints:
+            return "Auto fell back after Google endpoints failed: " + ", ".join(str(item) for item in endpoints if item)
+        return ""
+
+    @staticmethod
+    def _append_machine_translation_note(message, note):
+        message = str(message or "").strip()
+        note = str(note or "").strip()
+        if not note:
+            return message
+        if not message:
+            return note
+        return f"{message} {note}"
+
     def _update_machine_translation_button_tooltip(self):
         try:
             provider_label = self._machine_translation_provider_label()
@@ -5163,6 +5185,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 batch_html = self._tooltip_batch_html(work)
                 result = translator.translate(batch_html)
                 result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
+                result_note = self._machine_translation_result_note(result)
                 translated_html = str(result.get("translatedText") or "").strip()
                 translations = self._extract_tooltip_batch_translations(translated_html, work)
                 translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
@@ -5171,6 +5194,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     translations = {}
                 elif validation_error:
                     error = validation_error
+                error = self._append_machine_translation_note(error, result_note)
                 self._tooltip_translation_progress.emit(1, 1)
             except Exception as exc:
                 error = str(exc)
@@ -5223,6 +5247,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     batch_html = self._tooltip_batch_html(work)
                     result = translator.translate(batch_html)
                     result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
+                    result_note = self._machine_translation_result_note(result)
                     translated_html = str(result.get("translatedText") or "").strip()
                     translations = self._extract_tooltip_batch_translations(translated_html, work)
                     translations, validation_error = self._validate_tooltip_batch_translations(translations, work)
@@ -5231,6 +5256,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         translations = {}
                     elif validation_error:
                         error = validation_error
+                    error = self._append_machine_translation_note(error, result_note)
                     translated_count += len(translations)
                 except Exception as exc:
                     error = str(exc)
@@ -5357,7 +5383,10 @@ class SDLXLIFFReviewDialog(QDialog):
         elif translations:
             try:
                 provider_label = self._machine_translation_provider_label()
-                self.save_status_label.setText(f"Generated {len(translations)} {provider_label} machine translation preview(s)")
+                message = f"Generated {len(translations)} {provider_label} machine translation preview(s)"
+                if error:
+                    message = f"{message}. {error}"
+                self.save_status_label.setText(message)
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             except Exception:
                 pass
@@ -5376,9 +5405,12 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         try:
             if int(translated_count or 0) > 0:
-                self.save_status_label.setText(
+                message = (
                     f"Generated {int(translated_count)} {self._machine_translation_provider_label()} machine translation preview(s) across {int(piece_count or 0)} entries"
                 )
+                if error:
+                    message = f"{message}. {error}"
+                self.save_status_label.setText(message)
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             elif error:
                 self.save_status_label.setText(f"Machine translation preview failed: {error}")

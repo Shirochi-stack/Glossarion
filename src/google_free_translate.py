@@ -305,6 +305,31 @@ class GoogleFreeTranslateNew:
             'error': str(error),
         }
 
+    @staticmethod
+    def _brief_google_endpoint_failure_labels(errors) -> list:
+        labels = []
+        seen = set()
+        for error in errors or []:
+            endpoint = str(error or "").split(": ", 1)[0].strip()
+            try:
+                parsed = urllib.parse.urlparse(endpoint)
+                host = parsed.netloc or endpoint
+                path = parsed.path.rsplit("/", 1)[-1] or parsed.path.strip("/")
+                label = f"{host}/{path}" if path else host
+            except Exception:
+                label = endpoint
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+        return labels
+
+    @classmethod
+    def _google_fallback_note(cls, errors) -> str:
+        labels = cls._brief_google_endpoint_failure_labels(errors)
+        if not labels:
+            return ""
+        return f"Auto fell back to Argos after Google endpoints failed: {', '.join(labels)}"
+
     def _stop_requested(self) -> bool:
         if not getattr(self, "honor_global_stop", True):
             return False
@@ -492,6 +517,11 @@ class GoogleFreeTranslateNew:
             argos_result = self._translate_via_argos(text, source_lang, target_lang)
             if argos_result:
                 self.logger.info("✅ Argos Translate fallback successful")
+                failed_endpoints = self._brief_google_endpoint_failure_labels(all_errors)
+                argos_result = dict(argos_result)
+                argos_result["fallback_from_provider"] = "google"
+                argos_result["fallback_failed_endpoints"] = failed_endpoints
+                argos_result["fallback_note"] = self._google_fallback_note(all_errors)
                 # Cache the result to avoid repeated fallback overhead
                 with self.cache_lock:
                     self.cache[cache_key] = argos_result
