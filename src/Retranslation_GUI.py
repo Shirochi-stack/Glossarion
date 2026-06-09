@@ -166,6 +166,7 @@ class SDLXLIFFReviewDialog(QDialog):
     _tooltip_translation_batch_finished = Signal(int, int, str)
     _review_data_preload_finished = Signal(int, object)
     _review_refresh_scan_finished = Signal(int, object)
+    _review_piece_reload_finished = Signal(int, object)
     _review_generation_progress = Signal(object)
 
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
@@ -318,6 +319,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_refresh_scan_force = False
         self._review_refresh_scan_validate = False
         self._review_refresh_scan_current_path = None
+        self._review_piece_reload_token = 0
+        self._review_piece_reload_running = False
+        self._review_piece_reload_requested = False
         self._seamless_review_old_page = None
         self._review_context_menu_open = False
         self._review_text_context_menu = None
@@ -344,6 +348,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         self._review_data_preload_finished.connect(self._apply_review_data_preload)
         self._review_refresh_scan_finished.connect(self._apply_review_refresh_scan)
+        self._review_piece_reload_finished.connect(self._apply_async_review_piece_reload)
         self._review_generation_progress.connect(self._apply_review_generation_progress)
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
@@ -637,6 +642,8 @@ class SDLXLIFFReviewDialog(QDialog):
             "machine_translation_signature": last_mt_signature,
             "autogen_signature": last_autogen_signature,
             "sidecar_changed": False,
+            "sidecar_path_set_changed": False,
+            "changed_sidecar_paths": [],
             "machine_translation_changed": False,
             "autogen_changed": False,
             "sidecars_generated": False,
@@ -671,6 +678,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 "machine_translation_signature": mt_signature,
                 "autogen_signature": autogen_signature,
                 "sidecar_changed": sidecar_changed,
+                "sidecar_path_set_changed": self._review_signature_path_set_changed(last_review_signature, review_signature),
+                "changed_sidecar_paths": self._changed_review_signature_paths(last_review_signature, review_signature, stats),
                 "machine_translation_changed": mt_changed,
                 "autogen_changed": autogen_changed,
                 "sidecars_generated": generated,
@@ -679,6 +688,40 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception as exc:
             result["error"] = str(exc)
         return result
+
+    @staticmethod
+    def _review_signature_path_map(signature):
+        path_map = {}
+        for entry in signature or ():
+            try:
+                if not entry or entry[0] != "sdlxliff" or len(entry) < 4:
+                    continue
+                path_map[str(entry[1])] = tuple(entry[2:])
+            except Exception:
+                continue
+        return path_map
+
+    @classmethod
+    def _review_signature_path_set_changed(cls, old_signature, new_signature):
+        old_paths = set(cls._review_signature_path_map(old_signature))
+        new_paths = set(cls._review_signature_path_map(new_signature))
+        return old_paths != new_paths
+
+    @classmethod
+    def _changed_review_signature_paths(cls, old_signature, new_signature, stats=None):
+        old_map = cls._review_signature_path_map(old_signature)
+        new_map = cls._review_signature_path_map(new_signature)
+        changed = {
+            path for path in (set(old_map) | set(new_map))
+            if old_map.get(path) != new_map.get(path)
+        }
+        if isinstance(stats, dict):
+            for path in stats.get("paths") or []:
+                try:
+                    changed.add(os.path.normcase(os.path.abspath(path)))
+                except Exception:
+                    continue
+        return sorted(changed)
 
     def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None):
         signature = current_signature or ()
@@ -991,7 +1034,247 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _queue_async_review_piece_reload(
+        self,
+        current_path=None,
+        signature=None,
+        autogen_signature=None,
+        mt_signature=None,
+        stats=None,
+        changed_paths=None,
+    ):
+        try:
+            if getattr(self, "_review_piece_reload_running", False):
+                self._review_piece_reload_requested = True
+                return True
+            selected_path = os.path.abspath(current_path or self.current_path or "")
+            try:
+                row = self.piece_list.currentRow()
+                if 0 <= row < len(self.pieces):
+                    selected_path = os.path.abspath(self.pieces[row].get("path") or selected_path)
+            except Exception:
+                pass
+            self._save_current_review_scroll()
+            self._flush_target_edits()
+            if selected_path and os.path.isfile(selected_path):
+                self.current_path = selected_path
+            changed_path_set = set()
+            for path in changed_paths or []:
+                try:
+                    changed_path_set.add(os.path.normcase(os.path.abspath(path)))
+                except Exception:
+                    continue
+            piece_snapshot = []
+            for row, piece in enumerate(list(self.pieces or [])):
+                try:
+                    path = os.path.normcase(os.path.abspath(piece.get("path") or ""))
+                except Exception:
+                    path = ""
+                piece_snapshot.append({
+                    "row": row,
+                    "path": piece.get("path") or "",
+                    "path_norm": path,
+                    "review_label": piece.get("review_label"),
+                    "opf_position": piece.get("opf_position"),
+                    "chapter_num": piece.get("chapter_num"),
+                    "output_name": piece.get("output_name"),
+                })
+            self._review_piece_reload_token = int(getattr(self, "_review_piece_reload_token", 0)) + 1
+            token = self._review_piece_reload_token
+            self._review_piece_reload_running = True
+            self._review_piece_reload_requested = False
+            self._refreshing_review_data = True
+            try:
+                self.save_status_label.setText("Refreshing SDLXLIFF entries...")
+            except Exception:
+                pass
+            self._hide_generation_progress()
+
+            def _worker():
+                result = {
+                    "pieces": [],
+                    "current_path": selected_path,
+                    "review_signature": signature,
+                    "autogen_signature": autogen_signature,
+                    "machine_translation_signature": mt_signature,
+                    "stats": stats,
+                    "partial": bool(changed_path_set),
+                    "pieces_by_path": {},
+                    "removed_paths": [],
+                    "error": "",
+                }
+                try:
+                    if changed_path_set:
+                        progress_map = self._read_progress_metadata()
+                        spine_positions = self._read_spine_positions(allow_deep_search=False)
+                        snapshot_by_path = {
+                            item.get("path_norm"): item
+                            for item in piece_snapshot
+                            if item.get("path_norm")
+                        }
+                        for path_norm in sorted(changed_path_set):
+                            snapshot = snapshot_by_path.get(path_norm)
+                            if not snapshot:
+                                result["partial"] = False
+                                result["pieces"] = self._load_pieces(stream_sidebar=False)
+                                break
+                            path = snapshot.get("path") or path_norm
+                            if not os.path.isfile(path):
+                                result["removed_paths"].append(path_norm)
+                                continue
+                            metadata = self._sidecar_metadata(
+                                path,
+                                int(snapshot.get("row") or 0),
+                                progress_map,
+                                spine_positions,
+                            )
+                            if snapshot.get("review_label"):
+                                metadata["label"] = snapshot.get("review_label")
+                            if snapshot.get("opf_position") is not None:
+                                metadata["opf_position"] = snapshot.get("opf_position")
+                            if snapshot.get("chapter_num") is not None:
+                                metadata["chapter_num"] = snapshot.get("chapter_num")
+                            if snapshot.get("output_name"):
+                                metadata["output_name"] = snapshot.get("output_name")
+                            piece = self._build_piece(path, int(snapshot.get("row") or 0), metadata)
+                            if self._review_piece_is_empty_sidecar(piece):
+                                result["removed_paths"].append(path_norm)
+                            else:
+                                result["pieces_by_path"][path_norm] = piece
+                    else:
+                        result["pieces"] = self._load_pieces(stream_sidebar=False)
+                except Exception as exc:
+                    result["error"] = str(exc)
+                self._review_piece_reload_finished.emit(token, result)
+
+            threading.Thread(target=_worker, name="sdlxliff-review-piece-reload", daemon=True).start()
+            return True
+        except Exception as exc:
+            self._review_piece_reload_running = False
+            self._refreshing_review_data = False
+            try:
+                self.save_status_label.setText(f"SDLXLIFF refresh failed: {exc}")
+            except Exception:
+                pass
+            return False
+
+    def _apply_async_review_piece_reload(self, token, result):
+        try:
+            if int(token) != int(getattr(self, "_review_piece_reload_token", -1)):
+                return
+            if not isinstance(result, dict):
+                result = {"pieces": [], "error": "Invalid SDLXLIFF reload result"}
+            if result.get("error"):
+                try:
+                    self.save_status_label.setText(f"SDLXLIFF refresh failed: {result.get('error')}")
+                except Exception:
+                    pass
+                return
+            if result.get("partial"):
+                pieces_by_path = result.get("pieces_by_path") if isinstance(result.get("pieces_by_path"), dict) else {}
+                removed_paths = set(result.get("removed_paths") or [])
+                path_to_row = {}
+                for row, piece in enumerate(self.pieces or []):
+                    try:
+                        path_to_row[os.path.normcase(os.path.abspath(piece.get("path") or ""))] = row
+                    except Exception:
+                        continue
+                changed_rows = []
+                rows_to_remove = []
+                for path_norm in removed_paths:
+                    row = path_to_row.get(path_norm)
+                    if row is not None:
+                        rows_to_remove.append(row)
+                for path_norm, piece in pieces_by_path.items():
+                    row = path_to_row.get(path_norm)
+                    if row is None:
+                        continue
+                    piece["index"] = row
+                    self.pieces[row] = piece
+                    self._invalidate_piece_page_for_refresh(row)
+                    self._refresh_piece_list_item(row)
+                    changed_rows.append(row)
+                if rows_to_remove:
+                    for row in sorted(rows_to_remove, reverse=True):
+                        self._discard_piece_page(row)
+                        try:
+                            self.pieces.pop(row)
+                            self.piece_list.takeItem(row)
+                        except Exception:
+                            pass
+                    for row, piece in enumerate(self.pieces):
+                        piece["index"] = row
+                    current_path = os.path.abspath(result.get("current_path") or self.current_path or "")
+                    self._populate_piece_list()
+                    if current_path:
+                        self._select_piece_for_path(current_path)
+                self._last_review_signature = result.get("review_signature")
+                self._last_machine_translation_signature = result.get("machine_translation_signature")
+                self._last_autogen_signature = result.get("autogen_signature")
+                summary = self._review_generation_summary(result.get("stats"))
+                if summary:
+                    try:
+                        self.save_status_label.setText(summary)
+                    except Exception:
+                        pass
+                elif changed_rows:
+                    try:
+                        self.save_status_label.setText(f"Refreshed {len(changed_rows)} SDLXLIFF entr{'y' if len(changed_rows) == 1 else 'ies'}")
+                    except Exception:
+                        pass
+                current_row = self.piece_list.currentRow()
+                if current_row in changed_rows and self.isVisible():
+                    self._refresh_piece_header(current_row)
+                    QTimer.singleShot(0, lambda row=current_row: self._render_piece(row, show_loading=False))
+                return
+            pieces = result.get("pieces") if isinstance(result.get("pieces"), list) else []
+            selected_path = os.path.abspath(result.get("current_path") or self.current_path or "")
+            if selected_path and os.path.isfile(selected_path):
+                self.current_path = selected_path
+            self._render_token += 1
+            self._clear_cached_review_pages()
+            self._streamed_piece_list_populated = False
+            self.pieces = pieces
+            self._review_data_loaded = True
+            self._populate_piece_list()
+            self._last_review_signature = result.get("review_signature")
+            self._last_machine_translation_signature = result.get("machine_translation_signature")
+            self._last_autogen_signature = result.get("autogen_signature")
+            self._start_review_data_preload()
+            summary = self._review_generation_summary(result.get("stats"))
+            if summary:
+                try:
+                    self.save_status_label.setText(summary)
+                except Exception:
+                    pass
+            elif self.pieces:
+                try:
+                    self.save_status_label.setText(f"Refreshed {len(self.pieces)} SDLXLIFF entr{'y' if len(self.pieces) == 1 else 'ies'}")
+                except Exception:
+                    pass
+            if self.pieces and self.isVisible():
+                row = self.piece_list.currentRow()
+                if row < 0:
+                    row = self._initial_piece_row
+                QTimer.singleShot(0, lambda row=row: self._render_piece(row, show_loading=False))
+            elif not self.pieces:
+                try:
+                    self.loading_label.setText("No SDLXLIFF review files found")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            self._refreshing_review_data = False
+            self._review_piece_reload_running = False
+            self._hide_generation_progress()
+            self._queue_stop_refresh_button_animation(150)
+            if getattr(self, "_review_piece_reload_requested", False):
+                self._review_piece_reload_requested = False
+                self._queue_review_refresh_scan(force=False, validate=True, current_path=self.current_path, delay_ms=350)
+
     def _apply_review_refresh_scan(self, token, result):
+        defer_stop_refresh_animation = False
         try:
             if int(token) != int(getattr(self, "_review_refresh_scan_token", -1)):
                 return
@@ -1042,6 +1325,25 @@ class SDLXLIFFReviewDialog(QDialog):
                         self.loading_label.setText("Loading SDLXLIFF review entries...")
                     except Exception:
                         pass
+                else:
+                    changed_paths = result.get("changed_sidecar_paths") if not result.get("sidecar_path_set_changed") else None
+                    if changed_paths is not None:
+                        changed_paths = self._refresh_visible_sidecar_paths(changed_paths)
+                        if not changed_paths:
+                            self._last_review_signature = signature
+                            self._last_machine_translation_signature = mt_signature
+                            self._last_autogen_signature = autogen_signature
+                            return
+                    defer_stop_refresh_animation = self._queue_async_review_piece_reload(
+                        current_path=result.get("current_path") or self.current_path,
+                        signature=signature,
+                        autogen_signature=autogen_signature,
+                        mt_signature=mt_signature,
+                        stats=stats,
+                        changed_paths=changed_paths,
+                    )
+                    if defer_stop_refresh_animation:
+                        return
                 self.refresh_review_data(
                     force=False,
                     current_path=result.get("current_path") or self.current_path,
@@ -1076,13 +1378,39 @@ class SDLXLIFFReviewDialog(QDialog):
         finally:
             self._sdlxliff_autogen_output_files = None
             self._review_refresh_scan_running = False
-            self._queue_stop_refresh_button_animation(150)
+            if not defer_stop_refresh_animation:
+                self._queue_stop_refresh_button_animation(150)
             if getattr(self, "_review_refresh_scan_requested", False):
                 force = bool(getattr(self, "_review_refresh_scan_force", False))
                 validate = bool(getattr(self, "_review_refresh_scan_validate", False))
                 current_path = getattr(self, "_review_refresh_scan_current_path", None) or self.current_path
                 self._review_refresh_scan_requested = False
                 self._queue_review_refresh_scan(force=force, validate=validate, current_path=current_path, delay_ms=350)
+
+    def _refresh_visible_sidecar_paths(self, changed_paths, max_background_updates=24):
+        paths = []
+        for path in changed_paths or []:
+            try:
+                paths.append(os.path.normcase(os.path.abspath(path)))
+            except Exception:
+                continue
+        if not paths:
+            return []
+        if len(paths) <= int(max_background_updates):
+            return paths
+        visible_paths = set()
+        try:
+            row = self.piece_list.currentRow()
+            if 0 <= row < len(self.pieces):
+                visible_paths.add(os.path.normcase(os.path.abspath(self.pieces[row].get("path") or "")))
+        except Exception:
+            pass
+        try:
+            if self.current_path:
+                visible_paths.add(os.path.normcase(os.path.abspath(self.current_path)))
+        except Exception:
+            pass
+        return [path for path in paths if path in visible_paths]
 
     def _current_review_signature(self):
         signature = []
@@ -1974,7 +2302,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _manual_review_refresh(self):
         self._start_refresh_button_animation()
-        self._queue_review_refresh_scan(force=False, validate=True, current_path=self.current_path, delay_ms=0)
+        self._queue_review_refresh_scan(force=False, validate=False, current_path=self.current_path, delay_ms=0)
 
     def _silent_review_refresh(self):
         try:
@@ -3911,7 +4239,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     break
                 done, pending = wait(pending, timeout=0.025, return_when=FIRST_COMPLETED)
                 if not done:
-                    self._pump_review_loading_events(max_ms=4)
+                    if stream_sidebar:
+                        self._pump_review_loading_events(max_ms=4)
                     continue
                 for future in done:
                     idx = futures[future]
@@ -3922,7 +4251,8 @@ class SDLXLIFFReviewDialog(QDialog):
                         pieces[idx] = self._build_piece(path, idx, metadata)
                         pieces[idx]["error"] = str(exc)
                 flush_streamed_pieces(limit=12)
-                self._pump_review_loading_events(max_ms=4)
+                if stream_sidebar:
+                    self._pump_review_loading_events(max_ms=4)
         if stream_sidebar:
             flush_streamed_pieces()
             self._finish_streaming_piece_list()
@@ -4196,6 +4526,29 @@ class SDLXLIFFReviewDialog(QDialog):
                 QTimer.singleShot(90, lambda row=current_row: self._queue_review_page_preloads(row))
         except Exception:
             pass
+
+    def _invalidate_piece_page_for_refresh(self, row):
+        if row == self._preload_render_row:
+            self._cancel_review_preload(discard_page=False)
+        try:
+            if 0 <= row < len(self.pieces):
+                self.pieces[row].pop("_render_model", None)
+        except Exception:
+            pass
+        try:
+            page = self._piece_pages.pop(row, None)
+            self._piece_render_complete.discard(row)
+        except Exception:
+            page = None
+        if page is None:
+            return
+        try:
+            if self.rows_stack.currentWidget() is page:
+                self._seamless_review_old_page = page
+                return
+        except Exception:
+            pass
+        self._remove_review_page_widget(page)
 
     def _set_review_context_menu_open(self, open_):
         self._review_context_menu_open = bool(open_)

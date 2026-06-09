@@ -1596,7 +1596,7 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     ]
     assert "self._queue_review_refresh_scan(" in manual_refresh_body
     assert "force=False" in manual_refresh_body
-    assert "validate=True" in manual_refresh_body
+    assert "validate=False" in manual_refresh_body
     assert "self._silent_review_refresh()" not in manual_refresh_body
     flag_accuracy_body = source[
         source.index("def _flag_current_piece_inaccurate_translations"):
@@ -1739,22 +1739,51 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "_review_data_preload_finished.connect(self._apply_review_data_preload)" in source
     assert "_review_refresh_scan_finished = Signal(int, object)" in source
     assert "_review_refresh_scan_finished.connect(self._apply_review_refresh_scan)" in source
+    assert "_review_piece_reload_finished = Signal(int, object)" in source
+    assert "_review_piece_reload_finished.connect(self._apply_async_review_piece_reload)" in source
     assert "def _queue_review_refresh_scan" in source
     assert "def _start_review_refresh_scan" in source
     assert "def _build_review_refresh_scan_result" in source
     assert "def _regenerate_review_sidecars_for_refresh_scan" in source
     assert "def _apply_review_refresh_scan" in source
+    assert "def _queue_async_review_piece_reload" in source
+    assert "def _apply_async_review_piece_reload" in source
+    assert "def _changed_review_signature_paths" in source
+    assert "def _review_signature_path_set_changed" in source
     assert "_review_refresh_scan_validate" in source
     assert "validate=validate" in source
     assert "_review_refresh_scan_running" in source
     assert "_review_refresh_scan_requested" in source
+    assert "_review_piece_reload_running" in source
+    assert "_review_piece_reload_requested" in source
     assert 'name="sdlxliff-review-refresh-scan"' in source
+    assert 'name="sdlxliff-review-piece-reload"' in source
     apply_scan_body = source[
         source.index("def _apply_review_refresh_scan"):
         source.index("def _current_review_signature", source.index("def _apply_review_refresh_scan"))
     ]
     assert 'initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)' in apply_scan_body
+    assert 'changed_paths = result.get("changed_sidecar_paths") if not result.get("sidecar_path_set_changed") else None' in apply_scan_body
+    assert "_queue_async_review_piece_reload(" in apply_scan_body
+    assert "changed_paths=changed_paths" in apply_scan_body
+    assert "defer_stop_refresh_animation" in apply_scan_body
     assert "seamless=not initial_load" in apply_scan_body
+    piece_reload_body = source[
+        source.index("def _queue_async_review_piece_reload"):
+        source.index("def _apply_async_review_piece_reload", source.index("def _queue_async_review_piece_reload"))
+    ]
+    assert "threading.Thread" in piece_reload_body
+    assert "self._load_pieces(stream_sidebar=False)" in piece_reload_body
+    assert "pieces_by_path" in piece_reload_body
+    assert "changed_path_set" in piece_reload_body
+    assert "_pump_review_loading_events" not in piece_reload_body
+    piece_reload_apply_body = source[
+        source.index("def _apply_async_review_piece_reload"):
+        source.index("def _apply_review_refresh_scan", source.index("def _apply_async_review_piece_reload"))
+    ]
+    assert 'if result.get("partial"):' in piece_reload_apply_body
+    assert "self._refresh_piece_list_item(row)" in piece_reload_apply_body
+    assert "self._populate_piece_list()" in piece_reload_apply_body
     assert "Loaded SDLXLIFF entry" in source
     refresh_signature = source[
         source.index("def refresh_review_data"):
