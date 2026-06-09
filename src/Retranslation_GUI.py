@@ -316,6 +316,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_refresh_scan_requested = False
         self._review_refresh_scan_queued = False
         self._review_refresh_scan_force = False
+        self._review_refresh_scan_validate = False
         self._review_refresh_scan_current_path = None
         self._seamless_review_old_page = None
         self._review_context_menu_open = False
@@ -324,6 +325,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._machine_translation_provider_menu = None
         self._generation_stream_pending_pieces = []
         self._generation_stream_finished_message = ""
+        self._generation_stream_preserve_after_finish = False
         self._generation_stream_flush_timer = QTimer(self)
         self._generation_stream_flush_timer.setSingleShot(True)
         self._generation_stream_flush_timer.timeout.connect(self._flush_generated_sidecar_stream_pieces)
@@ -555,7 +557,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         QTimer.singleShot(max(0, int(delay_ms)), _run_refresh)
 
-    def _queue_review_refresh_scan(self, force=False, current_path=None, delay_ms=350):
+    def _queue_review_refresh_scan(self, force=False, current_path=None, delay_ms=350, validate=False):
         try:
             if not bool(getattr(self, "_review_data_loaded", False)):
                 try:
@@ -564,6 +566,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 except Exception:
                     pass
             self._review_refresh_scan_force = bool(getattr(self, "_review_refresh_scan_force", False) or force)
+            self._review_refresh_scan_validate = bool(getattr(self, "_review_refresh_scan_validate", False) or validate)
             if current_path is not None:
                 self._review_refresh_scan_current_path = current_path
             elif not getattr(self, "_review_refresh_scan_current_path", None):
@@ -588,8 +591,10 @@ class SDLXLIFFReviewDialog(QDialog):
             self._review_refresh_scan_token = int(getattr(self, "_review_refresh_scan_token", 0)) + 1
             token = self._review_refresh_scan_token
             force = bool(getattr(self, "_review_refresh_scan_force", False))
+            validate = bool(getattr(self, "_review_refresh_scan_validate", False))
             current_path = getattr(self, "_review_refresh_scan_current_path", None) or self.current_path
             self._review_refresh_scan_force = False
+            self._review_refresh_scan_validate = False
             self._review_refresh_scan_current_path = None
             self._review_refresh_scan_requested = False
             self._review_refresh_scan_running = True
@@ -602,6 +607,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     token,
                     self._build_review_refresh_scan_result(
                         force=force,
+                        validate=validate,
                         current_path=current_path,
                         last_review_signature=last_review_signature,
                         last_mt_signature=last_mt_signature,
@@ -617,6 +623,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _build_review_refresh_scan_result(
         self,
         force=False,
+        validate=False,
         current_path=None,
         last_review_signature=None,
         last_mt_signature=None,
@@ -624,6 +631,7 @@ class SDLXLIFFReviewDialog(QDialog):
     ):
         result = {
             "force": bool(force),
+            "validate": bool(validate),
             "current_path": current_path,
             "review_signature": last_review_signature,
             "machine_translation_signature": last_mt_signature,
@@ -644,7 +652,7 @@ class SDLXLIFFReviewDialog(QDialog):
             autogen_changed = autogen_signature != last_autogen_signature
             stats = None
             generated = False
-            if force or sidecar_changed or autogen_changed:
+            if force or validate or sidecar_changed or autogen_changed:
                 stats = self._regenerate_review_sidecars_for_refresh_scan(
                     force=force,
                     previous_signature=last_autogen_signature,
@@ -761,6 +769,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._generation_stream_seen_paths = set()
             self._generation_stream_pending_pieces = []
             self._generation_stream_finished_message = ""
+            self._generation_stream_preserve_after_finish = False
             self._generation_stream_total = max(0, int(total or 0))
             self._generation_stream_progress_map = self._read_progress_metadata()
             self._generation_stream_spine_positions = self._read_spine_positions(allow_deep_search=False)
@@ -828,6 +837,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             self._generation_streaming_active = False
             self._review_data_loaded = bool(self.pieces)
+            self._generation_stream_preserve_after_finish = bool(self.pieces)
             if self.pieces:
                 row = self.piece_list.currentRow()
                 if row < 0:
@@ -1012,10 +1022,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     and (
                         getattr(self, "_generation_streaming_active", False)
                         or getattr(self, "_generation_stream_pending_pieces", None)
-                        or self.pieces
+                        or getattr(self, "_generation_stream_preserve_after_finish", False)
                     )
                 )
                 if preserve_generated_stream:
+                    self._generation_stream_preserve_after_finish = False
                     self._last_review_signature = signature
                     self._last_machine_translation_signature = mt_signature
                     self._last_autogen_signature = autogen_signature
@@ -1065,9 +1076,10 @@ class SDLXLIFFReviewDialog(QDialog):
             self._queue_stop_refresh_button_animation(150)
             if getattr(self, "_review_refresh_scan_requested", False):
                 force = bool(getattr(self, "_review_refresh_scan_force", False))
+                validate = bool(getattr(self, "_review_refresh_scan_validate", False))
                 current_path = getattr(self, "_review_refresh_scan_current_path", None) or self.current_path
                 self._review_refresh_scan_requested = False
-                self._queue_review_refresh_scan(force=force, current_path=current_path, delay_ms=350)
+                self._queue_review_refresh_scan(force=force, validate=validate, current_path=current_path, delay_ms=350)
 
     def _current_review_signature(self):
         signature = []
@@ -1959,7 +1971,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _manual_review_refresh(self):
         self._start_refresh_button_animation()
-        self._queue_review_refresh_scan(force=True, current_path=self.current_path, delay_ms=0)
+        self._queue_review_refresh_scan(force=False, validate=True, current_path=self.current_path, delay_ms=0)
 
     def _silent_review_refresh(self):
         try:

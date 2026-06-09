@@ -1595,7 +1595,8 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
     ]
     assert "self._queue_review_refresh_scan(" in manual_refresh_body
-    assert "force=True" in manual_refresh_body
+    assert "force=False" in manual_refresh_body
+    assert "validate=True" in manual_refresh_body
     assert "self._silent_review_refresh()" not in manual_refresh_body
     flag_accuracy_body = source[
         source.index("def _flag_current_piece_inaccurate_translations"):
@@ -1739,6 +1740,8 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "def _build_review_refresh_scan_result" in source
     assert "def _regenerate_review_sidecars_for_refresh_scan" in source
     assert "def _apply_review_refresh_scan" in source
+    assert "_review_refresh_scan_validate" in source
+    assert "validate=validate" in source
     assert "_review_refresh_scan_running" in source
     assert "_review_refresh_scan_requested" in source
     assert 'name="sdlxliff-review-refresh-scan"' in source
@@ -2857,6 +2860,60 @@ def test_sdlxliff_review_refresh_worker_regenerates_deleted_sidecar_folder(tmp_p
     assert result["sidecars_generated"] is True
     assert result["sidecar_changed"] is True
     assert sidecar.is_file()
+
+
+def test_sdlxliff_review_manual_validation_does_not_regenerate_current_sidecars(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output.name,
+                        "original_basename": source.name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._last_autogen_signature = None
+    dialog._sdlxliff_autogen_owner = mixin
+
+    assert dialog._maybe_regenerate_review_sidecars(force=True) is True
+    last_review_signature = dialog._current_review_signature()
+    last_mt_signature = dialog._current_machine_translation_signature()
+    last_autogen_signature = dialog._current_review_autogen_signature()
+
+    class FailingOwner:
+        def _generate_sdlxliff_sidecars_from_completed_entries(self, *args, **kwargs):
+            raise AssertionError("manual validation should not regenerate current sidecars")
+
+    dialog._sdlxliff_autogen_owner = FailingOwner()
+    result = dialog._build_review_refresh_scan_result(
+        force=False,
+        validate=True,
+        current_path=str(tmp_path / "SDLXLIFF" / "response_chapter0001.html.sdlxliff"),
+        last_review_signature=last_review_signature,
+        last_mt_signature=last_mt_signature,
+        last_autogen_signature=last_autogen_signature,
+    )
+
+    assert result["error"] == ""
+    assert result["stats"] is None
+    assert result["sidecars_generated"] is False
+    assert result["sidecar_changed"] is False
 
 
 def test_sdlxliff_review_refresh_does_not_generate_when_no_output_html_exists(tmp_path):
