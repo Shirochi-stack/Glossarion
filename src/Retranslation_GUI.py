@@ -2577,7 +2577,8 @@ class SDLXLIFFReviewDialog(QDialog):
         loading_progress = QProgressBar()
         loading_progress.setTextVisible(True)
         loading_progress.setFixedHeight(18)
-        loading_progress.setMaximumWidth(460)
+        loading_progress.setMinimumWidth(560)
+        loading_progress.setMaximumWidth(720)
         loading_progress.setStyleSheet(
             "QProgressBar { background-color:#202936; color:#d7ecff; border:1px solid #4a5568; "
             "border-radius:5px; text-align:center; font-size:9pt; font-weight:bold; }"
