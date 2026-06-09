@@ -2652,6 +2652,18 @@ class SDLXLIFFReviewDialog(QDialog):
             return []
 
     @staticmethod
+    def _annotate_review_tag_labels(units):
+        counts = Counter()
+        for unit in units or []:
+            tag = str((unit or {}).get("tag", "") or "").strip().lower()
+            if not tag:
+                continue
+            counts[tag] += 1
+            unit["tag_ordinal"] = counts[tag]
+            unit["tag_label"] = f"{tag}({counts[tag]})"
+        return units
+
+    @staticmethod
     def _has_linguistic_letters(text):
         return any(ch.isalpha() for ch in str(text or ""))
 
@@ -3466,8 +3478,8 @@ class SDLXLIFFReviewDialog(QDialog):
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_units = self._extract_text_units(source_html)
             target_units = self._extract_text_units(target_html)
-            source_review_units = self._non_empty_text_units(source_units)
-            target_review_units = self._non_empty_text_units(target_units)
+            source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
+            target_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(target_units))
             rows = []
             red_count = 0
             yellow_count = 0
@@ -3489,9 +3501,13 @@ class SDLXLIFFReviewDialog(QDialog):
                 rows.append({
                     "row_index": row_idx,
                     "source_tag": src.get("tag", "") if src else "",
+                    "source_tag_label": src.get("tag_label", "") if src else "",
+                    "source_tag_ordinal": src.get("tag_ordinal") if src else None,
                     "source": src.get("text", "") if src else "",
                     "source_index": src.get("index") if src else None,
                     "target_tag": tgt.get("tag", "") if tgt else "",
+                    "target_tag_label": tgt.get("tag_label", "") if tgt else "",
+                    "target_tag_ordinal": tgt.get("tag_ordinal") if tgt else None,
                     "target": tgt.get("text", "") if tgt else "",
                     "target_original": tgt.get("text", "") if tgt else "",
                     "target_index": tgt.get("index") if tgt else None,
@@ -4566,22 +4582,27 @@ class SDLXLIFFReviewDialog(QDialog):
         QTimer.singleShot(0, _apply_saved_scroll)
         QTimer.singleShot(25, _apply_saved_scroll)
 
-    def _tag_label(self, source_tag, target_tag, status):
+    @staticmethod
+    def _tag_label_text(source_tag, target_tag, source_label=None, target_label=None):
         source_tag = str(source_tag or "").strip()
         target_tag = str(target_tag or "").strip()
+        source_label = str(source_label or source_tag).strip()
+        target_label = str(target_label or target_tag).strip()
         if source_tag and target_tag:
-            text = source_tag if source_tag == target_tag else f"{source_tag} -> {target_tag}"
+            return source_label if source_label == target_label else f"{source_label} -> {target_label}"
         elif source_tag:
-            text = f"{source_tag} -> missing"
+            return f"{source_label} -> missing"
         elif target_tag:
-            text = f"+ {target_tag}"
-        else:
-            text = "-"
+            return f"+ {target_label}"
+        return "-"
+
+    def _tag_label(self, source_tag, target_tag, status, source_label=None, target_label=None):
+        text = self._tag_label_text(source_tag, target_tag, source_label, target_label)
         label = QLabel(text)
         label.setObjectName("SdlReviewTagLabel")
         label.setTextFormat(Qt.PlainText)
         label.setAlignment(Qt.AlignCenter)
-        label.setFixedWidth(36)
+        label.setFixedWidth(96)
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
@@ -4589,7 +4610,7 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label.setStyleSheet(
-            f"color: {color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace;"
+            f"color: {color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace; padding: 0px 2px;"
         )
         return label
 
@@ -4649,7 +4670,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     "red": self.THEME["danger"],
                 }.get(row_data["status"], self.THEME["muted"])
                 tag_label.setStyleSheet(
-                    f"color: {tag_color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace;"
+                    f"color: {tag_color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace; padding: 0px 2px;"
                 )
                 tag_label.setToolTip(row_data.get("reason", ""))
 
@@ -6635,10 +6656,10 @@ class SDLXLIFFReviewDialog(QDialog):
         frame.setProperty("sdl_base_style", row_style)
         frame.setStyleSheet(row_style)
         grid = QGridLayout(frame)
-        grid.setContentsMargins(10, 5, 10, 5)
-        grid.setHorizontalSpacing(6)
+        grid.setContentsMargins(4, 5, 6, 5)
+        grid.setHorizontalSpacing(4)
         grid.setVerticalSpacing(0)
-        grid.setColumnMinimumWidth(0, 48)
+        grid.setColumnMinimumWidth(0, 100)
         if two_column_layout:
             grid.setColumnStretch(0, 0)
             grid.setColumnStretch(1, 1)
@@ -6659,7 +6680,13 @@ class SDLXLIFFReviewDialog(QDialog):
         target_missing = bool(row_model.get("target_missing", not row_data.get("target_tag")))
         target_editable = bool(row_model.get("target_editable", not source_missing or not target_missing))
 
-        tag_label = self._tag_label(row_data.get("source_tag"), row_data.get("target_tag"), row_data.get("status"))
+        tag_label = self._tag_label(
+            row_data.get("source_tag"),
+            row_data.get("target_tag"),
+            row_data.get("status"),
+            source_label=row_data.get("source_tag_label"),
+            target_label=row_data.get("target_tag_label"),
+        )
         tag_label.setToolTip(row_data.get("reason", ""))
         target_widget = self._target_display_widget(
             piece["index"],
