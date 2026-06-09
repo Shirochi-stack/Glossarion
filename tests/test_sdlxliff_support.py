@@ -2537,11 +2537,13 @@ def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path)
     assert piece["red_count"] == 0
 
 
-def test_sdlxliff_review_numbered_tag_label_text_keeps_missing_word():
+def test_sdlxliff_review_numbered_tag_label_text_uses_compact_empty_labels():
     assert SDLXLIFFReviewDialog._tag_label_text("p", "p", "p(2)", "p(2)") == "p(2)"
     assert SDLXLIFFReviewDialog._tag_label_text("h1", "h2", "h1", "h2") == "h1 -> h2"
-    assert SDLXLIFFReviewDialog._tag_label_text("p", "", "p(3)", "") == "Missing (3)"
-    assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "Added (4)"
+    assert SDLXLIFFReviewDialog._tag_label_text("p", "", "p(3)", "") == "Empty(3)"
+    assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "Added(4)"
+    assert SDLXLIFFReviewDialog._tag_label_rich_text("p(2)") == 'p<span style="font-size: 8pt;">(2)</span>'
+    assert SDLXLIFFReviewDialog._tag_label_rich_text("Empty(33)") == 'Empty<span style="font-size: 8pt;">(33)</span>'
 
 
 def test_sdlxliff_review_regenerates_sidecar_when_source_column_is_empty(tmp_path, monkeypatch):

@@ -4616,16 +4616,25 @@ class SDLXLIFFReviewDialog(QDialog):
         if source_tag and target_tag:
             return source_label if source_label == target_label else f"{source_label} -> {target_label}"
         elif source_tag:
-            return f"Missing ({source_ordinal.group(1)})" if source_ordinal else "Missing"
+            return f"Empty({source_ordinal.group(1)})" if source_ordinal else "Empty"
         elif target_tag:
-            return f"Added ({target_ordinal.group(1)})" if target_ordinal else f"+ {target_label}"
+            return f"Added({target_ordinal.group(1)})" if target_ordinal else f"+ {target_label}"
         return "-"
+
+    @staticmethod
+    def _tag_label_rich_text(text):
+        escaped = html_lib.escape(str(text or ""))
+        return re.sub(
+            r"\((\d+)\)",
+            r'<span style="font-size: 8pt;">(\1)</span>',
+            escaped,
+        )
 
     def _tag_label(self, source_tag, target_tag, status, source_label=None, target_label=None):
         text = self._tag_label_text(source_tag, target_tag, source_label, target_label)
-        label = QLabel(text)
+        label = QLabel(self._tag_label_rich_text(text))
         label.setObjectName("SdlReviewTagLabel")
-        label.setTextFormat(Qt.PlainText)
+        label.setTextFormat(Qt.RichText)
         label.setAlignment(Qt.AlignCenter)
         label.setFixedWidth(96)
         color = {
