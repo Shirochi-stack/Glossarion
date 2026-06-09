@@ -2632,6 +2632,30 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
 
+    def _set_loading_progress(self, value=0, total=0, text=""):
+        try:
+            total = max(0, int(total or 0))
+            value = max(0, int(value or 0))
+        except Exception:
+            total = 0
+            value = 0
+        if total <= 0:
+            total = max(1, value, 1)
+        value = min(value, total)
+        progress_text = text or f"{value}/{total} SDLXLIFF entries"
+        bar = getattr(self, "loading_progress_bar", None)
+        if bar is None:
+            return
+        try:
+            bar.setRange(0, total)
+            bar.setValue(value)
+            bar.setFormat(progress_text)
+            bar.show()
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+
     def _hide_generation_progress(self):
         for bar in (
             getattr(self, "generation_progress_bar", None),
@@ -3617,6 +3641,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._streaming_piece_selected_row = 0
             self._streaming_piece_visible_count = 0
             self._streaming_piece_last_pump = time.monotonic()
+            self._set_loading_progress(0, len(work_items), f"0/{len(work_items)} SDLXLIFF entries")
         except Exception:
             return False
         self.piece_list.update()
@@ -3635,6 +3660,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 total = int(getattr(self, "_streaming_piece_total", 0) or 0)
                 if total:
                     self.loading_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{total}")
+                    self._set_loading_progress(
+                        visible_row + 1,
+                        total,
+                        f"{visible_row + 1}/{total} SDLXLIFF entries",
+                    )
             except Exception:
                 pass
             try:
@@ -3850,6 +3880,20 @@ class SDLXLIFFReviewDialog(QDialog):
             if stream_sidebar:
                 flush_streamed_pieces()
                 self._finish_streaming_piece_list()
+            return self._filter_review_pieces(pieces)
+
+        if stream_sidebar:
+            pieces = []
+            for idx, (path, metadata) in enumerate(work_items):
+                try:
+                    piece = self._build_piece(path, idx, metadata)
+                except Exception as exc:
+                    piece = self._build_piece(path, idx, metadata)
+                    piece["error"] = str(exc)
+                pieces.append(piece)
+                self._stream_piece_list_item(idx, piece)
+                self._pump_review_loading_events(max_ms=3)
+            self._finish_streaming_piece_list()
             return self._filter_review_pieces(pieces)
 
         pieces = [None] * len(work_items)

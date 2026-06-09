@@ -1678,6 +1678,8 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "self.generation_progress_bar = QProgressBar()" in source
     assert "self.loading_progress_bar = loading_progress" in source
     assert "def _set_generation_progress" in source
+    assert "def _set_loading_progress" in source
+    assert "self._set_loading_progress(" in source
     assert "def _queue_generated_sidecar_stream_piece" in source
     assert "def _flush_generated_sidecar_stream_pieces" in source
     assert "preserve_generated_stream" in source
@@ -1720,6 +1722,8 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "def _prepare_generation_streaming_piece_list" in source
     assert "def _append_generated_sidecar_stream_piece" in source
     assert "_prepare_streaming_piece_list(work_items)" in source
+    assert "if stream_sidebar:" in source
+    assert "for idx, (path, metadata) in enumerate(work_items):" in source
     assert "_stream_piece_list_item(next_stream_index, pieces[next_stream_index])" in source
     assert "_finish_streaming_piece_list()" in source
     assert "_append_generated_sidecar_stream_piece" in source
