@@ -1080,12 +1080,8 @@ class TranslationConfig:
 
 DEFAULT_TRANSLATION_CHUNK_PROMPT = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned."
 _TRANSLATION_CHUNK_PROMPT_ROLES = {"system", "assistant", "user"}
-_PREVIOUS_CHUNK_MEMORY_HEADER = (
-    "[MEMORY - PREVIOUS CHUNK CONTEXT]\n"
-    "The following source HTML is context from the immediately previous chunk only. "
-    "Do NOT translate, repeat, or include it in your response.\n\n"
-)
-_PREVIOUS_CHUNK_MEMORY_FOOTER = "\n\n[END MEMORY - PREVIOUS CHUNK CONTEXT]"
+_PREVIOUS_CHUNK_MEMORY_HEADER = "[MEMORY - PREVIOUS CHUNK CONTEXT]\n"
+_PREVIOUS_CHUNK_MEMORY_FOOTER = "\n[END MEMORY - PREVIOUS CHUNK CONTEXT]"
 
 
 def _normalize_translation_chunk_prompt_role(role):
@@ -1120,17 +1116,20 @@ def _translation_chunk_prompt_int(config, attr_name, env_name, default=3):
     return max(-1, value)
 
 
+def _has_visible_previous_chunk_context(tag):
+    text = tag.get_text("", strip=False).replace("\u200b", "").replace("\ufeff", "").replace("\xa0", "").strip()
+    return bool(text) or bool(tag.find(["img", "svg", "math", "table"]))
+
+
 def _extract_previous_chunk_context(previous_chunk_html, limit):
     raw = str(previous_chunk_html or "").strip()
     if not raw:
         return ""
-    if limit == -1:
-        return raw
     try:
         limit = int(limit)
     except Exception:
         limit = 3
-    if limit <= 0:
+    if limit == 0 or limit < -1:
         return ""
 
     try:
@@ -1149,12 +1148,25 @@ def _extract_previous_chunk_context(previous_chunk_html, limit):
             ]
             if nested_tags:
                 tags = nested_tags
-        tag_blocks = [str(tag).strip() for tag in tags if str(tag).strip()]
+        tag_blocks = [(str(tag).strip(), _has_visible_previous_chunk_context(tag)) for tag in tags if str(tag).strip()]
         if tag_blocks:
-            return "\n".join(tag_blocks[-limit:]).strip()
+            if limit == -1:
+                return "\n".join(block for block, _visible in tag_blocks).strip()
+            visible_seen = 0
+            start_index = len(tag_blocks)
+            for index in range(len(tag_blocks) - 1, -1, -1):
+                if tag_blocks[index][1]:
+                    visible_seen += 1
+                    if visible_seen >= limit:
+                        start_index = index
+                        break
+            if visible_seen:
+                return "\n".join(block for block, _visible in tag_blocks[start_index:]).strip()
     except Exception:
         pass
 
+    if limit == -1:
+        return raw
     lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
     return "\n".join(lines[-limit:]).strip()
 
@@ -1191,6 +1203,7 @@ def _build_translation_chunk_prompt_parts(
     )
     system_additions = []
     user_prefixes = []
+    assistant_prefixes = []
 
     try:
         current_chunk_idx = int(chunk_idx or 0)
@@ -1217,7 +1230,7 @@ def _build_translation_chunk_prompt_parts(
             elif role == "user":
                 user_prefixes.append(previous_memory)
             else:
-                chunk_prompt_msgs.append({"role": "assistant", "content": previous_memory})
+                assistant_prefixes.append(previous_memory)
 
     enabled = _translation_chunk_prompt_bool(
         config,
@@ -1225,10 +1238,10 @@ def _build_translation_chunk_prompt_parts(
         "ENABLE_TRANSLATION_CHUNK_PROMPT",
         False,
     )
-    if not enabled and not system_additions and not user_prefixes and not chunk_prompt_msgs:
+    if not enabled and not system_additions and not user_prefixes and not assistant_prefixes:
         return system_content, chunk_prompt_msgs, user_prompt
 
-    if enabled:
+    if enabled and current_chunk_idx > 1:
         template = (
             getattr(config, "TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
             if config is not None
@@ -1241,7 +1254,7 @@ def _build_translation_chunk_prompt_parts(
             elif role == "user":
                 user_prefixes.append(prompt)
             else:
-                chunk_prompt_msgs.append({"role": "assistant", "content": prompt})
+                assistant_prefixes.append(prompt)
 
     if system_additions:
         base = str(system_content or "").rstrip()
@@ -1249,6 +1262,8 @@ def _build_translation_chunk_prompt_parts(
         system_content = f"{base}\n\n{additions}" if base else additions
     if user_prefixes:
         user_prompt = "\n".join(user_prefixes + ([chunk_html] if chunk_html else []))
+    if assistant_prefixes:
+        chunk_prompt_msgs.append({"role": "assistant", "content": "\n".join(assistant_prefixes)})
 
     return system_content, chunk_prompt_msgs, user_prompt
 
