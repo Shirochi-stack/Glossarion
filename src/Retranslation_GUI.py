@@ -2683,7 +2683,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             counts[tag] += 1
             unit["tag_ordinal"] = counts[tag]
-            unit["tag_label"] = f"{tag}({counts[tag]})"
+            unit["tag_label"] = tag if counts[tag] == 1 else f"{tag}({counts[tag]})"
         return units
 
     @staticmethod

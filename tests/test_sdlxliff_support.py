@@ -686,8 +686,8 @@ def test_sdlxliff_review_ignores_invisible_empty_html_tags(tmp_path):
     assert piece["source_count"] == 1
     assert piece["target_count"] == 1
     assert len(piece["rows"]) == 1
-    assert piece["rows"][0]["source_tag_label"] == "p(1)"
-    assert piece["rows"][0]["target_tag_label"] == "p(1)"
+    assert piece["rows"][0]["source_tag_label"] == "p"
+    assert piece["rows"][0]["target_tag_label"] == "p"
     assert piece["rows"][0]["source"] == "Real source text."
     assert piece["rows"][0]["target"] == "Real target text."
 
@@ -2527,8 +2527,8 @@ def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path)
     assert piece["source_count"] == 3
     assert piece["target_count"] == 3
     assert [row["source_tag"] for row in piece["rows"]] == ["p", "p", "p"]
-    assert [row["source_tag_label"] for row in piece["rows"]] == ["p(1)", "p(2)", "p(3)"]
-    assert [row["target_tag_label"] for row in piece["rows"]] == ["p(1)", "p(2)", "p(3)"]
+    assert [row["source_tag_label"] for row in piece["rows"]] == ["p", "p(2)", "p(3)"]
+    assert [row["target_tag_label"] for row in piece["rows"]] == ["p", "p(2)", "p(3)"]
     assert [row["source"] for row in piece["rows"]] == [
         "The Girl With the Magitek Armor",
         "Final Fantasy 6- The Novel",
@@ -2539,7 +2539,7 @@ def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path)
 
 def test_sdlxliff_review_numbered_tag_label_text_keeps_missing_word():
     assert SDLXLIFFReviewDialog._tag_label_text("p", "p", "p(2)", "p(2)") == "p(2)"
-    assert SDLXLIFFReviewDialog._tag_label_text("h1", "h2", "h1(1)", "h2(1)") == "h1(1) -> h2(1)"
+    assert SDLXLIFFReviewDialog._tag_label_text("h1", "h2", "h1", "h2") == "h1 -> h2"
     assert SDLXLIFFReviewDialog._tag_label_text("p", "", "p(3)", "") == "Missing (3)"
     assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "Added (4)"
 
