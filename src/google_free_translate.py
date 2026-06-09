@@ -168,6 +168,8 @@ class GoogleFreeTranslateNew:
         # Use a CLASS-LEVEL flag for permanent fallback so it persists across instances
         if not hasattr(GoogleFreeTranslateNew, '_use_fallback_only'):
             GoogleFreeTranslateNew._use_fallback_only = False
+        if not hasattr(GoogleFreeTranslateNew, '_fallback_only_provider'):
+            GoogleFreeTranslateNew._fallback_only_provider = "argos"
         
         # Multiple user agents to rotate through (helps avoid 403)
         self.user_agents = [
@@ -325,12 +327,29 @@ class GoogleFreeTranslateNew:
                 labels.append(label)
         return labels
 
+    @staticmethod
+    def _fallback_provider_label(provider: str) -> str:
+        labels = {
+            "deepl": "DeepL",
+            "bing": "Bing",
+            "yandex": "Yandex",
+            "argos": "Argos Translate",
+        }
+        return labels.get(str(provider or "").strip().lower(), str(provider or "").strip() or "fallback")
+
+    @staticmethod
+    def _fallback_provider_note_label(provider: str) -> str:
+        if str(provider or "").strip().lower() == "argos":
+            return "Argos"
+        return GoogleFreeTranslateNew._fallback_provider_label(provider)
+
     @classmethod
-    def _google_fallback_note(cls, errors) -> str:
+    def _google_fallback_note(cls, errors, fallback_provider: str = "argos") -> str:
         labels = cls._brief_google_endpoint_failure_labels(errors)
         if not labels:
             return ""
-        return f"Auto fell back to Argos after Google endpoints failed: {', '.join(labels)}"
+        provider_label = cls._fallback_provider_note_label(fallback_provider)
+        return f"Auto fell back to {provider_label} after Google endpoints failed: {', '.join(labels)}"
 
     @classmethod
     def _brief_google_endpoint_label(cls, endpoint_url: str) -> str:
@@ -367,6 +386,105 @@ class GoogleFreeTranslateNew:
     def _raise_if_stop_requested(self):
         if self._stop_requested():
             raise Exception("Operation cancelled")
+
+    def _provider_api_key_configured(self, provider: str, *env_names: str) -> bool:
+        try:
+            return bool(self._api_key(provider, *env_names))
+        except Exception:
+            return False
+
+    def _provider_folder_id_configured(self, provider: str, env_name: str) -> bool:
+        try:
+            return bool(self._folder_id(provider, env_name))
+        except Exception:
+            return False
+
+    def _auto_api_provider_configured(self, provider: str) -> bool:
+        provider = str(provider or "").strip().lower()
+        if provider == "deepl":
+            return self._provider_api_key_configured("deepl", "DEEPL_API_KEY")
+        if provider == "bing":
+            return self._provider_api_key_configured("bing", "BING_TRANSLATOR_API_KEY", "AZURE_TRANSLATOR_KEY")
+        if provider == "yandex":
+            return (
+                self._provider_api_key_configured("yandex", "YANDEX_TRANSLATE_API_KEY")
+                and self._provider_folder_id_configured("yandex", "YANDEX_FOLDER_ID")
+            )
+        return False
+
+    def _configured_auto_api_providers(self) -> list:
+        return [provider for provider in ("deepl", "bing", "yandex") if self._auto_api_provider_configured(provider)]
+
+    def _auto_fallback_provider_sequence(self, preferred_provider: Optional[str] = None) -> list:
+        providers = []
+        preferred_provider = str(preferred_provider or "").strip().lower()
+        if preferred_provider in {"deepl", "bing", "yandex"} and self._auto_api_provider_configured(preferred_provider):
+            providers.append(preferred_provider)
+
+        for provider in self._configured_auto_api_providers():
+            if provider not in providers:
+                providers.append(provider)
+
+        if "argos" not in providers:
+            providers.append("argos")
+        return providers
+
+    def _translate_via_auto_fallback_chain(
+        self,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+        cache_key: str,
+        google_errors=None,
+        preferred_provider: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        provider_errors = []
+        self._last_auto_fallback_errors = []
+        google_errors = list(google_errors or []) if google_errors is not None else None
+        providers = self._auto_fallback_provider_sequence(preferred_provider)
+
+        for index, provider in enumerate(providers):
+            label = self._fallback_provider_label(provider)
+            if google_errors is not None:
+                self._emit_endpoint_status(
+                    f"Google failed on {len(google_errors)} endpoints; trying {label} fallback..."
+                )
+            else:
+                self._emit_endpoint_status(f"Using {label} fallback...")
+
+            try:
+                self._raise_if_stop_requested()
+                result = self._translate_via_configured_provider(provider, text, source_lang, target_lang)
+                if not result or not str(result.get("translatedText") or "").strip():
+                    raise Exception(f"{label} returned no translation")
+
+                result = dict(result)
+                GoogleFreeTranslateNew._use_fallback_only = True
+                GoogleFreeTranslateNew._fallback_only_provider = provider
+
+                if google_errors is not None:
+                    failed_endpoints = self._brief_google_endpoint_failure_labels(google_errors)
+                    result["fallback_from_provider"] = "google"
+                    result["fallback_provider"] = provider
+                    result["fallback_failed_endpoints"] = failed_endpoints
+                    result["fallback_note"] = self._google_fallback_note(google_errors, provider)
+                if provider_errors:
+                    result["fallback_provider_errors"] = list(provider_errors)
+
+                self._emit_endpoint_status(f"{label} fallback successful.")
+                return self._cache_translation_result(cache_key, result)
+            except Exception as e:
+                if "Operation cancelled" in str(e):
+                    raise
+                brief_error = self._brief_google_endpoint_error(e)
+                provider_errors.append(f"{label}: {brief_error}")
+                self.logger.warning(f"Auto fallback provider failed: {label}: {e}")
+                next_text = " Trying next fallback..." if index < len(providers) - 1 else ""
+                self._emit_endpoint_status(f"{label} fallback failed: {brief_error}.{next_text}")
+                continue
+
+        self._last_auto_fallback_errors = provider_errors
+        return None
 
     def _translate_via_configured_provider(
         self,
@@ -439,35 +557,25 @@ class GoogleFreeTranslateNew:
         # Explicit Google mode should still try Google and report Google failures.
         if provider == "auto" and GoogleFreeTranslateNew._use_fallback_only:
             try:
-                # Prepare source lang for fallback logic (convert 'auto' if needed)
-                # Note: _translate_via_argos handles 'auto' logic internally, so just pass self.source_language
-                # but map Google codes if needed
                 source_code = self._get_source_code()
                 target_code = self._get_target_code()
+                preferred_provider = getattr(GoogleFreeTranslateNew, "_fallback_only_provider", "argos")
+                fallback_result = self._translate_via_auto_fallback_chain(
+                    text,
+                    source_code,
+                    target_code,
+                    cache_key,
+                    preferred_provider=preferred_provider,
+                )
+                if fallback_result:
+                    return fallback_result
                 
-                # Use fallback immediately
-                # No logging needed here as we want to be quiet about it
-                argos_result = self._translate_via_argos(text, source_code, target_code)
-                if argos_result:
-                    with self.cache_lock:
-                        self.cache[cache_key] = argos_result
-                    return argos_result
-                
-                # If fallback fails even in fallback-only mode, and Argos is unavailable, disable fallback-only
-                # and continue with Google endpoints.
-                try:
-                    import importlib.util
-                    if importlib.util.find_spec("argostranslate") is None:
-                        GoogleFreeTranslateNew._use_fallback_only = False
-                        return self.translate(text)
-                except Exception:
-                    pass
-                # If fallback fails even in fallback-only mode, raise exception
-                raise Exception("Argos fallback failed in permanent fallback mode")
+                # The remembered fallback is no longer usable; try Google again so
+                # Auto can discover the current best provider without a stale lock.
+                GoogleFreeTranslateNew._use_fallback_only = False
             except Exception as e:
-                # If fallback fails, log error and return original text
                 self.logger.error(f"❌ Permanent fallback failed: {e}")
-                return self._translation_error_result("argos", e)
+                return self._translation_error_result(provider, e)
 
         # Log start for Google endpoints (pre-call)
         try:
@@ -545,30 +653,29 @@ class GoogleFreeTranslateNew:
             if provider == "google":
                 self._emit_endpoint_status(f"Google failed on {len(all_errors)} endpoints.")
                 raise Exception(detailed_error)
-            
-            # Fallback to Argos Translate
-            self.logger.info("🔄 All Google endpoints failed. Switching to permanent Argos Translate fallback...")
-            GoogleFreeTranslateNew._use_fallback_only = True  # Set flag to skip Google endpoints for future requests
-            self.logger.info("🧩 Using Argos Translate fallback for this request")
-            self._emit_endpoint_status(
-                f"Google failed on {len(all_errors)} endpoints; trying Argos Translate fallback..."
+
+            self.logger.info("All Google endpoints failed. Trying configured Auto fallbacks before Argos...")
+            fallback_result = self._translate_via_auto_fallback_chain(
+                text,
+                source_lang,
+                target_lang,
+                cache_key,
+                google_errors=all_errors,
             )
-            
-            argos_result = self._translate_via_argos(text, source_lang, target_lang)
-            if argos_result:
-                self.logger.info("✅ Argos Translate fallback successful")
-                failed_endpoints = self._brief_google_endpoint_failure_labels(all_errors)
-                argos_result = dict(argos_result)
-                argos_result["fallback_from_provider"] = "google"
-                argos_result["fallback_failed_endpoints"] = failed_endpoints
-                argos_result["fallback_note"] = self._google_fallback_note(all_errors)
-                # Cache the result to avoid repeated fallback overhead
-                with self.cache_lock:
-                    self.cache[cache_key] = argos_result
-                return argos_result
-            
+            if fallback_result:
+                self.logger.info(
+                    f"{self._fallback_provider_label(fallback_result.get('provider'))} fallback successful"
+                )
+                return fallback_result
+
+            fallback_errors = getattr(self, "_last_auto_fallback_errors", []) or []
+            if fallback_errors:
+                detailed_error = (
+                    f"{detailed_error}\nFallback providers failed:\n"
+                    + "\n".join(f"  - {err}" for err in fallback_errors)
+                )
             raise Exception(detailed_error)
-            
+
         except Exception as e:
             # Only log if it's not already logged above
             if "All Google Translate endpoints failed" not in str(e):

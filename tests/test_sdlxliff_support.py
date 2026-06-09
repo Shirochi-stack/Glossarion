@@ -1711,6 +1711,9 @@ def test_sdlxliff_review_compacts_machine_translation_endpoint_errors():
     assert SDLXLIFFReviewDialog._compact_machine_translation_error(
         "Auto fell back after Google endpoints failed: a, b, c"
     ) == "Auto fell back after Google failed on 3 endpoints"
+    assert SDLXLIFFReviewDialog._compact_machine_translation_error(
+        "Auto fell back to DeepL after Google endpoints failed: a, b"
+    ) == "Auto fell back to DeepL after Google failed on 2 endpoints"
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():

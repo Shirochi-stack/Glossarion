@@ -1295,13 +1295,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 return f"Google failed on {count} endpoints; see tooltip for details"
             return "Google failed on all endpoints; see tooltip for details"
         if text.startswith("Auto fell back") and "Google endpoints failed:" in text:
+            provider_match = re.match(r"^Auto fell back to (.+?) after Google endpoints failed:", text)
+            provider_text = f" to {provider_match.group(1).strip()}" if provider_match else ""
             endpoints = [
                 item.strip()
                 for item in text.split("Google endpoints failed:", 1)[-1].split(",")
                 if item.strip()
             ]
             if endpoints:
-                return f"Auto fell back after Google failed on {len(endpoints)} endpoints"
+                return f"Auto fell back{provider_text} after Google failed on {len(endpoints)} endpoints"
         first_line = text.splitlines()[0].strip()
         if len(first_line) > 180:
             first_line = first_line[:177].rstrip() + "..."

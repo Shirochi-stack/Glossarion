@@ -350,7 +350,71 @@ def test_auto_argos_fallback_reports_failed_google_endpoints(monkeypatch):
     )
     assert endpoint_statuses[0] == "Trying Google endpoint 1/7: translate.google.co.in/single"
     assert "Google endpoint 1/7 failed: translate.google.co.in/single - blocked" in endpoint_statuses[1]
-    assert endpoint_statuses[-1] == "Google failed on 7 endpoints; trying Argos Translate fallback..."
+    assert endpoint_statuses[-2] == "Google failed on 7 endpoints; trying Argos Translate fallback..."
+    assert endpoint_statuses[-1] == "Argos Translate fallback successful."
+
+
+def test_auto_uses_configured_deepl_before_argos_after_google_failure(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: False),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_fallback_only_provider", "argos", raising=False)
+    argos_calls = _install_fake_argos(monkeypatch, lambda _text: "Argos Hello")
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None, params=None, json=None):
+        if "deepl.com" in url:
+            calls.append(("deepl", url, dict(data or {})))
+            return FakeResponse(
+                200,
+                {"translations": [{"text": "DeepL Hello", "detected_source_language": "KO"}]},
+            )
+        calls.append(("google", url, dict(data or {})))
+        raise RuntimeError(f"blocked {url}")
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(("google-get", url, dict(params or {})))
+        raise RuntimeError(f"blocked {url}")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+    monkeypatch.setattr("google_free_translate.requests.get", fake_get)
+
+    endpoint_statuses = []
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+        endpoint_status_callback=endpoint_statuses.append,
+    )
+    translator.rate_limit = 0
+
+    result = translator.translate("hello one")
+
+    assert result["provider"] == "deepl"
+    assert result["translatedText"] == "DeepL Hello"
+    assert result["fallback_provider"] == "deepl"
+    assert result["fallback_from_provider"] == "google"
+    assert "Auto fell back to DeepL after Google endpoints failed:" in result["fallback_note"]
+    assert argos_calls == []
+    assert "Google failed on 7 endpoints; trying DeepL fallback..." in endpoint_statuses
+    assert endpoint_statuses[-1] == "DeepL fallback successful."
+    assert GoogleFreeTranslateNew._fallback_only_provider == "deepl"
+
+    calls.clear()
+    second = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        api_keys={"deepl": {"api_key": "deepl-key:fx"}},
+    )
+    second.rate_limit = 0
+    second_result = second.translate("hello two")
+
+    assert second_result["provider"] == "deepl"
+    assert calls[0][0] == "deepl"
+    assert argos_calls == []
 
 
 def test_argos_fallback_translates_marked_html_segments_without_tag_bleed(monkeypatch):
