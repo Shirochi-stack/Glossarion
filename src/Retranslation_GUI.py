@@ -658,6 +658,8 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None):
         signature = current_signature or ()
+        if not self._review_autogen_has_output_html(signature):
+            return None
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
         invalid_outputs = []
         if force or previous_signature is not None or missing_outputs:
@@ -1122,6 +1124,18 @@ class SDLXLIFFReviewDialog(QDialog):
             if output_name:
                 output_names.append(output_name)
         return sorted(set(output_names))
+
+    @classmethod
+    def _review_autogen_has_output_html(cls, autogen_signature):
+        for entry in autogen_signature or ():
+            if not entry or entry[0] != "output_html":
+                continue
+            try:
+                if len(entry) > 10 and int(entry[10]) >= 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _missing_review_sidecar_outputs(self, output_dir, autogen_signature):
         expected = self._review_autogen_output_names(autogen_signature)

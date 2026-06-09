@@ -2783,6 +2783,55 @@ def test_sdlxliff_review_refresh_worker_regenerates_deleted_sidecar_folder(tmp_p
     assert sidecar.is_file()
 
 
+def test_sdlxliff_review_refresh_does_not_generate_when_no_output_html_exists(tmp_path):
+    (tmp_path / "SDLXLIFF").mkdir()
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": "response_chapter0001.html",
+                        "original_basename": "chapter0001.xhtml",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FailingOwner:
+        def _generate_sdlxliff_sidecars_from_completed_entries(self, *args, **kwargs):
+            raise AssertionError("generator should not run when no output HTML exists")
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._sdlxliff_autogen_owner = FailingOwner()
+
+    autogen_signature = dialog._current_review_autogen_signature()
+    assert dialog._review_autogen_has_output_html(autogen_signature) is False
+    assert dialog._regenerate_review_sidecars_for_refresh_scan(
+        force=True,
+        previous_signature=None,
+        current_signature=autogen_signature,
+    ) is None
+
+    result = dialog._build_review_refresh_scan_result(
+        force=True,
+        current_path="",
+        last_review_signature=None,
+        last_mt_signature=None,
+        last_autogen_signature=None,
+    )
+
+    assert result["error"] == ""
+    assert result["sidecars_generated"] is False
+    assert result["stats"] is None
+
+
 def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
     issue = _missing_beautifulsoup_tags_issue({"p": 212}, {"p": 213})
 
