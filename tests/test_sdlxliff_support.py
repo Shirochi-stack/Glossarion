@@ -1375,6 +1375,10 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_set_machine_translation_provider" in source
     assert "_prompt_machine_translation_credentials" in source
     assert "_machine_translation_translator" in source
+    assert "MACHINE_TRANSLATION_API_KEY_CONFIG_KEYS" in source
+    assert "_encrypt_machine_translation_api_key" in source
+    assert "_decrypt_machine_translation_api_key" in source
+    assert "_machine_translation_config_value" in source
     assert "honor_global_stop=False" in source
     assert "QLineEdit.Password" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
@@ -1448,6 +1452,61 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_stop_flag_accuracy_button_animation" in source
     assert "_queue_stop_flag_accuracy_button_animation" in source
     assert 'self.flag_accuracy_btn.setText(f"{frames[self._flag_accuracy_button_frame]} Flagging")' in source
+
+
+def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
+    from api_key_encryption import get_handler
+
+    source = (SRC / "Retranslation_GUI.py").read_text(encoding="utf-8")
+    handler = get_handler()
+    key_fields = [
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY,
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY,
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY,
+    ]
+
+    assert set(key_fields).issubset(set(getattr(handler, "api_key_fields", [])))
+
+    raw_config = {field: f"{field}-secret" for field in key_fields}
+    encrypted_config = handler.encrypt_config(raw_config)
+    for field in key_fields:
+        assert encrypted_config[field].startswith("ENC:")
+
+    assert handler.decrypt_config(encrypted_config) == raw_config
+
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog._config = {
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY: encrypted_config[
+            SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY
+        ],
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY: encrypted_config[
+            SDLXLIFFReviewDialog.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY
+        ],
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY: "eastus",
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY: encrypted_config[
+            SDLXLIFFReviewDialog.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY
+        ],
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY: "folder-123",
+    }
+
+    options = dialog._machine_translation_api_options()
+    assert options["deepl"]["api_key"] == raw_config[SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY]
+    assert options["bing"]["api_key"] == raw_config[SDLXLIFFReviewDialog.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY]
+    assert options["bing"]["region"] == "eastus"
+    assert options["yandex"]["api_key"] == raw_config[SDLXLIFFReviewDialog.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY]
+    assert options["yandex"]["folder_id"] == "folder-123"
+
+    parent_config = {}
+    dialog._config = {}
+    dialog._context_parent = SimpleNamespace(config=parent_config, save_config=lambda show_message=False: True)
+    assert dialog._persist_review_config_value(
+        SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY,
+        "fresh-deepl-key",
+    )
+    stored = dialog._config[SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY]
+    assert stored.startswith("ENC:")
+    assert parent_config[SDLXLIFFReviewDialog.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY] == stored
+    assert handler.decrypt_value(stored) == "fresh-deepl-key"
     assert 'QShortcut(QKeySequence("F5"), self)' in source
     assert "self._manual_refresh_shortcut.activated.connect(self._manual_review_refresh)" in source
     constructor_body = source[source.index("def __init__"):source.index("self.setWindowTitle", source.index("def __init__"))]

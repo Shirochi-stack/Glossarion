@@ -42,6 +42,9 @@ class APIKeyEncryption:
         self.api_key_fields = [
             'api_key',
             'replicate_api_key',
+            'sdlxliff_machine_translation_deepl_api_key',
+            'sdlxliff_machine_translation_bing_api_key',
+            'sdlxliff_machine_translation_yandex_api_key',
             # Add more field names here if needed
         ]
     
@@ -242,7 +245,13 @@ def get_handler():
 
 class _NullHandler:
     """No-op handler that passes config through unchanged."""
-    api_key_fields = ['api_key', 'replicate_api_key']
+    api_key_fields = [
+        'api_key',
+        'replicate_api_key',
+        'sdlxliff_machine_translation_deepl_api_key',
+        'sdlxliff_machine_translation_bing_api_key',
+        'sdlxliff_machine_translation_yandex_api_key',
+    ]
     def encrypt_config(self, config):
         return config
     def decrypt_config(self, config):

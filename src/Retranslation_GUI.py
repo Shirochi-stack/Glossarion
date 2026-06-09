@@ -201,6 +201,11 @@ class SDLXLIFFReviewDialog(QDialog):
     MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY = "sdlxliff_machine_translation_bing_region"
     MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY = "sdlxliff_machine_translation_yandex_api_key"
     MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY = "sdlxliff_machine_translation_yandex_folder_id"
+    MACHINE_TRANSLATION_API_KEY_CONFIG_KEYS = frozenset({
+        MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY,
+        MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY,
+        MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY,
+    })
     MACHINE_TRANSLATION_PROVIDER_LABELS = {
         "auto": "Auto",
         "google": "Google",
@@ -1182,6 +1187,8 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _persist_review_config_value(self, key, value):
+        if key in self.MACHINE_TRANSLATION_API_KEY_CONFIG_KEYS:
+            value = self._encrypt_machine_translation_api_key(value)
         if isinstance(self._config, dict):
             self._config[key] = value
         parent = getattr(self, "_context_parent", None)
@@ -1232,6 +1239,34 @@ class SDLXLIFFReviewDialog(QDialog):
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _decrypt_machine_translation_api_key(value):
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        try:
+            from api_key_encryption import get_handler
+            return str(get_handler().decrypt_value(value) or "").strip()
+        except Exception:
+            return value
+
+    @staticmethod
+    def _encrypt_machine_translation_api_key(value):
+        value = str(value or "").strip()
+        if not value or value.startswith("ENC:"):
+            return value
+        try:
+            from api_key_encryption import get_handler
+            return str(get_handler().encrypt_value(value) or value)
+        except Exception:
+            return value
+
+    def _machine_translation_config_value(self, key, default=""):
+        value = (self._config or {}).get(key, default)
+        if key in self.MACHINE_TRANSLATION_API_KEY_CONFIG_KEYS:
+            return self._decrypt_machine_translation_api_key(value)
+        return str(value or "").strip()
 
     @classmethod
     def _normalize_machine_translation_provider(cls, provider):
@@ -1374,20 +1409,19 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _machine_translation_api_options(self):
-        config = self._config or {}
         options = {}
-        deepl_key = str(config.get(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, "") or "").strip()
+        deepl_key = self._machine_translation_config_value(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY)
         if deepl_key:
             options["deepl"] = {"api_key": deepl_key}
-        bing_key = str(config.get(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, "") or "").strip()
+        bing_key = self._machine_translation_config_value(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY)
         if bing_key:
             bing_options = {"api_key": bing_key}
-            region = str(config.get(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, "") or "").strip()
+            region = self._machine_translation_config_value(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY)
             if region:
                 bing_options["region"] = region
             options["bing"] = bing_options
-        yandex_key = str(config.get(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY, "") or "").strip()
-        yandex_folder_id = str(config.get(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY, "") or "").strip()
+        yandex_key = self._machine_translation_config_value(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY)
+        yandex_folder_id = self._machine_translation_config_value(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY)
         if yandex_key or yandex_folder_id:
             options["yandex"] = {
                 "api_key": yandex_key,
@@ -1432,9 +1466,8 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _prompt_machine_translation_credentials(self, provider, force=False):
         provider = self._normalize_machine_translation_provider(provider)
-        config = self._config or {}
         if provider == "deepl":
-            current = str(config.get(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, "") or "").strip()
+            current = self._machine_translation_config_value(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY)
             if current and not force:
                 return True
             key = self._prompt_secret_text("DeepL API Key", "DeepL API key:", current)
@@ -1444,22 +1477,22 @@ class SDLXLIFFReviewDialog(QDialog):
             self._persist_review_config_value(self.MACHINE_TRANSLATION_DEEPL_API_KEY_CONFIG_KEY, key)
             return True
         if provider == "bing":
-            current = str(config.get(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, "") or "").strip()
+            current = self._machine_translation_config_value(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY)
             if not current or force:
                 key = self._prompt_secret_text("Bing / Microsoft Translator API Key", "Microsoft Translator API key:", current)
                 if not key:
                     self.save_status_label.setText("Bing requires a Microsoft Translator API key")
                     return False
                 self._persist_review_config_value(self.MACHINE_TRANSLATION_BING_API_KEY_CONFIG_KEY, key)
-            current_region = str(config.get(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, "") or "").strip()
+            current_region = self._machine_translation_config_value(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY)
             if force:
                 region = self._prompt_plain_text("Bing / Microsoft Translator Region", "Azure region (optional):", current_region)
                 if region is not None:
                     self._persist_review_config_value(self.MACHINE_TRANSLATION_BING_REGION_CONFIG_KEY, region)
             return True
         if provider == "yandex":
-            current_key = str(config.get(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY, "") or "").strip()
-            current_folder = str(config.get(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY, "") or "").strip()
+            current_key = self._machine_translation_config_value(self.MACHINE_TRANSLATION_YANDEX_API_KEY_CONFIG_KEY)
+            current_folder = self._machine_translation_config_value(self.MACHINE_TRANSLATION_YANDEX_FOLDER_ID_CONFIG_KEY)
             if current_key and current_folder and not force:
                 return True
             key = self._prompt_secret_text("Yandex Translate API Key", "Yandex Cloud API key:", current_key)
