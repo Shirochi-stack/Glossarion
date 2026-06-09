@@ -757,6 +757,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 return True
             if self.pieces or self.piece_list.count():
                 return False
+            if self._sdlxliff_sidecar_paths_for_output_dir(self.output_dir):
+                return False
             try:
                 self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
             except Exception:
@@ -835,9 +837,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _finish_generation_streaming(self, message=""):
         try:
+            was_streaming = bool(getattr(self, "_generation_streaming_active", False))
             self._generation_streaming_active = False
             self._review_data_loaded = bool(self.pieces)
-            self._generation_stream_preserve_after_finish = bool(self.pieces)
+            self._generation_stream_preserve_after_finish = bool(was_streaming and self.pieces)
             if self.pieces:
                 row = self.piece_list.currentRow()
                 if row < 0:

@@ -2916,6 +2916,37 @@ def test_sdlxliff_review_manual_validation_does_not_regenerate_current_sidecars(
     assert result["sidecar_changed"] is False
 
 
+def test_sdlxliff_generation_streaming_does_not_replace_existing_sidecar_list(monkeypatch):
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = "existing-output"
+    dialog.pieces = []
+    dialog.piece_list = SimpleNamespace(count=lambda: 0)
+    monkeypatch.setattr(
+        dialog,
+        "_sdlxliff_sidecar_paths_for_output_dir",
+        lambda _output_dir: ["existing-output/SDLXLIFF/response_chapter0001.html.sdlxliff"],
+    )
+
+    assert dialog._prepare_generation_streaming_piece_list(total=1) is False
+
+
+def test_sdlxliff_generation_finish_only_preserves_active_stream(monkeypatch):
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.pieces = [{"path": "existing-output/SDLXLIFF/response_chapter0001.html.sdlxliff"}]
+    dialog._generation_streaming_active = False
+    dialog._generation_stream_preserve_after_finish = False
+    dialog._review_data_loaded = False
+    dialog.piece_list = SimpleNamespace(currentRow=lambda: 0)
+    dialog._refresh_piece_header = lambda _row: None
+    dialog._hide_generation_progress = lambda: None
+    dialog.loading_label = SimpleNamespace(setText=lambda _text: None)
+    dialog.save_status_label = SimpleNamespace(setText=lambda _text: None)
+
+    dialog._finish_generation_streaming("Generated 1/1 SDLXLIFF sidecar(s)")
+
+    assert dialog._generation_stream_preserve_after_finish is False
+
+
 def test_sdlxliff_review_refresh_does_not_generate_when_no_output_html_exists(tmp_path):
     (tmp_path / "SDLXLIFF").mkdir()
     (tmp_path / "translation_progress.json").write_text(
