@@ -31,6 +31,7 @@ import time
 import threading
 import hashlib
 import unicodedata
+from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
@@ -671,7 +672,17 @@ class SDLXLIFFReviewDialog(QDialog):
         owner = getattr(self, "_sdlxliff_autogen_owner", None)
         generator = getattr(owner, "_generate_sdlxliff_sidecars_from_completed_entries", None)
         if not callable(generator):
-            return None
+            return {
+                "total": 0,
+                "considered": 0,
+                "created": 0,
+                "skipped": 0,
+                "missing_source": 0,
+                "missing_output": 0,
+                "failed": 1,
+                "paths": [],
+                "errors": ["SDLXLIFF auto-generation helper is not available in this build"],
+            }
 
         file_path = getattr(self, "_sdlxliff_autogen_file_path", None)
         try:
@@ -714,21 +725,108 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _prepare_generation_streaming_piece_list(self, total=0):
+        try:
+            if getattr(self, "_generation_streaming_active", False):
+                return True
+            if self.pieces or self.piece_list.count():
+                return False
+            try:
+                self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
+            except Exception:
+                pass
+            self.piece_list.clear()
+            self.pieces = []
+            self._piece_pages.clear()
+            self._piece_render_complete.clear()
+            self._generation_streaming_active = True
+            self._generation_stream_seen_paths = set()
+            self._generation_stream_total = max(0, int(total or 0))
+            self._generation_stream_progress_map = self._read_progress_metadata()
+            self._generation_stream_spine_positions = self._read_spine_positions(allow_deep_search=False)
+            self._streamed_piece_list_populated = True
+            try:
+                self.piece_list.currentRowChanged.connect(self._request_render_piece)
+            except Exception:
+                pass
+            self._pump_review_loading_events(max_ms=4)
+            return True
+        except Exception:
+            return False
+
+    def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
+        try:
+            if not getattr(self, "_generation_streaming_active", False):
+                return False
+            if not path or not os.path.isfile(path):
+                return False
+            path_norm = os.path.normcase(os.path.abspath(path))
+            seen = getattr(self, "_generation_stream_seen_paths", set())
+            if path_norm in seen:
+                return False
+            seen.add(path_norm)
+            self._generation_stream_seen_paths = seen
+
+            row = len(self.pieces)
+            progress_map = getattr(self, "_generation_stream_progress_map", {}) or {}
+            spine_positions = getattr(self, "_generation_stream_spine_positions", {}) or {}
+            metadata = self._sidecar_metadata(path, row, progress_map, spine_positions)
+            if metadata.get("opf_position") is None:
+                metadata["display_position"] = int(progress_index or row + 1)
+            else:
+                metadata["display_position"] = int(metadata["opf_position"]) + 1
+            metadata["label"] = self._review_label_from_metadata(metadata)
+            piece = self._build_piece(path, row, metadata)
+            if self._review_piece_is_empty_sidecar(piece):
+                return False
+            piece["index"] = row
+            self.pieces.append(piece)
+            self.piece_list.addItem(self._piece_list_item_for_piece(piece, row))
+            total = int(getattr(self, "_generation_stream_total", 0) or 0)
+            if total:
+                self.loading_label.setText(f"Loaded SDLXLIFF entry {len(self.pieces)}/{total}")
+            if row == 0:
+                previous_block = self.piece_list.blockSignals(True)
+                self.piece_list.setCurrentRow(0)
+                self.piece_list.blockSignals(previous_block)
+                self._initial_piece_row = 0
+                QTimer.singleShot(0, lambda: self._render_piece(0, show_loading=False))
+            self.piece_list.update()
+            self._pump_review_loading_events(max_ms=3)
+            return True
+        except Exception:
+            return False
+
     def _review_generation_summary(self, stats):
         if not isinstance(stats, dict):
             return ""
+        total = int(stats.get("total") or 0)
         considered = int(stats.get("considered") or 0)
         created = int(stats.get("created") or 0)
+        skipped = int(stats.get("skipped") or 0)
         missing_source = int(stats.get("missing_source") or 0)
         missing_output = int(stats.get("missing_output") or 0)
         failed = int(stats.get("failed") or 0)
-        if created:
-            return f"Generated {created} SDLXLIFF sidecar(s)"
-        if considered:
-            return (
-                "No SDLXLIFF sidecars generated "
-                f"(source missing: {missing_source}, output missing: {missing_output}, failed: {failed})"
-            )
+        errors = stats.get("errors") if isinstance(stats.get("errors"), list) else []
+        details = []
+        if missing_source:
+            details.append(f"missing source {missing_source}")
+        if missing_output:
+            details.append(f"missing output {missing_output}")
+        if failed:
+            details.append(f"failed {failed}")
+        if skipped:
+            details.append(f"skipped {skipped}")
+        if errors:
+            details.append(str(errors[0]))
+        if total or considered or created:
+            denominator = total or considered or created
+            summary = f"Generated {created}/{denominator} SDLXLIFF sidecar(s)"
+            if details:
+                summary += f": {', '.join(details)}"
+            return summary
+        if errors:
+            return f"No SDLXLIFF sidecars generated: {errors[0]}"
         return ""
 
     def _apply_review_generation_progress(self, payload):
@@ -740,11 +838,17 @@ class SDLXLIFFReviewDialog(QDialog):
             index = int(payload.get("index") or 0)
             total = int(payload.get("total") or 0)
             stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else None
+            if stage == "start" and total:
+                self._prepare_generation_streaming_piece_list(total=total)
+            elif stage == "created":
+                self._append_generated_sidecar_stream_piece(str(payload.get("path") or ""), progress_index=index)
             if stage == "finished":
                 message = self._review_generation_summary(stats) or "SDLXLIFF generation finished"
+                self._generation_streaming_active = False
             elif stage == "start":
                 message = f"Generating SDLXLIFF sidecars for {total} completed entr{'y' if total == 1 else 'ies'}..."
             elif output_name and total:
+                detail = str(payload.get("error") or payload.get("message") or "")
                 label = {
                     "created": "Generated",
                     "missing_source": "Missing source for",
@@ -753,6 +857,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     "skipped": "Skipped",
                 }.get(stage, "Generating")
                 message = f"{label} SDLXLIFF {index}/{total}: {output_name}"
+                if detail and stage in {"failed", "missing_source", "missing_output"}:
+                    message = f"{message} ({detail})"
             else:
                 message = str(payload.get("message") or "Generating SDLXLIFF sidecars...")
             try:
@@ -810,6 +916,17 @@ class SDLXLIFFReviewDialog(QDialog):
                     autogen_signature=autogen_signature,
                     mt_signature=mt_signature,
                 )
+                if stats:
+                    summary = self._review_generation_summary(stats)
+                    if summary and not self.pieces:
+                        try:
+                            self.loading_label.setText(summary)
+                        except Exception:
+                            pass
+                        try:
+                            self.save_status_label.setText(summary)
+                        except Exception:
+                            pass
             elif result.get("machine_translation_changed"):
                 if self._tooltip_translation_running:
                     self._last_machine_translation_signature = mt_signature
@@ -7224,6 +7341,7 @@ class RetranslationMixin:
         progress_callback=None,
     ):
         stats = {
+            "total": 0,
             "considered": 0,
             "created": 0,
             "skipped": 0,
@@ -7231,8 +7349,13 @@ class RetranslationMixin:
             "missing_output": 0,
             "failed": 0,
             "paths": [],
+            "errors": [],
         }
-        if not output_dir or not os.path.isdir(output_dir):
+        if not output_dir:
+            stats["errors"].append("Output folder was not provided")
+            return stats
+        if not os.path.isdir(output_dir):
+            stats["errors"].append(f"Output folder does not exist: {output_dir}")
             return stats
 
         if progress_data is None:
@@ -7247,6 +7370,7 @@ class RetranslationMixin:
         if not isinstance(chapters, dict):
             chapters = progress_data if isinstance(progress_data, dict) else {}
         if not isinstance(chapters, dict):
+            stats["errors"].append("translation_progress.json did not contain chapter entries")
             return stats
 
         requested = None
@@ -7279,8 +7403,11 @@ class RetranslationMixin:
             work_entries.append((progress_key, entry, output_name))
 
         total = len(work_entries)
+        stats["total"] = total
+        if total == 0:
+            stats["errors"].append("No completed HTML entries are eligible for SDLXLIFF generation")
 
-        def _notify(stage, index=0, output_name="", path="", message=""):
+        def _notify(stage, index=0, output_name="", path="", message="", error=""):
             if not callable(progress_callback):
                 return
             try:
@@ -7291,6 +7418,7 @@ class RetranslationMixin:
                     "output_name": output_name,
                     "path": path,
                     "message": message,
+                    "error": error,
                     "stats": dict(stats),
                 })
             except Exception:
@@ -7300,8 +7428,6 @@ class RetranslationMixin:
         old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
         os.environ["OUTPUT_SDLXLIFF"] = "1"
         try:
-            from TransateKRtoEN import _write_html_sdlxliff_sidecar
-
             for entry_index, (progress_key, entry, output_name) in enumerate(work_entries, 1):
                 output_file = entry.get("output_file")
                 stats["considered"] += 1
@@ -7317,14 +7443,16 @@ class RetranslationMixin:
                 output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
                 if not output_path or not os.path.isfile(output_path):
                     stats["missing_output"] += 1
-                    _notify("missing_output", entry_index, output_name)
+                    _notify("missing_output", entry_index, output_name, message=f"Output HTML not found: {output_file}")
                     continue
                 try:
                     with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                         target_html = f.read()
                 except Exception:
                     stats["missing_output"] += 1
-                    _notify("missing_output", entry_index, output_name)
+                    message = f"Could not read output HTML: {output_file}"
+                    stats["errors"].append(message)
+                    _notify("missing_output", entry_index, output_name, message=message)
                     continue
 
                 source_html, source_path = self._sdlxliff_autogen_read_source_html(
@@ -7336,20 +7464,33 @@ class RetranslationMixin:
                 )
                 if not source_html:
                     stats["missing_source"] += 1
-                    _notify("missing_source", entry_index, output_name)
+                    _notify("missing_source", entry_index, output_name, message=f"Source HTML not found for {output_name}")
                     continue
 
                 chapter = dict(entry)
                 if not chapter.get("original_basename"):
                     chapter["original_basename"] = os.path.basename(str(source_path or output_name).split("!", 1)[-1])
-                result_path = _write_html_sdlxliff_sidecar(output_dir, output_name, chapter, source_html, target_html)
+                writer_error = ""
+                try:
+                    result_path = _write_html_sdlxliff_sidecar(
+                        output_dir,
+                        output_name,
+                        chapter,
+                        source_html,
+                        target_html,
+                        raise_errors=True,
+                    )
+                except Exception as exc:
+                    result_path = None
+                    writer_error = f"{type(exc).__name__}: {exc}"
+                    stats["errors"].append(f"{output_name}: {writer_error}")
                 if result_path:
                     stats["created"] += 1
                     stats["paths"].append(result_path)
                     _notify("created", entry_index, output_name, path=result_path)
                 else:
                     stats["failed"] += 1
-                    _notify("failed", entry_index, output_name)
+                    _notify("failed", entry_index, output_name, error=writer_error)
         finally:
             if old_output_sdlxliff is None:
                 os.environ.pop("OUTPUT_SDLXLIFF", None)
