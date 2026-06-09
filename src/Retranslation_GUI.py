@@ -7069,6 +7069,61 @@ class RetranslationMixin:
         return os.path.normpath(path)
 
     @staticmethod
+    def _output_dir_has_sdlxliff_sidecars(output_dir):
+        sidecar_dir = os.path.join(output_dir or "", "SDLXLIFF")
+        try:
+            if not os.path.isdir(sidecar_dir):
+                return False
+            with os.scandir(sidecar_dir) as entries:
+                return any(entry.is_file() and entry.name.lower().endswith(".sdlxliff") for entry in entries)
+        except Exception:
+            return False
+
+    @classmethod
+    def _output_dir_has_sdlxliff_generatable_html(cls, output_dir, progress_data=None, output_files=None):
+        if not output_dir or not os.path.isdir(output_dir):
+            return False
+        chapters = progress_data.get("chapters") if isinstance(progress_data, dict) else None
+        if not isinstance(chapters, dict):
+            chapters = progress_data if isinstance(progress_data, dict) else {}
+        if not isinstance(chapters, dict):
+            return False
+
+        requested = None
+        if output_files:
+            requested = {
+                os.path.basename(str(name or "").replace("\\", "/")).lower()
+                for name in output_files
+                if name
+            }
+            requested.discard("")
+
+        for entry in chapters.values():
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "") or "").lower()
+            if status not in cls._SDLXLIFF_AUTOGEN_STATUSES:
+                continue
+            output_file = entry.get("output_file")
+            output_name = os.path.basename(str(output_file or "").replace("\\", "/")).lower()
+            if not output_name.endswith((".html", ".htm", ".xhtml")):
+                continue
+            if requested is not None and output_name not in requested:
+                continue
+            output_path = cls._sdlxliff_autogen_output_path(output_dir, output_file)
+            if output_path and os.path.isfile(output_path):
+                return True
+        return False
+
+    def _show_no_sdlxliff_review_available(self, parent=None):
+        self._show_message(
+            'info',
+            "Text Analysis Unavailable",
+            "No SDLXLIFF sidecars were found for this output folder.",
+            parent=parent or self,
+        )
+
+    @staticmethod
     def _sdlxliff_autogen_source_candidates(entry, output_file=None, progress_key=None):
         entry = entry if isinstance(entry, dict) else {}
         raw_candidates = [
@@ -7554,6 +7609,18 @@ class RetranslationMixin:
             key = os.path.normcase(os.path.abspath(output_dir))
         except Exception:
             key = str(output_dir or "")
+
+        if (
+            not self._output_dir_has_sdlxliff_sidecars(output_dir)
+            and not self._output_dir_has_sdlxliff_generatable_html(
+                output_dir,
+                progress_data=autogen_progress_data,
+                output_files=autogen_output_files,
+            )
+        ):
+            self._show_no_sdlxliff_review_available(parent or self)
+            return None
+
         cache = getattr(self, "_sdlxliff_review_dialog_cache", None)
         if not isinstance(cache, dict):
             cache = {}
@@ -9476,6 +9543,8 @@ class RetranslationMixin:
                     autogen_file_path=file_path,
                     autogen_progress_data=prog,
                 )
+                if review_dialog is None:
+                    return
                 try:
                     review_dialog.save_status_label.setText("Checking SDLXLIFF sidecars...")
                 except Exception:
@@ -12522,6 +12591,8 @@ class RetranslationMixin:
                     autogen_progress_data=data.get('prog'),
                     autogen_output_files=[output_file] if output_file else None,
                 )
+                if review_dialog is None:
+                    return
                 try:
                     review_dialog.save_status_label.setText("Checking SDLXLIFF sidecar for selected entry...")
                 except Exception:

@@ -2832,6 +2832,40 @@ def test_sdlxliff_review_refresh_does_not_generate_when_no_output_html_exists(tm
     assert result["stats"] is None
 
 
+def test_sdlxliff_review_opener_shows_message_when_no_sidecars_or_output_html(tmp_path):
+    (tmp_path / "SDLXLIFF").mkdir()
+    progress = {
+        "chapters": {
+            "1": {
+                "actual_num": 1,
+                "status": "completed",
+                "output_file": "response_chapter0001.html",
+            }
+        }
+    }
+
+    class StubRetranslation(RetranslationMixin):
+        def __init__(self):
+            self.messages = []
+
+        def _show_message(self, msg_type, title, message, parent=None):
+            self.messages.append((msg_type, title, message))
+
+    stub = StubRetranslation()
+
+    assert stub._open_or_reuse_sdlxliff_review(
+        str(tmp_path),
+        autogen_progress_data=progress,
+    ) is None
+    assert stub.messages == [
+        (
+            "info",
+            "Text Analysis Unavailable",
+            "No SDLXLIFF sidecars were found for this output folder.",
+        )
+    ]
+
+
 def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
     issue = _missing_beautifulsoup_tags_issue({"p": 212}, {"p": 213})
 
