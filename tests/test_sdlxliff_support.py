@@ -1631,6 +1631,13 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "_review_refresh_scan_running" in source
     assert "_review_refresh_scan_requested" in source
     assert 'name="sdlxliff-review-refresh-scan"' in source
+    apply_scan_body = source[
+        source.index("def _apply_review_refresh_scan"):
+        source.index("def _current_review_signature", source.index("def _apply_review_refresh_scan"))
+    ]
+    assert 'initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)' in apply_scan_body
+    assert "seamless=not initial_load" in apply_scan_body
+    assert "Loaded SDLXLIFF entry" in source
     refresh_signature = source[
         source.index("def refresh_review_data"):
         source.index("if self._refreshing_review_data:", source.index("def refresh_review_data"))

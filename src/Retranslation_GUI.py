@@ -795,11 +795,17 @@ class SDLXLIFFReviewDialog(QDialog):
                 or result.get("autogen_changed")
                 or result.get("sidecars_generated")
             ):
+                initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)
+                if initial_load:
+                    try:
+                        self.loading_label.setText("Loading SDLXLIFF review entries...")
+                    except Exception:
+                        pass
                 self.refresh_review_data(
                     force=False,
                     current_path=result.get("current_path") or self.current_path,
                     signature=signature,
-                    seamless=True,
+                    seamless=not initial_load,
                     skip_autogen=True,
                     autogen_signature=autogen_signature,
                     mt_signature=mt_signature,
@@ -3286,6 +3292,12 @@ class SDLXLIFFReviewDialog(QDialog):
             self.piece_list.addItem(item)
             self._streaming_piece_visible_count = visible_row + 1
             try:
+                total = int(getattr(self, "_streaming_piece_total", 0) or 0)
+                if total:
+                    self.loading_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{total}")
+            except Exception:
+                pass
+            try:
                 piece_norm = os.path.normcase(os.path.abspath(piece.get("path") or ""))
                 if self._streaming_piece_selected_path and piece_norm == self._streaming_piece_selected_path:
                     self._streaming_piece_selected_row = visible_row
@@ -3462,6 +3474,12 @@ class SDLXLIFFReviewDialog(QDialog):
         stream_sidebar = bool(stream_sidebar and self.isVisible())
         if stream_sidebar:
             stream_sidebar = self._prepare_streaming_piece_list(work_items)
+            if stream_sidebar:
+                try:
+                    self._streaming_piece_total = len(work_items)
+                    self.loading_label.setText(f"Loading SDLXLIFF entries 0/{len(work_items)}")
+                except Exception:
+                    pass
 
         def flush_streamed_pieces(limit=None):
             if not stream_sidebar:
