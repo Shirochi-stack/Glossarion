@@ -498,7 +498,8 @@ class SDLXLIFFReviewDialog(QDialog):
         self.generation_progress_bar = QProgressBar()
         self.generation_progress_bar.setTextVisible(True)
         self.generation_progress_bar.setFixedHeight(16)
-        self.generation_progress_bar.setMaximumWidth(360)
+        self.generation_progress_bar.setMinimumWidth(280)
+        self.generation_progress_bar.setMaximumWidth(420)
         self.generation_progress_bar.setStyleSheet(
             "QProgressBar { background-color:#202936; color:#d7ecff; border:1px solid #4a5568; "
             "border-radius:4px; text-align:center; font-size:8pt; font-weight:bold; }"
