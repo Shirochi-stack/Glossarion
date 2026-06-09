@@ -845,7 +845,7 @@ class SplashManager(QObject):
                 "loader": self._preload_epub_webengine,
                 "display": "Qt WebEngine",
                 "loading": "Loading Qt WebEngine...",
-                "loaded": "Qt WebEngine loaded",
+                "loaded": "🌐 Qt WebEngine loaded",
                 "required": (),
                 "result": lambda loaded: loaded,
                 "optional": True,

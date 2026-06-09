@@ -1681,6 +1681,22 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "REVIEW_SYNC_RENDER_ROW_LIMIT = 80" in source
     assert "wait(pending, timeout=0.025, return_when=FIRST_COMPLETED)" in source
     assert "_pump_review_loading_events" in source
+    pump_body = source[
+        source.index("def _pump_review_loading_events"):
+        source.index("def _remove_review_page_widget", source.index("def _pump_review_loading_events"))
+    ]
+    assert "_review_event_pump_active" in pump_body
+    assert "finally:" in pump_body
+    generation_prepare_body = source[
+        source.index("def _prepare_generation_streaming_piece_list"):
+        source.index("def _append_generated_sidecar_stream_piece", source.index("def _prepare_generation_streaming_piece_list"))
+    ]
+    assert "_pump_review_loading_events" not in generation_prepare_body
+    generation_stream_body = source[
+        source.index("def _append_generated_sidecar_stream_piece"):
+        source.index("def _review_generation_summary", source.index("def _append_generated_sidecar_stream_piece"))
+    ]
+    assert "_pump_review_loading_events" not in generation_stream_body
     assert "self.pieces = self._load_pieces(stream_sidebar=not seamless)" in source
     assert "if not self._streamed_piece_list_populated:" in source
     assert "def _prepare_streaming_piece_list" in source

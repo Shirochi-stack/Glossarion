@@ -751,7 +751,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 self.piece_list.currentRowChanged.connect(self._request_render_piece)
             except Exception:
                 pass
-            self._pump_review_loading_events(max_ms=4)
+            self._spin_review_loading_icon()
+            QTimer.singleShot(0, self.piece_list.update)
             return True
         except Exception:
             return False
@@ -794,7 +795,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._initial_piece_row = 0
                 QTimer.singleShot(0, lambda: self._render_piece(0, show_loading=False))
             self.piece_list.update()
-            self._pump_review_loading_events(max_ms=3)
+            QTimer.singleShot(0, self.piece_list.update)
             return True
         except Exception:
             return False
@@ -3835,12 +3836,17 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _pump_review_loading_events(self, max_ms=8):
+        if getattr(self, "_review_event_pump_active", False):
+            return
         try:
+            self._review_event_pump_active = True
             self._spin_review_loading_icon()
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents(QEventLoop.AllEvents, max(1, int(max_ms)))
         except Exception:
             pass
+        finally:
+            self._review_event_pump_active = False
 
     def _remove_review_page_widget(self, page):
         if page is None or page is self.loading_page:
