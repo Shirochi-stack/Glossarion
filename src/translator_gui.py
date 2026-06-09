@@ -17646,7 +17646,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             enabled = False
         if not enabled:
             return ''
-        top_p = str(env.get('TOP_P', '1.0'))
+        top_p = f"{float(env.get('TOP_P', '1.0')):g}"
         min_p = str(env.get('MIN_P', '0.0'))
         top_k = str(env.get('TOP_K', '0'))
         freq = str(env.get('FREQUENCY_PENALTY', '0.0'))

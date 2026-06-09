@@ -19537,7 +19537,7 @@ def main(log_callback=None, stop_callback=None):
     print("="*50 + "\n")
 
     if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1" and os.getenv("TRANSLATION_ANTI_DUPLICATE_LOGGED", "0") != "1":
-        ad_top_p = os.getenv("TOP_P", "1.0")
+        ad_top_p = f"{float(os.getenv('TOP_P', '1.0')):g}"
         ad_min_p = os.getenv("MIN_P", "0.0")
         ad_top_k = os.getenv("TOP_K", "0")
         ad_freq = os.getenv("FREQUENCY_PENALTY", "0.0")
