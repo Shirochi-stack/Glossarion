@@ -17485,6 +17485,12 @@ class UnifiedClient:
         if should_log:
             if "min_p" not in params and float(self._get_anti_duplicate_env("MIN_P", "0.0") or 0) > 0:
                 params = {**params, "min_p": float(self._get_anti_duplicate_env("MIN_P", "0.0"))}
+            if "top_k" not in params and int(float(self._get_anti_duplicate_env("TOP_K", "0") or 0)) > 0:
+                params = {**params, "top_k": int(float(self._get_anti_duplicate_env("TOP_K", "0")))}
+            if "frequency_penalty" not in params and float(self._get_anti_duplicate_env("FREQUENCY_PENALTY", "0.0") or 0) > 0:
+                params = {**params, "frequency_penalty": float(self._get_anti_duplicate_env("FREQUENCY_PENALTY", "0.0"))}
+            if "presence_penalty" not in params and float(self._get_anti_duplicate_env("PRESENCE_PENALTY", "0.0") or 0) > 0:
+                params = {**params, "presence_penalty": float(self._get_anti_duplicate_env("PRESENCE_PENALTY", "0.0"))}
             applied_kv = ", ".join([f"{k}={params[k]:g}" if isinstance(params[k], float) else f"{k}={params[k]}" for k in params.keys()])
             logger.info(f"🧩 Anti-duplicate applied: {applied_kv}")
 
