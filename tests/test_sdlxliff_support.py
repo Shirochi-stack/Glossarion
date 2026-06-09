@@ -647,6 +647,51 @@ def test_sdlxliff_review_ignores_empty_source_paragraphs_for_alignment(tmp_path)
     assert all(row["source"] for row in piece["rows"])
 
 
+def test_sdlxliff_review_ignores_invisible_empty_html_tags(tmp_path):
+    sidecar = tmp_path / "response_chapter_empty_tags.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p></p>"
+        "<p>&nbsp;</p>"
+        "<p>\u200b</p>"
+        "<p>Real source text.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p> </p>"
+        "<p>&#8203;</p>"
+        "<p>Real target text.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_empty_tags.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[{source_html}]]></source>
+        <target><![CDATA[{target_html}]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": "response_chapter_empty_tags.html"})
+
+    assert piece["source_count"] == 1
+    assert piece["target_count"] == 1
+    assert len(piece["rows"]) == 1
+    assert piece["rows"][0]["source_tag_label"] == "p(1)"
+    assert piece["rows"][0]["target_tag_label"] == "p(1)"
+    assert piece["rows"][0]["source"] == "Real source text."
+    assert piece["rows"][0]["target"] == "Real target text."
+
+
 def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):
     sidecar = tmp_path / "response_chapter_heading.html.sdlxliff"
     source_html = "<html><body><h1>Source heading</h1><p>Source body</p></body></html>"
@@ -2495,8 +2540,8 @@ def test_sdlxliff_review_treats_div_u_source_blocks_as_paragraph_units(tmp_path)
 def test_sdlxliff_review_numbered_tag_label_text_keeps_missing_word():
     assert SDLXLIFFReviewDialog._tag_label_text("p", "p", "p(2)", "p(2)") == "p(2)"
     assert SDLXLIFFReviewDialog._tag_label_text("h1", "h2", "h1(1)", "h2(1)") == "h1(1) -> h2(1)"
-    assert SDLXLIFFReviewDialog._tag_label_text("p", "", "p(3)", "") == "p(3) -> missing"
-    assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "+ p(4)"
+    assert SDLXLIFFReviewDialog._tag_label_text("p", "", "p(3)", "") == "Missing (3)"
+    assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "Added (4)"
 
 
 def test_sdlxliff_review_regenerates_sidecar_when_source_column_is_empty(tmp_path, monkeypatch):

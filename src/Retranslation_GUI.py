@@ -2637,7 +2637,9 @@ class SDLXLIFFReviewDialog(QDialog):
             return not tag.find(self.TEXT_TAGS)
 
         for index, tag in enumerate(soup.find_all(_is_text_unit)):
-            value = tag.get_text(" ", strip=True)
+            value = self._normalize_review_text(tag.get_text(" ", strip=True))
+            if not value:
+                continue
             tag_name = tag.name.lower()
             if tag_name == "div":
                 tag_name = "p"
@@ -2649,9 +2651,16 @@ class SDLXLIFFReviewDialog(QDialog):
         return units
 
     @staticmethod
+    def _normalize_review_text(text):
+        text = html_lib.unescape(str(text or ""))
+        text = re.sub(r"[\u200b\u200c\u200d\ufeff\u2060]", "", text)
+        text = text.replace("\xa0", " ")
+        return text.strip()
+
+    @staticmethod
     def _non_empty_text_unit_count(units):
         try:
-            return sum(1 for unit in (units or []) if str(unit.get("text", "") or "").strip())
+            return sum(1 for unit in (units or []) if SDLXLIFFReviewDialog._normalize_review_text(unit.get("text", "")))
         except Exception:
             return 0
 
@@ -2660,7 +2669,7 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             return [
                 unit for unit in (units or [])
-                if str(unit.get("text", "") or "").strip()
+                if SDLXLIFFReviewDialog._normalize_review_text(unit.get("text", ""))
             ]
         except Exception:
             return []
@@ -2682,8 +2691,8 @@ class SDLXLIFFReviewDialog(QDialog):
         return any(ch.isalpha() for ch in str(text or ""))
 
     def _row_status(self, source_text, target_text, source_missing=False, target_missing=False):
-        source_text = str(source_text or "").strip()
-        target_text = str(target_text or "").strip()
+        source_text = self._normalize_review_text(source_text)
+        target_text = self._normalize_review_text(target_text)
         if source_missing or target_missing:
             return "red", "dropped/added"
         if not target_text:
@@ -4602,12 +4611,14 @@ class SDLXLIFFReviewDialog(QDialog):
         target_tag = str(target_tag or "").strip()
         source_label = str(source_label or source_tag).strip()
         target_label = str(target_label or target_tag).strip()
+        source_ordinal = re.search(r"\((\d+)\)", source_label)
+        target_ordinal = re.search(r"\((\d+)\)", target_label)
         if source_tag and target_tag:
             return source_label if source_label == target_label else f"{source_label} -> {target_label}"
         elif source_tag:
-            return f"{source_label} -> missing"
+            return f"Missing ({source_ordinal.group(1)})" if source_ordinal else "Missing"
         elif target_tag:
-            return f"+ {target_label}"
+            return f"Added ({target_ordinal.group(1)})" if target_ordinal else f"+ {target_label}"
         return "-"
 
     def _tag_label(self, source_tag, target_tag, status, source_label=None, target_label=None):
