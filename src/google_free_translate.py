@@ -150,6 +150,7 @@ class GoogleFreeTranslateNew:
         provider: str = "auto",
         api_keys: Optional[Dict[str, Any]] = None,
         honor_global_stop: bool = True,
+        endpoint_status_callback=None,
     ):
         self.source_language = source_language
         self.target_language = target_language
@@ -157,6 +158,7 @@ class GoogleFreeTranslateNew:
         self.provider = self._normalize_provider(provider)
         self.api_keys = dict(api_keys or {})
         self.honor_global_stop = bool(honor_global_stop)
+        self.endpoint_status_callback = endpoint_status_callback
         self.cache = {}  # Simple in-memory cache
         self.cache_lock = threading.Lock()
         self.request_lock = threading.Lock()
@@ -330,6 +332,29 @@ class GoogleFreeTranslateNew:
             return ""
         return f"Auto fell back to Argos after Google endpoints failed: {', '.join(labels)}"
 
+    @classmethod
+    def _brief_google_endpoint_label(cls, endpoint_url: str) -> str:
+        labels = cls._brief_google_endpoint_failure_labels([endpoint_url])
+        return labels[0] if labels else str(endpoint_url or "").strip()
+
+    @staticmethod
+    def _brief_google_endpoint_error(error: Any) -> str:
+        text = str(error or "").strip()
+        if not text:
+            return "unknown error"
+        if len(text) > 140:
+            text = text[:137].rstrip() + "..."
+        return text
+
+    def _emit_endpoint_status(self, message: str):
+        callback = getattr(self, "endpoint_status_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback(str(message or "").strip())
+        except Exception:
+            pass
+
     def _stop_requested(self) -> bool:
         if not getattr(self, "honor_global_stop", True):
             return False
@@ -471,10 +496,15 @@ class GoogleFreeTranslateNew:
             # Collect all errors for detailed reporting
             all_errors = []
             
-            for endpoint_url in endpoints_to_try:
+            endpoint_count = len(endpoints_to_try)
+            for endpoint_index, endpoint_url in enumerate(endpoints_to_try, start=1):
                 # Honor global stop flags between requests
                 self._raise_if_stop_requested()
                 try:
+                    endpoint_label = self._brief_google_endpoint_label(endpoint_url)
+                    self._emit_endpoint_status(
+                        f"Trying Google endpoint {endpoint_index}/{endpoint_count}: {endpoint_label}"
+                    )
                     # Check if it's the mobile /translate_a/t API, not merely a translate.* host.
                     is_mobile = endpoint_url.rstrip('/').endswith('/translate_a/t')
                     
@@ -499,6 +529,12 @@ class GoogleFreeTranslateNew:
                     error_msg = f"{endpoint_url}: {e}"
                     all_errors.append(error_msg)
                     self.logger.warning(f"⚠️ {error_msg}")
+                    endpoint_label = self._brief_google_endpoint_label(endpoint_url)
+                    error_label = self._brief_google_endpoint_error(e)
+                    next_text = " Trying next endpoint..." if endpoint_index < endpoint_count else ""
+                    self._emit_endpoint_status(
+                        f"Google endpoint {endpoint_index}/{endpoint_count} failed: {endpoint_label} - {error_label}.{next_text}"
+                    )
                     continue
             
             # If all endpoints failed, report all errors
@@ -507,12 +543,16 @@ class GoogleFreeTranslateNew:
             self.logger.error(detailed_error)
 
             if provider == "google":
+                self._emit_endpoint_status(f"Google failed on {len(all_errors)} endpoints.")
                 raise Exception(detailed_error)
             
             # Fallback to Argos Translate
             self.logger.info("🔄 All Google endpoints failed. Switching to permanent Argos Translate fallback...")
             GoogleFreeTranslateNew._use_fallback_only = True  # Set flag to skip Google endpoints for future requests
             self.logger.info("🧩 Using Argos Translate fallback for this request")
+            self._emit_endpoint_status(
+                f"Google failed on {len(all_errors)} endpoints; trying Argos Translate fallback..."
+            )
             
             argos_result = self._translate_via_argos(text, source_lang, target_lang)
             if argos_result:

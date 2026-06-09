@@ -161,6 +161,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     _tooltip_translation_finished = Signal(int, object, str)
     _tooltip_translation_progress = Signal(int, int)
+    _tooltip_translation_status = Signal(int, object, str)
     _tooltip_translation_batch_finished = Signal(int, int, str)
     _review_data_preload_finished = Signal(int, object)
     _review_refresh_scan_finished = Signal(int, object)
@@ -312,6 +313,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_batch_active = False
         self._tooltip_translation_finished.connect(self._apply_tooltip_translations)
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
+        self._tooltip_translation_status.connect(self._apply_tooltip_translation_status)
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         self._review_data_preload_finished.connect(self._apply_review_data_preload)
         self._review_refresh_scan_finished.connect(self._apply_review_refresh_scan)
@@ -1269,6 +1271,64 @@ class SDLXLIFFReviewDialog(QDialog):
         return f"⏳ Translating with {self._machine_translation_provider_label()}..."
 
     @staticmethod
+    def _compact_machine_translation_error(error):
+        text = str(error or "").strip()
+        if not text:
+            return "Machine translation preview failed"
+        if "All Google Translate endpoints failed" in text:
+            endpoint_lines = [
+                line.strip().lstrip("•").strip()
+                for line in text.splitlines()
+                if "translate" in line and ": " in line
+            ]
+            reasons = []
+            for line in endpoint_lines:
+                match = re.match(r"^https?://[^\s]+:\s*(.+)$", line)
+                reason = (match.group(1) if match else line.rsplit(": ", 1)[-1]).strip()
+                if reason:
+                    reasons.append(reason)
+            count = len(endpoint_lines) or len(reasons)
+            if reasons and len(set(reasons)) == 1:
+                reason = reasons[0].replace(": ", " ")
+                return f"Google failed: {reason} on {count} endpoints"
+            if count:
+                return f"Google failed on {count} endpoints; see tooltip for details"
+            return "Google failed on all endpoints; see tooltip for details"
+        if text.startswith("Auto fell back") and "Google endpoints failed:" in text:
+            endpoints = [
+                item.strip()
+                for item in text.split("Google endpoints failed:", 1)[-1].split(",")
+                if item.strip()
+            ]
+            if endpoints:
+                return f"Auto fell back after Google failed on {len(endpoints)} endpoints"
+        first_line = text.splitlines()[0].strip()
+        if len(first_line) > 180:
+            first_line = first_line[:177].rstrip() + "..."
+        return first_line
+
+    @classmethod
+    def _row_machine_translation_preview_from_snapshot(cls, row):
+        row = row if isinstance(row, dict) else {}
+        if row.get("tooltip_translation_pending"):
+            return str(row.get("tooltip_translation_status") or cls.MACHINE_TRANSLATION_PENDING_TEXT)
+        error = str(row.get("tooltip_translation_error") or "").strip()
+        if error:
+            return error
+        return str(row.get("tooltip_translation") or "").strip()
+
+    @staticmethod
+    def _row_machine_translation_preview_state(row):
+        row = row if isinstance(row, dict) else {}
+        if row.get("tooltip_translation_pending"):
+            return "pending"
+        if str(row.get("tooltip_translation_error") or "").strip():
+            return "error"
+        if str(row.get("tooltip_translation") or "").strip():
+            return "translation"
+        return ""
+
+    @staticmethod
     def _machine_translation_result_note(result):
         if not isinstance(result, dict):
             return ""
@@ -1333,7 +1393,7 @@ class SDLXLIFFReviewDialog(QDialog):
             }
         return options
 
-    def _machine_translation_translator(self, target_code):
+    def _machine_translation_translator(self, target_code, status_callback=None):
         from google_free_translate import GoogleFreeTranslateNew
         return GoogleFreeTranslateNew(
             "auto",
@@ -1341,6 +1401,7 @@ class SDLXLIFFReviewDialog(QDialog):
             provider=self._machine_translation_provider(),
             api_keys=self._machine_translation_api_options(),
             honor_global_stop=False,
+            endpoint_status_callback=status_callback,
         )
 
     def _prompt_secret_text(self, title, label, current=""):
@@ -3608,6 +3669,9 @@ class SDLXLIFFReviewDialog(QDialog):
             "status": str(row_data.get("status", "green") or "green"),
             "tooltip_translation": str(row_data.get("tooltip_translation", "") or ""),
             "tooltip_translation_pending": bool(row_data.get("tooltip_translation_pending")),
+            "tooltip_translation_status": str(row_data.get("tooltip_translation_status", "") or ""),
+            "tooltip_translation_error": str(row_data.get("tooltip_translation_error", "") or ""),
+            "tooltip_translation_error_detail": str(row_data.get("tooltip_translation_error_detail", "") or ""),
         }
 
     @staticmethod
@@ -3641,6 +3705,7 @@ class SDLXLIFFReviewDialog(QDialog):
         tooltip_pending=False,
         viewport_width=1200,
         two_column_layout=False,
+        tooltip_preview_text=None,
     ):
         chars_per_line = cls._review_chars_per_line_for_width(
             viewport_width,
@@ -3648,7 +3713,11 @@ class SDLXLIFFReviewDialog(QDialog):
         )
         source_lines = cls._review_wrapped_lines(source_text, chars_per_line)
         target_lines = cls._review_wrapped_lines(target_text, chars_per_line)
-        tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
+        tooltip_preview = (
+            str(tooltip_preview_text or "").strip()
+            if tooltip_preview_text is not None
+            else (cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip())
+        )
         if tooltip_preview:
             translated_chars_per_line = max(30, int(chars_per_line * 1.35))
             tooltip_lines = min(18, cls._review_wrapped_lines(tooltip_preview, translated_chars_per_line))
@@ -3665,6 +3734,7 @@ class SDLXLIFFReviewDialog(QDialog):
         tooltip_pending=False,
         viewport_width=1200,
         two_column_layout=False,
+        tooltip_preview_text=None,
     ):
         source_lines, target_lines, tooltip_lines = cls._review_row_line_counts_for_width(
             source_text,
@@ -3673,9 +3743,14 @@ class SDLXLIFFReviewDialog(QDialog):
             tooltip_pending,
             viewport_width,
             two_column_layout=two_column_layout,
+            tooltip_preview_text=tooltip_preview_text,
         )
         max_lines = max(1, source_lines, target_lines)
-        tooltip_preview = cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip()
+        tooltip_preview = (
+            str(tooltip_preview_text or "").strip()
+            if tooltip_preview_text is not None
+            else (cls.MACHINE_TRANSLATION_PENDING_TEXT if tooltip_pending else str(tooltip_translation or "").strip())
+        )
         if tooltip_lines:
             max_lines = max(max_lines, source_lines + tooltip_lines)
         if two_column_layout:
@@ -3710,6 +3785,8 @@ class SDLXLIFFReviewDialog(QDialog):
             target_text = row.get("target", "")
             tooltip_translation = row.get("tooltip_translation", "")
             tooltip_pending = bool(row.get("tooltip_translation_pending"))
+            tooltip_preview = cls._row_machine_translation_preview_from_snapshot(row)
+            tooltip_state = cls._row_machine_translation_preview_state(row)
             source_lines, target_lines, tooltip_lines = cls._review_row_line_counts_for_width(
                 source_text,
                 target_text,
@@ -3717,6 +3794,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_pending,
                 viewport_width,
                 two_column_layout=two_column_layout,
+                tooltip_preview_text=tooltip_preview,
             )
             source_missing = not row.get("source_tag")
             target_missing = not row.get("target_tag")
@@ -3730,6 +3808,9 @@ class SDLXLIFFReviewDialog(QDialog):
                 "target_editable": (not source_missing or not target_missing),
                 "tooltip_translation": tooltip_translation,
                 "tooltip_pending": tooltip_pending,
+                "tooltip_preview": tooltip_preview,
+                "tooltip_state": tooltip_state,
+                "tooltip_detail": str(row.get("tooltip_translation_error_detail") or row.get("tooltip_translation_status") or ""),
                 "two_column_layout": bool(two_column_layout),
                 "source_lines": source_lines,
                 "target_lines": target_lines,
@@ -3741,6 +3822,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     tooltip_pending,
                     viewport_width,
                     two_column_layout=two_column_layout,
+                    tooltip_preview_text=tooltip_preview,
                 ),
             })
         return {
@@ -4419,8 +4501,22 @@ class SDLXLIFFReviewDialog(QDialog):
             source_text = row_data.get("source", "")
             target_text = row_data.get("target", "")
             tooltip_translation = self._row_tooltip_translation(piece, row_data)
-            tooltip_pending = bool(row_data.get("tooltip_translation_pending"))
-            row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
+            row_snapshot = self._review_row_snapshot(row_data)
+            tooltip_preview = self._row_machine_translation_preview_from_snapshot(row_snapshot)
+            tooltip_state = self._row_machine_translation_preview_state(row_snapshot)
+            tooltip_pending = tooltip_state == "pending"
+            tooltip_detail = str(
+                row_data.get("tooltip_translation_error_detail")
+                or row_data.get("tooltip_translation_status")
+                or ""
+            )
+            row_height = self._review_row_height(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                tooltip_preview_text=tooltip_preview,
+            )
             source_missing = not row_data.get("source_tag")
             target_missing = not row_data.get("target_tag")
             target_editable = not source_missing or not target_missing
@@ -4428,15 +4524,17 @@ class SDLXLIFFReviewDialog(QDialog):
             source_label = self._text_label(
                 source_text,
                 missing=source_missing,
-                tooltip_translation=tooltip_translation,
+                tooltip_translation=tooltip_preview,
                 tooltip_pending=tooltip_pending,
+                tooltip_state=tooltip_state,
+                tooltip_detail=tooltip_detail,
                 translate_tooltip_callback=(
                     lambda pi=piece_index, ri=row_index: self._translate_single_row_tooltip(pi, ri)
                 ) if source_text else None,
                 inject_machine_translation_callback=(
                     lambda pi=piece_index, ri=row_index, text=tooltip_translation, ed=target_widget:
                         self._inject_machine_translation_to_target(pi, ri, text, ed)
-                ) if tooltip_translation and target_editable and not tooltip_pending else None,
+                ) if tooltip_translation and target_editable and tooltip_state == "translation" else None,
             )
             source_lines, target_lines, tooltip_lines = self._review_row_line_counts_for_width(
                 source_text,
@@ -4445,6 +4543,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_pending,
                 self._review_render_viewport_width(),
                 two_column_layout=bool(frame.property("sdl_two_column_layout")),
+                tooltip_preview_text=tooltip_preview,
             )
             source_label.setToolTip(self._wrapped_tooltip(source_text))
 
@@ -4504,16 +4603,28 @@ class SDLXLIFFReviewDialog(QDialog):
             source_text = row_data.get("source", "")
             target_text = row_data.get("target", "")
             tooltip_translation = self._row_tooltip_translation(piece, row_data)
-            tooltip_pending = bool(row_data.get("tooltip_translation_pending"))
-            preview_text = self._machine_translation_pending_text() if tooltip_pending else tooltip_translation
+            row_snapshot = self._review_row_snapshot(row_data)
+            tooltip_preview = self._row_machine_translation_preview_from_snapshot(row_snapshot)
+            tooltip_state = self._row_machine_translation_preview_state(row_snapshot)
+            tooltip_pending = tooltip_state == "pending"
+            tooltip_detail = str(
+                row_data.get("tooltip_translation_error_detail")
+                or row_data.get("tooltip_translation_status")
+                or ""
+            )
+            preview_text = tooltip_preview
             if not str(preview_text or "").strip():
                 return False
             translated_label.setObjectName(
-                "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"
+                "SdlReviewMachineTranslationPending" if tooltip_state in {"pending", "error"} else "SdlReviewMachineTranslation"
             )
             translated_label.setText(preview_text)
-            if tooltip_pending:
-                translated_label.setToolTip(f"Machine translation preview is being generated with {self._machine_translation_provider_label()}.")
+            if tooltip_state in {"pending", "error"}:
+                translated_label.setToolTip(
+                    self._wrapped_tooltip(tooltip_detail)
+                    if tooltip_detail
+                    else f"Machine translation preview is being generated with {self._machine_translation_provider_label()}."
+                )
                 translated_label.setStyleSheet(
                     "QLabel#SdlReviewMachineTranslationPending { "
                     "color: #d8c99b; background: rgba(54, 45, 23, 180); "
@@ -4535,7 +4646,7 @@ class SDLXLIFFReviewDialog(QDialog):
             inject_callback = (
                 lambda pi=piece_index, ri=row_index, text=tooltip_translation, ed=target_widget:
                     self._inject_machine_translation_to_target(pi, ri, text, ed)
-            ) if tooltip_translation and target_editable and not tooltip_pending else None
+            ) if tooltip_translation and target_editable and tooltip_state == "translation" else None
             raw_label = source_widget.findChild(QLabel, "SdlReviewSourceRawText")
             self._wire_source_preview_context_menu(
                 raw_label or translated_label,
@@ -4553,8 +4664,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 tooltip_pending,
                 self._review_render_viewport_width(),
                 two_column_layout=bool(frame.property("sdl_two_column_layout")),
+                tooltip_preview_text=tooltip_preview,
             )
-            row_height = self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending)
+            row_height = self._review_row_height(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                tooltip_preview_text=tooltip_preview,
+            )
             frame.setFixedHeight(row_height)
             if target_widget is not None:
                 self._apply_review_row_text_geometry(
@@ -4568,7 +4686,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 )
             self._update_review_row_inject_button(
                 frame,
-                bool(tooltip_translation) and bool(target_editable) and not tooltip_pending,
+                bool(tooltip_translation) and bool(target_editable) and tooltip_state == "translation",
             )
             frame.updateGeometry()
             frame.update()
@@ -5140,6 +5258,9 @@ class SDLXLIFFReviewDialog(QDialog):
             for row_idx, _key, _source_text, _tag_name in work:
                 if 0 <= row_idx < len(rows):
                     rows[row_idx]["tooltip_translation_pending"] = True
+                    rows[row_idx]["tooltip_translation_status"] = self._machine_translation_pending_text()
+                    rows[row_idx].pop("tooltip_translation_error", None)
+                    rows[row_idx].pop("tooltip_translation_error_detail", None)
                     rows[row_idx]["_source_preview_dirty"] = True
                     pending_rows.append(row_idx)
             if pending_rows:
@@ -5149,6 +5270,36 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._queue_refresh_current_visible_dirty_source_previews()
                 else:
                     self._update_review_row_source_previews(piece_index, pending_rows, visible_only=True)
+        except Exception:
+            pass
+
+    def _apply_tooltip_translation_status(self, piece_index, keys, message):
+        try:
+            if piece_index < 0 or piece_index >= len(self.pieces):
+                return
+            message = str(message or "").strip()
+            if not message:
+                return
+            key_set = set(keys or [])
+            piece = self.pieces[piece_index]
+            rows = piece.get("rows") or []
+            changed_rows = []
+            for row_index, row_data in enumerate(rows):
+                if key_set and self._tooltip_translation_key(piece, row_data) not in key_set:
+                    continue
+                if not row_data.get("tooltip_translation_pending"):
+                    continue
+                row_data["tooltip_translation_status"] = message
+                row_data["_source_preview_dirty"] = True
+                changed_rows.append(row_index)
+            if not changed_rows:
+                return
+            self._invalidate_piece_render_model(piece, restart_preload=False)
+            if piece_index == self._displayed_piece_row():
+                if self._review_context_menu_is_open():
+                    self._queue_refresh_current_visible_dirty_source_previews()
+                else:
+                    self._update_review_row_source_previews(piece_index, changed_rows, visible_only=True)
         except Exception:
             pass
 
@@ -5181,7 +5332,11 @@ class SDLXLIFFReviewDialog(QDialog):
             translations = {}
             error = ""
             try:
-                translator = self._machine_translation_translator(target_code)
+                work_keys = [item[1] for item in work]
+                def _status(message):
+                    self._tooltip_translation_status.emit(row, work_keys, str(message or ""))
+
+                translator = self._machine_translation_translator(target_code, status_callback=_status)
                 batch_html = self._tooltip_batch_html(work)
                 result = translator.translate(batch_html)
                 result_error = str(result.get("error") or "").strip() if isinstance(result, dict) else ""
@@ -5234,13 +5389,26 @@ class SDLXLIFFReviewDialog(QDialog):
         def _worker():
             translated_count = 0
             last_error = ""
+            status_context = {
+                "piece_index": jobs[0][0] if jobs else -1,
+                "keys": [],
+            }
+            def _status(message):
+                self._tooltip_translation_status.emit(
+                    int(status_context.get("piece_index", -1)),
+                    list(status_context.get("keys") or []),
+                    str(message or ""),
+                )
+
             try:
-                translator = self._machine_translation_translator(target_code)
+                translator = self._machine_translation_translator(target_code, status_callback=_status)
             except Exception as exc:
                 self._tooltip_translation_batch_finished.emit(0, total_jobs, str(exc))
                 return
 
             for done, (piece_index, work) in enumerate(jobs, start=1):
+                status_context["piece_index"] = piece_index
+                status_context["keys"] = [item[1] for item in work]
                 translations = {}
                 error = ""
                 try:
@@ -5345,15 +5513,24 @@ class SDLXLIFFReviewDialog(QDialog):
             rows_to_persist = []
             for row_index, row_data in enumerate(piece.get("rows") or []):
                 key = self._tooltip_translation_key(piece, row_data)
-                if row_data.pop("tooltip_translation_pending", False):
+                was_pending = bool(row_data.pop("tooltip_translation_pending", False))
+                if was_pending:
+                    row_data.pop("tooltip_translation_status", None)
                     changed_rows.add(row_index)
                 if key in translations:
                     translated = str(translations[key] or "").strip()
+                    row_data.pop("tooltip_translation_error", None)
+                    row_data.pop("tooltip_translation_error_detail", None)
                     if self._normalized_machine_translation_text(translated) == self._normalized_machine_translation_text(row_data.get("source", "")):
                         changed_rows.add(row_index)
                         continue
                     self._set_row_tooltip_translation(piece, row_data, translated, persist=False)
                     rows_to_persist.append((row_data, translated))
+                    changed_rows.add(row_index)
+                elif error and was_pending and not translations:
+                    row_data["tooltip_translation_error"] = self._compact_machine_translation_error(error)
+                    row_data["tooltip_translation_error_detail"] = str(error or "")
+                    row_data["_source_preview_dirty"] = True
                     changed_rows.add(row_index)
             if rows_to_persist:
                 self._write_machine_translation_entries(piece, rows_to_persist)
@@ -5377,7 +5554,9 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         if error and not translations:
             try:
-                self.save_status_label.setText(f"Machine translation preview failed: {error}")
+                self.save_status_label.setText(
+                    f"Machine translation preview failed: {self._compact_machine_translation_error(error)}"
+                )
             except Exception:
                 pass
         elif translations:
@@ -5385,7 +5564,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 provider_label = self._machine_translation_provider_label()
                 message = f"Generated {len(translations)} {provider_label} machine translation preview(s)"
                 if error:
-                    message = f"{message}. {error}"
+                    message = f"{message}. {self._compact_machine_translation_error(error)}"
                 self.save_status_label.setText(message)
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             except Exception:
@@ -5409,11 +5588,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     f"Generated {int(translated_count)} {self._machine_translation_provider_label()} machine translation preview(s) across {int(piece_count or 0)} entries"
                 )
                 if error:
-                    message = f"{message}. {error}"
+                    message = f"{message}. {self._compact_machine_translation_error(error)}"
                 self.save_status_label.setText(message)
                 QTimer.singleShot(2500, lambda: self.save_status_label.setText(""))
             elif error:
-                self.save_status_label.setText(f"Machine translation preview failed: {error}")
+                self.save_status_label.setText(
+                    f"Machine translation preview failed: {self._compact_machine_translation_error(error)}"
+                )
         except Exception:
             pass
 
@@ -5943,6 +6124,8 @@ class SDLXLIFFReviewDialog(QDialog):
         missing=False,
         tooltip_translation=None,
         tooltip_pending=False,
+        tooltip_state=None,
+        tooltip_detail=None,
         translate_tooltip_callback=None,
         inject_machine_translation_callback=None,
     ):
@@ -5959,7 +6142,11 @@ class SDLXLIFFReviewDialog(QDialog):
 
         tooltip_translation = str(tooltip_translation or "").strip()
         tooltip_pending = bool(tooltip_pending)
-        if not tooltip_translation and not tooltip_pending:
+        tooltip_state = str(tooltip_state or ("pending" if tooltip_pending else ("translation" if tooltip_translation else ""))).strip().lower()
+        if tooltip_state not in {"pending", "error", "translation"}:
+            tooltip_state = "pending" if tooltip_pending else ("translation" if tooltip_translation else "")
+        tooltip_detail = str(tooltip_detail or "").strip()
+        if not tooltip_translation and tooltip_state not in {"pending", "error"}:
             self._wire_source_preview_context_menu(
                 label,
                 [label],
@@ -5981,11 +6168,11 @@ class SDLXLIFFReviewDialog(QDialog):
         layout.addStretch(1)
         layout.addWidget(label)
 
-        preview_text = self._machine_translation_pending_text() if tooltip_pending else tooltip_translation
+        preview_text = tooltip_translation or self._machine_translation_pending_text()
         preview_label_text = preview_text
         translated_label = QLabel(preview_label_text)
         translated_label.setObjectName(
-            "SdlReviewMachineTranslationPending" if tooltip_pending else "SdlReviewMachineTranslation"
+            "SdlReviewMachineTranslationPending" if tooltip_state in {"pending", "error"} else "SdlReviewMachineTranslation"
         )
         translated_label.setTextFormat(Qt.PlainText)
         translated_label.setWordWrap(True)
@@ -5993,8 +6180,12 @@ class SDLXLIFFReviewDialog(QDialog):
         translated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         translated_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         translated_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        if tooltip_pending:
-            translated_label.setToolTip(f"Machine translation preview is being generated with {self._machine_translation_provider_label()}.")
+        if tooltip_state in {"pending", "error"}:
+            translated_label.setToolTip(
+                self._wrapped_tooltip(tooltip_detail)
+                if tooltip_detail
+                else f"Machine translation preview is being generated with {self._machine_translation_provider_label()}."
+            )
             translated_label.setStyleSheet(
                 "QLabel#SdlReviewMachineTranslationPending { "
                 "color: #d8c99b; background: rgba(54, 45, 23, 180); "
@@ -6017,7 +6208,7 @@ class SDLXLIFFReviewDialog(QDialog):
             label,
             [container, label, translated_label],
             translate_tooltip_callback=translate_tooltip_callback,
-            inject_machine_translation_callback=None if tooltip_pending else inject_machine_translation_callback,
+            inject_machine_translation_callback=None if tooltip_state in {"pending", "error"} else inject_machine_translation_callback,
         )
         return container
 
@@ -6049,7 +6240,7 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             anchor.setProperty("sdl_source_context_menu_wired", True)
 
-    def _review_row_height(self, source_text, target_text, tooltip_translation=None, tooltip_pending=False):
+    def _review_row_height(self, source_text, target_text, tooltip_translation=None, tooltip_pending=False, tooltip_preview_text=None):
         return self._review_row_height_for_width(
             source_text,
             target_text,
@@ -6057,6 +6248,7 @@ class SDLXLIFFReviewDialog(QDialog):
             tooltip_pending,
             self._review_render_viewport_width(),
             two_column_layout=bool(getattr(self, "_two_column_layout_enabled", True)),
+            tooltip_preview_text=tooltip_preview_text,
         )
 
     def _review_row_source_widget(self, frame):
@@ -6130,8 +6322,30 @@ class SDLXLIFFReviewDialog(QDialog):
         source_text = row_model.get("source_text", row_data.get("source", ""))
         target_text = row_model.get("target_text", row_data.get("target", ""))
         tooltip_translation = row_model.get("tooltip_translation", self._row_tooltip_translation(piece, row_data))
-        tooltip_pending = bool(row_model.get("tooltip_pending", row_data.get("tooltip_translation_pending")))
-        row_height = int(row_model.get("row_height") or self._review_row_height(source_text, target_text, tooltip_translation, tooltip_pending))
+        fallback_snapshot = self._review_row_snapshot(row_data)
+        tooltip_preview = row_model.get(
+            "tooltip_preview",
+            self._row_machine_translation_preview_from_snapshot(fallback_snapshot),
+        )
+        tooltip_state = row_model.get(
+            "tooltip_state",
+            self._row_machine_translation_preview_state(fallback_snapshot),
+        )
+        tooltip_detail = row_model.get(
+            "tooltip_detail",
+            str(row_data.get("tooltip_translation_error_detail") or row_data.get("tooltip_translation_status") or ""),
+        )
+        tooltip_pending = str(tooltip_state or "").strip().lower() == "pending"
+        row_height = int(
+            row_model.get("row_height")
+            or self._review_row_height(
+                source_text,
+                target_text,
+                tooltip_translation,
+                tooltip_pending,
+                tooltip_preview_text=tooltip_preview,
+            )
+        )
         two_column_layout = bool(row_model.get("two_column_layout", row_model.get("one_column_layout", row_model.get("one_row_layout", getattr(self, "_two_column_layout_enabled", True)))))
         frame = QFrame()
         frame.setObjectName("SdlReviewRow")
@@ -6182,15 +6396,17 @@ class SDLXLIFFReviewDialog(QDialog):
         source_label = self._text_label(
             source_text,
             missing=source_missing,
-            tooltip_translation=tooltip_translation,
+            tooltip_translation=tooltip_preview,
             tooltip_pending=tooltip_pending,
+            tooltip_state=tooltip_state,
+            tooltip_detail=tooltip_detail,
             translate_tooltip_callback=(
                 lambda pi=piece["index"], ri=idx: self._translate_single_row_tooltip(pi, ri)
             ) if source_text else None,
             inject_machine_translation_callback=(
                 lambda pi=piece["index"], ri=idx, text=tooltip_translation, ed=target_widget:
                     self._inject_machine_translation_to_target(pi, ri, text, ed)
-            ) if tooltip_translation and target_editable and not tooltip_pending else None,
+            ) if tooltip_translation and target_editable and tooltip_state == "translation" else None,
         )
         source_label.setMaximumHeight(max(24, row_height - 14))
         source_label.setToolTip(self._wrapped_tooltip(source_text))

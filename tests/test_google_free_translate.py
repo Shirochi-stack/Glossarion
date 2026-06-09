@@ -320,7 +320,12 @@ def test_auto_argos_fallback_reports_failed_google_endpoints(monkeypatch):
     monkeypatch.setattr("google_free_translate.requests.post", fake_post)
     monkeypatch.setattr("google_free_translate.requests.get", fake_get)
 
-    translator = GoogleFreeTranslateNew(source_language="Korean", target_language="English")
+    endpoint_statuses = []
+    translator = GoogleFreeTranslateNew(
+        source_language="Korean",
+        target_language="English",
+        endpoint_status_callback=endpoint_statuses.append,
+    )
     translator.rate_limit = 0
 
     result = translator.translate("안녕")
@@ -343,6 +348,9 @@ def test_auto_argos_fallback_reports_failed_google_endpoints(monkeypatch):
         "clients5.google.com/single, clients1.google.com/single, clients3.google.com/t, "
         "translate.googleapis.com/single"
     )
+    assert endpoint_statuses[0] == "Trying Google endpoint 1/7: translate.google.co.in/single"
+    assert "Google endpoint 1/7 failed: translate.google.co.in/single - blocked" in endpoint_statuses[1]
+    assert endpoint_statuses[-1] == "Google failed on 7 endpoints; trying Argos Translate fallback..."
 
 
 def test_argos_fallback_translates_marked_html_segments_without_tag_bleed(monkeypatch):

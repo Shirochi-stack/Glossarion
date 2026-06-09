@@ -1389,6 +1389,11 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_append_machine_translation_note" in source
     assert "fallback_note" in source
     assert "fallback_failed_endpoints" in source
+    assert "_tooltip_translation_status = Signal(int, object, str)" in source
+    assert "_tooltip_translation_status.connect(self._apply_tooltip_translation_status)" in source
+    assert "endpoint_status_callback=status_callback" in source
+    assert "_apply_tooltip_translation_status" in source
+    assert "_compact_machine_translation_error" in source
     assert "setSelectionMode(QAbstractItemView.ExtendedSelection)" in source
     assert "setContextMenuPolicy(Qt.NoContextMenu)" in source
     assert "self.piece_list.viewport().installEventFilter(self)" in source
@@ -1682,13 +1687,30 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_render_piece" not in apply_body
     assert "message = f\"Generated {len(translations)} {provider_label} machine translation preview(s)\"" in apply_body
     assert "if error:" in apply_body
-    assert "message = f\"{message}. {error}\"" in apply_body
+    assert "message = f\"{message}. {self._compact_machine_translation_error(error)}\"" in apply_body
+    assert "row_data[\"tooltip_translation_error\"] = self._compact_machine_translation_error(error)" in apply_body
+    assert "row_data[\"tooltip_translation_error_detail\"] = str(error or \"\")" in apply_body
     batch_start = source.index("def _start_piece_list_tooltip_translation")
     batch_end = source.index("def _translate_piece_rows_tooltips", batch_start)
     batch_body = source[batch_start:batch_end]
     assert "_discard_piece_page" not in batch_body
     assert "result_note = self._machine_translation_result_note(result)" in batch_body
     assert "error = self._append_machine_translation_note(error, result_note)" in batch_body
+    assert "status_context[\"piece_index\"] = piece_index" in batch_body
+
+
+def test_sdlxliff_review_compacts_machine_translation_endpoint_errors():
+    google_error = (
+        "All Google Translate endpoints failed:\n"
+        "  • https://translate.google.co.in/translate_a/single: HTTP 429: Rate Limited (too many requests)\n"
+        "  • https://translate.google.com/translate_a/single: HTTP 429: Rate Limited (too many requests)\n"
+    )
+    assert SDLXLIFFReviewDialog._compact_machine_translation_error(google_error) == (
+        "Google failed: HTTP 429 Rate Limited (too many requests) on 2 endpoints"
+    )
+    assert SDLXLIFFReviewDialog._compact_machine_translation_error(
+        "Auto fell back after Google endpoints failed: a, b, c"
+    ) == "Auto fell back after Google failed on 3 endpoints"
 
 
 def test_sdlxliff_review_tooltip_batch_wraps_and_parses_by_html_tag():
