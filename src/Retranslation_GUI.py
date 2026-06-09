@@ -163,6 +163,7 @@ class SDLXLIFFReviewDialog(QDialog):
     _tooltip_translation_progress = Signal(int, int)
     _tooltip_translation_batch_finished = Signal(int, int, str)
     _review_data_preload_finished = Signal(int, object)
+    _review_refresh_scan_finished = Signal(int, object)
 
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
     THEME = {
@@ -289,6 +290,12 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_data_loaded = False
         self._initial_review_load_started = False
         self._queued_review_refresh = False
+        self._review_refresh_scan_token = 0
+        self._review_refresh_scan_running = False
+        self._review_refresh_scan_requested = False
+        self._review_refresh_scan_queued = False
+        self._review_refresh_scan_force = False
+        self._review_refresh_scan_current_path = None
         self._seamless_review_old_page = None
         self._review_context_menu_open = False
         self._review_text_context_menu = None
@@ -307,6 +314,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_progress.connect(self._update_tooltip_translation_progress)
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         self._review_data_preload_finished.connect(self._apply_review_data_preload)
+        self._review_refresh_scan_finished.connect(self._apply_review_refresh_scan)
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
@@ -507,6 +515,203 @@ class SDLXLIFFReviewDialog(QDialog):
             )
 
         QTimer.singleShot(max(0, int(delay_ms)), _run_refresh)
+
+    def _queue_review_refresh_scan(self, force=False, current_path=None, delay_ms=350):
+        try:
+            self._review_refresh_scan_force = bool(getattr(self, "_review_refresh_scan_force", False) or force)
+            if current_path is not None:
+                self._review_refresh_scan_current_path = current_path
+            elif not getattr(self, "_review_refresh_scan_current_path", None):
+                self._review_refresh_scan_current_path = self.current_path
+            if getattr(self, "_review_refresh_scan_running", False):
+                self._review_refresh_scan_requested = True
+                return
+            if getattr(self, "_review_refresh_scan_queued", False):
+                self._review_refresh_scan_requested = True
+                return
+            self._review_refresh_scan_queued = True
+            QTimer.singleShot(max(0, int(delay_ms)), self._start_review_refresh_scan)
+        except Exception:
+            pass
+
+    def _start_review_refresh_scan(self):
+        try:
+            self._review_refresh_scan_queued = False
+            if getattr(self, "_review_refresh_scan_running", False):
+                self._review_refresh_scan_requested = True
+                return
+            self._review_refresh_scan_token = int(getattr(self, "_review_refresh_scan_token", 0)) + 1
+            token = self._review_refresh_scan_token
+            force = bool(getattr(self, "_review_refresh_scan_force", False))
+            current_path = getattr(self, "_review_refresh_scan_current_path", None) or self.current_path
+            self._review_refresh_scan_force = False
+            self._review_refresh_scan_current_path = None
+            self._review_refresh_scan_requested = False
+            self._review_refresh_scan_running = True
+            last_review_signature = getattr(self, "_last_review_signature", None)
+            last_mt_signature = getattr(self, "_last_machine_translation_signature", None)
+            last_autogen_signature = getattr(self, "_last_autogen_signature", None)
+
+            def _worker():
+                self._review_refresh_scan_finished.emit(
+                    token,
+                    self._build_review_refresh_scan_result(
+                        force=force,
+                        current_path=current_path,
+                        last_review_signature=last_review_signature,
+                        last_mt_signature=last_mt_signature,
+                        last_autogen_signature=last_autogen_signature,
+                    ),
+                )
+
+            threading.Thread(target=_worker, name="sdlxliff-review-refresh-scan", daemon=True).start()
+        except Exception:
+            self._review_refresh_scan_running = False
+            self._queue_stop_refresh_button_animation(150)
+
+    def _build_review_refresh_scan_result(
+        self,
+        force=False,
+        current_path=None,
+        last_review_signature=None,
+        last_mt_signature=None,
+        last_autogen_signature=None,
+    ):
+        result = {
+            "force": bool(force),
+            "current_path": current_path,
+            "review_signature": last_review_signature,
+            "machine_translation_signature": last_mt_signature,
+            "autogen_signature": last_autogen_signature,
+            "sidecar_changed": False,
+            "machine_translation_changed": False,
+            "autogen_changed": False,
+            "sidecars_generated": False,
+            "stats": None,
+            "error": "",
+        }
+        try:
+            review_signature = self._current_review_signature()
+            mt_signature = self._current_machine_translation_signature()
+            autogen_signature = self._current_review_autogen_signature()
+            sidecar_changed = review_signature != last_review_signature
+            mt_changed = mt_signature != last_mt_signature
+            autogen_changed = autogen_signature != last_autogen_signature
+            stats = None
+            generated = False
+            if force or sidecar_changed or autogen_changed:
+                stats = self._regenerate_review_sidecars_for_refresh_scan(
+                    force=force,
+                    previous_signature=last_autogen_signature,
+                    current_signature=autogen_signature,
+                )
+                generated = bool(stats and (stats.get("created") or stats.get("paths")))
+                if force or generated:
+                    review_signature = self._current_review_signature()
+                    mt_signature = self._current_machine_translation_signature()
+                    autogen_signature = self._current_review_autogen_signature()
+                    sidecar_changed = True
+                    mt_changed = mt_signature != last_mt_signature
+                    autogen_changed = autogen_signature != last_autogen_signature
+            result.update({
+                "review_signature": review_signature,
+                "machine_translation_signature": mt_signature,
+                "autogen_signature": autogen_signature,
+                "sidecar_changed": sidecar_changed,
+                "machine_translation_changed": mt_changed,
+                "autogen_changed": autogen_changed,
+                "sidecars_generated": generated,
+                "stats": stats,
+            })
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
+    def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None):
+        signature = current_signature or ()
+        missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
+        invalid_outputs = []
+        if force or previous_signature is not None or missing_outputs:
+            invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
+        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
+            return None
+
+        owner = getattr(self, "_sdlxliff_autogen_owner", None)
+        generator = getattr(owner, "_generate_sdlxliff_sidecars_from_completed_entries", None)
+        if not callable(generator):
+            return None
+
+        file_path = None
+        try:
+            if 0 <= self._book_index < len(self._book_entries):
+                file_path = self._book_entries[self._book_index].get("epub_path") or None
+        except Exception:
+            file_path = None
+
+        output_files = None
+        if not force:
+            changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
+            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or []))) or None
+            if not output_files:
+                return None
+
+        return generator(
+            self.output_dir,
+            file_path=file_path,
+            progress_data=None,
+            output_files=output_files,
+            overwrite=True,
+        )
+
+    def _apply_review_refresh_scan(self, token, result):
+        try:
+            if int(token) != int(getattr(self, "_review_refresh_scan_token", -1)):
+                return
+            if not isinstance(result, dict):
+                return
+            if result.get("error"):
+                try:
+                    self.save_status_label.setText(f"SDLXLIFF refresh failed: {result.get('error')}")
+                except Exception:
+                    pass
+                return
+            signature = result.get("review_signature")
+            mt_signature = result.get("machine_translation_signature")
+            autogen_signature = result.get("autogen_signature")
+            if (
+                result.get("force")
+                or result.get("sidecar_changed")
+                or result.get("autogen_changed")
+                or result.get("sidecars_generated")
+            ):
+                self.refresh_review_data(
+                    force=False,
+                    current_path=result.get("current_path") or self.current_path,
+                    signature=signature,
+                    seamless=True,
+                    skip_autogen=True,
+                    autogen_signature=autogen_signature,
+                    mt_signature=mt_signature,
+                )
+            elif result.get("machine_translation_changed"):
+                if self._tooltip_translation_running:
+                    self._last_machine_translation_signature = mt_signature
+                else:
+                    self._reload_machine_translation_previews(signature=mt_signature)
+            else:
+                self._last_review_signature = signature
+                self._last_machine_translation_signature = mt_signature
+                self._last_autogen_signature = autogen_signature
+        except Exception:
+            pass
+        finally:
+            self._review_refresh_scan_running = False
+            self._queue_stop_refresh_button_animation(150)
+            if getattr(self, "_review_refresh_scan_requested", False):
+                force = bool(getattr(self, "_review_refresh_scan_force", False))
+                current_path = getattr(self, "_review_refresh_scan_current_path", None) or self.current_path
+                self._review_refresh_scan_requested = False
+                self._queue_review_refresh_scan(force=force, current_path=current_path, delay_ms=350)
 
     def _current_review_signature(self):
         signature = []
@@ -1113,6 +1318,7 @@ class SDLXLIFFReviewDialog(QDialog):
             target_code,
             provider=self._machine_translation_provider(),
             api_keys=self._machine_translation_api_options(),
+            honor_global_stop=False,
         )
 
     def _prompt_secret_text(self, title, label, current=""):
@@ -1273,10 +1479,8 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _manual_review_refresh(self):
-        if self._refreshing_review_data or self._queued_review_refresh:
-            return
         self._start_refresh_button_animation()
-        self._queue_review_refresh(force=True, current_path=self.current_path, delay_ms=0)
+        self._queue_review_refresh_scan(force=True, current_path=self.current_path, delay_ms=0)
 
     def _silent_review_refresh(self):
         try:
@@ -1299,31 +1503,24 @@ class SDLXLIFFReviewDialog(QDialog):
                     return
             except Exception:
                 pass
-            signature = self._current_review_signature()
-            mt_signature = self._current_machine_translation_signature()
-            autogen_signature = self._current_review_autogen_signature()
-            sidecar_changed = signature != self._last_review_signature
-            mt_changed = mt_signature != self._last_machine_translation_signature
-            autogen_changed = autogen_signature != self._last_autogen_signature
-            if sidecar_changed or autogen_changed:
-                self.refresh_review_data(
-                    force=False,
-                    signature=signature,
-                    seamless=True,
-                )
-            elif mt_changed:
-                if self._tooltip_translation_running:
-                    self._last_machine_translation_signature = mt_signature
-                else:
-                    self._reload_machine_translation_previews(signature=mt_signature)
+            self._queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=350)
         except Exception:
             pass
 
-    def refresh_review_data(self, force=False, current_path=None, signature=None, seamless=False):
+    def refresh_review_data(
+        self,
+        force=False,
+        current_path=None,
+        signature=None,
+        seamless=False,
+        skip_autogen=False,
+        autogen_signature=None,
+        mt_signature=None,
+    ):
         if self._refreshing_review_data:
             return
         try:
-            autogen_changed = self._maybe_regenerate_review_sidecars(force=force)
+            autogen_changed = False if skip_autogen else self._maybe_regenerate_review_sidecars(force=force)
             if signature is None or autogen_changed or force:
                 signature = self._current_review_signature()
                 if not force and not autogen_changed and signature == self._last_review_signature:
@@ -1370,11 +1567,15 @@ class SDLXLIFFReviewDialog(QDialog):
             self._start_review_data_preload()
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
-                self._last_machine_translation_signature = self._current_machine_translation_signature()
+                self._last_machine_translation_signature = (
+                    mt_signature if mt_signature is not None else self._current_machine_translation_signature()
+                )
             except Exception:
                 pass
             try:
-                self._last_autogen_signature = self._current_review_autogen_signature()
+                self._last_autogen_signature = (
+                    autogen_signature if autogen_signature is not None else self._current_review_autogen_signature()
+                )
             except Exception:
                 pass
             if self.pieces and self.isVisible():

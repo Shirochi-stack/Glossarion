@@ -163,6 +163,56 @@ def test_google_free_translate_co_in_uses_dropdown_target(monkeypatch):
     assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
 
 
+def test_google_free_translate_honors_global_stop_by_default(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: True),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    def fake_post(*_args, **_kwargs):
+        raise AssertionError("stopped translations must not hit Google endpoints")
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(source_language="auto", target_language="Spanish")
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == ""
+    assert result["provider"] == "auto"
+    assert "Operation cancelled" in result["error"]
+
+
+def test_google_free_translate_can_ignore_global_stop_for_viewer(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "unified_api_client",
+        types.SimpleNamespace(is_stop_requested=lambda: True),
+    )
+    monkeypatch.setattr(GoogleFreeTranslateNew, "_use_fallback_only", False, raising=False)
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        assert url == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+        return FakeResponse(200, [[["Hola", "Hello", None, None, 10]], None, "en"])
+
+    monkeypatch.setattr("google_free_translate.requests.post", fake_post)
+
+    translator = GoogleFreeTranslateNew(
+        source_language="auto",
+        target_language="Spanish",
+        honor_global_stop=False,
+    )
+    translator.rate_limit = 0
+
+    result = translator.translate("Hello")
+
+    assert result["translatedText"] == "Hola"
+    assert result["endpoint"] == GOOGLE_TRANSLATE_CO_IN_ENDPOINT
+
+
 def test_send_with_interrupt_timeout_does_not_mark_user_cancel(monkeypatch):
     from TransateKRtoEN import send_with_interrupt
     from unified_api_client import UnifiedClientError

@@ -149,12 +149,14 @@ class GoogleFreeTranslateNew:
         logger=None,
         provider: str = "auto",
         api_keys: Optional[Dict[str, Any]] = None,
+        honor_global_stop: bool = True,
     ):
         self.source_language = source_language
         self.target_language = target_language
         self.logger = logger or logging.getLogger(__name__)
         self.provider = self._normalize_provider(provider)
         self.api_keys = dict(api_keys or {})
+        self.honor_global_stop = bool(honor_global_stop)
         self.cache = {}  # Simple in-memory cache
         self.cache_lock = threading.Lock()
         self.request_lock = threading.Lock()
@@ -303,6 +305,19 @@ class GoogleFreeTranslateNew:
             'error': str(error),
         }
 
+    def _stop_requested(self) -> bool:
+        if not getattr(self, "honor_global_stop", True):
+            return False
+        try:
+            import unified_api_client as _uac
+            return bool(getattr(_uac, "is_stop_requested", lambda: False)())
+        except Exception:
+            return False
+
+    def _raise_if_stop_requested(self):
+        if self._stop_requested():
+            raise Exception("Operation cancelled")
+
     def _translate_via_configured_provider(
         self,
         provider: str,
@@ -345,6 +360,9 @@ class GoogleFreeTranslateNew:
                 'translatedText': '',
                 'detectedSourceLanguage': self.source_language
             }
+
+        if self._stop_requested():
+            return self._translation_error_result(self.provider, "Operation cancelled")
             
         # Check cache first
         cache_key = self._get_cache_key(text)
@@ -403,16 +421,7 @@ class GoogleFreeTranslateNew:
 
         # Log start for Google endpoints (pre-call)
         try:
-            # Honor global stop flags if available
-            def _stop_requested():
-                try:
-                    import unified_api_client as _uac
-                    return bool(getattr(_uac, "is_stop_requested", lambda: False)())
-                except Exception:
-                    return False
-
-            if _stop_requested():
-                raise Exception("Operation cancelled")
+            self._raise_if_stop_requested()
             self.logger.info(f"🌐 Google Translate Free: Translating {len(text)} characters")
         except Exception:
             pass
@@ -439,14 +448,7 @@ class GoogleFreeTranslateNew:
             
             for endpoint_url in endpoints_to_try:
                 # Honor global stop flags between requests
-                def _stop_requested():
-                    try:
-                        import unified_api_client as _uac
-                        return bool(getattr(_uac, "is_stop_requested", lambda: False)())
-                    except Exception:
-                        return False
-                if _stop_requested():
-                    raise Exception("Operation cancelled")
+                self._raise_if_stop_requested()
                 try:
                     # Check if it's the mobile /translate_a/t API, not merely a translate.* host.
                     is_mobile = endpoint_url.rstrip('/').endswith('/translate_a/t')
@@ -465,8 +467,7 @@ class GoogleFreeTranslateNew:
                         self._cache_translation_result(cache_key, result)
                         
                         # Honor stop flag after a successful call (before returning)
-                        if _stop_requested():
-                            raise Exception("Operation cancelled")
+                        self._raise_if_stop_requested()
                         return result
                         
                 except Exception as e:
@@ -562,16 +563,7 @@ class GoogleFreeTranslateNew:
             return None
 
         try:
-            # Honor global stop flags if available
-            def _stop_requested():
-                try:
-                    import unified_api_client as _uac
-                    return bool(getattr(_uac, "is_stop_requested", lambda: False)())
-                except Exception:
-                    return False
-
-            if _stop_requested():
-                raise Exception("Operation cancelled")
+            self._raise_if_stop_requested()
             # Map Google codes to Argos codes (ISO 639-1 generally)
             code_map = {
                 'zh-CN': 'zh',
@@ -631,8 +623,7 @@ class GoogleFreeTranslateNew:
             translation_available = from_lang and to_lang and from_lang.get_translation(to_lang)
             
             if not translation_available:
-                if _stop_requested():
-                    raise Exception("Operation cancelled")
+                self._raise_if_stop_requested()
                 self.logger.info(f"⬇️ Downloading Argos model {argos_source}->{argos_target}...")
                 try:
                     argostranslate.package.update_package_index()
@@ -656,16 +647,14 @@ class GoogleFreeTranslateNew:
                     return None
 
             if from_lang and to_lang:
-                if _stop_requested():
-                    raise Exception("Operation cancelled")
+                self._raise_if_stop_requested()
                 translation = from_lang.get_translation(to_lang)
                 try:
                     self.logger.info(f"🌐 Argos Translate: Translating {len(text)} characters")
                 except Exception:
                     pass
-                if _stop_requested():
-                    raise Exception("Operation cancelled")
-                translated_text = self._translate_marked_html_batch_via_argos(text, translation, _stop_requested)
+                self._raise_if_stop_requested()
+                translated_text = self._translate_marked_html_batch_via_argos(text, translation, self._stop_requested)
                 if translated_text is None:
                     translated_text = translation.translate(text)
                     translated_text = self._sanitize_argos_text_tag_fragments(text, translated_text)

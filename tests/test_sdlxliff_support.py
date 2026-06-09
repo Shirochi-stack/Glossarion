@@ -1375,6 +1375,7 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_set_machine_translation_provider" in source
     assert "_prompt_machine_translation_credentials" in source
     assert "_machine_translation_translator" in source
+    assert "honor_global_stop=False" in source
     assert "QLineEdit.Password" in source
     assert "from google_free_translate import GoogleFreeTranslateNew" in source
     assert 'name="sdlxliff-machine-translation-preview"' in source
@@ -1447,7 +1448,7 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
         source.index("def _manual_review_refresh"):
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
     ]
-    assert "self._queue_review_refresh(" in manual_refresh_body
+    assert "self._queue_review_refresh_scan(" in manual_refresh_body
     assert "force=True" in manual_refresh_body
     assert "self._silent_review_refresh()" not in manual_refresh_body
     flag_accuracy_body = source[
@@ -1483,6 +1484,11 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
         source.index("def refresh_review_data", source.index("def _silent_review_refresh"))
     ]
     assert "if self._review_context_menu_is_open():" in silent_refresh_body
+    assert "self._queue_review_refresh_scan(" in silent_refresh_body
+    assert "_current_review_signature" not in silent_refresh_body
+    assert "_current_machine_translation_signature" not in silent_refresh_body
+    assert "_current_review_autogen_signature" not in silent_refresh_body
+    assert "refresh_review_data(" not in silent_refresh_body
     preload_queue_body = source[
         source.index("def _queue_review_page_preloads"):
         source.index("def _start_next_review_preload", source.index("def _queue_review_page_preloads"))
@@ -1533,6 +1539,28 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_trim_review_page_cache" in source
     assert "_review_data_preload_finished = Signal(int, object)" in source
     assert "_review_data_preload_finished.connect(self._apply_review_data_preload)" in source
+    assert "_review_refresh_scan_finished = Signal(int, object)" in source
+    assert "_review_refresh_scan_finished.connect(self._apply_review_refresh_scan)" in source
+    assert "def _queue_review_refresh_scan" in source
+    assert "def _start_review_refresh_scan" in source
+    assert "def _build_review_refresh_scan_result" in source
+    assert "def _regenerate_review_sidecars_for_refresh_scan" in source
+    assert "def _apply_review_refresh_scan" in source
+    assert "_review_refresh_scan_running" in source
+    assert "_review_refresh_scan_requested" in source
+    assert 'name="sdlxliff-review-refresh-scan"' in source
+    refresh_signature = source[
+        source.index("def refresh_review_data"):
+        source.index("if self._refreshing_review_data:", source.index("def refresh_review_data"))
+    ]
+    assert "skip_autogen=False" in refresh_signature
+    assert "autogen_signature=None" in refresh_signature
+    assert "mt_signature=None" in refresh_signature
+    refresh_body = source[
+        source.index("def refresh_review_data"):
+        source.index("def reopen_for_path", source.index("def refresh_review_data"))
+    ]
+    assert "False if skip_autogen else self._maybe_regenerate_review_sidecars" in refresh_body
     assert "self._start_review_data_preload()" in source
     assert "_build_review_piece_render_model_from_rows" in source
     assert "_review_piece_render_model" in source
@@ -1585,7 +1613,7 @@ def test_sdlxliff_review_translate_tooltips_uses_machine_translation_provider():
     assert "_current_machine_translation_signature" in source
     assert "_reload_machine_translation_previews" in source
     assert "if self._tooltip_translation_running:" in source
-    assert "elif mt_changed:" in source
+    assert 'elif result.get("machine_translation_changed"):' in source
     assert "self.refresh_review_data(" in source
     assert "_write_machine_translation_entries" in source
     assert "persist=False" in source
@@ -2500,6 +2528,59 @@ def test_sdlxliff_review_autorefresh_regenerates_deleted_sidecar_folder(tmp_path
     shutil.rmtree(sidecar_dir)
 
     assert dialog._maybe_regenerate_review_sidecars(force=False) is True
+    assert sidecar.is_file()
+
+
+def test_sdlxliff_review_refresh_worker_regenerates_deleted_sidecar_folder(tmp_path, monkeypatch):
+    import shutil
+
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output.name,
+                        "original_basename": source.name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._last_autogen_signature = None
+    dialog._sdlxliff_autogen_owner = mixin
+
+    assert dialog._maybe_regenerate_review_sidecars(force=True) is True
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar = sidecar_dir / "response_chapter0001.html.sdlxliff"
+    last_review_signature = dialog._current_review_signature()
+    last_mt_signature = dialog._current_machine_translation_signature()
+    last_autogen_signature = dialog._current_review_autogen_signature()
+    shutil.rmtree(sidecar_dir)
+
+    result = dialog._build_review_refresh_scan_result(
+        force=False,
+        current_path=str(sidecar),
+        last_review_signature=last_review_signature,
+        last_mt_signature=last_mt_signature,
+        last_autogen_signature=last_autogen_signature,
+    )
+
+    assert result["error"] == ""
+    assert result["sidecars_generated"] is True
+    assert result["sidecar_changed"] is True
     assert sidecar.is_file()
 
 
