@@ -105,6 +105,7 @@ app_files = [
     ('sdlxliff_extraction_manager.py', '.'),
     ('sdlxliff_extractor.py', '.'),
     ('sdlxliff_converter.py', '.'),
+    ('sdlxliff_sidecar_writer.py', '.'),
     ('_compress_worker.py', '.'),  # Lightweight image compression worker
     ('_empty_attr_fix.py', '.'),  # Shared LLM Token Fix (empty-attr) helper
     ('html_duplicate_cleanup.py', '.'),
@@ -220,6 +221,7 @@ app_modules = [
     'sdlxliff_extraction_manager',
     'sdlxliff_extractor',
     'sdlxliff_converter',
+    'sdlxliff_sidecar_writer',
     '_compress_worker',  # Lightweight image compression worker
     '_empty_attr_fix',  # Shared LLM Token Fix (empty-attr) helper
     'html_duplicate_cleanup',

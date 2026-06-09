@@ -40,8 +40,19 @@ def test_html_sdlxliff_writer_is_shared_between_translation_and_review_paths():
     assert "from TransateKRtoEN import _write_html_sdlxliff_sidecar" not in generator_body
 
 
-def test_html_sdlxliff_writer_is_packaged_in_windows_specs():
-    for spec_name in ("translator.spec", "translator_lite.spec", "translator_NoCuda.spec", "translator_TurboLite.spec"):
+def test_html_sdlxliff_writer_is_packaged_in_app_specs():
+    for spec_name in (
+        "translator.spec",
+        "translator_Heavy.spec",
+        "translator_lite.spec",
+        "translator_lite_linux.spec",
+        "translator_lite_mac.spec",
+        "translator_lite_mac_intel.spec",
+        "translator_lite_mac_intel_NoCuda.spec",
+        "translator_lite_mac_NoCuda.spec",
+        "translator_NoCuda.spec",
+        "translator_TurboLite.spec",
+    ):
         spec_source = (SRC / spec_name).read_text(encoding="utf-8")
         assert "('sdlxliff_sidecar_writer.py', '.')" in spec_source
         assert "'sdlxliff_sidecar_writer'" in spec_source
