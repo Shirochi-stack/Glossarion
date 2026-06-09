@@ -165,6 +165,7 @@ class SDLXLIFFReviewDialog(QDialog):
     _tooltip_translation_batch_finished = Signal(int, int, str)
     _review_data_preload_finished = Signal(int, object)
     _review_refresh_scan_finished = Signal(int, object)
+    _review_generation_progress = Signal(object)
 
     TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
     THEME = {
@@ -232,7 +233,17 @@ class SDLXLIFFReviewDialog(QDialog):
         "completed_image_only",
     }
 
-    def __init__(self, output_dir, current_path=None, parent=None, config=None, autogen_owner=None):
+    def __init__(
+        self,
+        output_dir,
+        current_path=None,
+        parent=None,
+        config=None,
+        autogen_owner=None,
+        autogen_file_path=None,
+        autogen_progress_data=None,
+        autogen_output_files=None,
+    ):
         super().__init__(parent)
         self.output_dir = output_dir
         self.current_path = os.path.abspath(current_path) if current_path else ""
@@ -240,6 +251,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._config = config if isinstance(config, dict) else (parent_config if isinstance(parent_config, dict) else {})
         self._context_parent = parent
         self._sdlxliff_autogen_owner = autogen_owner
+        self._sdlxliff_autogen_file_path = autogen_file_path
+        self._sdlxliff_autogen_progress_data = autogen_progress_data
+        self._sdlxliff_autogen_output_files = list(autogen_output_files or []) or None
         self._last_autogen_signature = None
         self._book_entries = self._discover_review_books(parent)
         self._book_index = self._initial_review_book_index()
@@ -322,6 +336,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._tooltip_translation_batch_finished.connect(self._finish_piece_list_tooltip_translations)
         self._review_data_preload_finished.connect(self._apply_review_data_preload)
         self._review_refresh_scan_finished.connect(self._apply_review_refresh_scan)
+        self._review_generation_progress.connect(self._apply_review_generation_progress)
         self.setWindowTitle("SDLXLIFF Source -> Output Review - Credits: OMORIO")
         self.setObjectName("SDLXLIFFReviewDialog")
         self.setWindowModality(Qt.NonModal)
@@ -500,7 +515,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not self._review_data_loaded and not self._initial_review_load_started:
             self._initial_review_load_started = True
             self._show_review_loading_page()
-            self._queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)
+            self._queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=25)
             return
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
@@ -525,6 +540,12 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _queue_review_refresh_scan(self, force=False, current_path=None, delay_ms=350):
         try:
+            if not bool(getattr(self, "_review_data_loaded", False)):
+                try:
+                    self._show_review_loading_page()
+                    self.loading_label.setText("Checking SDLXLIFF sidecars...")
+                except Exception:
+                    pass
             self._review_refresh_scan_force = bool(getattr(self, "_review_refresh_scan_force", False) or force)
             if current_path is not None:
                 self._review_refresh_scan_current_path = current_path
@@ -640,7 +661,11 @@ class SDLXLIFFReviewDialog(QDialog):
         invalid_outputs = []
         if force or previous_signature is not None or missing_outputs:
             invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
+        elif previous_signature is None:
+            invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
         if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
+            return None
+        if not force and previous_signature is None and not invalid_outputs and not missing_outputs:
             return None
 
         owner = getattr(self, "_sdlxliff_autogen_owner", None)
@@ -648,27 +673,98 @@ class SDLXLIFFReviewDialog(QDialog):
         if not callable(generator):
             return None
 
-        file_path = None
+        file_path = getattr(self, "_sdlxliff_autogen_file_path", None)
         try:
             if 0 <= self._book_index < len(self._book_entries):
-                file_path = self._book_entries[self._book_index].get("epub_path") or None
+                file_path = file_path or self._book_entries[self._book_index].get("epub_path") or None
         except Exception:
-            file_path = None
+            file_path = file_path or None
 
-        output_files = None
+        requested_output_files = list(getattr(self, "_sdlxliff_autogen_output_files", None) or [])
+        output_files = requested_output_files or None
         if not force:
-            changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
-            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or []))) or None
+            changed_outputs = [] if previous_signature is None else self._changed_review_autogen_outputs(previous_signature, signature)
+            generated_outputs = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or [])))
+            if requested_output_files:
+                requested_names = {
+                    os.path.basename(str(name).replace("\\", "/")).lower()
+                    for name in requested_output_files
+                    if name
+                }
+                generated_outputs = [
+                    name for name in generated_outputs
+                    if os.path.basename(str(name).replace("\\", "/")).lower() in requested_names
+                ] or requested_output_files
+            output_files = generated_outputs or None
             if not output_files:
                 return None
 
         return generator(
             self.output_dir,
             file_path=file_path,
-            progress_data=None,
+            progress_data=getattr(self, "_sdlxliff_autogen_progress_data", None),
             output_files=output_files,
             overwrite=True,
+            progress_callback=self._emit_review_generation_progress,
         )
+
+    def _emit_review_generation_progress(self, payload):
+        try:
+            self._review_generation_progress.emit(payload if isinstance(payload, dict) else {"message": str(payload)})
+        except Exception:
+            pass
+
+    def _review_generation_summary(self, stats):
+        if not isinstance(stats, dict):
+            return ""
+        considered = int(stats.get("considered") or 0)
+        created = int(stats.get("created") or 0)
+        missing_source = int(stats.get("missing_source") or 0)
+        missing_output = int(stats.get("missing_output") or 0)
+        failed = int(stats.get("failed") or 0)
+        if created:
+            return f"Generated {created} SDLXLIFF sidecar(s)"
+        if considered:
+            return (
+                "No SDLXLIFF sidecars generated "
+                f"(source missing: {missing_source}, output missing: {missing_output}, failed: {failed})"
+            )
+        return ""
+
+    def _apply_review_generation_progress(self, payload):
+        try:
+            if not isinstance(payload, dict):
+                return
+            stage = str(payload.get("stage") or "").lower()
+            output_name = str(payload.get("output_name") or "")
+            index = int(payload.get("index") or 0)
+            total = int(payload.get("total") or 0)
+            stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else None
+            if stage == "finished":
+                message = self._review_generation_summary(stats) or "SDLXLIFF generation finished"
+            elif stage == "start":
+                message = f"Generating SDLXLIFF sidecars for {total} completed entr{'y' if total == 1 else 'ies'}..."
+            elif output_name and total:
+                label = {
+                    "created": "Generated",
+                    "missing_source": "Missing source for",
+                    "missing_output": "Missing output for",
+                    "failed": "Failed",
+                    "skipped": "Skipped",
+                }.get(stage, "Generating")
+                message = f"{label} SDLXLIFF {index}/{total}: {output_name}"
+            else:
+                message = str(payload.get("message") or "Generating SDLXLIFF sidecars...")
+            try:
+                self.loading_label.setText(message)
+            except Exception:
+                pass
+            try:
+                self.save_status_label.setText(message)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _apply_review_refresh_scan(self, token, result):
         try:
@@ -685,6 +781,14 @@ class SDLXLIFFReviewDialog(QDialog):
             signature = result.get("review_signature")
             mt_signature = result.get("machine_translation_signature")
             autogen_signature = result.get("autogen_signature")
+            stats = result.get("stats")
+            if stats:
+                summary = self._review_generation_summary(stats)
+                if summary:
+                    try:
+                        self.save_status_label.setText(summary)
+                    except Exception:
+                        pass
             if (
                 result.get("force")
                 or result.get("sidecar_changed")
@@ -712,6 +816,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
         finally:
+            self._sdlxliff_autogen_output_files = None
             self._review_refresh_scan_running = False
             self._queue_stop_refresh_button_animation(150)
             if getattr(self, "_review_refresh_scan_requested", False):
@@ -1725,9 +1830,10 @@ class SDLXLIFFReviewDialog(QDialog):
             output_changed
             or not self._review_data_loaded
             or not self.pieces
+            or (self.current_path and not os.path.isfile(self.current_path))
         ):
             self._initial_review_load_started = True
-            self._queue_review_refresh(
+            self._queue_review_refresh_scan(
                 force=False,
                 current_path=self.current_path,
                 delay_ms=25,
@@ -2056,7 +2162,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self.piece_list.clear()
         self.header_label.setText("Loading SDLXLIFF review...")
         self._start_review_auto_refresh()
-        self._queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)
+        self._queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=25)
 
     def _apply_translator_theme(self, parent):
         base_style = ""
@@ -7097,6 +7203,7 @@ class RetranslationMixin:
         progress_data=None,
         output_files=None,
         overwrite=True,
+        progress_callback=None,
     ):
         stats = {
             "considered": 0,
@@ -7133,45 +7240,73 @@ class RetranslationMixin:
             }
             requested.discard("")
 
+        work_entries = []
         seen_outputs = set()
+        for progress_key, entry in chapters.items():
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "") or "").lower()
+            if status not in self._SDLXLIFF_AUTOGEN_STATUSES:
+                continue
+            output_file = entry.get("output_file")
+            output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
+            if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
+                continue
+            if requested is not None and output_name.lower() not in requested:
+                continue
+            if output_name.lower() in seen_outputs:
+                stats["skipped"] += 1
+                continue
+            seen_outputs.add(output_name.lower())
+            work_entries.append((progress_key, entry, output_name))
+
+        total = len(work_entries)
+
+        def _notify(stage, index=0, output_name="", path="", message=""):
+            if not callable(progress_callback):
+                return
+            try:
+                progress_callback({
+                    "stage": stage,
+                    "index": index,
+                    "total": total,
+                    "output_name": output_name,
+                    "path": path,
+                    "message": message,
+                    "stats": dict(stats),
+                })
+            except Exception:
+                pass
+
+        _notify("start", total and 1 or 0, message=f"Preparing {total} SDLXLIFF sidecar(s)")
         old_output_sdlxliff = os.environ.get("OUTPUT_SDLXLIFF")
         os.environ["OUTPUT_SDLXLIFF"] = "1"
         try:
             from TransateKRtoEN import _write_html_sdlxliff_sidecar
 
-            for progress_key, entry in chapters.items():
-                if not isinstance(entry, dict):
-                    continue
-                status = str(entry.get("status", "") or "").lower()
-                if status not in self._SDLXLIFF_AUTOGEN_STATUSES:
-                    continue
+            for entry_index, (progress_key, entry, output_name) in enumerate(work_entries, 1):
                 output_file = entry.get("output_file")
-                output_name = os.path.basename(str(output_file or "").replace("\\", "/"))
-                if not output_name.lower().endswith((".html", ".htm", ".xhtml")):
-                    continue
-                if requested is not None and output_name.lower() not in requested:
-                    continue
-                if output_name.lower() in seen_outputs:
-                    stats["skipped"] += 1
-                    continue
-                seen_outputs.add(output_name.lower())
                 stats["considered"] += 1
+                _notify("checking", entry_index, output_name)
 
                 sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
                 if not overwrite and os.path.isfile(sidecar_path):
                     stats["skipped"] += 1
                     stats["paths"].append(sidecar_path)
+                    _notify("skipped", entry_index, output_name, path=sidecar_path)
                     continue
 
                 output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
                 if not output_path or not os.path.isfile(output_path):
                     stats["missing_output"] += 1
+                    _notify("missing_output", entry_index, output_name)
                     continue
                 try:
                     with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                         target_html = f.read()
                 except Exception:
                     stats["missing_output"] += 1
+                    _notify("missing_output", entry_index, output_name)
                     continue
 
                 source_html, source_path = self._sdlxliff_autogen_read_source_html(
@@ -7183,6 +7318,7 @@ class RetranslationMixin:
                 )
                 if not source_html:
                     stats["missing_source"] += 1
+                    _notify("missing_source", entry_index, output_name)
                     continue
 
                 chapter = dict(entry)
@@ -7192,17 +7328,28 @@ class RetranslationMixin:
                 if result_path:
                     stats["created"] += 1
                     stats["paths"].append(result_path)
+                    _notify("created", entry_index, output_name, path=result_path)
                 else:
                     stats["failed"] += 1
+                    _notify("failed", entry_index, output_name)
         finally:
             if old_output_sdlxliff is None:
                 os.environ.pop("OUTPUT_SDLXLIFF", None)
             else:
                 os.environ["OUTPUT_SDLXLIFF"] = old_output_sdlxliff
 
+        _notify("finished", total, path=stats["paths"][-1] if stats["paths"] else "")
         return stats
 
-    def _open_or_reuse_sdlxliff_review(self, output_dir, review_path=None, parent=None):
+    def _open_or_reuse_sdlxliff_review(
+        self,
+        output_dir,
+        review_path=None,
+        parent=None,
+        autogen_file_path=None,
+        autogen_progress_data=None,
+        autogen_output_files=None,
+    ):
         try:
             key = os.path.normcase(os.path.abspath(output_dir))
         except Exception:
@@ -7227,6 +7374,9 @@ class RetranslationMixin:
                 parent or self,
                 config=getattr(self, 'config', {}),
                 autogen_owner=self,
+                autogen_file_path=autogen_file_path,
+                autogen_progress_data=autogen_progress_data,
+                autogen_output_files=autogen_output_files,
             )
             review_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
             cache[key] = review_dialog
@@ -7241,9 +7391,21 @@ class RetranslationMixin:
         else:
             try:
                 review_dialog._sdlxliff_autogen_owner = self
+                review_dialog._sdlxliff_autogen_file_path = autogen_file_path
+                review_dialog._sdlxliff_autogen_progress_data = autogen_progress_data
+                review_dialog._sdlxliff_autogen_output_files = list(autogen_output_files or []) or None
             except Exception:
                 pass
             review_dialog.reopen_for_path(output_dir, review_path)
+            try:
+                if autogen_output_files or not self._output_dir_has_sdlxliff_sidecars(output_dir):
+                    review_dialog._queue_review_refresh_scan(
+                        force=False,
+                        current_path=review_path or review_dialog.current_path,
+                        delay_ms=25,
+                    )
+            except Exception:
+                pass
 
         review_dialog.show()
         review_dialog.raise_()
@@ -9106,37 +9268,19 @@ class RetranslationMixin:
                 text_analysis_btn.setEnabled(True)
 
         def _show_text_analysis():
-            sidecars = _text_analysis_sidecars()
-            if not sidecars:
-                stats = self._generate_sdlxliff_sidecars_from_completed_entries(
-                    output_dir,
-                    file_path=file_path,
-                    progress_data=prog,
-                    overwrite=True,
-                )
-                sidecars = _text_analysis_sidecars()
-                if sidecars:
-                    _queue_text_analysis_button_update()
-            if not sidecars:
-                detail = ""
-                try:
-                    detail = (
-                        f"\n\nAuto-generation considered {stats.get('considered', 0)} completed entries; "
-                        f"missing source: {stats.get('missing_source', 0)}, "
-                        f"missing output: {stats.get('missing_output', 0)}, "
-                        f"failed: {stats.get('failed', 0)}."
-                    )
-                except Exception:
-                    detail = ""
-                self._show_message(
-                    'info',
-                    "Text Analysis Unavailable",
-                    "No SDLXLIFF sidecars were found or generated for this output folder." + detail,
-                    parent=dialog,
-                )
-                return
             try:
-                self._open_or_reuse_sdlxliff_review(output_dir, None, dialog)
+                review_dialog = self._open_or_reuse_sdlxliff_review(
+                    output_dir,
+                    None,
+                    dialog,
+                    autogen_file_path=file_path,
+                    autogen_progress_data=prog,
+                )
+                try:
+                    review_dialog.save_status_label.setText("Checking SDLXLIFF sidecars...")
+                except Exception:
+                    pass
+                _queue_text_analysis_button_update()
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=dialog)
 
@@ -12161,27 +12305,27 @@ class RetranslationMixin:
             path = _sdlxliff_sidecar_path_for_output_file(display_info.get('output_file') or progress_entry.get('output_file'))
             return path if os.path.isfile(path) else None
 
+        def _sdlxliff_expected_review_path_for_item(display_info):
+            progress_entry = display_info.get('info', {}) or {}
+            return _sdlxliff_sidecar_path_for_output_file(display_info.get('output_file') or progress_entry.get('output_file'))
+
         def _open_sdlxliff_review_for_item(display_info):
-            review_path = _sdlxliff_review_path_for_item(display_info)
-            if not _source_exists_for_item(display_info):
-                self._show_message('error', "Source Missing", "The raw source file for this entry was not found.", parent=data.get('dialog', self))
-                return
-            if not review_path:
-                progress_entry = display_info.get('info', {}) or {}
-                output_file = display_info.get('output_file') or progress_entry.get('output_file')
-                self._generate_sdlxliff_sidecars_from_completed_entries(
-                    data['output_dir'],
-                    file_path=data.get('file_path'),
-                    progress_data=data.get('prog'),
-                    output_files=[output_file] if output_file else None,
-                    overwrite=True,
-                )
-                review_path = _sdlxliff_review_path_for_item(display_info)
-                if not review_path:
-                    self._show_message('error', "SDLXLIFF Missing", "No matching SDLXLIFF review file could be generated for this exact output filename.", parent=data.get('dialog', self))
-                    return
+            progress_entry = display_info.get('info', {}) or {}
+            output_file = display_info.get('output_file') or progress_entry.get('output_file')
+            review_path = _sdlxliff_review_path_for_item(display_info) or _sdlxliff_expected_review_path_for_item(display_info)
             try:
-                self._open_or_reuse_sdlxliff_review(data['output_dir'], review_path, data.get('dialog', self))
+                review_dialog = self._open_or_reuse_sdlxliff_review(
+                    data['output_dir'],
+                    review_path,
+                    data.get('dialog', self),
+                    autogen_file_path=data.get('file_path'),
+                    autogen_progress_data=data.get('prog'),
+                    autogen_output_files=[output_file] if output_file else None,
+                )
+                try:
+                    review_dialog.save_status_label.setText("Checking SDLXLIFF sidecar for selected entry...")
+                except Exception:
+                    pass
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 

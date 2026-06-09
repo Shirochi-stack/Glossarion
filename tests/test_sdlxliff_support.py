@@ -1580,7 +1580,21 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "self.piece_list.setMaximumWidth(286)" in source
     assert "self.piece_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in source
     assert "def _output_dir_has_sdlxliff_sidecars" in source
-    assert "_queue_review_refresh(force=False, current_path=self.current_path, delay_ms=25)" in source
+    assert "_queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=25)" in source
+    show_text_analysis_body = source[
+        source.index("def _show_text_analysis"):
+        source.index("text_analysis_btn.clicked.connect", source.index("def _show_text_analysis"))
+    ]
+    assert "_open_or_reuse_sdlxliff_review(" in show_text_analysis_body
+    assert "_generate_sdlxliff_sidecars_from_completed_entries(" not in show_text_analysis_body
+    item_review_body = source[
+        source.index("def _open_sdlxliff_review_for_item"):
+        source.index("def _open_file_for_item", source.index("def _open_sdlxliff_review_for_item"))
+    ]
+    assert "_open_or_reuse_sdlxliff_review(" in item_review_body
+    assert "_generate_sdlxliff_sidecars_from_completed_entries(" not in item_review_body
+    assert "_review_generation_progress = Signal(object)" in source
+    assert "progress_callback=self._emit_review_generation_progress" in source
     assert "spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)" in source
     assert "REVIEW_PRELOAD_RADIUS = 2" in source
     assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
@@ -2118,16 +2132,20 @@ def test_retranslation_autogenerates_sdlxliff_sidecars_from_completed_entries(tm
     }
     monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
     mixin = RetranslationMixin.__new__(RetranslationMixin)
+    progress_events = []
 
     stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
         str(tmp_path),
         progress_data=progress,
+        progress_callback=progress_events.append,
     )
 
     sidecar = tmp_path / "SDLXLIFF" / "response_chapter0001.html.sdlxliff"
     assert stats["created"] == 1
     assert sidecar.is_file()
     assert os.environ["OUTPUT_SDLXLIFF"] == "0"
+    assert [event["stage"] for event in progress_events] == ["start", "checking", "created", "finished"]
+    assert progress_events[1]["output_name"] == output.name
 
     dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
     source_html, target_html = dialog._read_sdlxliff_html_pair(str(sidecar))
