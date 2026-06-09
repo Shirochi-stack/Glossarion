@@ -4848,6 +4848,13 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             return False
 
+    def _review_scroll_recently_active(self, threshold_s=0.25):
+        try:
+            last = float(getattr(self, "_last_review_scroll_activity", 0.0) or 0.0)
+            return (time.monotonic() - last) < float(threshold_s)
+        except Exception:
+            return False
+
     def _review_preload_order(self, current_row):
         if not self.pieces:
             return []
@@ -4989,6 +4996,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
                 self._preload_render_timer.start(self.REVIEW_PRELOAD_IDLE_MS)
                 return
+            if self._review_scroll_recently_active(0.35):
+                # Don't build background pages while the user is actively
+                # scrolling the visible page - it competes for the GUI thread.
+                self._preload_render_timer = QTimer(self)
+                self._preload_render_timer.setSingleShot(True)
+                self._preload_render_timer.timeout.connect(self._run_review_preload_batch)
+                self._preload_render_timer.start(max(200, self.REVIEW_PRELOAD_STEP_MS))
+                return
             if not self.isVisible() or self._active_render_timer is not None or self._active_render_page is not None:
                 self._preload_render_timer = QTimer(self)
                 self._preload_render_timer.setSingleShot(True)
@@ -5129,17 +5144,29 @@ class SDLXLIFFReviewDialog(QDialog):
             if page is None:
                 return
             layout = page.layout()
+            viewport_height = max(1, self.scroll.viewport().height())
+            hint_height = 0
             if layout is not None:
                 layout.invalidate()
-                layout.activate()
-            page.updateGeometry()
-            viewport_height = max(1, self.scroll.viewport().height())
-            content_height = max(viewport_height, page.sizeHint().height(), page.minimumSizeHint().height())
+                try:
+                    hint_height = int(layout.totalSizeHint().height())
+                except Exception:
+                    hint_height = 0
+            if hint_height <= 0:
+                hint_height = max(page.sizeHint().height(), page.minimumSizeHint().height())
+            content_height = max(viewport_height, hint_height)
+            # IMPORTANT: lock the container height BEFORE activating the layout.
+            # Activating first lays the fixed-height rows out inside the stale
+            # (smaller) page height, which briefly paints them overlapping while
+            # a render stream is in flight.
             page.setMinimumHeight(content_height)
             page.setMaximumHeight(content_height)
-            page.resize(max(1, page.width()), content_height)
             self.rows_stack.setMinimumHeight(content_height)
             self.rows_stack.setMaximumHeight(content_height)
+            page.resize(max(1, page.width()), content_height)
+            if layout is not None:
+                layout.activate()
+            page.updateGeometry()
             self.rows_stack.updateGeometry()
         except Exception:
             pass
@@ -5159,6 +5186,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _remember_current_review_scroll(self, value):
         if self._restoring_review_scroll:
             return
+        self._last_review_scroll_activity = time.monotonic()
         row = self._current_scroll_piece_row
         if row is None:
             return
@@ -6833,18 +6861,38 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _refresh_review_stream_geometry(self, final=False):
         try:
-            if self.rows_layout is not None:
-                self.rows_layout.invalidate()
-                self.rows_layout.activate()
-            if self.rows_widget is not None:
+            # _sync_review_scroll_range() already invalidates + activates the
+            # current page layout and sizes the page/stack, so avoid doing the
+            # same O(rows) work twice here.
+            if final and self.rows_widget is not None:
                 self.rows_widget.updateGeometry()
-            if final:
-                if self.rows_widget is not None:
-                    self.rows_widget.adjustSize()
-                self.rows_stack.adjustSize()
             self._sync_review_scroll_range()
-            self.rows_stack.updateGeometry()
-            self.scroll.updateGeometry()
+            viewport = self.scroll.viewport()
+            if viewport is not None:
+                viewport.update()
+        except Exception:
+            pass
+
+    def _apply_review_stream_geometry(self, page, layout, content_height):
+        """Cheap geometry sync used while review rows stream in.
+
+        All review rows have fixed heights, so the content height can be
+        tracked incrementally by the caller instead of re-measuring the whole
+        page layout on every batch (which is O(rows) and made streaming
+        quadratic). Container heights are locked BEFORE the layout is
+        activated so freshly added rows are never laid out into a stale,
+        too-small page (the cause of the brief row-overlap flicker).
+        """
+        try:
+            viewport_height = max(1, self.scroll.viewport().height())
+            content_height = max(viewport_height, int(content_height or 0))
+            page.setMinimumHeight(content_height)
+            page.setMaximumHeight(content_height)
+            self.rows_stack.setMinimumHeight(content_height)
+            self.rows_stack.setMaximumHeight(content_height)
+            page.resize(max(1, page.width()), content_height)
+            if layout is not None:
+                layout.activate()
             viewport = self.scroll.viewport()
             if viewport is not None:
                 viewport.update()
@@ -7539,8 +7587,14 @@ class SDLXLIFFReviewDialog(QDialog):
 
         render_timer = QTimer(self)
         render_timer.setSingleShot(True)
-        row_state = {"idx": 0}
+        row_state = {"idx": 0, "content_height": 0}
         batch_size = 12
+        try:
+            layout_spacing = layout.spacing()
+            if layout_spacing < 0:
+                layout_spacing = 4
+        except Exception:
+            layout_spacing = 4
 
         if show_loading:
             self.rows_stack.setCurrentWidget(page)
@@ -7584,9 +7638,17 @@ class SDLXLIFFReviewDialog(QDialog):
                     self.rows_widget = page
                     self.rows_layout = layout
                     start = row_state["idx"]
-                    end = min(len(rows), start + batch_size)
+                    total_rows = len(rows)
                     batch_frames = []
-                    for idx in range(start, end):
+                    # Time-boxed batches keep each tick short enough that the
+                    # event loop stays responsive (scrolling, painting, input).
+                    scrolling = self._review_scroll_recently_active()
+                    batch_budget_s = 0.004 if scrolling else 0.008
+                    batch_started_s = time.monotonic()
+                    first_tick = start == 0
+                    fill_target = (max(1, self.scroll.viewport().height()) + 240) if first_tick else 0
+                    idx = start
+                    while idx < total_rows:
                         row_model = row_models[idx] if idx < len(row_models) else None
                         frame = self._add_review_row(
                             piece,
@@ -7597,15 +7659,29 @@ class SDLXLIFFReviewDialog(QDialog):
                             row_model=row_model,
                             updates_enabled=False,
                         )
+                        idx += 1
                         if frame is not None:
                             batch_frames.append(frame)
-                    row_state["idx"] = end
+                            if row_state["content_height"] > 0:
+                                row_state["content_height"] += layout_spacing
+                            row_state["content_height"] += max(0, frame.minimumHeight())
+                        # First tick: render past the fold so the visible area
+                        # appears instantly, then yield.
+                        if first_tick and row_state["content_height"] < fill_target and (idx - start) < 40:
+                            continue
+                        if len(batch_frames) >= batch_size:
+                            break
+                        if (time.monotonic() - batch_started_s) >= batch_budget_s:
+                            break
+                    row_state["idx"] = idx
                     if visible_stream:
-                        self._refresh_review_stream_geometry(final=False)
+                        # Incremental geometry: rows have fixed heights, so the
+                        # content height is tracked as rows are added instead of
+                        # re-measuring the entire page layout every batch.
+                        self._apply_review_stream_geometry(page, layout, row_state["content_height"])
                     for frame in batch_frames:
                         try:
                             frame.setUpdatesEnabled(True)
-                            frame.update()
                         except Exception:
                             pass
                 finally:
@@ -7617,7 +7693,9 @@ class SDLXLIFFReviewDialog(QDialog):
                             pass
 
                 if row_state["idx"] < len(rows):
-                    render_timer.start(1)
+                    # Yield a full frame between batches so scrolling/painting
+                    # stays smooth while the rest of the rows stream in.
+                    render_timer.start(16)
                     return
 
                 if render_token != self._render_token:
