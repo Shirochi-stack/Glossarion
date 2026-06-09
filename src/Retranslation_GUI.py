@@ -5155,15 +5155,19 @@ class SDLXLIFFReviewDialog(QDialog):
             if hint_height <= 0:
                 hint_height = max(page.sizeHint().height(), page.minimumSizeHint().height())
             content_height = max(viewport_height, hint_height)
-            # IMPORTANT: lock the container height BEFORE activating the layout.
+            # IMPORTANT: lock the container heights BEFORE activating the layout.
             # Activating first lays the fixed-height rows out inside the stale
             # (smaller) page height, which briefly paints them overlapping while
-            # a render stream is in flight.
+            # a render stream is in flight. The stack must be resized in the
+            # same synchronous step as the page, otherwise the stacked layout
+            # squashes the page back to the old stack height until the scroll
+            # area's async layout pass catches up (visible vertical bouncing).
             page.setMinimumHeight(content_height)
             page.setMaximumHeight(content_height)
             self.rows_stack.setMinimumHeight(content_height)
             self.rows_stack.setMaximumHeight(content_height)
-            page.resize(max(1, page.width()), content_height)
+            self.rows_stack.resize(max(1, self.rows_stack.width()), content_height)
+            page.resize(max(1, self.rows_stack.width()), content_height)
             if layout is not None:
                 layout.activate()
             page.updateGeometry()
@@ -6873,6 +6877,19 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    @staticmethod
+    def _review_layout_trailing_stretch_index(layout):
+        """Index of the trailing stretch spacer in a review rows layout, or -1."""
+        try:
+            count = layout.count()
+            if count:
+                item = layout.itemAt(count - 1)
+                if item is not None and item.spacerItem() is not None:
+                    return count - 1
+        except Exception:
+            pass
+        return -1
+
     def _apply_review_stream_geometry(self, page, layout, content_height):
         """Cheap geometry sync used while review rows stream in.
 
@@ -6885,12 +6902,23 @@ class SDLXLIFFReviewDialog(QDialog):
         """
         try:
             viewport_height = max(1, self.scroll.viewport().height())
-            content_height = max(viewport_height, int(content_height or 0))
+            # Never shrink while streaming: alternating between the tracked
+            # height and a measured height (e.g. from a machine-translation
+            # preview patch landing mid-stream) would see-saw the page height
+            # and visibly jiggle the scrollbar/rows.
+            content_height = max(viewport_height, int(content_height or 0), page.minimumHeight())
+            # Resize the stack AND the page synchronously, in the same tick.
+            # Constraining only min/max leaves the stack at its old height
+            # until the scroll area's asynchronous layout pass runs; in that
+            # window the QStackedLayout squashes the (taller) page back down,
+            # then it springs up again - which paints as vertical bouncing
+            # between stream batches.
             page.setMinimumHeight(content_height)
             page.setMaximumHeight(content_height)
             self.rows_stack.setMinimumHeight(content_height)
             self.rows_stack.setMaximumHeight(content_height)
-            page.resize(max(1, page.width()), content_height)
+            self.rows_stack.resize(max(1, self.rows_stack.width()), content_height)
+            page.resize(max(1, self.rows_stack.width()), content_height)
             if layout is not None:
                 layout.activate()
             viewport = self.scroll.viewport()
@@ -7435,7 +7463,16 @@ class SDLXLIFFReviewDialog(QDialog):
             grid.addWidget(dot, 0, 3)
             grid.addWidget(self._bar_widget(row_model.get("target_len", len(target_text)), max_len, target_bar, align_right=False), 0, 4)
             grid.addWidget(target_widget, 0, 5)
-        self.rows_layout.addWidget(frame)
+        # Insert above the trailing stretch when one is already present (the
+        # streaming path adds it up-front so rows stay top-anchored while the
+        # rest of the page streams in - without it, a box layout spreads any
+        # surplus space BETWEEN the rows, making them visibly bounce whenever
+        # the page height is transiently out of sync with the row total).
+        stretch_index = self._review_layout_trailing_stretch_index(self.rows_layout)
+        if stretch_index >= 0:
+            self.rows_layout.insertWidget(stretch_index, frame)
+        else:
+            self.rows_layout.addWidget(frame)
         return frame
 
     def _render_piece(self, row, show_loading=True):
@@ -7595,6 +7632,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 layout_spacing = 4
         except Exception:
             layout_spacing = 4
+        # Anchor rows to the top for the whole stream: with the stretch in
+        # place from the start, any surplus page height collects BELOW the
+        # rows instead of being distributed between them, so already-placed
+        # rows never move while later entries stream in.
+        try:
+            layout.addStretch(1)
+        except Exception:
+            pass
 
         if show_loading:
             self.rows_stack.setCurrentWidget(page)
@@ -7702,7 +7747,8 @@ class SDLXLIFFReviewDialog(QDialog):
                     _finish_active_render_timer()
                     _discard_active_render_page()
                     return
-                layout.addStretch(1)
+                if self._review_layout_trailing_stretch_index(layout) < 0:
+                    layout.addStretch(1)
                 self._piece_render_complete.add(row)
                 self.rows_stack.setCurrentWidget(page)
                 self._finish_seamless_review_swap(page)
