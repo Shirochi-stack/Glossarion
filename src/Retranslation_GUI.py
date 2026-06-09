@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
-                                QLineEdit)
+                                QLineEdit, QProgressBar)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -322,6 +322,11 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_text_context_menu = None
         self._piece_list_context_menu = None
         self._machine_translation_provider_menu = None
+        self._generation_stream_pending_pieces = []
+        self._generation_stream_finished_message = ""
+        self._generation_stream_flush_timer = QTimer(self)
+        self._generation_stream_flush_timer.setSingleShot(True)
+        self._generation_stream_flush_timer.timeout.connect(self._flush_generated_sidecar_stream_pieces)
         self._manual_refresh_shortcut = None
         self._refresh_button_timer = None
         self._refresh_button_stop_timer = None
@@ -483,6 +488,17 @@ class SDLXLIFFReviewDialog(QDialog):
         self.save_status_label.setTextFormat(Qt.PlainText)
         self.save_status_label.setStyleSheet(f"color: {self.THEME['muted']}; background: transparent;")
         close_row.addWidget(self.save_status_label)
+        self.generation_progress_bar = QProgressBar()
+        self.generation_progress_bar.setTextVisible(True)
+        self.generation_progress_bar.setFixedHeight(16)
+        self.generation_progress_bar.setMaximumWidth(360)
+        self.generation_progress_bar.setStyleSheet(
+            "QProgressBar { background-color:#202936; color:#d7ecff; border:1px solid #4a5568; "
+            "border-radius:4px; text-align:center; font-size:8pt; font-weight:bold; }"
+            "QProgressBar::chunk { background-color:#5a9fd4; border-radius:3px; }"
+        )
+        self.generation_progress_bar.hide()
+        close_row.addWidget(self.generation_progress_bar, 0, Qt.AlignVCenter)
         close_row.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -743,6 +759,8 @@ class SDLXLIFFReviewDialog(QDialog):
             self._piece_render_complete.clear()
             self._generation_streaming_active = True
             self._generation_stream_seen_paths = set()
+            self._generation_stream_pending_pieces = []
+            self._generation_stream_finished_message = ""
             self._generation_stream_total = max(0, int(total or 0))
             self._generation_stream_progress_map = self._read_progress_metadata()
             self._generation_stream_spine_positions = self._read_spine_positions(allow_deep_search=False)
@@ -756,6 +774,82 @@ class SDLXLIFFReviewDialog(QDialog):
             return True
         except Exception:
             return False
+
+    def _queue_generated_sidecar_stream_piece(self, path, progress_index=0):
+        try:
+            if not getattr(self, "_generation_streaming_active", False):
+                return False
+            if not path:
+                return False
+            pending = getattr(self, "_generation_stream_pending_pieces", None)
+            if not isinstance(pending, list):
+                pending = []
+                self._generation_stream_pending_pieces = pending
+            pending.append((str(path), int(progress_index or 0)))
+            self._schedule_generation_stream_flush(delay_ms=0 if len(pending) <= 1 else 16)
+            return True
+        except Exception:
+            return False
+
+    def _schedule_generation_stream_flush(self, delay_ms=16):
+        timer = getattr(self, "_generation_stream_flush_timer", None)
+        if timer is None:
+            return
+        try:
+            if not timer.isActive():
+                timer.start(max(0, int(delay_ms or 0)))
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+
+    def _flush_generated_sidecar_stream_pieces(self):
+        try:
+            pending = getattr(self, "_generation_stream_pending_pieces", None)
+            if not isinstance(pending, list):
+                self._generation_stream_pending_pieces = []
+                pending = self._generation_stream_pending_pieces
+            flushed = 0
+            while pending and flushed < 4:
+                path, progress_index = pending.pop(0)
+                if self._append_generated_sidecar_stream_piece(path, progress_index=progress_index):
+                    flushed += 1
+            if pending:
+                self._schedule_generation_stream_flush(delay_ms=18)
+                return
+            message = str(getattr(self, "_generation_stream_finished_message", "") or "")
+            if message:
+                self._generation_stream_finished_message = ""
+                self._finish_generation_streaming(message)
+        except Exception:
+            pass
+
+    def _finish_generation_streaming(self, message=""):
+        try:
+            self._generation_streaming_active = False
+            self._review_data_loaded = bool(self.pieces)
+            if self.pieces:
+                row = self.piece_list.currentRow()
+                if row < 0:
+                    row = 0
+                    previous_block = self.piece_list.blockSignals(True)
+                    self.piece_list.setCurrentRow(row)
+                    self.piece_list.blockSignals(previous_block)
+                    QTimer.singleShot(0, lambda: self._render_piece(row, show_loading=False))
+                else:
+                    self._refresh_piece_header(row)
+            if message:
+                try:
+                    self.loading_label.setText(message)
+                except Exception:
+                    pass
+                try:
+                    self.save_status_label.setText(message)
+                except Exception:
+                    pass
+            QTimer.singleShot(1200, self._hide_generation_progress)
+        except Exception:
+            pass
 
     def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
         try:
@@ -843,11 +937,20 @@ class SDLXLIFFReviewDialog(QDialog):
             stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else None
             if stage == "start" and total:
                 self._prepare_generation_streaming_piece_list(total=total)
+                self._set_generation_progress(0, total, f"0/{total} SDLXLIFF")
             elif stage == "created":
-                self._append_generated_sidecar_stream_piece(str(payload.get("path") or ""), progress_index=index)
+                self._queue_generated_sidecar_stream_piece(str(payload.get("path") or ""), progress_index=index)
+                self._set_generation_progress(index, total, f"{index}/{total} SDLXLIFF")
+            elif stage in {"checking", "missing_source", "missing_output", "failed", "skipped"} and total:
+                self._set_generation_progress(index, total, f"{index}/{total} SDLXLIFF")
             if stage == "finished":
                 message = self._review_generation_summary(stats) or "SDLXLIFF generation finished"
-                self._generation_streaming_active = False
+                self._set_generation_progress(total, total, f"{total}/{total} SDLXLIFF")
+                if getattr(self, "_generation_stream_pending_pieces", None):
+                    self._generation_stream_finished_message = message
+                    self._schedule_generation_stream_flush(delay_ms=16)
+                else:
+                    self._finish_generation_streaming(message)
             elif stage == "start":
                 message = f"Generating SDLXLIFF sidecars for {total} completed entr{'y' if total == 1 else 'ies'}..."
             elif output_name and total:
@@ -904,6 +1007,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 or result.get("autogen_changed")
                 or result.get("sidecars_generated")
             ):
+                preserve_generated_stream = bool(
+                    result.get("sidecars_generated")
+                    and (
+                        getattr(self, "_generation_streaming_active", False)
+                        or getattr(self, "_generation_stream_pending_pieces", None)
+                        or self.pieces
+                    )
+                )
+                if preserve_generated_stream:
+                    self._last_review_signature = signature
+                    self._last_machine_translation_signature = mt_signature
+                    self._last_autogen_signature = autogen_signature
+                    if self.pieces:
+                        self._review_data_loaded = True
+                    return
                 initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)
                 if initial_load:
                     try:
@@ -2456,8 +2574,61 @@ class SDLXLIFFReviewDialog(QDialog):
         loading_label.setStyleSheet("color: #94a3b8; font-size: 12pt; font-weight: bold; padding: 24px;")
         self.loading_label = loading_label
         loading_layout.addWidget(loading_label)
+        loading_progress = QProgressBar()
+        loading_progress.setTextVisible(True)
+        loading_progress.setFixedHeight(18)
+        loading_progress.setMaximumWidth(460)
+        loading_progress.setStyleSheet(
+            "QProgressBar { background-color:#202936; color:#d7ecff; border:1px solid #4a5568; "
+            "border-radius:5px; text-align:center; font-size:9pt; font-weight:bold; }"
+            "QProgressBar::chunk { background-color:#5a9fd4; border-radius:4px; }"
+        )
+        loading_progress.hide()
+        self.loading_progress_bar = loading_progress
+        loading_layout.addWidget(loading_progress, 0, Qt.AlignCenter)
         loading_layout.addStretch(1)
         return loading_widget
+
+    def _set_generation_progress(self, value=0, total=0, text=""):
+        try:
+            total = max(0, int(total or 0))
+            value = max(0, int(value or 0))
+        except Exception:
+            total = 0
+            value = 0
+        if total <= 0:
+            total = max(1, value, 1)
+        value = min(value, total)
+        progress_text = text or f"{value}/{total} SDLXLIFF"
+        for bar in (
+            getattr(self, "generation_progress_bar", None),
+            getattr(self, "loading_progress_bar", None),
+        ):
+            if bar is None:
+                continue
+            try:
+                bar.setRange(0, total)
+                bar.setValue(value)
+                bar.setFormat(progress_text)
+                bar.show()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+
+    def _hide_generation_progress(self):
+        for bar in (
+            getattr(self, "generation_progress_bar", None),
+            getattr(self, "loading_progress_bar", None),
+        ):
+            if bar is None:
+                continue
+            try:
+                bar.hide()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
 
     def _spin_review_loading_icon(self):
         icon = getattr(self, "_sdl_review_loading_icon", None)

@@ -1673,6 +1673,20 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "_generate_sdlxliff_sidecars_from_completed_entries(" not in item_review_body
     assert "_review_generation_progress = Signal(object)" in source
     assert "progress_callback=self._emit_review_generation_progress" in source
+    assert "QProgressBar" in source
+    assert "self.generation_progress_bar = QProgressBar()" in source
+    assert "self.loading_progress_bar = loading_progress" in source
+    assert "def _set_generation_progress" in source
+    assert "def _queue_generated_sidecar_stream_piece" in source
+    assert "def _flush_generated_sidecar_stream_pieces" in source
+    assert "preserve_generated_stream" in source
+    assert 'elif stage == "created":' in source
+    created_stage_body = source[
+        source.index('elif stage == "created":'):
+        source.index('elif stage in {"checking", "missing_source"', source.index('elif stage == "created":'))
+    ]
+    assert "_queue_generated_sidecar_stream_piece" in created_stage_body
+    assert "_append_generated_sidecar_stream_piece" not in created_stage_body
     assert "spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)" in source
     assert "REVIEW_PRELOAD_RADIUS = 2" in source
     assert "REVIEW_PRELOAD_BATCH_SIZE = 8" in source
@@ -1707,7 +1721,6 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
     assert "_prepare_streaming_piece_list(work_items)" in source
     assert "_stream_piece_list_item(next_stream_index, pieces[next_stream_index])" in source
     assert "_finish_streaming_piece_list()" in source
-    assert 'elif stage == "created":' in source
     assert "_append_generated_sidecar_stream_piece" in source
     assert 'QListWidgetItem(f"{label} loading...")' not in source
     assert "flush_streamed_pieces(limit=12)" in source
