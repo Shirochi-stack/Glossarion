@@ -12716,6 +12716,10 @@ class RetranslationMixin:
                         _cached.show()
                         _cached.raise_()
                         _cached.activateWindow()
+                        # Restart auto-refresh timer if it was stopped on hide
+                        _gpt = getattr(_cached, '_gp_auto_refresh_timer', None)
+                        if _gpt is not None and not _gpt.isActive():
+                            _gpt.start()
 
                         def _refresh_cached_gp_panels():
                             for rfn in getattr(dialog, '_gp_refresh_funcs', []):
@@ -13066,6 +13070,19 @@ class RetranslationMixin:
                 _gp_timer.setInterval(2000)
                 _gp_timer.timeout.connect(_gp_refresh_all)
                 _gp_timer.start()
+                gp_dialog._gp_auto_refresh_timer = _gp_timer
+
+                # Stop auto-refresh timer when dialog is hidden to avoid
+                # main-thread JSON parsing lag during translation
+                _original_gp_hide_event = gp_dialog.hideEvent
+                def _gp_hide_event(event):
+                    try:
+                        if _gp_timer.isActive():
+                            _gp_timer.stop()
+                    except Exception:
+                        pass
+                    _original_gp_hide_event(event)
+                gp_dialog.hideEvent = _gp_hide_event
                 
                 # Cache on parent dialog so all tabs share the same instance
                 dialog._glossary_progress_dialog = gp_dialog
