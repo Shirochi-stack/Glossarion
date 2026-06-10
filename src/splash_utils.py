@@ -750,6 +750,22 @@ class SplashManager(QObject):
             import metadata_batch_translator  # noqa: F401
         except Exception:
             pass
+        # Pre-load heavy SDLXLIFF / lxml chain so the first click on any
+        # retranslation or glossary-progress feature doesn't freeze the GUI.
+        # lxml in particular is slow to load from PyInstaller archives.
+        for _mod_name in (
+            "lxml",
+            "lxml.etree",
+            "sdlxliff_extractor",
+            "sdlxliff_converter",
+            "sdlxliff_extraction_manager",
+            "sdlxliff_sidecar_writer",
+            "Retranslation_GUI",
+        ):
+            try:
+                importlib.import_module(_mod_name)
+            except Exception:
+                pass
 
     def _preload_epub_webengine(self):
         """Warm Qt WebEngine imports while the splash is still visible."""
@@ -907,15 +923,14 @@ class SplashManager(QObject):
             f"optional_preload={'on' if preload_enabled else 'off'})"
         )
 
-        if preload_enabled:
-            try:
-                threading.Thread(
-                    target=self._preload_optional_startup_modules,
-                    daemon=True,
-                    name="optional-startup-preload",
-                ).start()
-            except Exception:
-                pass
+        try:
+            threading.Thread(
+                target=self._preload_optional_startup_modules,
+                daemon=True,
+                name="optional-startup-preload",
+            ).start()
+        except Exception:
+            pass
 
         self.update_status("⚙️ Initializing startup modules...")
         for spec in specs:
