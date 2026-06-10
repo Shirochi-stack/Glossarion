@@ -2310,6 +2310,47 @@ def test_retranslation_autogenerates_sdlxliff_sidecars_from_completed_entries(tm
     assert "Target body." in target_html
 
 
+def test_retranslation_sdlxliff_generation_skips_current_sidecar_even_with_overwrite(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar = sidecar_dir / "response_chapter0001.html.sdlxliff"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    sidecar_dir.mkdir()
+    sidecar.write_text("existing sidecar must not be rewritten", encoding="utf-8")
+    old_ns = 1_700_000_000_000_000_000
+    new_ns = old_ns + 5_000_000_000
+    os.utime(output, ns=(old_ns, old_ns))
+    os.utime(sidecar, ns=(new_ns, new_ns))
+    progress = {
+        "chapters": {
+            "1": {
+                "actual_num": 1,
+                "status": "completed",
+                "output_file": output.name,
+                "original_basename": source.name,
+            }
+        }
+    }
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    progress_events = []
+
+    stats = mixin._generate_sdlxliff_sidecars_from_completed_entries(
+        str(tmp_path),
+        progress_data=progress,
+        overwrite=True,
+        progress_callback=progress_events.append,
+    )
+
+    assert stats["created"] == 0
+    assert stats["skipped"] == 1
+    assert sidecar.read_text(encoding="utf-8") == "existing sidecar must not be rewritten"
+    assert [event["stage"] for event in progress_events] == ["start", "checking", "skipped", "finished"]
+    assert os.environ["OUTPUT_SDLXLIFF"] == "0"
+
+
 def test_retranslation_sdlxliff_generation_reports_missing_source_counts(tmp_path, monkeypatch):
     output = tmp_path / "response_chapter0001.html"
     output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")

@@ -8741,6 +8741,21 @@ class RetranslationMixin:
                         continue
         return None, None
 
+    @staticmethod
+    def _sdlxliff_sidecar_current_for_output(sidecar_path, output_path):
+        try:
+            if not sidecar_path or not output_path:
+                return False
+            if not os.path.isfile(sidecar_path) or not os.path.isfile(output_path):
+                return False
+            sidecar_stat = os.stat(sidecar_path)
+            output_stat = os.stat(output_path)
+            sidecar_mtime = getattr(sidecar_stat, "st_mtime_ns", int(sidecar_stat.st_mtime * 1000000000))
+            output_mtime = getattr(output_stat, "st_mtime_ns", int(output_stat.st_mtime * 1000000000))
+            return sidecar_mtime >= output_mtime
+        except Exception:
+            return False
+
     def _generate_sdlxliff_sidecars_from_completed_entries(
         self,
         output_dir,
@@ -8844,17 +8859,21 @@ class RetranslationMixin:
                 _notify("checking", entry_index, output_name)
 
                 sidecar_path = os.path.join(output_dir, "SDLXLIFF", f"{output_name}.sdlxliff")
-                if not overwrite and os.path.isfile(sidecar_path):
-                    stats["skipped"] += 1
-                    stats["paths"].append(sidecar_path)
-                    _notify("skipped", entry_index, output_name, path=sidecar_path)
-                    continue
-
                 output_path = self._sdlxliff_autogen_output_path(output_dir, output_file)
                 if not output_path or not os.path.isfile(output_path):
                     stats["missing_output"] += 1
                     _notify("missing_output", entry_index, output_name, message=f"Output HTML not found: {output_file}")
                     continue
+                if os.path.isfile(sidecar_path):
+                    if not overwrite:
+                        stats["skipped"] += 1
+                        stats["paths"].append(sidecar_path)
+                        _notify("skipped", entry_index, output_name, path=sidecar_path)
+                        continue
+                    if requested is None and self._sdlxliff_sidecar_current_for_output(sidecar_path, output_path):
+                        stats["skipped"] += 1
+                        _notify("skipped", entry_index, output_name, path=sidecar_path)
+                        continue
                 try:
                     with open(output_path, "r", encoding="utf-8", errors="replace") as f:
                         target_html = f.read()
