@@ -568,7 +568,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if not bool(getattr(self, "_review_data_loaded", False)):
                 try:
                     self._show_review_loading_page()
-                    self.loading_label.setText("Checking SDLXLIFF sidecars...")
+                    self.save_status_label.setText("Checking SDLXLIFF sidecars...")
                 except Exception:
                     pass
             self._review_refresh_scan_force = bool(getattr(self, "_review_refresh_scan_force", False) or force)
@@ -905,10 +905,6 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._refresh_piece_header(row)
             if message:
                 try:
-                    self.loading_label.setText(message)
-                except Exception:
-                    pass
-                try:
                     self.save_status_label.setText(message)
                 except Exception:
                     pass
@@ -946,7 +942,8 @@ class SDLXLIFFReviewDialog(QDialog):
             self.piece_list.addItem(self._piece_list_item_for_piece(piece, row))
             total = int(getattr(self, "_generation_stream_total", 0) or 0)
             if total:
-                self.loading_label.setText(f"Loaded SDLXLIFF entry {len(self.pieces)}/{total}")
+                self.save_status_label.setText(f"Loaded SDLXLIFF entry {len(self.pieces)}/{total}")
+                self._set_loading_progress(len(self.pieces), total, f"{len(self.pieces)}/{total} SDLXLIFF entries")
             if row == 0:
                 previous_block = self.piece_list.blockSignals(True)
                 self.piece_list.setCurrentRow(0)
@@ -1032,10 +1029,6 @@ class SDLXLIFFReviewDialog(QDialog):
                     message = f"{message} ({detail})"
             else:
                 message = str(payload.get("message") or "Generating SDLXLIFF sidecars...")
-            try:
-                self.loading_label.setText(message)
-            except Exception:
-                pass
             try:
                 self.save_status_label.setText(message)
             except Exception:
@@ -1267,10 +1260,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     row = self._initial_piece_row
                 QTimer.singleShot(0, lambda row=row: self._render_piece(row, show_loading=False))
             elif not self.pieces:
-                try:
-                    self.loading_label.setText("No SDLXLIFF review files found")
-                except Exception:
-                    pass
+                self._show_review_empty_state("No SDLXLIFF review files found")
         except Exception:
             pass
         finally:
@@ -1331,7 +1321,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)
                 if initial_load:
                     try:
-                        self.loading_label.setText("Loading SDLXLIFF review entries...")
+                        self.save_status_label.setText("Loading SDLXLIFF review entries...")
                     except Exception:
                         pass
                 else:
@@ -1380,10 +1370,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 if stats:
                     summary = self._review_generation_summary(stats)
                     if summary and not self.pieces:
-                        try:
-                            self.loading_label.setText(summary)
-                        except Exception:
-                            pass
                         try:
                             self.save_status_label.setText(summary)
                         except Exception:
@@ -2921,6 +2907,7 @@ class SDLXLIFFReviewDialog(QDialog):
             base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
             loading_icon = create_icon_label(52, base_dir)
             loading_icon.setFixedSize(52, 52)
+            loading_icon.hide()
             loading_layout.addWidget(loading_icon, 0, Qt.AlignCenter)
             self._sdl_review_loading_icon = loading_icon
             pixmap = loading_icon.pixmap()
@@ -2939,6 +2926,7 @@ class SDLXLIFFReviewDialog(QDialog):
         loading_label.setTextFormat(Qt.PlainText)
         loading_label.setAlignment(Qt.AlignCenter)
         loading_label.setStyleSheet("color: #94a3b8; font-size: 12pt; font-weight: bold; padding: 24px;")
+        loading_label.hide()
         self.loading_label = loading_label
         loading_layout.addWidget(loading_label)
         loading_progress = QProgressBar()
@@ -2968,10 +2956,7 @@ class SDLXLIFFReviewDialog(QDialog):
             total = max(1, value, 1)
         value = min(value, total)
         progress_text = text or f"{value}/{total} SDLXLIFF"
-        for bar in (
-            getattr(self, "generation_progress_bar", None),
-            getattr(self, "loading_progress_bar", None),
-        ):
+        for bar in (getattr(self, "generation_progress_bar", None),):
             if bar is None:
                 continue
             try:
@@ -2995,7 +2980,15 @@ class SDLXLIFFReviewDialog(QDialog):
             total = max(1, value, 1)
         value = min(value, total)
         progress_text = text or f"{value}/{total} SDLXLIFF entries"
-        bar = getattr(self, "loading_progress_bar", None)
+        try:
+            status = getattr(self, "save_status_label", None)
+            if status is not None:
+                status.setText(progress_text)
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+        bar = getattr(self, "generation_progress_bar", None)
         if bar is None:
             return
         try:
@@ -3017,6 +3010,21 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             try:
                 bar.hide()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+
+    def _hide_review_loading_page_widgets(self):
+        for widget in (
+            getattr(self, "_sdl_review_loading_icon", None),
+            getattr(self, "loading_label", None),
+            getattr(self, "loading_progress_bar", None),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.hide()
             except RuntimeError:
                 pass
             except Exception:
@@ -3987,15 +3995,21 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         try:
             self.piece_list.clear()
+            self.pieces = []
             self._streaming_piece_selected_path = (
                 os.path.normcase(os.path.abspath(self.current_path)) if self.current_path else ""
             )
             self._streaming_piece_selected_row = 0
+            self._streaming_piece_rendered_row = None
             self._streaming_piece_visible_count = 0
             self._streaming_piece_last_pump = time.monotonic()
             self._set_loading_progress(0, len(work_items), f"0/{len(work_items)} SDLXLIFF entries")
         except Exception:
             return False
+        try:
+            self.piece_list.currentRowChanged.connect(self._request_render_piece)
+        except Exception:
+            pass
         self.piece_list.update()
         self._pump_review_loading_events(max_ms=5)
         return True
@@ -4005,13 +4019,16 @@ class SDLXLIFFReviewDialog(QDialog):
             if self._review_piece_is_empty_sidecar(piece):
                 return
             visible_row = int(getattr(self, "_streaming_piece_visible_count", 0) or 0)
+            piece = dict(piece)
+            piece["index"] = visible_row
+            self.pieces.append(piece)
             item = self._piece_list_item_for_piece(piece, visible_row)
             self.piece_list.addItem(item)
             self._streaming_piece_visible_count = visible_row + 1
             try:
                 total = int(getattr(self, "_streaming_piece_total", 0) or 0)
                 if total:
-                    self.loading_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{total}")
+                    self.save_status_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{total}")
                     self._set_loading_progress(
                         visible_row + 1,
                         total,
@@ -4021,8 +4038,16 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             try:
                 piece_norm = os.path.normcase(os.path.abspath(piece.get("path") or ""))
-                if self._streaming_piece_selected_path and piece_norm == self._streaming_piece_selected_path:
+                selected_match = bool(self._streaming_piece_selected_path and piece_norm == self._streaming_piece_selected_path)
+                if selected_match:
                     self._streaming_piece_selected_row = visible_row
+                if selected_match or self.piece_list.currentRow() < 0:
+                    previous_block = self.piece_list.blockSignals(True)
+                    self.piece_list.setCurrentRow(visible_row)
+                    self.piece_list.blockSignals(previous_block)
+                    self._initial_piece_row = visible_row
+                    self._streaming_piece_rendered_row = visible_row
+                    QTimer.singleShot(0, lambda row=visible_row: self._render_piece(row, show_loading=False))
             except Exception:
                 pass
             self.piece_list.update()
@@ -4052,10 +4077,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._initial_piece_row = selected_row
             else:
                 self.header_label.setText("No SDLXLIFF review files found")
-                try:
-                    self.loading_label.setText("No SDLXLIFF review files found")
-                except Exception:
-                    pass
+                self._show_review_empty_state("No SDLXLIFF review files found")
             self._streamed_piece_list_populated = True
             self.piece_list.update()
             return True
@@ -4203,7 +4225,8 @@ class SDLXLIFFReviewDialog(QDialog):
             if stream_sidebar:
                 try:
                     self._streaming_piece_total = len(work_items)
-                    self.loading_label.setText(f"Loading SDLXLIFF entries 0/{len(work_items)}")
+                    self.save_status_label.setText(f"Loading SDLXLIFF entries 0/{len(work_items)}")
+                    self._set_loading_progress(0, len(work_items), f"0/{len(work_items)} SDLXLIFF entries")
                 except Exception:
                     pass
 
@@ -4304,10 +4327,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._initial_piece_row = selected_row
         else:
             self.header_label.setText("No SDLXLIFF review files found")
-            try:
-                self.loading_label.setText("No SDLXLIFF review files found")
-            except Exception:
-                pass
+            self._show_review_empty_state("No SDLXLIFF review files found")
 
     def _refresh_piece_list_item(self, piece_index):
         try:
@@ -4399,22 +4419,42 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _show_review_loading_page(self):
         try:
-            self.loading_label.setText("Loading SDLXLIFF...")
+            status = getattr(self, "save_status_label", None)
+            if status is not None:
+                status.setText("Loading SDLXLIFF...")
+            self._hide_review_loading_page_widgets()
+            if self.rows_stack.currentWidget() is not self.loading_page and not self.pieces:
+                self.rows_widget = self.loading_page
+                self.rows_layout = self.loading_page.layout()
+                self._current_scroll_piece_row = None
+                self.rows_stack.setCurrentWidget(self.loading_page)
+                self._sync_review_scroll_range(self.loading_page)
+        except Exception:
+            pass
+
+    def _show_review_empty_state(self, message="No SDLXLIFF review files found"):
+        try:
             self.rows_widget = self.loading_page
             self.rows_layout = self.loading_page.layout()
             self._current_scroll_piece_row = None
             if self.rows_stack.currentWidget() is not self.loading_page:
                 self.rows_stack.setCurrentWidget(self.loading_page)
             self._sync_review_scroll_range(self.loading_page)
-            self.loading_page.show()
-            self.loading_page.raise_()
-            self.scroll.viewport().update()
-            self.rows_stack.update()
-            self.rows_stack.repaint()
-            self._spin_review_loading_icon()
             try:
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents(QEventLoop.AllEvents, 20)
+                icon = getattr(self, "_sdl_review_loading_icon", None)
+                if icon is not None:
+                    icon.show()
+            except Exception:
+                pass
+            try:
+                self.loading_label.setText(str(message or "No SDLXLIFF review files found"))
+                self.loading_label.show()
+            except Exception:
+                pass
+            try:
+                progress = getattr(self, "loading_progress_bar", None)
+                if progress is not None:
+                    progress.hide()
             except Exception:
                 pass
         except Exception:
@@ -4508,7 +4548,7 @@ class SDLXLIFFReviewDialog(QDialog):
             overlay.raise_()
             anim = QPropertyAnimation(effect, b"opacity", overlay)
             anim.setDuration(max(35, int(duration_ms)))
-            anim.setStartValue(1.0)
+            anim.setStartValue(0.5)
             anim.setEndValue(0.0)
             anim.setEasingCurve(QEasingCurve.OutCubic)
             self._review_transition_overlay = overlay
