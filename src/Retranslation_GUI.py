@@ -952,7 +952,6 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._initial_piece_row = 0
                 QTimer.singleShot(0, lambda: self._render_piece(0, show_loading=False))
             self.piece_list.update()
-            QTimer.singleShot(0, self.piece_list.update)
             return True
         except Exception:
             return False
@@ -4274,6 +4273,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if stream_sidebar:
                 flush_streamed_pieces()
                 self._finish_streaming_piece_list()
+                return list(self.pieces)
             return self._filter_review_pieces(pieces)
 
         if stream_sidebar:
@@ -4288,7 +4288,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._stream_piece_list_item(idx, piece)
                 self._pump_review_loading_events(max_ms=3)
             self._finish_streaming_piece_list()
-            return self._filter_review_pieces(pieces)
+            return list(self.pieces)
 
         pieces = [None] * len(work_items)
         max_workers = max(1, min(8, len(work_items)))
@@ -4322,6 +4322,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if stream_sidebar:
             flush_streamed_pieces()
             self._finish_streaming_piece_list()
+            return list(self.pieces)
         return self._filter_review_pieces(pieces)
 
     def _populate_piece_list(self):
