@@ -665,6 +665,7 @@ class SDLXLIFFReviewDialog(QDialog):
                     force=force,
                     previous_signature=last_autogen_signature,
                     current_signature=autogen_signature,
+                    validate=validate,
                 )
                 generated = bool(stats and (stats.get("created") or stats.get("paths")))
                 if force or generated:
@@ -724,15 +725,22 @@ class SDLXLIFFReviewDialog(QDialog):
                     continue
         return sorted(changed)
 
-    def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None):
+    def _regenerate_review_sidecars_for_refresh_scan(self, force=False, previous_signature=None, current_signature=None, validate=False):
         signature = current_signature or ()
         if not self._review_autogen_has_output_html(signature):
             return None
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
         invalid_outputs = []
-        if force or previous_signature is not None or missing_outputs:
-            invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
-        elif previous_signature is None:
+        initial_scan = previous_signature is None and not force and not validate
+        if initial_scan:
+            # First scan after opening the dialog: skip the parse-validation of
+            # every sidecar - it reads and parses all of them (twice each) and
+            # held the "Checking SDLXLIFF sidecars..." screen for seconds.
+            # Missing sidecars are still generated here; a deferred validate
+            # pass runs in the background after the initial load and repairs
+            # any invalid sidecars seamlessly.
+            invalid_outputs = []
+        else:
             invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
         if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
             return None
@@ -1354,6 +1362,21 @@ class SDLXLIFFReviewDialog(QDialog):
                     autogen_signature=autogen_signature,
                     mt_signature=mt_signature,
                 )
+                if initial_load and not getattr(self, "_initial_sidecar_validation_queued", False):
+                    # The initial scan skipped the expensive per-sidecar
+                    # parse-validation to get entries on screen fast. Run it
+                    # once now, in the background, a moment after the initial
+                    # load settles - any invalid sidecars get regenerated and
+                    # refreshed seamlessly.
+                    self._initial_sidecar_validation_queued = True
+                    QTimer.singleShot(
+                        2500,
+                        lambda: self._queue_review_refresh_scan(
+                            validate=True,
+                            current_path=self.current_path,
+                            delay_ms=0,
+                        ),
+                    )
                 if stats:
                     summary = self._review_generation_summary(stats)
                     if summary and not self.pieces:
