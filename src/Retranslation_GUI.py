@@ -4456,7 +4456,7 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-    def _cancel_active_review_render(self):
+    def _cancel_active_review_render(self, defer_visible_discard=False):
         timer = self._active_render_timer
         row = self._active_render_row
         page = self._active_render_page
@@ -4470,7 +4470,29 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
         if row is not None and row not in self._piece_render_complete:
-            self._discard_piece_page(row, page)
+            page_is_current = False
+            if defer_visible_discard and page is not None:
+                try:
+                    page_is_current = self.rows_stack.currentWidget() is page
+                except Exception:
+                    page_is_current = False
+            if page_is_current:
+                # Keep the partially rendered page on screen until the next
+                # page's first batch is ready, then swap straight to it.
+                # Discarding it here would flash the loading page on every
+                # entry switch even though streaming makes it unnecessary.
+                try:
+                    if self._piece_pages.get(row) is page:
+                        self._piece_pages.pop(row, None)
+                    self._piece_render_complete.discard(row)
+                except Exception:
+                    pass
+                previous = self._seamless_review_old_page
+                if previous is not None and previous is not page:
+                    self._remove_review_page_widget(previous)
+                self._seamless_review_old_page = page
+            else:
+                self._discard_piece_page(row, page)
 
     def _cancel_review_preload(self, discard_page=True):
         timer = self._preload_render_timer
@@ -7491,7 +7513,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._clear_review_row_highlight()
         self._status_jump_indices.clear()
         render_token = self._render_token
-        self._cancel_active_review_render()
+        self._cancel_active_review_render(defer_visible_discard=True)
 
         piece = self.pieces[row]
         try:
@@ -7517,6 +7539,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self.rows_widget = cached_page
             self.rows_layout = cached_page.layout()
             self.rows_stack.setCurrentWidget(cached_page)
+            self._finish_seamless_review_swap(cached_page)
             self._finish_rows_rebuild(final=True)
             self._queue_refresh_current_visible_dirty_source_previews()
             self._restore_review_scroll(row)
@@ -7642,10 +7665,11 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
-        if show_loading:
-            self.rows_stack.setCurrentWidget(page)
-            self._finish_seamless_review_swap(page)
-            self._finish_rows_rebuild(final=False)
+        # Don't swap to the (still empty) page or to a loading screen here.
+        # The previous content stays visible and the swap happens inside the
+        # first batch tick, once enough rows exist to fill the viewport - so
+        # switching entries never flashes a blank or loading page.
+        swap_state = {"pending": bool(show_loading)}
 
         def _finish_active_render_timer():
             if self._active_render_timer is render_timer:
@@ -7670,7 +7694,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 _discard_active_render_page()
                 return
             try:
-                visible_stream = self.rows_stack.currentWidget() is page
+                visible_stream = swap_state["pending"] or self.rows_stack.currentWidget() is page
                 stream_widgets = tuple(
                     widget for widget in (page, self.rows_stack, self.scroll.viewport(), self.scroll)
                     if widget is not None
@@ -7725,6 +7749,14 @@ class SDLXLIFFReviewDialog(QDialog):
                         # content height is tracked as rows are added instead of
                         # re-measuring the entire page layout every batch.
                         self._apply_review_stream_geometry(page, layout, row_state["content_height"])
+                    if swap_state["pending"]:
+                        # First batch rendered: swap from the old content to
+                        # the new page in the same updates-disabled tick, so
+                        # the switch paints exactly once with real rows.
+                        swap_state["pending"] = False
+                        self.rows_stack.setCurrentWidget(page)
+                        self._finish_seamless_review_swap(page)
+                        self._restore_review_scroll(row)
                     for frame in batch_frames:
                         try:
                             frame.setUpdatesEnabled(True)
