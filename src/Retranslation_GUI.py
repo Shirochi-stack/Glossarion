@@ -319,7 +319,6 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdl_review_loading_original_pixmap = None
         self._sdl_review_loading_angle = 0
         self._review_loading_minimum_ms = 10
-        self._review_perf_trace_log_path = None
         self._review_dirty_preview_refresh_queued = False
         self._status_jump_indices = {}
         self._highlighted_status_frame = None
@@ -978,37 +977,50 @@ class SDLXLIFFReviewDialog(QDialog):
         return False
 
     def _trace_review_perf(self, label, started=None, force=False, **details):
+        """SDLXLIFF viewer performance logging is intentionally disabled."""
+        return None
+
+    def _review_piece_worker_count(self, total):
+        """Return the SDLXLIFF viewer worker count from Other Settings."""
         try:
-            elapsed_ms = None
-            if started is not None:
-                elapsed_ms = (time.perf_counter() - float(started)) * 1000.0
-                if not force and elapsed_ms < 35.0:
-                    return
-            parts = [f"SDLXLIFF PERF {label}"]
-            if elapsed_ms is not None:
-                parts.append(f"{elapsed_ms:.1f}ms")
-            for key, value in details.items():
-                if value is None:
-                    continue
-                parts.append(f"{key}={value}")
-            line = " | ".join(parts)
-            try:
-                print(line, flush=True)
-            except Exception:
-                pass
-            try:
-                log_path = getattr(self, "_review_perf_trace_log_path", None)
-                if not log_path:
-                    log_dir = os.path.join(_get_app_dir(), "logs")
-                    os.makedirs(log_dir, exist_ok=True)
-                    log_path = os.path.join(log_dir, "sdlxliff_perf.log")
-                    self._review_perf_trace_log_path = log_path
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
-            except Exception:
-                pass
+            total = int(total)
         except Exception:
-            pass
+            total = 0
+        if total <= 1:
+            return 1
+
+        parent = getattr(self, "_context_parent", None)
+        config = getattr(parent, "config", None)
+        if not isinstance(config, dict):
+            config = self._config if isinstance(getattr(self, "_config", None), dict) else {}
+
+        enabled = True
+        try:
+            if hasattr(parent, "enable_parallel_extraction_var"):
+                enabled = bool(getattr(parent, "enable_parallel_extraction_var"))
+            elif "enable_parallel_extraction" in config:
+                enabled = bool(config.get("enable_parallel_extraction", True))
+        except Exception:
+            enabled = True
+        if not enabled:
+            return 1
+
+        raw_workers = None
+        try:
+            if hasattr(parent, "extraction_workers_var"):
+                raw_workers = getattr(parent, "extraction_workers_var")
+        except Exception:
+            raw_workers = None
+        if raw_workers is None and "extraction_workers" in config:
+            raw_workers = config.get("extraction_workers")
+        if raw_workers is None:
+            raw_workers = os.environ.get("EXTRACTION_WORKERS", "2")
+
+        try:
+            workers = int(str(raw_workers).strip())
+        except (TypeError, ValueError):
+            workers = 1
+        return min(total, max(1, workers))
 
     def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
         trace_started = time.perf_counter()
@@ -4586,17 +4598,13 @@ class SDLXLIFFReviewDialog(QDialog):
             return filtered
 
         pieces = [None] * len(work_items)
+        max_workers = self._review_piece_worker_count(len(work_items))
 
-        # Streaming load: parse in ONE background worker while the GUI thread
-        # only flushes finished entries into the sidebar and pumps events.
-        # A single worker is deliberate: BeautifulSoup tree building is pure
-        # Python, so multiple parser threads cannot run in parallel anyway -
-        # they only fight the GUI thread for the GIL and make the whole
-        # window lag for the entire load. One worker keeps the GUI thread
-        # responsive (it gets the GIL every switch interval) and removes the
-        # old per-chapter lag spikes that happened when parsing ran directly
-        # on the GUI thread.
-        if stream_sidebar:
+        # Single-worker streaming load: parse in one background worker while
+        # the GUI thread flushes finished entries into the sidebar.
+        # Use the Other Settings parallel-extraction worker count; a value of
+        # 1 keeps the old single background parser behavior.
+        if stream_sidebar and max_workers <= 1:
             stream_started = time.perf_counter()
             total = len(work_items)
             worker_done = threading.Event()
@@ -4624,7 +4632,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 force=True,
                 pieces=len(self.pieces or []),
                 work_items=total,
-                workers=1,
+                workers=max_workers,
             )
             self._trace_review_perf(
                 "load_pieces_done",
@@ -4636,7 +4644,6 @@ class SDLXLIFFReviewDialog(QDialog):
             )
             return list(self.pieces)
         parallel_started = time.perf_counter()
-        max_workers = max(1, min(8, len(work_items)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self._build_piece, path, idx, metadata): idx
