@@ -291,6 +291,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._review_data_preload_token = 0
         self._review_data_preload_running = False
         self._review_data_preload_requested = False
+        self._review_data_preload_queued = False
         self._sdl_review_loading_icon_timer = None
         self._sdl_review_loading_icon = None
         self._sdl_review_loading_original_pixmap = None
@@ -1242,7 +1243,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._last_review_signature = result.get("review_signature")
             self._last_machine_translation_signature = result.get("machine_translation_signature")
             self._last_autogen_signature = result.get("autogen_signature")
-            self._start_review_data_preload()
+            self._queue_review_data_preload(delay_ms=220)
             summary = self._review_generation_summary(result.get("stats"))
             if summary:
                 try:
@@ -2396,7 +2397,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._review_data_loaded = True
             if not self._streamed_piece_list_populated:
                 self._populate_piece_list()
-            self._start_review_data_preload()
+            self._queue_review_data_preload(delay_ms=220)
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
                 self._last_machine_translation_signature = (
@@ -2412,7 +2413,15 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
             if self.pieces and self.isVisible():
                 show_loading = not (seamless and old_visible_page is not None)
-                QTimer.singleShot(0, lambda show_loading=show_loading: self._render_piece(self._initial_piece_row, show_loading=show_loading))
+                render_row = self.piece_list.currentRow()
+                if render_row < 0 or render_row >= len(self.pieces):
+                    render_row = self._initial_piece_row
+                render_row = max(0, min(render_row, len(self.pieces) - 1))
+                self._initial_piece_row = render_row
+                QTimer.singleShot(
+                    0,
+                    lambda row=render_row, show_loading=show_loading: self._render_piece(row, show_loading=show_loading),
+                )
         except Exception:
             pass
         finally:
@@ -4070,11 +4079,21 @@ class SDLXLIFFReviewDialog(QDialog):
         try:
             selected_row = int(getattr(self, "_streaming_piece_selected_row", 0) or 0)
             if self.piece_list.count() > 0:
-                selected_row = max(0, min(selected_row, self.piece_list.count() - 1))
-                previous_block = self.piece_list.blockSignals(True)
-                self.piece_list.setCurrentRow(selected_row)
-                self.piece_list.blockSignals(previous_block)
+                current_row = self.piece_list.currentRow()
+                if 0 <= current_row < self.piece_list.count():
+                    selected_row = current_row
+                else:
+                    selected_row = max(0, min(selected_row, self.piece_list.count() - 1))
+                    previous_block = self.piece_list.blockSignals(True)
+                    self.piece_list.setCurrentRow(selected_row)
+                    self.piece_list.blockSignals(previous_block)
                 self._initial_piece_row = selected_row
+                if (
+                    getattr(self, "_streaming_piece_rendered_row", None) is None
+                    and 0 <= selected_row < len(self.pieces)
+                ):
+                    self._streaming_piece_rendered_row = selected_row
+                    QTimer.singleShot(0, lambda row=selected_row: self._render_piece(row, show_loading=False))
             else:
                 self.header_label.setText("No SDLXLIFF review files found")
                 self._show_review_empty_state("No SDLXLIFF review files found")
@@ -4932,11 +4951,28 @@ class SDLXLIFFReviewDialog(QDialog):
                 piece.pop("_render_model", None)
             self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
             if restart_preload and getattr(self, "_review_data_loaded", False):
-                self._review_data_preload_requested = True
-                if not getattr(self, "_review_data_preload_running", False):
-                    QTimer.singleShot(250, self._start_review_data_preload)
+                self._queue_review_data_preload(delay_ms=250)
         except Exception:
             pass
+
+    def _queue_review_data_preload(self, delay_ms=220):
+        try:
+            if not getattr(self, "_review_data_loaded", False) or not self.pieces:
+                return
+            self._review_data_preload_requested = True
+            if getattr(self, "_review_data_preload_running", False) or getattr(self, "_review_data_preload_queued", False):
+                return
+            self._review_data_preload_queued = True
+
+            def _run():
+                self._review_data_preload_queued = False
+                if not getattr(self, "_review_data_preload_requested", False):
+                    return
+                self._start_review_data_preload()
+
+            QTimer.singleShot(max(0, int(delay_ms or 0)), _run)
+        except Exception:
+            self._review_data_preload_queued = False
 
     def _start_review_data_preload(self):
         if not getattr(self, "_review_data_loaded", False) or not self.pieces:
@@ -4944,25 +4980,28 @@ class SDLXLIFFReviewDialog(QDialog):
         if getattr(self, "_review_data_preload_running", False):
             self._review_data_preload_requested = True
             return
+        self._review_data_preload_queued = False
         self._review_data_preload_token = int(getattr(self, "_review_data_preload_token", 0)) + 1
         token = self._review_data_preload_token
         viewport_width = self._review_render_viewport_width()
         two_column_layout = bool(getattr(self, "_two_column_layout_enabled", True))
-        snapshots = [
-            (piece_index, self._piece_render_snapshot(piece))
+        pieces_for_preload = [
+            (piece_index, piece.get("rows") or [])
             for piece_index, piece in enumerate(self.pieces)
             if isinstance(piece, dict) and not piece.get("error")
         ]
-        if not snapshots:
+        if not pieces_for_preload:
             return
         self._review_data_preload_running = True
         self._review_data_preload_requested = False
+        cls = type(self)
 
         def _worker():
             models = {}
             try:
-                for ordinal, (piece_index, row_snapshot) in enumerate(snapshots, start=1):
-                    models[piece_index] = self._build_review_piece_render_model_from_rows(
+                for ordinal, (piece_index, rows) in enumerate(pieces_for_preload, start=1):
+                    row_snapshot = [cls._review_row_snapshot(row_data) for row_data in rows]
+                    models[piece_index] = cls._build_review_piece_render_model_from_rows(
                         row_snapshot,
                         viewport_width,
                         two_column_layout=two_column_layout,
@@ -4981,7 +5020,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if int(token) != int(getattr(self, "_review_data_preload_token", -1)):
                 if getattr(self, "_review_data_preload_requested", False):
                     self._review_data_preload_requested = False
-                    self._start_review_data_preload()
+                    self._queue_review_data_preload(delay_ms=250)
                 return
             if not isinstance(models, dict):
                 return
@@ -4999,8 +5038,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         self.pieces[piece_index]["_render_model"] = model
         finally:
             if getattr(self, "_review_data_preload_requested", False):
-                self._review_data_preload_requested = False
-                QTimer.singleShot(0, self._start_review_data_preload)
+                self._queue_review_data_preload(delay_ms=250)
 
     def _review_selection_recently_changed(self):
         try:
