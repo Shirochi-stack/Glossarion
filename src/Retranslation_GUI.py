@@ -913,6 +913,22 @@ class SDLXLIFFReviewDialog(QDialog):
         except Exception:
             pass
 
+    def _review_row_rendered_or_rendering(self, row):
+        try:
+            row = int(row)
+        except Exception:
+            return False
+        try:
+            if row in self._piece_render_complete and self._piece_pages.get(row) is not None:
+                return True
+            if getattr(self, "_active_render_row", None) == row and getattr(self, "_active_render_page", None) is not None:
+                return True
+            if getattr(self, "_preload_render_row", None) == row and self._piece_pages.get(row) is not None:
+                return True
+        except Exception:
+            return False
+        return False
+
     def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
         try:
             if not getattr(self, "_generation_streaming_active", False):
@@ -1258,7 +1274,8 @@ class SDLXLIFFReviewDialog(QDialog):
                 row = self.piece_list.currentRow()
                 if row < 0:
                     row = self._initial_piece_row
-                QTimer.singleShot(0, lambda row=row: self._render_piece(row, show_loading=False))
+                if not self._review_row_rendered_or_rendering(row):
+                    QTimer.singleShot(0, lambda row=row: self._render_piece(row, show_loading=False))
             elif not self.pieces:
                 self._show_review_empty_state("No SDLXLIFF review files found")
         except Exception:
@@ -2417,10 +2434,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     render_row = self._initial_piece_row
                 render_row = max(0, min(render_row, len(self.pieces) - 1))
                 self._initial_piece_row = render_row
-                QTimer.singleShot(
-                    0,
-                    lambda row=render_row, show_loading=show_loading: self._render_piece(row, show_loading=show_loading),
-                )
+                if not self._review_row_rendered_or_rendering(render_row):
+                    QTimer.singleShot(
+                        0,
+                        lambda row=render_row, show_loading=show_loading: self._render_piece(row, show_loading=show_loading),
+                    )
         except Exception:
             pass
         finally:
@@ -4090,6 +4108,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if (
                     getattr(self, "_streaming_piece_rendered_row", None) is None
                     and 0 <= selected_row < len(self.pieces)
+                    and not self._review_row_rendered_or_rendering(selected_row)
                 ):
                     self._streaming_piece_rendered_row = selected_row
                     QTimer.singleShot(0, lambda row=selected_row: self._render_piece(row, show_loading=False))
@@ -7898,8 +7917,6 @@ class SDLXLIFFReviewDialog(QDialog):
                     scrolling = self._review_scroll_recently_active()
                     batch_budget_s = 0.004 if scrolling else 0.008
                     batch_started_s = time.monotonic()
-                    first_tick = start == 0
-                    fill_target = (max(1, self.scroll.viewport().height()) + 240) if first_tick else 0
                     idx = start
                     while idx < total_rows:
                         row_model = row_models[idx] if idx < len(row_models) else None
@@ -7918,10 +7935,6 @@ class SDLXLIFFReviewDialog(QDialog):
                             if row_state["content_height"] > 0:
                                 row_state["content_height"] += layout_spacing
                             row_state["content_height"] += max(0, frame.minimumHeight())
-                        # First tick: render past the fold so the visible area
-                        # appears instantly, then yield.
-                        if first_tick and row_state["content_height"] < fill_target and (idx - start) < 40:
-                            continue
                         if len(batch_frames) >= batch_size:
                             break
                         if (time.monotonic() - batch_started_s) >= batch_budget_s:
@@ -7997,7 +8010,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         render_timer.timeout.connect(_run_render_batch)
         self._active_render_timer = render_timer
-        render_timer.start(self._review_loading_minimum_ms)
+        render_timer.start(0)
 
 
 class RetranslationMixin:
