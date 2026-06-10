@@ -3633,24 +3633,81 @@ Text to analyze:
         dialog_y = screen.y() + (screen.height() - dialog_height) // 2
         dialog.move(dialog_x, dialog_y)
         
-        # Create scrollable content area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        # Create main content widget
-        content_widget = QWidget()
-        scroll_area.setWidget(content_widget)
-        
         # Set dialog layout
         dialog_layout = QVBoxLayout(dialog)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
-        dialog_layout.addWidget(scroll_area)
-        
-        # Initialize the manga translator interface with PySide6 widget
-        self.manga_translator = MangaTranslationTab(content_widget, self, dialog, scroll_area)
-        
+
+        # --- Instant feedback: show a lightweight loading placeholder first.
+        # Building MangaTranslationTab takes seconds, so it is deferred until
+        # after the dialog is visible and painted.
+        from PySide6.QtWidgets import QLabel, QProgressBar
+        from PySide6.QtCore import QTimer
+        loading_widget = QWidget()
+        loading_layout = QVBoxLayout(loading_widget)
+        loading_layout.setSpacing(14)
+        loading_layout.addStretch(1)
+        loading_spin_timer = None
+        try:
+            from spinning import create_icon_label
+            loading_icon = create_icon_label(64, self.base_dir)
+            loading_icon.setFixedSize(64, 64)
+            loading_layout.addWidget(loading_icon, 0, Qt.AlignCenter)
+            # Continuously spin the icon (spinning.py's animate_icon is a
+            # one-shot 500ms spin, so drive the rotation with our own timer,
+            # same as the SDLXLIFF review loading page).
+            original_pixmap = loading_icon.pixmap()
+            if original_pixmap is not None and not original_pixmap.isNull():
+                original_pixmap = original_pixmap.copy()
+                from PySide6.QtGui import QTransform
+                spin_state = {"angle": 0}
+
+                def _spin_manga_loading_icon():
+                    try:
+                        spin_state["angle"] = (spin_state["angle"] + 24) % 360
+                        transform = QTransform().rotate(spin_state["angle"])
+                        rotated = original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                        if rotated.isNull():
+                            return
+                        loading_icon.setPixmap(rotated.scaled(
+                            loading_icon.size().width(),
+                            loading_icon.size().height(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation,
+                        ))
+                        loading_icon.update()
+                    except RuntimeError:
+                        try:
+                            loading_spin_timer.stop()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                from PySide6.QtCore import QTimer as _QTimer
+                loading_spin_timer = _QTimer(dialog)
+                loading_spin_timer.timeout.connect(_spin_manga_loading_icon)
+                # IMPORTANT: don't start spinning yet. The dialog fades in via
+                # a QGraphicsOpacityEffect, and updating a transparent label's
+                # pixmap while that effect is active smears ghost copies of the
+                # icon into the effect's cached buffer (multiple overlaid
+                # Halgakos icons until the fade ends). The spin is started
+                # after the fade completes, in _build_manga_content's
+                # scheduling below.
+        except Exception:
+            loading_spin_timer = None
+        loading_label = QLabel("Loading Manga Translator...")
+        loading_label.setAlignment(Qt.AlignCenter)
+        loading_label.setStyleSheet("font-size: 13pt; font-weight: bold; color: #94a3b8; padding: 8px;")
+        loading_layout.addWidget(loading_label)
+        loading_progress = QProgressBar()
+        loading_progress.setRange(0, 0)  # indeterminate
+        loading_progress.setTextVisible(False)
+        loading_progress.setFixedHeight(14)
+        loading_progress.setFixedWidth(340)
+        loading_layout.addWidget(loading_progress, 0, Qt.AlignCenter)
+        loading_layout.addStretch(1)
+        dialog_layout.addWidget(loading_widget)
+
         # Intercept window close: hide instead of destroy to preserve state
         def _handle_close(event):
             try:
@@ -3683,17 +3740,85 @@ Text to analyze:
                     pass
                 dialog.hide()
         dialog.closeEvent = _handle_close
-        
+
         # Keep reference to prevent garbage collection and allow reuse
         self._manga_dialog = dialog
-        
-        # Show the dialog with smooth fade-in animation
+
+        # Show the dialog with smooth fade-in animation BEFORE building the
+        # heavy manga UI, so the user gets instant feedback on click.
         try:
             from dialog_animations import show_dialog_with_fade
             show_dialog_with_fade(dialog, duration=250)
         except Exception:
             # Fallback to normal show if animation fails
             dialog.show()
+
+        def _build_manga_content():
+            # Dialog may have been replaced/discarded while the timer was pending
+            if getattr(self, '_manga_dialog', None) is not dialog:
+                return
+            try:
+                # Create scrollable content area
+                scroll_area = QScrollArea()
+                scroll_area.setWidgetResizable(True)
+                scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+                # Create main content widget
+                content_widget = QWidget()
+                scroll_area.setWidget(content_widget)
+
+                # Initialize the manga translator interface (the heavy part)
+                self.manga_translator = MangaTranslationTab(content_widget, self, dialog, scroll_area)
+
+                dialog_layout.addWidget(scroll_area)
+            except Exception as exc:
+                # Surface the failure inside the dialog and allow a clean retry
+                try:
+                    if loading_spin_timer is not None:
+                        loading_spin_timer.stop()
+                    loading_progress.hide()
+                    loading_label.setText(f"Failed to load Manga Translator:\n{exc}")
+                    loading_label.setStyleSheet("font-size: 11pt; color: #e74c3c; padding: 8px;")
+                except Exception:
+                    pass
+                self._manga_dialog = None
+                return
+            # Swap the placeholder out. Hide FIRST and keep the timer cleanup
+            # separate, so no failure can leave the placeholder visible on top
+            # of the real UI (which would show two Halgakos icons).
+            try:
+                loading_widget.hide()
+            except Exception:
+                pass
+            try:
+                if loading_spin_timer is not None:
+                    loading_spin_timer.stop()
+                    loading_spin_timer.deleteLater()
+            except Exception:
+                pass
+            try:
+                dialog_layout.removeWidget(loading_widget)
+                loading_widget.setParent(None)
+                loading_widget.deleteLater()
+            except Exception:
+                pass
+
+        def _start_loading_phase():
+            # Runs after the fade-in has fully completed and the opacity
+            # effect has been removed from the dialog. Only now is it safe to
+            # animate the icon (no ghost smearing) and to pump events during
+            # the heavy build.
+            try:
+                if loading_spin_timer is not None:
+                    loading_spin_timer.start(45)
+            except Exception:
+                pass
+            # Let the first clean spin frames paint, then start the build
+            QTimer.singleShot(90, _build_manga_content)
+
+        # Defer past the 250ms fade so the QGraphicsOpacityEffect is gone
+        QTimer.singleShot(320, _start_loading_phase)
 
         
     def _init_default_prompts(self):

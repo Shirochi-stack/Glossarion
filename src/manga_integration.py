@@ -3781,6 +3781,19 @@ class MangaTranslationTab(QObject):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(6)
         self._build_pyside6_interface(main_layout)
+
+    @staticmethod
+    def _pump_build_events():
+        """Let the GUI breathe at section boundaries during the heavy
+        interface build, so the host dialog's loading placeholder keeps
+        animating instead of freezing. User input events are excluded to
+        avoid re-entrancy while the UI is only half built."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import QEventLoop
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
     
     def _build_pyside6_interface(self, main_layout):
         # Import QSizePolicy for layout management
@@ -3930,8 +3943,9 @@ class MangaTranslationTab(QObject):
         status_label.setStyleSheet(f"color: {status_color};")
         title_layout.addStretch()
         title_layout.addWidget(status_label)
-        
+
         main_layout.addWidget(title_frame)
+        self._pump_build_events()
         
         # Store reference for updates
         self.status_label = status_label
@@ -4231,6 +4245,7 @@ class MangaTranslationTab(QObject):
         file_frame_layout.addWidget(file_btn_frame)
         
         main_layout.addWidget(file_frame)
+        self._pump_build_events()
         
         # Connect file list selection to image preview
         self.file_listbox.itemSelectionChanged.connect(self._on_file_selection_changed)
@@ -4392,6 +4407,7 @@ class MangaTranslationTab(QObject):
         api_layout.addStretch()
         
         settings_frame_layout.addWidget(api_frame)
+        self._pump_build_events()
 
         # OCR Provider Selection - ENHANCED VERSION
         self.ocr_provider_frame = QWidget()
@@ -4676,6 +4692,7 @@ class MangaTranslationTab(QObject):
         
         settings_frame_layout.addWidget(self.azure_doc_intel_frame)
         self.azure_doc_intel_frame.setVisible(False)  # Hidden by default
+        self._pump_build_events()
 
         # Initially show/hide based on saved provider
         self._on_ocr_provider_change()
@@ -5131,6 +5148,7 @@ class MangaTranslationTab(QObject):
         
         # Add main settings frame to left column
         left_column_layout.addWidget(settings_frame)
+        self._pump_build_events()
         
         # Text Rendering Settings Frame - SPLIT BETWEEN COLUMNS
         render_frame = QGroupBox("Text Visibility Settings")
@@ -5620,6 +5638,7 @@ class MangaTranslationTab(QObject):
         
         # Add render_frame (inpainting only) to LEFT COLUMN
         left_column_layout.addWidget(render_frame)
+        self._pump_build_events()
         
         # Background Settings - MOVED TO RIGHT COLUMN
         self.bg_settings_frame = QGroupBox("Background Settings")
@@ -6119,6 +6138,7 @@ class MangaTranslationTab(QObject):
         wrap_layout.addWidget(self.force_caps_checkbox)
         
         sizing_group_layout.addWidget(wrap_frame)
+        self._pump_build_events()
     
         # Update multiplier label with loaded value
         self._update_multiplier_label(self.font_size_multiplier_value)
@@ -6425,6 +6445,7 @@ class MangaTranslationTab(QObject):
             font_icon_layout.addWidget(font_icon_text)
         
         font_render_frame_layout.addWidget(font_icon_frame)
+        self._pump_build_events()
         
         # Add font_render_frame to RIGHT COLUMN
         right_column_layout.addWidget(font_render_frame)
@@ -6654,6 +6675,7 @@ class MangaTranslationTab(QObject):
         
         # Add columns container to main layout
         main_layout.addWidget(columns_container)
+        self._pump_build_events()
         
         # Progress frame
         progress_frame = QGroupBox("Progress")
@@ -6759,6 +6781,7 @@ class MangaTranslationTab(QObject):
         QTimer.singleShot(0, self._update_log_scroll_button)
         
         main_layout.addWidget(log_frame)
+        self._pump_build_events()
         
         # Restore persistent log from previous sessions
         self._restore_persistent_log()
