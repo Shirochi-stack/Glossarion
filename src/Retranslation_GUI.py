@@ -4484,7 +4484,7 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 pass
 
-    def _start_review_page_transition(self, pixmap, duration_ms=160):
+    def _start_review_page_transition(self, pixmap, duration_ms=80):
         """Crossfade entry switches: fade a static snapshot of the old content
         out over the new page. Only the snapshot is animated, so the live rows
         underneath render at full speed."""
@@ -4507,7 +4507,7 @@ class SDLXLIFFReviewDialog(QDialog):
             overlay.show()
             overlay.raise_()
             anim = QPropertyAnimation(effect, b"opacity", overlay)
-            anim.setDuration(max(60, int(duration_ms)))
+            anim.setDuration(max(35, int(duration_ms)))
             anim.setStartValue(1.0)
             anim.setEndValue(0.0)
             anim.setEasingCurve(QEasingCurve.OutCubic)
