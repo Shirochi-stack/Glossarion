@@ -9496,43 +9496,34 @@ class RetranslationMixin:
                 content_layout = QVBoxLayout(content)
                 content_layout.setContentsMargins(0, 0, 0, 0)
 
-                # Swap from loading to content early so the UI builds visibly
-                # as _force_retranslation_epub_or_text adds widgets.
-                timer = getattr(dialog, '_loading_icon_timer', None)
-                if timer:
-                    timer.stop()
-                loading_widget.hide()
-                dialog_layout.addWidget(content)
-                dialog.repaint()
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents(QEventLoop.AllEvents, 30)
-
                 result = self._force_retranslation_epub_or_text(
                     file_path,
                     parent_dialog=dialog,
                     tab_frame=content,
                     show_special_files_state=show_special_files_state,
+                    _loading_label=loading_label,
                 )
                 if not result:
                     dialog.hide()
                     return
 
+                timer = getattr(dialog, '_loading_icon_timer', None)
+                if timer:
+                    timer.stop()
+                loading_widget.hide()
                 loading_widget.deleteLater()
+                dialog_layout.addWidget(content)
 
                 dialog.setWindowTitle("Progress Manager - OPF Based" if result.get('spine_chapters') else "Progress Manager")
                 if not hasattr(self, '_retranslation_dialog_cache'):
                     self._retranslation_dialog_cache = {}
                 self._retranslation_dialog_cache[file_key] = result
-                import time as _t_build
-                _t_pop = _t_build.perf_counter()
-                self._populate_progress_listbox_inline(result)
-                print(f"PROGRESS_MGR PERF populate_done | {(_t_build.perf_counter()-_t_pop)*1000:.1f}ms")
+                QTimer.singleShot(50, lambda: self._populate_progress_listbox_streamed(result))
             except Exception as e:
                 print(f"Failed to build progress manager contents: {e}")
                 import traceback
                 traceback.print_exc()
                 try:
-                    loading_widget.show()
                     loading_label.setText(f"Failed to load progress:\n{e}")
                     loading_label.show()
                 except Exception:
@@ -9670,7 +9661,7 @@ class RetranslationMixin:
         self._show_retranslation_shell_then_build(input_path, show_special_files_state=show_special)
 
 
-    def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False):
+    def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False, _loading_label=None):
         """
         Shared logic for force retranslation of EPUB/text files with OPF support
         Can be used standalone or embedded in a tab
@@ -9680,13 +9671,27 @@ class RetranslationMixin:
             parent_dialog: If provided, won't create its own dialog
             tab_frame: If provided, will render into this frame instead of creating dialog
             show_special_files_state: Initial state for showing special files toggle
+            _loading_label: Optional QLabel to update with progress messages during loading
         
         Returns:
             dict: Contains all the UI elements and data for external access
         """
         
-        import time as _t_perf
-        _t0 = _t_perf.perf_counter()
+        def _pump_loading(msg=None):
+            """Update loading label text and spin the icon."""
+            try:
+                if msg and _loading_label is not None:
+                    _loading_label.setText(msg)
+                dlg = parent_dialog
+                if dlg is not None:
+                    advance = getattr(dlg, '_advance_loading_icon', None)
+                    if callable(advance):
+                        advance()
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents(QEventLoop.AllEvents, 15)
+            except Exception:
+                pass
+        
         epub_base = os.path.splitext(os.path.basename(file_path))[0]
         
         # Check for output directory override
@@ -9806,7 +9811,8 @@ class RetranslationMixin:
         # Save the cleaned progress back to file
         with open(progress_file, 'w', encoding='utf-8') as f:
             json.dump(prog, f, ensure_ascii=False, indent=2)
-        self._ui_yield()
+        
+        _pump_loading("Reading progress data...")
         
         # =====================================================
         # PARSE CONTENT.OPF FOR CHAPTER MANIFEST
@@ -9943,7 +9949,6 @@ class RetranslationMixin:
             # OPF-AWARE AUTO-DISCOVERY: Use OPF filenames as original_basename
             # This ensures correct mapping between OPF entries and response files
             progress_updated = False
-            self._ui_yield()
             for spine_ch in spine_chapters:
                 opf_filename = spine_ch['filename']  # e.g., "0009_10_.xhtml"
                 base_name = os.path.splitext(opf_filename)[0]  # e.g., "0009_10_"
@@ -9994,6 +9999,8 @@ class RetranslationMixin:
                     #print("💾 Saved OPF-aware auto-discovered progress")
                 except Exception as e:
                     print(f"⚠️ Failed to save progress: {e}")
+        
+        _pump_loading("Parsing EPUB structure...")
         
         # =====================================================
         # MATCH OPF CHAPTERS WITH TRANSLATION PROGRESS
@@ -10048,11 +10055,10 @@ class RetranslationMixin:
                         response_file_to_progress[norm_key] = []
                     response_file_to_progress[norm_key].append((chapter_key, chapter_info))
         
-        # Update spine chapters with translation status
-        self._ui_yield()
+        _n_spine = len(spine_chapters)
         for idx, spine_ch in enumerate(spine_chapters):
             if idx % 80 == 0:
-                self._ui_yield()
+                _pump_loading(f"Matching chapters ({idx + 1}/{_n_spine})...")
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             is_special = spine_ch.get('is_special', False)
@@ -10432,12 +10438,13 @@ class RetranslationMixin:
             except Exception as e:
                 print(f"⚠️ Warning: Failed to save progress file: {e}")
         
+        _pump_loading(f"Building chapter list ({len(prog.get('chapters', {}))} entries)...")
+        
         # =====================================================
         # BUILD DISPLAY INFO
         # =====================================================
         
         chapter_display_info = []
-        self._ui_yield()
         
         if spine_chapters:
             # Use OPF order
@@ -10461,9 +10468,7 @@ class RetranslationMixin:
             _non_chapter_files = {"glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt"}
             _source_has_translated = "_translated" in os.path.basename(file_path).lower()
             files_to_entries = {}
-            for file_idx, (chapter_key, chapter_info) in enumerate(prog.get("chapters", {}).items()):
-                if file_idx % 80 == 0:
-                    self._ui_yield()
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
                 output_file = chapter_info.get("output_file", "")
                 status = chapter_info.get("status", "")
                 
@@ -10568,9 +10573,9 @@ class RetranslationMixin:
 
         self._append_pdf_ocr_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
         self._append_image_gen_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
-        self._ui_yield()
         
-        print(f"PROGRESS_MGR PERF data_phase_done | {(_t_perf.perf_counter()-_t0)*1000:.1f}ms | entries={len(chapter_display_info)}")
+        _pump_loading(f"Preparing UI ({len(chapter_display_info)} chapters)...")
+        
         # =====================================================
         # CREATE UI
         # =====================================================
@@ -11844,7 +11849,7 @@ class RetranslationMixin:
                         gp_listbox.setUpdatesEnabled(True)
                         gp_listbox.viewport().update()
             
-            def _populate_gp_listbox(_d, chunk_size=25):
+            def _populate_gp_listbox(_d, chunk_size=150):
                 panel_state['populate_generation'] = panel_state.get('populate_generation', 0) + 1
                 generation = panel_state['populate_generation']
                 cache = _gp_status_cache(_d)
@@ -12749,8 +12754,10 @@ class RetranslationMixin:
                 except Exception:
                     pass
 
-                def _pump_gp_loading():
+                def _pump_gp_loading(msg=None):
                     try:
+                        if msg and loading_label is not None:
+                            loading_label.setText(msg)
                         advance = getattr(gp_dialog, '_advance_loading_icon', None)
                         if callable(advance):
                             advance()
@@ -12760,26 +12767,11 @@ class RetranslationMixin:
                         pass
 
                 gp_content = QWidget(gp_dialog)
+                gp_content.hide()
                 gp_content_layout = QVBoxLayout(gp_content)
                 gp_content_layout.setContentsMargins(0, 0, 0, 0)
                 gp_content_layout.setSpacing(6)
                 gp_main_layout.addWidget(gp_content)
-                
-                # Swap from loading to content early so panels build visibly
-                try:
-                    loading_timer = getattr(gp_dialog, '_loading_icon_timer', None)
-                    if loading_timer is not None:
-                        loading_timer.stop()
-                except Exception:
-                    pass
-                try:
-                    gp_main_layout.removeWidget(loading_widget)
-                    loading_widget.hide()
-                    loading_widget.setParent(None)
-                    loading_widget.deleteLater()
-                except Exception:
-                    pass
-                _pump_gp_loading()
                 
                 # Title + note
                 gp_title = QLabel("Glossary Extraction Progress")
@@ -12884,6 +12876,7 @@ class RetranslationMixin:
                 
                 if n_files == 1:
                     # Single file — no tabs needed
+                    _pump_gp_loading("Building glossary panel...")
                     fp, gp = all_file_entries[0]
                     if gp:
                         panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog, pump_loading=_pump_gp_loading)
@@ -12895,6 +12888,7 @@ class RetranslationMixin:
                 
                 elif n_files <= 3:
                     # Tabs for ≤3 files
+                    _pump_gp_loading(f"Building glossary panels ({n_files} files)...")
                     notebook = QTabWidget()
                     notebook.setStyleSheet("""
                         QTabWidget::pane {
@@ -12933,6 +12927,7 @@ class RetranslationMixin:
                 
                 else:
                     # Dropdown navigation for >3 files
+                    _pump_gp_loading(f"Building glossary panels ({n_files} files)...")
                     from PySide6.QtWidgets import QComboBox, QStackedWidget
                     
                     nav_row = QHBoxLayout()
@@ -13015,6 +13010,14 @@ class RetranslationMixin:
                         loading_timer.stop()
                 except Exception:
                     pass
+                try:
+                    gp_main_layout.removeWidget(loading_widget)
+                    loading_widget.hide()
+                    loading_widget.setParent(None)
+                    loading_widget.deleteLater()
+                except Exception:
+                    pass
+                gp_content.show()
                 try:
                     from PySide6.QtWidgets import QApplication
                     QApplication.processEvents(QEventLoop.AllEvents, 50)
@@ -13101,7 +13104,6 @@ class RetranslationMixin:
         _gp_vis_timer.setParent(container)
         
         container_layout.addWidget(title_row)
-        container.repaint()
         
         # Store reference to the listbox (will be created later)
         listbox_ref = [None]
@@ -13209,7 +13211,6 @@ class RetranslationMixin:
         stats_layout = QHBoxLayout(stats_frame)
         stats_layout.setContentsMargins(0, 5, 0, 5)
         container_layout.addWidget(stats_frame)
-        container.repaint()
         
         # Calculate stats from the appropriate source
         _stats_data = {'prog': prog}
@@ -13308,7 +13309,6 @@ class RetranslationMixin:
         main_layout = QVBoxLayout(main_frame)
         main_layout.setContentsMargins(10 if not tab_frame else 5, 5, 10 if not tab_frame else 5, 5)
         container_layout.addWidget(main_frame)
-        container.repaint()
         
         # Create listbox (QListWidget has built-in scrollbars)
         listbox = QListWidget()
@@ -13417,7 +13417,6 @@ class RetranslationMixin:
             # Embedded in tab - just add buttons
             self._add_retranslation_buttons_opf(result)
         
-        print(f"PROGRESS_MGR PERF ui_phase_done | {(_t_perf.perf_counter()-_t0)*1000:.1f}ms")
         return result
 
 
@@ -16367,51 +16366,6 @@ class RetranslationMixin:
         })
         item.setData(Qt.UserRole + 2, status)
         item.setHidden(is_skipped_special and not show_special_files)
-
-    def _populate_progress_listbox_inline(self, data, batch_size=8):
-        """Populate the progress listbox synchronously, painting every batch
-        so entries visibly stream in one group at a time."""
-        if not self._is_data_valid(data):
-            return
-        listbox = data.get('listbox')
-        if not listbox:
-            return
-        self._progress_list_sync_model_toggle(data)
-        infos = list(data.get('chapter_display_info') or [])
-        max_original_len, max_output_len = self._progress_list_column_widths(infos, data)
-        show_special_files = self._progress_list_show_special(data)
-        data['_listbox_populate_active'] = True
-        try:
-            from PySide6.QtWidgets import QApplication
-        except Exception:
-            QApplication = None
-        try:
-            listbox.blockSignals(True)
-            listbox.clear()
-            for idx, info in enumerate(infos):
-                display, status = self._progress_list_display_text(
-                    info, data, max_original_len, max_output_len,
-                )
-                item = QListWidgetItem(display)
-                self._apply_progress_list_item_visuals(item, status)
-                self._set_progress_list_item_metadata(item, info, status, show_special_files)
-                self._add_compact_inline_list_item(listbox, item)
-                if (idx + 1) % batch_size == 0:
-                    listbox.viewport().repaint()
-                    if QApplication is not None:
-                        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents, 2)
-        except RuntimeError:
-            pass
-        finally:
-            data['_listbox_populate_active'] = False
-            try:
-                listbox.blockSignals(False)
-                label = data.get('selection_count_label')
-                if label:
-                    label.setText(f"Selected: {len(listbox.selectedItems())}")
-                listbox.viewport().repaint()
-            except RuntimeError:
-                pass
 
     def _populate_progress_listbox_streamed(self, data, chunk_size=150, preserve_selection=False, preserve_scroll=False):
         """Populate large progress lists over multiple event-loop turns."""
