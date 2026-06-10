@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
 import zipfile
@@ -35,6 +35,28 @@ from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
+
+
+class _GlossaryProgressAsyncBridge(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, on_finished=None, on_failed=None, parent=None):
+        super().__init__(parent)
+        self._on_finished = on_finished
+        self._on_failed = on_failed
+        self.finished.connect(self._handle_finished)
+        self.failed.connect(self._handle_failed)
+
+    @Slot(object)
+    def _handle_finished(self, payload):
+        if callable(self._on_finished):
+            self._on_finished(payload)
+
+    @Slot(str)
+    def _handle_failed(self, message):
+        if callable(self._on_failed):
+            self._on_failed(message)
 
 
 def _sdlxliff_machine_translation_output_name(path_or_name):
@@ -11524,6 +11546,7 @@ class RetranslationMixin:
                 'total': _total_init,
                 'translate_special': _ts_init,
                 'populate_generation': 0,
+                'mark_completed_lock': threading.Lock(),
             }
             if not panel_state['chapter_map']:
                 chapter_filenames = gp_data.get('chapter_filenames', {})
@@ -11725,22 +11748,341 @@ class RetranslationMixin:
 
             _populate_gp_listbox(gp_data)
 
-            # Helper to refresh stats labels from a loaded progress dict
-            def _refresh_stats_from_dict(_d):
+            def _gp_stats_for_dict(_d):
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
                 _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
                 _not_refined2 = _gp_refinement_status_counts(_d).get('not_refined', 0)
-                lbl_total.setText(f"Total: {_total} | ")
-                lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
-                lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog2)} | ")
+                return {
+                    'total': _total,
+                    'completed': len(_comp2 - _merg2),
+                    'in_progress': len(_prog2),
+                    'failed': len(_fail2),
+                    'merged': len(_merg2),
+                    'not_refined': _not_refined2,
+                    'remaining': max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2)),
+                }
+
+            def _apply_gp_stats(stats):
+                if not isinstance(stats, dict):
+                    return
+                lbl_total.setText(f"Total: {stats.get('total', 0)} | ")
+                lbl_gp_completed.setText(f"✅ Completed: {stats.get('completed', 0)} | ")
+                lbl_gp_in_progress.setText(f"🔄 In Progress: {stats.get('in_progress', 0)} | ")
                 lbl_gp_in_progress.setVisible(True)
-                lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
-                lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
-                lbl_gp_merged.setVisible(len(_merg2) > 0)
-                lbl_gp_remaining.setText(f"⬜ Not Translated: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}{' | ' if _not_refined2 else ''}")
-                lbl_gp_not_refined.setText(f"✨ Not Refined: {_not_refined2}")
-                lbl_gp_not_refined.setVisible(_not_refined2 > 0)
+                lbl_gp_failed.setText(f"❌ Failed: {stats.get('failed', 0)} | ")
+                merged_count = stats.get('merged', 0)
+                lbl_gp_merged.setText(f"🔗 Merged: {merged_count} | ")
+                lbl_gp_merged.setVisible(merged_count > 0)
+                not_refined = stats.get('not_refined', 0)
+                lbl_gp_remaining.setText(f"⬜ Not Translated: {stats.get('remaining', 0)}{' | ' if not_refined else ''}")
+                lbl_gp_not_refined.setText(f"✨ Not Refined: {not_refined}")
+                lbl_gp_not_refined.setVisible(not_refined > 0)
+
+            # Helper to refresh stats labels from a loaded progress dict
+            def _refresh_stats_from_dict(_d):
+                _apply_gp_stats(_gp_stats_for_dict(_d))
+
+            def _gp_context_target_label(item, target):
+                target_kind, target_value = target
+                display_text = item.text() if item else ""
+                if target_kind == 'refinement':
+                    return display_text.split('|')[-1].strip() or str(target_value)
+                label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text or "")
+                return label_match.group(0) if label_match else f"Ch.{target_value + 1}"
+
+            def _gp_remove_mapped_indices_from_list(_d, key, indices_to_remove, match_raw=False):
+                values = _d.get(key, [])
+                if not isinstance(values, list):
+                    return False
+                kept = []
+                for value in values:
+                    mapped_ci = _gp_index_for_progress_value(value, _d)
+                    if mapped_ci is not None and mapped_ci in indices_to_remove:
+                        continue
+                    if match_raw:
+                        try:
+                            if int(value) in indices_to_remove:
+                                continue
+                        except (TypeError, ValueError):
+                            pass
+                    kept.append(value)
+                if len(kept) != len(values):
+                    _d[key] = kept
+                    return True
+                return False
+
+            def _gp_progress_uses_chapter_entries(_d):
+                chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
+                if not isinstance(chapters, dict):
+                    return False
+                return any(isinstance(info, dict) and str(info.get('status') or '').strip() for info in chapters.values())
+
+            def _gp_progress_value_for_index(ci, _d):
+                if str(_d.get('indexing', '')).lower() == 'chapter_index_zero_based':
+                    return ci
+                positions = _d.get('chapter_positions', {})
+                if isinstance(positions, dict) and str(ci) in positions:
+                    return ci
+                chapter_numbers = _d.get('chapter_numbers', {})
+                if isinstance(chapter_numbers, dict) and str(ci) in chapter_numbers:
+                    try:
+                        return int(chapter_numbers[str(ci)])
+                    except (TypeError, ValueError):
+                        return chapter_numbers[str(ci)]
+                fname = (panel_state.get('chapter_map') or {}).get(ci, f'chapter {ci + 1}')
+                ch_num = _gp_display_chapter_num(ci, fname)
+                return ch_num if ch_num is not None else ci
+
+            def _gp_chapter_entry_map(_d):
+                chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
+                if not isinstance(chapters, dict):
+                    return {}
+                entry_map = {}
+                for key, info in chapters.items():
+                    if not isinstance(info, dict):
+                        continue
+                    ci = _gp_index_for_entry(info, key, _d)
+                    if ci is not None:
+                        entry_map.setdefault(ci, (key, info))
+                return entry_map
+
+            def _gp_row_updates_for_targets(_d, target_specs):
+                updates = {}
+                cache = _gp_status_cache(_d)
+                refinement_rows = {row[0]: row for row in _gp_refinement_rows(_d)}
+                _cmap = panel_state['chapter_map']
+                for kind, value in target_specs:
+                    if kind == 'refinement':
+                        row = refinement_rows.get(value)
+                        if not row:
+                            continue
+                        _rk, display, status = row
+                        updates[(kind, value)] = {
+                            'display': display,
+                            'status': status,
+                            'color': _gp_color_for(status),
+                        }
+                    else:
+                        ci = value
+                        fname = _cmap.get(ci, f'chapter {ci + 1}')
+                        display, status = _gp_display_for(ci, fname, _d, cache)
+                        updates[(kind, value)] = {
+                            'display': display,
+                            'status': status,
+                            'color': _gp_color_for(status),
+                        }
+                return updates
+
+            def _gp_apply_mark_completed_to_progress(_rp, target_specs):
+                _d = _gp_load_progress_dict(_rp)
+                if not isinstance(_d, dict):
+                    _d = {}
+
+                chapter_indices = {value for kind, value in target_specs if kind == 'chapter'}
+                refinement_keys = {value for kind, value in target_specs if kind == 'refinement'}
+                changed = False
+                now = time.time()
+
+                if chapter_indices:
+                    for key in ('failed', 'merged_indices', 'in_progress', 'manual_removed_indices'):
+                        changed = _gp_remove_mapped_indices_from_list(
+                            _d,
+                            key,
+                            chapter_indices,
+                            match_raw=(key == 'manual_removed_indices'),
+                        ) or changed
+
+                    completed_values = _d.get('completed', [])
+                    if not isinstance(completed_values, list):
+                        completed_values = []
+                    completed_mapped = {
+                        mapped_ci
+                        for mapped_ci in (_gp_index_for_progress_value(value, _d) for value in completed_values)
+                        if mapped_ci is not None
+                    }
+                    for ci in sorted(chapter_indices):
+                        if ci not in completed_mapped:
+                            completed_values.append(_gp_progress_value_for_index(ci, _d))
+                            completed_mapped.add(ci)
+                            changed = True
+                    _d['completed'] = completed_values
+
+                    qa_map = _d.get('qa_issues_found', {})
+                    if isinstance(qa_map, dict):
+                        new_qa_map = {}
+                        for key, value in qa_map.items():
+                            mapped_ci = _gp_index_for_progress_value(key, _d)
+                            keep = mapped_ci not in chapter_indices if mapped_ci is not None else True
+                            if keep:
+                                new_qa_map[key] = value
+                        if len(new_qa_map) != len(qa_map):
+                            _d['qa_issues_found'] = new_qa_map
+                            changed = True
+
+                    if _gp_progress_uses_chapter_entries(_d):
+                        chapters = _d.get('chapters')
+                        if not isinstance(chapters, dict):
+                            chapters = {}
+                            _d['chapters'] = chapters
+                        entry_map = _gp_chapter_entry_map(_d)
+                        for ci in sorted(chapter_indices):
+                            entry_key, entry = entry_map.get(ci, (None, None))
+                            fname = (panel_state.get('chapter_map') or {}).get(ci, f'chapter {ci + 1}')
+                            if not isinstance(entry, dict):
+                                entry_key = str(ci)
+                                if entry_key in chapters:
+                                    entry_key = f"manual_completed_{ci}"
+                                entry = {
+                                    'chapter_index': ci,
+                                    'actual_num': _gp_display_chapter_num(ci, fname),
+                                    'original_basename': fname,
+                                }
+                                chapters[entry_key] = entry
+                                entry_map[ci] = (entry_key, entry)
+                            entry['status'] = 'completed'
+                            entry.setdefault('chapter_index', ci)
+                            entry.setdefault('actual_num', _gp_display_chapter_num(ci, fname))
+                            entry.setdefault('original_basename', fname)
+                            entry['last_updated'] = now
+                            entry['manually_marked_completed'] = True
+                            for field in (
+                                'qa_issues', 'qa_issues_found', 'qa_timestamp', 'failure_reason',
+                                'error_message', 'previous_status', 'previous_progress_entry',
+                                'previous_status_unknown', 'merged_parent_chapter'
+                            ):
+                                entry.pop(field, None)
+                            changed = True
+
+                if refinement_keys:
+                    refinement = _d.get('refinement', {})
+                    if not isinstance(refinement, dict):
+                        refinement = {}
+                        _d['refinement'] = refinement
+                    expected_refinement = _glossary_refinement_expected_entries()
+                    for ref_key in sorted(refinement_keys):
+                        ref_info = refinement.get(ref_key)
+                        if not isinstance(ref_info, dict):
+                            ref_info = dict(expected_refinement.get(ref_key, {}))
+                            refinement[ref_key] = ref_info
+                        ref_info['status'] = 'completed'
+                        ref_info['completed_at'] = now
+                        ref_info['last_updated'] = now
+                        total_chunks = ref_info.get('total_chunks')
+                        if total_chunks is not None:
+                            ref_info['completed_chunks'] = total_chunks
+                        for field in ('error', 'error_message', 'failure_reason', 'qa_issues_found'):
+                            ref_info.pop(field, None)
+                        changed = True
+
+                if changed:
+                    with open(_rp, 'w', encoding='utf-8') as _f:
+                        json.dump(_d, _f, ensure_ascii=False, indent=2)
+
+                return {
+                    'changed': changed,
+                    'data': _d,
+                    'row_updates': _gp_row_updates_for_targets(_d, target_specs),
+                    'stats': _gp_stats_for_dict(_d),
+                }
+
+            def _apply_gp_mark_completed_result(payload):
+                nonlocal gp_data
+                if not isinstance(payload, dict):
+                    return
+                job_id = payload.get('job_id')
+                targets = (panel_state.setdefault('_mark_completed_jobs', {})).pop(job_id, [])
+                _d = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+                if _d:
+                    gp_data = _d
+                row_updates = payload.get('row_updates') if isinstance(payload.get('row_updates'), dict) else {}
+                stats = payload.get('stats')
+                updates_were_enabled = {'value': True}
+
+                def _finish_row_updates():
+                    try:
+                        gp_listbox.setUpdatesEnabled(updates_were_enabled['value'])
+                        gp_listbox.viewport().update()
+                    except RuntimeError:
+                        pass
+                    if isinstance(stats, dict):
+                        _apply_gp_stats(stats)
+                    elif _d:
+                        _refresh_stats_from_dict(_d)
+
+                def _apply_row_update_chunk(start=0, chunk_size=200):
+                    if start == 0:
+                        try:
+                            updates_were_enabled['value'] = gp_listbox.updatesEnabled()
+                            gp_listbox.setUpdatesEnabled(False)
+                        except RuntimeError:
+                            return
+                    end = min(start + chunk_size, len(targets))
+                    for item, target in targets[start:end]:
+                        update = row_updates.get(tuple(target))
+                        if not update:
+                            continue
+                        try:
+                            item.setText(update.get('display', item.text()))
+                            item.setForeground(QColor(update.get('color') or _gp_color_for(update.get('status'))))
+                            item.setData(Qt.UserRole, update.get('status'))
+                        except RuntimeError:
+                            continue
+                    if end < len(targets):
+                        QTimer.singleShot(0, lambda: _apply_row_update_chunk(end, chunk_size))
+                    else:
+                        _finish_row_updates()
+
+                if targets:
+                    _apply_row_update_chunk()
+                else:
+                    _finish_row_updates()
+
+            def _apply_gp_mark_completed_error(message):
+                try:
+                    self._show_message(
+                        'error',
+                        "Glossary Progress",
+                        f"Failed to mark glossary progress as completed:\n{message}",
+                        parent=parent_widget,
+                    )
+                except Exception:
+                    print(f"⚠️ Error marking glossary progress complete: {message}")
+
+            gp_mark_completed_bridge = _GlossaryProgressAsyncBridge(
+                _apply_gp_mark_completed_result,
+                _apply_gp_mark_completed_error,
+                gp_listbox,
+            )
+
+            def _gp_mark_targets_completed(targets):
+                _rp = _find_gp_for_file(fp)
+                if not _rp or not os.path.isfile(_rp):
+                    return
+                target_specs = [target for _, target in targets]
+                job_id = f"{time.time():.6f}:{id(targets)}"
+                panel_state.setdefault('_mark_completed_jobs', {})[job_id] = list(targets)
+
+                def _worker():
+                    try:
+                        mark_lock = panel_state.get('mark_completed_lock')
+                        if mark_lock:
+                            with mark_lock:
+                                payload = _gp_apply_mark_completed_to_progress(_rp, target_specs)
+                        else:
+                            payload = _gp_apply_mark_completed_to_progress(_rp, target_specs)
+                        if not isinstance(payload, dict):
+                            payload = {'changed': False, 'data': {}}
+                        payload['job_id'] = job_id
+                        gp_mark_completed_bridge.finished.emit(payload)
+                    except Exception as e:
+                        panel_state.setdefault('_mark_completed_jobs', {}).pop(job_id, None)
+                        try:
+                            gp_mark_completed_bridge.failed.emit(str(e))
+                        except RuntimeError:
+                            pass
+
+                threading.Thread(target=_worker, name="glossary-progress-mark-completed", daemon=True).start()
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -11751,42 +12093,55 @@ class RetranslationMixin:
                     clicked_item.setSelected(True)
                 selected = gp_listbox.selectedItems()
                 deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed', 'not_refined')
-                targets = []
+                removable_targets = []
+                mark_completed_targets = []
                 for it in selected:
-                    if it.data(Qt.UserRole) not in deletable_statuses:
-                        continue
+                    status = it.data(Qt.UserRole)
                     refinement_key = it.data(Qt.UserRole + 3)
                     chapter_index = it.data(Qt.UserRole + 1)
+                    target = None
                     if refinement_key:
-                        targets.append((it, ('refinement', refinement_key)))
+                        target = ('refinement', refinement_key)
                     elif chapter_index is not None:
-                        targets.append((it, ('chapter', chapter_index)))
-                if not targets:
+                        target = ('chapter', chapter_index)
+                    if not target:
+                        continue
+                    if status in deletable_statuses:
+                        removable_targets.append((it, target))
+                    if status != 'completed':
+                        mark_completed_targets.append((it, target))
+                if not removable_targets and not mark_completed_targets:
                     return
                 
                 from PySide6.QtWidgets import QMenu
                 menu = QMenu(gp_listbox)
                 menu.setStyleSheet(
-                    "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; }"
+                    "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 10px 4px 4px; }"
+                    "QMenu::item { padding: 6px 28px 6px 12px; }"
                     "QMenu::item:selected { background-color: #c0392b; }"
                 )
                 
-                n = len(targets)
-                if n == 1:
-                    target_kind, target_value = targets[0][1]
-                    status = targets[0][0].data(Qt.UserRole)
-                    display_text = targets[0][0].text() or ""
-                    if target_kind == 'refinement':
-                        chapter_label = display_text.split('|')[-1].strip() or str(target_value)
+                mark_action = None
+                if mark_completed_targets:
+                    mark_action = menu.addAction("✅Mark as Completed")
+
+                remove_action = None
+                if removable_targets:
+                    if mark_action is not None:
+                        menu.addSeparator()
+                    n = len(removable_targets)
+                    if n == 1:
+                        status = removable_targets[0][0].data(Qt.UserRole)
+                        chapter_label = _gp_context_target_label(*removable_targets[0])
+                        remove_action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
                     else:
-                        label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
-                        chapter_label = label_match.group(0) if label_match else f"Ch.{target_value+1}"
-                    action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
-                else:
-                    action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
+                        remove_action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
                 
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
-                if chosen != action:
+                if mark_action is not None and chosen == mark_action:
+                    _gp_mark_targets_completed(mark_completed_targets)
+                    return
+                if remove_action is None or chosen != remove_action:
                     return
                 
                 # Remove from progress JSON
@@ -11796,8 +12151,8 @@ class RetranslationMixin:
                         return
                     _d = _gp_load_progress_dict(_rp)
                     
-                    indices_to_remove = set(value for _, (kind, value) in targets if kind == 'chapter')
-                    refinement_keys_to_remove = set(value for _, (kind, value) in targets if kind == 'refinement')
+                    indices_to_remove = set(value for _, (kind, value) in removable_targets if kind == 'chapter')
+                    refinement_keys_to_remove = set(value for _, (kind, value) in removable_targets if kind == 'refinement')
                     changed = False
                     if indices_to_remove:
                         removed_indices = _d.get('manual_removed_indices', [])
@@ -11863,7 +12218,7 @@ class RetranslationMixin:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
                         # Update all affected items
                         _cmap = panel_state['chapter_map']
-                        for it, (kind, value) in targets:
+                        for it, (kind, value) in removable_targets:
                             if kind == 'refinement':
                                 row = next((r for r in _gp_refinement_rows(_d) if r[0] == value), None)
                                 if row:
