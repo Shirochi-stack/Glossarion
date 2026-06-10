@@ -17163,10 +17163,10 @@ class RetranslationMixin:
                 tab_name = file_base if use_dropdown else (file_base[:20] + "..." if len(file_base) > 20 else file_base)
                 notebook.addTab(tab_frame, tab_name)
                 _update_dropdown_nav_safe()
-                build_tasks.append(('epub_text', file_path, file_base, tab_frame))
+                build_tasks.append(('epub_text', file_path, file_base, tab_frame, loading_label))
 
             for folder_path in folders:
-                build_tasks.append(('folder', folder_path, os.path.basename(folder_path) or folder_path, None))
+                build_tasks.append(('folder', folder_path, os.path.basename(folder_path) or folder_path, None, None))
 
             build_state = {'idx': 0, 'tabs_created': False}
             dialog._multi_file_tabs_building = True
@@ -17239,7 +17239,7 @@ class RetranslationMixin:
                     _finish_streamed_tabs()
                     return
 
-                kind, path, label, tab_frame = build_tasks[build_state['idx']]
+                kind, path, label, tab_frame, tab_loading_label = build_tasks[build_state['idx']]
                 build_state['idx'] += 1
 
                 if kind == 'epub_text':
@@ -17251,7 +17251,8 @@ class RetranslationMixin:
                             path,
                             parent_dialog=dialog,
                             tab_frame=tab_frame,
-                            show_special_files_state=global_show_special
+                            show_special_files_state=global_show_special,
+                            _loading_label=tab_loading_label,
                         )
                         if tab_result:
                             cdi = tab_result.get('chapter_display_info', [])
