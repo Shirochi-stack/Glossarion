@@ -337,6 +337,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._queued_review_refresh = False
         self._review_refresh_scan_token = 0
         self._review_refresh_scan_running = False
+        self._last_review_scan_finished_at = 0.0
         self._review_refresh_scan_requested = False
         self._review_refresh_scan_queued = False
         self._review_refresh_scan_force = False
@@ -568,6 +569,14 @@ class SDLXLIFFReviewDialog(QDialog):
         if self.pieces:
             QTimer.singleShot(0, lambda: self._render_piece(self._initial_piece_row))
 
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        try:
+            if self._auto_refresh_timer is not None and self._auto_refresh_timer.isActive():
+                self._auto_refresh_timer.stop()
+        except Exception:
+            pass
+
     def _queue_review_refresh(self, force=True, current_path=None, signature=None, seamless=False, delay_ms=25):
         if self._queued_review_refresh:
             return
@@ -647,6 +656,7 @@ class SDLXLIFFReviewDialog(QDialog):
             threading.Thread(target=_worker, name="sdlxliff-review-refresh-scan", daemon=True).start()
         except Exception:
             self._review_refresh_scan_running = False
+            self._last_review_scan_finished_at = time.monotonic()
             self._queue_stop_refresh_button_animation(150)
 
     def _build_review_refresh_scan_result(
@@ -1514,6 +1524,7 @@ class SDLXLIFFReviewDialog(QDialog):
         finally:
             self._sdlxliff_autogen_output_files = None
             self._review_refresh_scan_running = False
+            self._last_review_scan_finished_at = time.monotonic()
             if not defer_stop_refresh_animation:
                 self._queue_stop_refresh_button_animation(150)
             if getattr(self, "_review_refresh_scan_requested", False):
@@ -2445,6 +2456,13 @@ class SDLXLIFFReviewDialog(QDialog):
             if not self.isVisible() or self._refreshing_review_data:
                 return
             if not self._review_data_loaded:
+                return
+            # Cooldown: skip if the last scan finished less than 4s ago
+            _now = time.monotonic()
+            _last = getattr(self, '_last_review_scan_finished_at', 0.0)
+            if _now - _last < 4.0:
+                return
+            if getattr(self, '_review_refresh_scan_running', False):
                 return
             if self._review_context_menu_is_open():
                 return
