@@ -153,7 +153,7 @@ _BASE_PIXMAP_CACHE_LIMIT = 256
 _BASE_PIXMAP_CACHE: dict[str, QPixmap] = {}
 
 _DEFAULT_SPECIAL_FILE_KEYWORDS = (
-    "title, toc, copyright, preface, nav, message, notice, info, colophon, "
+    "title, toc, copyright, preface, nav, message, notice, colophon, "
     "dedication, epigraph, foreword, acknowledgment, author, appendix, "
     "bibliography"
 )

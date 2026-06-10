@@ -9617,7 +9617,7 @@ def is_configured_special_filename(filename):
     special_keywords = (
         _parse_special_file_tokens(special_kw_env)
         if special_kw_env
-        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     )
     special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
     special_exact = (
@@ -11567,7 +11567,7 @@ def _vision_ocr_glossary_should_skip_special_chapter(chapter):
     special_keywords = (
         [k.strip().lower() for k in special_kw_env.split(",") if k.strip()]
         if special_kw_env
-        else ["cover", "title", "toc", "copyright", "preface", "nav", "message", "notice", "info", "colophon", "dedication", "epigraph", "foreword", "acknowledgment", "author", "appendix", "bibliography"]
+        else ["cover", "title", "toc", "copyright", "preface", "nav", "message", "notice", "colophon", "dedication", "epigraph", "foreword", "acknowledgment", "author", "appendix", "bibliography"]
     )
     special_exact_env = os.getenv("SPECIAL_FILE_EXACT", "")
     special_exact = (
@@ -19666,7 +19666,7 @@ def main(log_callback=None, stop_callback=None):
     _special_keywords = (
         [k.strip().lower() for k in _special_kw_env.split(',') if k.strip()]
         if _special_kw_env
-        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     )
     _special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
     _special_exact = (

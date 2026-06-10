@@ -297,6 +297,7 @@ class SDLXLIFFReviewDialog(QDialog):
         self._sdl_review_loading_original_pixmap = None
         self._sdl_review_loading_angle = 0
         self._review_loading_minimum_ms = 10
+        self._review_perf_trace_log_path = None
         self._review_dirty_preview_refresh_queued = False
         self._status_jump_indices = {}
         self._highlighted_status_frame = None
@@ -868,27 +869,44 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
 
     def _flush_generated_sidecar_stream_pieces(self):
+        trace_started = time.perf_counter()
         try:
             pending = getattr(self, "_generation_stream_pending_pieces", None)
             if not isinstance(pending, list):
                 self._generation_stream_pending_pieces = []
                 pending = self._generation_stream_pending_pieces
+            pending_before = len(pending)
             flushed = 0
             while pending and flushed < 4:
                 path, progress_index = pending.pop(0)
                 if self._append_generated_sidecar_stream_piece(path, progress_index=progress_index):
                     flushed += 1
             if pending:
+                self._trace_review_perf(
+                    "flush_generated_sidecar_stream_batch",
+                    trace_started,
+                    pending_before=pending_before,
+                    flushed=flushed,
+                    remaining=len(pending),
+                )
                 self._schedule_generation_stream_flush(delay_ms=18)
                 return
             message = str(getattr(self, "_generation_stream_finished_message", "") or "")
             if message:
                 self._generation_stream_finished_message = ""
                 self._finish_generation_streaming(message)
+            self._trace_review_perf(
+                "flush_generated_sidecar_stream_done",
+                trace_started,
+                force=bool(message),
+                pending_before=pending_before,
+                flushed=flushed,
+            )
         except Exception:
             pass
 
     def _finish_generation_streaming(self, message=""):
+        trace_started = time.perf_counter()
         try:
             was_streaming = bool(getattr(self, "_generation_streaming_active", False))
             self._generation_streaming_active = False
@@ -912,6 +930,14 @@ class SDLXLIFFReviewDialog(QDialog):
             QTimer.singleShot(1200, self._hide_generation_progress)
         except Exception:
             pass
+        finally:
+            self._trace_review_perf(
+                "finish_generation_streaming",
+                trace_started,
+                force=True,
+                pieces=len(getattr(self, "pieces", []) or []),
+                message=message[:80] if message else "",
+            )
 
     def _review_row_rendered_or_rendering(self, row):
         try:
@@ -929,7 +955,41 @@ class SDLXLIFFReviewDialog(QDialog):
             return False
         return False
 
+    def _trace_review_perf(self, label, started=None, force=False, **details):
+        try:
+            elapsed_ms = None
+            if started is not None:
+                elapsed_ms = (time.perf_counter() - float(started)) * 1000.0
+                if not force and elapsed_ms < 35.0:
+                    return
+            parts = [f"SDLXLIFF PERF {label}"]
+            if elapsed_ms is not None:
+                parts.append(f"{elapsed_ms:.1f}ms")
+            for key, value in details.items():
+                if value is None:
+                    continue
+                parts.append(f"{key}={value}")
+            line = " | ".join(parts)
+            try:
+                print(line, flush=True)
+            except Exception:
+                pass
+            try:
+                log_path = getattr(self, "_review_perf_trace_log_path", None)
+                if not log_path:
+                    log_dir = os.path.join(_get_app_dir(), "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, "sdlxliff_perf.log")
+                    self._review_perf_trace_log_path = log_path
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _append_generated_sidecar_stream_piece(self, path, progress_index=0):
+        trace_started = time.perf_counter()
         try:
             if not getattr(self, "_generation_streaming_active", False):
                 return False
@@ -968,8 +1028,23 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._initial_piece_row = 0
                 QTimer.singleShot(0, lambda: self._render_piece(0, show_loading=False))
             self.piece_list.update()
+            self._trace_review_perf(
+                "append_generated_sidecar_piece",
+                trace_started,
+                force=bool(row == 0 or (total and len(self.pieces) >= total)),
+                row=row,
+                visible=len(self.pieces),
+                total=total or None,
+                path=os.path.basename(str(path or "")),
+            )
             return True
         except Exception:
+            self._trace_review_perf(
+                "append_generated_sidecar_piece_failed",
+                trace_started,
+                force=True,
+                path=os.path.basename(str(path or "")),
+            )
             return False
 
     def _review_generation_summary(self, stats):
@@ -2368,11 +2443,31 @@ class SDLXLIFFReviewDialog(QDialog):
     ):
         if self._refreshing_review_data:
             return
+        trace_started = time.perf_counter()
         try:
+            phase_started = time.perf_counter()
             autogen_changed = False if skip_autogen else self._maybe_regenerate_review_sidecars(force=force)
+            self._trace_review_perf(
+                "refresh_review_data_autogen",
+                phase_started,
+                force=bool(autogen_changed or force),
+                force_refresh=bool(force),
+                changed=bool(autogen_changed),
+            )
             if signature is None or autogen_changed or force:
+                phase_started = time.perf_counter()
                 signature = self._current_review_signature()
+                self._trace_review_perf(
+                    "refresh_review_data_signature",
+                    phase_started,
+                    force=bool(force or autogen_changed),
+                )
                 if not force and not autogen_changed and signature == self._last_review_signature:
+                    self._trace_review_perf(
+                        "refresh_review_data_no_change",
+                        trace_started,
+                        force=True,
+                    )
                     return
             old_visible_page = None
             if seamless:
@@ -2409,10 +2504,25 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._seamless_review_old_page = None
             self._clear_cached_review_pages()
             self._streamed_piece_list_populated = False
+            phase_started = time.perf_counter()
             self.pieces = self._load_pieces(stream_sidebar=not seamless)
+            self._trace_review_perf(
+                "refresh_review_data_load_pieces",
+                phase_started,
+                force=True,
+                pieces=len(self.pieces or []),
+                seamless=bool(seamless),
+            )
             self._review_data_loaded = True
             if not self._streamed_piece_list_populated:
+                phase_started = time.perf_counter()
                 self._populate_piece_list()
+                self._trace_review_perf(
+                    "refresh_review_data_populate_piece_list",
+                    phase_started,
+                    force=True,
+                    pieces=len(self.pieces or []),
+                )
             self._queue_review_data_preload(delay_ms=220)
             self._last_review_signature = signature if signature is not None else self._current_review_signature()
             try:
@@ -2439,7 +2549,15 @@ class SDLXLIFFReviewDialog(QDialog):
                         0,
                         lambda row=render_row, show_loading=show_loading: self._render_piece(row, show_loading=show_loading),
                     )
+            self._trace_review_perf(
+                "refresh_review_data_done",
+                trace_started,
+                force=True,
+                pieces=len(self.pieces or []),
+                seamless=bool(seamless),
+            )
         except Exception:
+            self._trace_review_perf("refresh_review_data_failed", trace_started, force=True)
             pass
         finally:
             self._refreshing_review_data = False
@@ -4013,6 +4131,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return item
 
     def _prepare_streaming_piece_list(self, work_items):
+        trace_started = time.perf_counter()
         if not work_items:
             return False
         try:
@@ -4038,9 +4157,16 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         self.piece_list.update()
         self._pump_review_loading_events(max_ms=5)
+        self._trace_review_perf(
+            "prepare_streaming_piece_list",
+            trace_started,
+            force=True,
+            total=len(work_items),
+        )
         return True
 
     def _stream_piece_list_item(self, original_index, piece):
+        trace_started = time.perf_counter()
         try:
             if self._review_piece_is_empty_sidecar(piece):
                 return
@@ -4081,10 +4207,22 @@ class SDLXLIFFReviewDialog(QDialog):
             if time.monotonic() - last_pump >= 0.012:
                 self._streaming_piece_last_pump = time.monotonic()
                 self._pump_review_loading_events(max_ms=2)
+            total = int(getattr(self, "_streaming_piece_total", 0) or 0)
+            visible_count = int(getattr(self, "_streaming_piece_visible_count", 0) or 0)
+            self._trace_review_perf(
+                "stream_piece_list_item",
+                trace_started,
+                force=bool(visible_count in {1, total} or (visible_count and visible_count % 50 == 0)),
+                original_index=original_index,
+                visible=visible_count,
+                total=total or None,
+                output=piece.get("output_name") or piece.get("name"),
+            )
         except Exception:
             pass
 
     def _finish_streaming_piece_list(self):
+        trace_started = time.perf_counter()
         try:
             self.piece_list.currentRowChanged.disconnect(self._request_render_piece)
         except Exception:
@@ -4117,11 +4255,25 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._show_review_empty_state("No SDLXLIFF review files found")
             self._streamed_piece_list_populated = True
             self.piece_list.update()
+            self._trace_review_perf(
+                "finish_streaming_piece_list",
+                trace_started,
+                force=True,
+                pieces=len(self.pieces or []),
+                selected=self.piece_list.currentRow(),
+            )
             return True
         except Exception:
+            self._trace_review_perf(
+                "finish_streaming_piece_list_failed",
+                trace_started,
+                force=True,
+                pieces=len(getattr(self, "pieces", []) or []),
+            )
             return False
 
     def _build_piece(self, path, index, metadata=None):
+        trace_started = time.perf_counter()
         metadata = dict(metadata or {})
         metadata.setdefault("output_name", self._sidecar_output_name(path))
         metadata.setdefault("display_position", index + 1)
@@ -4190,8 +4342,24 @@ class SDLXLIFFReviewDialog(QDialog):
             }
             self._load_machine_translation_file_for_piece(piece)
             self._refresh_piece_summary(piece)
+            self._trace_review_perf(
+                "build_piece",
+                trace_started,
+                index=index,
+                source=source_count,
+                target=target_count,
+                output=metadata.get("output_name") or os.path.basename(path),
+            )
             return piece
         except Exception as exc:
+            self._trace_review_perf(
+                "build_piece_failed",
+                trace_started,
+                force=True,
+                index=index,
+                output=metadata.get("output_name") or os.path.basename(path),
+                error=str(exc)[:160],
+            )
             return {
                 "path": path,
                 "index": index,
@@ -4227,6 +4395,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return filtered
 
     def _load_pieces(self, stream_sidebar=False):
+        trace_started = time.perf_counter()
         sidecar_dir = os.path.join(self.output_dir or "", "SDLXLIFF")
         paths = []
         try:
@@ -4241,6 +4410,14 @@ class SDLXLIFFReviewDialog(QDialog):
             if all(os.path.normcase(os.path.abspath(path)) != current_norm for path in paths):
                 paths.insert(0, self.current_path)
 
+        self._trace_review_perf(
+            "load_pieces_discovered_paths",
+            trace_started,
+            force=True,
+            stream=bool(stream_sidebar),
+            paths=len(paths),
+        )
+        metadata_started = time.perf_counter()
         progress_map = self._read_progress_metadata()
         spine_positions = self._read_spine_positions(allow_deep_search=not stream_sidebar)
         work_items = []
@@ -4255,6 +4432,13 @@ class SDLXLIFFReviewDialog(QDialog):
             else:
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
             metadata["label"] = self._review_label_from_metadata(metadata)
+        self._trace_review_perf(
+            "load_pieces_metadata_ready",
+            metadata_started,
+            force=True,
+            stream=bool(stream_sidebar),
+            work_items=len(work_items),
+        )
 
         stream_sidebar = bool(stream_sidebar and self.isVisible())
         if stream_sidebar:
@@ -4292,24 +4476,58 @@ class SDLXLIFFReviewDialog(QDialog):
             if stream_sidebar:
                 flush_streamed_pieces()
                 self._finish_streaming_piece_list()
+                self._trace_review_perf(
+                    "load_pieces_done",
+                    trace_started,
+                    force=True,
+                    stream=True,
+                    pieces=len(self.pieces or []),
+                    work_items=len(work_items),
+                )
                 return list(self.pieces)
-            return self._filter_review_pieces(pieces)
+            filtered = self._filter_review_pieces(pieces)
+            self._trace_review_perf(
+                "load_pieces_done",
+                trace_started,
+                force=True,
+                stream=False,
+                pieces=len(filtered),
+                work_items=len(work_items),
+            )
+            return filtered
 
         if stream_sidebar:
+            stream_started = time.perf_counter()
+            last_yield = time.monotonic()
             pieces = []
             for idx, (path, metadata) in enumerate(work_items):
-                try:
-                    piece = self._build_piece(path, idx, metadata)
-                except Exception as exc:
-                    piece = self._build_piece(path, idx, metadata)
-                    piece["error"] = str(exc)
+                piece = self._build_piece(path, idx, metadata)
                 pieces.append(piece)
                 self._stream_piece_list_item(idx, piece)
-                self._pump_review_loading_events(max_ms=3)
+                now = time.monotonic()
+                if now - last_yield >= 0.006:
+                    self._pump_review_loading_events(max_ms=2)
+                    last_yield = now
             self._finish_streaming_piece_list()
+            self._trace_review_perf(
+                "load_pieces_stream_done",
+                stream_started,
+                force=True,
+                pieces=len(self.pieces or []),
+                work_items=len(work_items),
+            )
+            self._trace_review_perf(
+                "load_pieces_done",
+                trace_started,
+                force=True,
+                stream=True,
+                pieces=len(self.pieces or []),
+                work_items=len(work_items),
+            )
             return list(self.pieces)
 
         pieces = [None] * len(work_items)
+        parallel_started = time.perf_counter()
         max_workers = max(1, min(8, len(work_items)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -4341,8 +4559,33 @@ class SDLXLIFFReviewDialog(QDialog):
         if stream_sidebar:
             flush_streamed_pieces()
             self._finish_streaming_piece_list()
+            self._trace_review_perf(
+                "load_pieces_done",
+                trace_started,
+                force=True,
+                stream=True,
+                pieces=len(self.pieces or []),
+                work_items=len(work_items),
+            )
             return list(self.pieces)
-        return self._filter_review_pieces(pieces)
+        self._trace_review_perf(
+            "load_pieces_parallel_done",
+            parallel_started,
+            force=True,
+            pieces=len([piece for piece in pieces if piece is not None]),
+            work_items=len(work_items),
+            workers=max_workers,
+        )
+        filtered = self._filter_review_pieces(pieces)
+        self._trace_review_perf(
+            "load_pieces_done",
+            trace_started,
+            force=True,
+            stream=False,
+            pieces=len(filtered),
+            work_items=len(work_items),
+        )
+        return filtered
 
     def _populate_piece_list(self):
         try:
@@ -5329,6 +5572,12 @@ class SDLXLIFFReviewDialog(QDialog):
     def _request_render_piece(self, row):
         if row < 0 or row >= len(self.pieces):
             return
+        self._trace_review_perf(
+            "request_render_piece",
+            None,
+            force=True,
+            row=row,
+        )
         self._last_review_selection_change = time.monotonic()
         self._cancel_review_preload(discard_page=True)
         self._save_current_review_scroll()
@@ -5350,6 +5599,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 pass
 
     def _finish_rows_rebuild(self, final=True):
+        trace_started = time.perf_counter()
         self._refresh_review_stream_geometry(final=final)
         self._set_rows_rebuild_active(False)
         for widget in (self.rows_widget, self.rows_stack, self.scroll.viewport(), self.scroll):
@@ -5357,6 +5607,11 @@ class SDLXLIFFReviewDialog(QDialog):
                 widget.update()
             except Exception:
                 pass
+        self._trace_review_perf(
+            "finish_rows_rebuild",
+            trace_started,
+            final=bool(final),
+        )
 
     def _sync_review_scroll_range(self, page=None):
         try:
@@ -7696,6 +7951,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return frame
 
     def _render_piece(self, row, show_loading=True):
+        trace_started = time.perf_counter()
         if row < 0 or row >= len(self.pieces):
             return
         if self._preload_render_row is not None:
@@ -7746,6 +8002,13 @@ class SDLXLIFFReviewDialog(QDialog):
             self._start_review_page_transition(transition_pixmap)
             QTimer.singleShot(0, self._queue_refresh_current_visible_dirty_source_previews)
             self._queue_review_page_preloads(row)
+            self._trace_review_perf(
+                "render_piece_cached_done",
+                trace_started,
+                force=True,
+                row=row,
+                rows=len(piece.get("rows") or []),
+            )
             return
 
         if cached_page is not None:
@@ -7774,6 +8037,12 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
             self._queue_review_page_preloads(row)
+            self._trace_review_perf(
+                "render_piece_error_done",
+                trace_started,
+                force=True,
+                row=row,
+            )
             return
 
         rows = piece.get("rows") or []
@@ -7791,6 +8060,12 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
             self._queue_review_page_preloads(row)
+            self._trace_review_perf(
+                "render_piece_empty_done",
+                trace_started,
+                force=True,
+                row=row,
+            )
             return
 
         try:
@@ -7813,9 +8088,16 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             self._restore_review_scroll(row)
             self._queue_review_page_preloads(row)
+            self._trace_review_perf(
+                "render_piece_model_failed_done",
+                trace_started,
+                force=True,
+                row=row,
+            )
             return
 
         if len(rows) <= self.REVIEW_SYNC_RENDER_ROW_LIMIT:
+            sync_started = time.perf_counter()
             try:
                 for idx, row_data in enumerate(rows):
                     row_model = row_models[idx] if idx < len(row_models) else None
@@ -7830,6 +8112,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._restore_review_scroll(row)
                 self._start_review_page_transition(transition_pixmap)
                 self._queue_review_page_preloads(row)
+                self._trace_review_perf(
+                    "render_piece_sync_done",
+                    trace_started,
+                    force=True,
+                    row=row,
+                    rows=len(rows),
+                    build_ms=f"{(time.perf_counter() - sync_started) * 1000.0:.1f}",
+                )
                 return
             except Exception as exc:
                 self._clear_rows(layout)
@@ -7846,6 +8136,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._finish_rows_rebuild(final=True)
                 self._restore_review_scroll(row)
                 self._queue_review_page_preloads(row)
+                self._trace_review_perf(
+                    "render_piece_sync_failed_done",
+                    trace_started,
+                    force=True,
+                    row=row,
+                    rows=len(rows),
+                    error=str(exc)[:160],
+                )
                 return
 
         render_timer = QTimer(self)
@@ -7872,6 +8170,13 @@ class SDLXLIFFReviewDialog(QDialog):
         # first batch tick, once enough rows exist to fill the viewport - so
         # switching entries never flashes a blank or loading page.
         swap_state = {"pending": bool(show_loading)}
+        self._trace_review_perf(
+            "render_piece_async_start",
+            trace_started,
+            force=True,
+            row=row,
+            rows=len(rows),
+        )
 
         def _finish_active_render_timer():
             if self._active_render_timer is render_timer:
@@ -7954,6 +8259,14 @@ class SDLXLIFFReviewDialog(QDialog):
                         self._finish_seamless_review_swap(page)
                         self._restore_review_scroll(row)
                         self._start_review_page_transition(transition_pixmap)
+                        self._trace_review_perf(
+                            "render_piece_async_first_swap",
+                            trace_started,
+                            force=True,
+                            row=row,
+                            rendered=row_state["idx"],
+                            total=len(rows),
+                        )
                     for frame in batch_frames:
                         try:
                             frame.setUpdatesEnabled(True)
@@ -7989,6 +8302,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     self._active_render_page = None
                 _finish_active_render_timer()
                 self._queue_review_page_preloads(row)
+                self._trace_review_perf(
+                    "render_piece_async_done",
+                    trace_started,
+                    force=True,
+                    row=row,
+                    rows=len(rows),
+                )
             except Exception as exc:
                 _finish_active_render_timer()
                 if render_token == self._render_token:
@@ -8007,6 +8327,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 if self._active_render_page is page:
                     self._active_render_row = None
                     self._active_render_page = None
+                self._trace_review_perf(
+                    "render_piece_async_failed",
+                    trace_started,
+                    force=True,
+                    row=row,
+                    rows=len(rows),
+                    error=str(exc)[:160],
+                )
 
         render_timer.timeout.connect(_run_render_batch)
         self._active_render_timer = render_timer

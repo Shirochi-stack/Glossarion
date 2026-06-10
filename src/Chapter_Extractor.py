@@ -44,7 +44,7 @@ from html_tag_entities import fix_stray_p_gt_artifacts, unescape_valid_html_tag_
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
-    'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword',
+    'notice', 'colophon', 'dedication', 'epigraph', 'foreword',
     'acknowledgment', 'author', 'appendix', 'bibliography'
 ]
 _DEFAULT_SPECIAL_EXACT = ['cover', 'index', 'glossary', 'glossary_extension']
