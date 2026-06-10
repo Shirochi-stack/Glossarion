@@ -12619,15 +12619,19 @@ class RetranslationMixin:
             
                 _populate_gp_listbox(_d)
 
-            # Refresh function (called by timer)
+            # Guard to prevent overlapping background refresh threads
+            panel_state['_gp_refresh_running'] = False
+
             def _refresh():
+                # Skip if a background refresh is already in flight
+                if panel_state.get('_gp_refresh_running'):
+                    return
                 try:
                     _rp = _find_gp_for_file(fp)
                     if not _rp or not os.path.isfile(_rp):
                         return
                     
-                    # Dirty-check: skip full recomputation if file hasn't changed
-                    # and the special-files toggle is the same
+                    # Quick mtime check on main thread (single stat call, fast)
                     try:
                         _cur_mtime = os.path.getmtime(_rp)
                     except OSError:
@@ -12637,72 +12641,120 @@ class RetranslationMixin:
                             and _cur_ts == panel_state.get('translate_special')):
                         return  # Nothing changed — skip
                     panel_state['_last_mtime'] = _cur_mtime
-                    
-                    _d = _gp_load_progress_dict(_rp)
-                    
-                    # Check if TRANSLATE_SPECIAL_FILES toggle changed — rebuild chapter map if so
-                    if _cur_ts != panel_state['translate_special']:
-                        panel_state['translate_special'] = _cur_ts
-                        new_cmap, new_total, new_spine_idx = _read_spine_map(fp, _cur_ts)
-                        if new_total > 0:
-                            panel_state['chapter_map'] = new_cmap
-                            panel_state['spine_index_map'] = new_spine_idx
-                            panel_state['total'] = new_total
-                        elif new_total == 0:
-                            _comp0, _fail0, _merg0 = _gp_sets(_d)
-                            _all_idx = _comp0 | _fail0 | _merg0
-                            panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
-                        # Rebuild reverse lookups after chapter_map change
-                        _rebuild_reverse_lookups()
-                        _rebuild_listbox(_d)
-                        _refresh_stats_from_dict(_d)
-                        return
-                    
-                    _comp, _fail, _merg = _gp_sets(_d)
-                    _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
-                    _not_refined = _gp_refinement_status_counts(_d).get('not_refined', 0)
-                    _total = panel_state['total']
-                    _cmap = panel_state['chapter_map']
-                    
-                    _nr = max(0, _total - len(_comp | _fail | _merg | _prog))
-                    lbl_total.setText(f"Total: {_total} | ")
-                    lbl_gp_completed.setText(f"✅ Completed: {len(_comp - _merg)} | ")
-                    lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog)} | ")
-                    lbl_gp_in_progress.setVisible(True)
-                    lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
-                    lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
-                    lbl_gp_merged.setVisible(len(_merg) > 0)
-                    lbl_gp_remaining.setText(f"⬜ Not Translated: {_nr}{' | ' if _not_refined else ''}")
-                    lbl_gp_not_refined.setText(f"✨ Not Refined: {_not_refined}")
-                    lbl_gp_not_refined.setVisible(_not_refined > 0)
-                    
-                    _bt = _d.get('book_title', '')
-                    if _bt and bt_label:
-                        bt_label.setText(f"📖 {_bt}")
-                    
-                    _cache = _gp_status_cache(_d)
-                    for ci in range(min(gp_listbox.count(), _total)):
-                        item = gp_listbox.item(ci)
-                        if not item:
-                            continue
-                        if item.data(Qt.UserRole + 3):
-                            continue
-                        old_status = item.data(Qt.UserRole)
-                        new_status, _issues = _gp_status_for(ci, _d, _cache)
-                        new_color = _gp_color_for(new_status)
-                        
-                        if new_status != old_status or _issues:
-                            fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            ch_num2 = _gp_display_chapter_num(ci, fname)
-                            _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
-                            display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
-                            display2, _ = _gp_display_for(ci, fname, _d, _cache)
-                            item.setText(display2)
-                            item.setForeground(QColor(new_color))
-                            item.setData(Qt.UserRole, new_status)
-                    _refresh_refinement_rows(_d)
+                    panel_state['_gp_refresh_running'] = True
+
+                    def _bg_compute():
+                        """Background thread: read file + compute all data."""
+                        try:
+                            _d = _gp_load_progress_dict(_rp)
+                            
+                            # Check if TRANSLATE_SPECIAL_FILES toggle changed
+                            _toggle_changed = (_cur_ts != panel_state.get('translate_special'))
+                            _spine_result = None
+                            if _toggle_changed:
+                                new_cmap, new_total, new_spine_idx = _read_spine_map(fp, _cur_ts)
+                                _spine_result = (new_cmap, new_total, new_spine_idx)
+                            
+                            _comp, _fail, _merg = _gp_sets(_d)
+                            _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
+                            _not_refined = _gp_refinement_status_counts(_d).get('not_refined', 0)
+                            _cache = _gp_status_cache(_d)
+                            _refinement_rows_data = list(_gp_refinement_rows(_d))
+                            
+                            # Pre-compute per-item updates
+                            _total = panel_state['total']
+                            _cmap = panel_state['chapter_map']
+                            _item_updates = []
+                            for ci in range(_total):
+                                new_status, _issues = _gp_status_for(ci, _d, _cache)
+                                new_color = _gp_color_for(new_status)
+                                display_text = None
+                                if True:  # Always compute display text; main thread decides if changed
+                                    fname = _cmap.get(ci, f'chapter {ci + 1}')
+                                    display_text, _ = _gp_display_for(ci, fname, _d, _cache)
+                                _item_updates.append((ci, new_status, new_color, display_text, _issues))
+                            
+                            _bt = _d.get('book_title', '')
+                            _nr = max(0, _total - len(_comp | _fail | _merg | _prog))
+                            
+                            result = {
+                                'd': _d,
+                                'toggle_changed': _toggle_changed,
+                                'spine_result': _spine_result,
+                                'cur_ts': _cur_ts,
+                                'comp': _comp, 'fail': _fail, 'merg': _merg, 'prog': _prog,
+                                'not_refined': _not_refined,
+                                'nr': _nr, 'total': _total,
+                                'item_updates': _item_updates,
+                                'bt': _bt,
+                                'refinement_rows': _refinement_rows_data,
+                                'cache': _cache,
+                            }
+                            QTimer.singleShot(0, lambda: _apply_bg_result(result))
+                        except Exception:
+                            panel_state['_gp_refresh_running'] = False
+
+                    def _apply_bg_result(result):
+                        """Main thread: apply pre-computed data to UI widgets."""
+                        try:
+                            _d = result['d']
+                            
+                            if result['toggle_changed']:
+                                panel_state['translate_special'] = result['cur_ts']
+                                sr = result['spine_result']
+                                if sr:
+                                    new_cmap, new_total, new_spine_idx = sr
+                                    if new_total > 0:
+                                        panel_state['chapter_map'] = new_cmap
+                                        panel_state['spine_index_map'] = new_spine_idx
+                                        panel_state['total'] = new_total
+                                    elif new_total == 0:
+                                        _all_idx = result['comp'] | result['fail'] | result['merg']
+                                        panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
+                                _rebuild_reverse_lookups()
+                                _rebuild_listbox(_d)
+                                _refresh_stats_from_dict(_d)
+                                return
+                            
+                            _total = result['total']
+                            lbl_total.setText(f"Total: {_total} | ")
+                            lbl_gp_completed.setText(f"✅ Completed: {len(result['comp'] - result['merg'])} | ")
+                            lbl_gp_in_progress.setText(f"🔄 In Progress: {len(result['prog'])} | ")
+                            lbl_gp_in_progress.setVisible(True)
+                            lbl_gp_failed.setText(f"❌ Failed: {len(result['fail'])} | ")
+                            lbl_gp_merged.setText(f"🔗 Merged: {len(result['merg'])} | ")
+                            lbl_gp_merged.setVisible(len(result['merg']) > 0)
+                            lbl_gp_remaining.setText(f"⬜ Not Translated: {result['nr']}{' | ' if result['not_refined'] else ''}")
+                            lbl_gp_not_refined.setText(f"✨ Not Refined: {result['not_refined']}")
+                            lbl_gp_not_refined.setVisible(result['not_refined'] > 0)
+                            
+                            if result['bt'] and bt_label:
+                                bt_label.setText(f"📖 {result['bt']}")
+                            
+                            for ci, new_status, new_color, display_text, _issues in result['item_updates']:
+                                if ci >= gp_listbox.count():
+                                    break
+                                item = gp_listbox.item(ci)
+                                if not item:
+                                    continue
+                                if item.data(Qt.UserRole + 3):
+                                    continue
+                                old_status = item.data(Qt.UserRole)
+                                if new_status != old_status or _issues:
+                                    if display_text:
+                                        item.setText(display_text)
+                                    item.setForeground(QColor(new_color))
+                                    item.setData(Qt.UserRole, new_status)
+                            _refresh_refinement_rows(_d)
+                        except Exception:
+                            pass
+                        finally:
+                            panel_state['_gp_refresh_running'] = False
+
+                    import threading
+                    threading.Thread(target=_bg_compute, name="gp-refresh-bg", daemon=True).start()
                 except Exception:
-                    pass
+                    panel_state['_gp_refresh_running'] = False
             
             return panel, _refresh
         
