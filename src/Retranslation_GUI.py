@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
-                                QLineEdit, QProgressBar)
+                                QLineEdit, QProgressBar, QGraphicsOpacityEffect)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -4431,6 +4431,82 @@ class SDLXLIFFReviewDialog(QDialog):
             return
         self._remove_review_page_widget(old_page)
 
+    def _capture_review_transition_snapshot(self):
+        """Grab what the user currently sees so the next page can fade in over it."""
+        try:
+            if not self.isVisible():
+                return None
+            viewport = self.scroll.viewport()
+            if viewport is None or viewport.width() < 2 or viewport.height() < 2:
+                return None
+            return viewport.grab()
+        except Exception:
+            return None
+
+    def _cancel_review_page_transition(self):
+        anim = getattr(self, "_review_transition_anim", None)
+        self._review_transition_anim = None
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+        overlay = getattr(self, "_review_transition_overlay", None)
+        self._review_transition_overlay = None
+        if overlay is not None:
+            try:
+                overlay.hide()
+                overlay.setParent(None)
+                overlay.deleteLater()
+            except Exception:
+                pass
+
+    def _start_review_page_transition(self, pixmap, duration_ms=160):
+        """Crossfade entry switches: fade a static snapshot of the old content
+        out over the new page. Only the snapshot is animated, so the live rows
+        underneath render at full speed."""
+        try:
+            self._cancel_review_page_transition()
+            if pixmap is None or pixmap.isNull():
+                return
+            viewport = self.scroll.viewport()
+            if viewport is None:
+                return
+            overlay = QLabel(viewport)
+            overlay.setObjectName("SdlReviewTransitionOverlay")
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            overlay.setPixmap(pixmap)
+            overlay.setScaledContents(False)
+            overlay.setGeometry(0, 0, viewport.width(), viewport.height())
+            effect = QGraphicsOpacityEffect(overlay)
+            effect.setOpacity(1.0)
+            overlay.setGraphicsEffect(effect)
+            overlay.show()
+            overlay.raise_()
+            anim = QPropertyAnimation(effect, b"opacity", overlay)
+            anim.setDuration(max(60, int(duration_ms)))
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._review_transition_overlay = overlay
+            self._review_transition_anim = anim
+
+            def _cleanup():
+                if getattr(self, "_review_transition_overlay", None) is overlay:
+                    self._review_transition_overlay = None
+                    self._review_transition_anim = None
+                try:
+                    overlay.hide()
+                    overlay.setParent(None)
+                    overlay.deleteLater()
+                except Exception:
+                    pass
+
+            anim.finished.connect(_cleanup)
+            anim.start()
+        except Exception:
+            self._cancel_review_page_transition()
+
     def _discard_piece_page(self, row, page=None):
         if row == self._preload_render_row:
             self._cancel_review_preload(discard_page=False)
@@ -7514,6 +7590,9 @@ class SDLXLIFFReviewDialog(QDialog):
         self._status_jump_indices.clear()
         render_token = self._render_token
         self._cancel_active_review_render(defer_visible_discard=True)
+        # Snapshot the current view now (before any geometry churn) so the
+        # new entry can crossfade in over it at swap time.
+        transition_pixmap = self._capture_review_transition_snapshot() if show_loading else None
 
         piece = self.pieces[row]
         try:
@@ -7543,6 +7622,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._finish_rows_rebuild(final=True)
             self._queue_refresh_current_visible_dirty_source_previews()
             self._restore_review_scroll(row)
+            self._start_review_page_transition(transition_pixmap)
             QTimer.singleShot(0, self._queue_refresh_current_visible_dirty_source_previews)
             self._queue_review_page_preloads(row)
             return
@@ -7627,6 +7707,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 self._finish_seamless_review_swap(page)
                 self._finish_rows_rebuild(final=True)
                 self._restore_review_scroll(row)
+                self._start_review_page_transition(transition_pixmap)
                 self._queue_review_page_preloads(row)
                 return
             except Exception as exc:
@@ -7757,6 +7838,7 @@ class SDLXLIFFReviewDialog(QDialog):
                         self.rows_stack.setCurrentWidget(page)
                         self._finish_seamless_review_swap(page)
                         self._restore_review_scroll(row)
+                        self._start_review_page_transition(transition_pixmap)
                     for frame in batch_frames:
                         try:
                             frame.setUpdatesEnabled(True)
