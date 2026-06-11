@@ -18179,7 +18179,16 @@ def main(log_callback=None, stop_callback=None):
     else:
         # Check if we should use async extraction (for GUI mode)
         use_async_extraction = os.getenv("USE_ASYNC_CHAPTER_EXTRACTION", "0") == "1"
-        
+
+        # Single-chapter mode (Library / Reader "Translate" on one entry):
+        # always use the in-process extractor — it honors
+        # SINGLE_CHAPTER_FILTER and only pulls the one HTML file out of the
+        # EPUB, skipping the full extraction pipeline entirely.
+        if (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip():
+            if use_async_extraction:
+                print("🎯 Single-chapter mode: forcing in-process targeted extraction")
+            use_async_extraction = False
+
         if use_async_extraction and log_callback:
             print("🚀 Using async chapter extraction (subprocess mode)...")
             from chapter_extraction_manager import ChapterExtractionManager

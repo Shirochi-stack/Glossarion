@@ -850,8 +850,17 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
     print(f"🔧 Using {max_workers} workers for parallel processing")
     
-    extracted_resources = _extract_all_resources(zf, output_dir, progress_callback)
-    
+    # Single-chapter mode (SINGLE_CHAPTER_FILTER): skip the heavy full
+    # resource pass — we only need the one HTML file. Resources from a
+    # previous full extraction (css/, images/, fonts/) are left untouched.
+    _single_mode = bool((os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip())
+    if _single_mode:
+        print("🎯 Single-chapter mode: skipping full resource extraction (css/fonts/images)")
+        extracted_resources = {'css': [], 'fonts': [], 'images': [],
+                               'epub_structure': [], 'other': []}
+    else:
+        extracted_resources = _extract_all_resources(zf, output_dir, progress_callback)
+
     # Check stop after resource extraction
     if is_stop_requested():
         print("❌ Extraction stopped by user")
@@ -888,7 +897,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     # Rename images to chapter-based format (chapter001_img_1.jpg, etc.).
     # Image output mode also needs this map; its passthrough HTML copy applies
     # image_rename_map.json before writing response files.
-    chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+    # Skipped in single-chapter mode — renaming with a one-chapter list would
+    # mis-claim images that belong to chapters not present in this run.
+    if not _single_mode:
+        chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+    else:
+        print("🎯 Single-chapter mode: skipping image rename pass")
     
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
     chapters_info = []
@@ -974,34 +988,62 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     chapters_info.sort(key=lambda x: x['num'])
     
     print(f"✅ Successfully processed {len(chapters_info)} chapters")
-    
+
+    if _single_mode and os.path.exists(chapters_info_path):
+        # Merge into any existing chapters_info.json so a single-chapter run
+        # doesn't clobber the bookkeeping written by a previous full run.
+        try:
+            with open(chapters_info_path, 'r', encoding='utf-8') as f:
+                existing_info = json.load(f)
+            if isinstance(existing_info, list):
+                new_nums = {c.get('num') for c in chapters_info}
+                merged_info = [c for c in existing_info
+                               if isinstance(c, dict) and c.get('num') not in new_nums]
+                merged_info.extend(chapters_info)
+                merged_info.sort(key=lambda x: x.get('num', 0))
+                chapters_info = merged_info
+        except Exception as e:
+            print(f"⚠️ Could not merge existing chapters_info.json: {e}")
+
     with open(chapters_info_path, 'w', encoding='utf-8') as f:
         json.dump(chapters_info, f, ensure_ascii=False, indent=2)
-    
+
     print(f"💾 Saved detailed chapter info to: chapters_info.json")
-    
-    metadata.update({
-        'chapter_count': len(chapters),
-        'detected_language': detected_language,
-        'extracted_resources': extracted_resources,
-        'extraction_mode': extraction_mode,
-        'extraction_summary': {
-            'total_chapters': len(chapters),
-            'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
-            'resources_extracted': sum(len(files) for files in extracted_resources.values())
+
+    if _single_mode:
+        # Merge instead of overwrite — keep counts/titles from the previous
+        # full extraction (``metadata`` was preloaded from metadata.json
+        # above when it exists) and only fold in this chapter's title.
+        titles = metadata.get('chapter_titles') or {}
+        titles.update({str(c['num']): c['title'] for c in chapters})
+        metadata['chapter_titles'] = titles
+        metadata.setdefault('chapter_count', len(titles))
+        metadata.setdefault('detected_language', detected_language)
+        metadata.setdefault('extraction_mode', extraction_mode)
+    else:
+        metadata.update({
+            'chapter_count': len(chapters),
+            'detected_language': detected_language,
+            'extracted_resources': extracted_resources,
+            'extraction_mode': extraction_mode,
+            'extraction_summary': {
+                'total_chapters': len(chapters),
+                'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
+                'resources_extracted': sum(len(files) for files in extracted_resources.values())
+            }
+        })
+
+        metadata['chapter_titles'] = {
+            str(c['num']): c['title'] for c in chapters
         }
-    })
-    
-    metadata['chapter_titles'] = {
-        str(c['num']): c['title'] for c in chapters
-    }
-    
+
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
-    
+
     print(f"💾 Saved comprehensive metadata to: {metadata_path}")
-    
-    _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
+
+    if not _single_mode:
+        _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
     _log_extraction_summary(chapters, extracted_resources, detected_language)
     
     print(f"🔍 VERIFICATION: {extraction_mode.capitalize()} chapter extraction completed successfully")
@@ -1313,31 +1355,63 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     print(f"📚 Processing {len(files_to_process)} files after merge analysis")
     if progress_callback:
         progress_callback(f"Preparing to process {len(files_to_process)} chapters...")
-    
+
+    # ── Single-chapter mode ─────────────────────────────────────────────
+    # When SINGLE_CHAPTER_FILTER is set (Library / Reader "Translate" on a
+    # single chapter entry), only the matching HTML file is actually parsed
+    # and extracted. The FULL ``files_to_process`` list is still used as the
+    # numbering reference (via ``_file_index_map`` below) so the single
+    # chapter receives exactly the same chapter number it would get during
+    # a full extraction run.
+    files_to_run = files_to_process
+    _single_target = (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip()
+    if _single_target:
+        _tgt_norm = _single_target.replace("\\", "/").lower().lstrip("/")
+        _tgt_base = os.path.basename(_tgt_norm)
+        _matches = [
+            f for f in files_to_process
+            if f.replace("\\", "/").lower().lstrip("/") == _tgt_norm
+            or os.path.basename(f).lower() == _tgt_base
+        ]
+        if _matches:
+            files_to_run = _matches[:1]
+            print(f"🎯 Single-chapter extraction: {files_to_run[0]} "
+                  f"(skipping the other {len(files_to_process) - 1} files; numbering preserved)")
+            if progress_callback:
+                progress_callback(
+                    f"Single-chapter extraction: {os.path.basename(files_to_run[0])}")
+        else:
+            print(f"⚠️ SINGLE_CHAPTER_FILTER '{_single_target}' did not match any "
+                  f"HTML file — falling back to full extraction")
+
+    # Map each file to its position in the FULL processing list so chapter
+    # numbering stays stable even when only a subset is actually processed.
+    _file_index_map = {f: i for i, f in enumerate(files_to_process)}
+
     # Initialize collections for aggregating results
     file_size_groups = {}
     h1_count = 0
     h2_count = 0
     skipped_files = []
-    
+
     # Progress tracking
-    total_files = len(files_to_process)
-    
+    total_files = len(files_to_run)
+
     # Prepare arguments for parallel processing
     zip_file_path = zf.filename
-    
+
     # Process files in parallel or sequentially based on file count
     # Only print if no callback (avoid duplicates)
     if not progress_callback:
-        print(f"🚀 Processing {len(files_to_process)} HTML files...")
-    
+        print(f"🚀 Processing {len(files_to_run)} HTML files...")
+
     # Initial progress - no message needed, progress bar will show
-    
+
     candidate_chapters = []  # For smart mode
     chapters_direct = []      # For other modes
-    
+
     # Decide whether to use parallel processing
-    use_parallel = len(files_to_process) > 10
+    use_parallel = len(files_to_run) > 10
     
     if use_parallel:
         # Get worker count from environment variable
@@ -1375,7 +1449,7 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                 executor.submit(
                     _process_single_html_file,
                     file_path=file_path,
-                    file_index=idx,
+                    file_index=_file_index_map.get(file_path, idx),
                     zip_file_path=zip_file_path,
                     parser=parser,
                     merge_candidates=merge_candidates,
@@ -1389,7 +1463,7 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     files_to_process=files_to_process,
                     is_stop_requested=is_stop_requested
                 ): (file_path, idx)
-                for idx, file_path in enumerate(files_to_process)
+                for idx, file_path in enumerate(files_to_run)
             }
             # Collect results as they complete with progress tracking
             processed_count = 0
@@ -1469,15 +1543,15 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
         print("📦 Using sequential processing (small file count)...")
         
         # Process files sequentially for small EPUBs
-        for idx, file_path in enumerate(files_to_process):
+        for idx, file_path in enumerate(files_to_run):
             if is_stop_requested():
                 print("❌ Chapter processing stopped by user")
                 return [], 'unknown'
-            
+
             # Call the module-level function directly
             result = _process_single_html_file(
                 file_path=file_path,
-                file_index=idx,
+                file_index=_file_index_map.get(file_path, idx),
                 zip_file_path=zip_file_path,
                 parser=parser,
                 merge_candidates=merge_candidates,

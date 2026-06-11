@@ -942,6 +942,90 @@ def _find_halgakos_icon() -> str | None:
     return None
 
 
+def _find_translator_gui(widget):
+    """Walk up the Qt parent chain to the main TranslatorGUI instance.
+
+    Both :class:`BookDetailsDialog` (Library → Details) and
+    :class:`EpubReaderDialog` ultimately hang off the main translator
+    window, which exposes ``start_single_chapter_translation`` /
+    ``run_translation_thread``. Returns ``None`` when no such ancestor
+    exists (e.g. the reader was opened standalone).
+    """
+    w = widget
+    for _ in range(16):
+        if w is None:
+            return None
+        if (hasattr(w, "start_single_chapter_translation")
+                and hasattr(w, "append_log")):
+            return w
+        try:
+            w = w.parent()
+        except Exception:
+            return None
+    return None
+
+
+def _mark_chapter_pending_for_retranslation(output_folder: str,
+                                            chapter_filename: str) -> bool:
+    """Reset a chapter's translation_progress.json entry to ``pending``.
+
+    Mirrors what Retranslation_GUI's "force retranslation" does for a single
+    chapter: the matching entry's status is reset and its on-disk
+    ``response_*`` output file is deleted so the pipeline re-translates it.
+    Matching is by source-file stem (``original_basename``), falling back to
+    the recorded ``output_file``. Returns True when anything changed.
+    """
+    import json as _json
+    try:
+        progress_file = os.path.join(output_folder, "translation_progress.json")
+        if not os.path.isfile(progress_file):
+            return False
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+        chapters = prog.get("chapters", {}) or {}
+        target_stem = os.path.splitext(
+            os.path.basename(str(chapter_filename)))[0].strip().lower()
+        if not target_stem:
+            return False
+        changed = False
+        for key, ch in chapters.items():
+            if not isinstance(ch, dict):
+                continue
+            stems = set()
+            ob = str(ch.get("original_basename") or "")
+            if ob:
+                stems.add(os.path.splitext(os.path.basename(ob))[0].lower())
+            of = str(ch.get("output_file") or "")
+            if of:
+                stems.add(os.path.splitext(os.path.basename(of))[0].lower())
+            if target_stem not in stems:
+                continue
+            status = str(ch.get("status") or "")
+            if of:
+                candidate = of if os.path.isabs(of) else os.path.join(
+                    output_folder, of)
+                try:
+                    if os.path.isfile(candidate):
+                        os.remove(candidate)
+                        logger.info("Deleted %s for retranslation", candidate)
+                        changed = True
+                except OSError as e:
+                    logger.warning("Could not delete %s: %s", candidate, e)
+            if status != "pending":
+                ch["status"] = "pending"
+                ch["failure_reason"] = ""
+                ch["error_message"] = ""
+                changed = True
+        if changed:
+            with open(progress_file, "w", encoding="utf-8") as f:
+                _json.dump(prog, f, ensure_ascii=False, indent=2)
+        return changed
+    except Exception:
+        logger.warning("Failed to mark chapter pending: %s",
+                       traceback.format_exc())
+        return False
+
+
 def _extract_cover(epub_path: str) -> str | None:
     cache_dir = _cover_cache_dir()
     name_hash = hashlib.md5(epub_path.encode("utf-8")).hexdigest()[:12]
@@ -12666,6 +12750,8 @@ class _ChapterVirtualList(QWidget):
 
     clicked = Signal(int)
     activated = Signal(int)
+    # Right-click → (chapter index, global QPoint); menu built by the dialog.
+    menu_requested = Signal(int, object)
 
     _ROW_HEIGHT = 66
     _ROW_GAP = 6
@@ -12771,6 +12857,19 @@ class _ChapterVirtualList(QWidget):
             if row >= 0:
                 self.activated.emit(self._chapter_index_for_row(row))
         super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        row = self._row_at(int(event.pos().y()))
+        if row >= 0:
+            idx = self._chapter_index_for_row(row)
+            # Focus the row under the cursor so the menu visibly applies to it.
+            self._selected_idx = idx
+            self.clicked.emit(idx)
+            self.update()
+            self.menu_requested.emit(idx, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -13380,6 +13479,7 @@ class BookDetailsDialog(QDialog):
         self._chap_list.setObjectName("chapterList")
         self._chap_list.clicked.connect(self._on_chapter_virtual_clicked)
         self._chap_list.activated.connect(self._on_chapter_activated)
+        self._chap_list.menu_requested.connect(self._show_chapter_context_menu)
         self._chap_list_opacity = QGraphicsOpacityEffect(self._chap_list)
         self._chap_list_opacity.setOpacity(1.0)
         self._chap_list.setGraphicsEffect(self._chap_list_opacity)
@@ -14354,6 +14454,7 @@ class BookDetailsDialog(QDialog):
                 )
                 row.activated.connect(self._on_chapter_activated)
                 row.clicked.connect(self._on_chapter_clicked)
+                row.menu_requested.connect(self._show_chapter_context_menu)
                 if info.get("index") == selected_idx:
                     row.set_selected(True)
                 self._chap_layout.addWidget(row)
@@ -14387,6 +14488,135 @@ class BookDetailsDialog(QDialog):
         if not self._chapters_loaded:
             return
         self._open_reader(initial_chapter=idx)
+
+    def _show_chapter_context_menu(self, idx: int, global_pos):
+        """Right-click menu for a chapter entry (Translate / Open in Reader)."""
+        if not self._chapters_loaded:
+            return
+        if not (0 <= idx < len(self._chapters_info)):
+            return
+        info = self._chapters_info[idx] or {}
+        filename = info.get("filename") or ""
+        status = (info.get("status") or "").strip()
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 9pt; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 3px; }
+            QMenu::item:selected { background: #3a3a5e; }
+            QMenu::item:disabled { color: #666; }
+        """)
+        label = ("\U0001f310  Retranslate this chapter" if status == "completed"
+                 else "\U0001f310  Translate this chapter")
+        translate_action = menu.addAction(label)
+        translate_action.setToolTip(
+            "Translate only this HTML file — skips the full extraction "
+            "pass and jumps straight to the translation phase.")
+        if not filename or bool(info.get("is_gallery")):
+            translate_action.setEnabled(False)
+        menu.addSeparator()
+        reader_action = menu.addAction("\U0001f4d6  Open in Reader")
+
+        translate_action.triggered.connect(
+            lambda *_a, i=idx: self._translate_single_chapter(i))
+        reader_action.triggered.connect(
+            lambda *_a, i=idx: self._on_chapter_activated(i))
+        menu.exec(global_pos)
+
+    def _translate_single_chapter(self, idx: int):
+        """Translate exactly one chapter entry via the main translator GUI.
+
+        Skips the full extraction pass — only the HTML file behind this
+        entry is pulled out of the source EPUB (numbering preserved) and
+        the run jumps straight to the translation phase.
+        """
+        if not (0 <= idx < len(self._chapters_info)):
+            return
+        info = self._chapters_info[idx] or {}
+        filename = info.get("filename") or ""
+        if not filename:
+            QMessageBox.warning(self, "Translate chapter",
+                                "This entry has no source filename to translate.")
+            return
+
+        # Resolve the raw source EPUB the chapter lives in.
+        def _is_epub_file(p: str) -> bool:
+            return bool(p) and p.lower().endswith(".epub") and os.path.isfile(p)
+
+        raw_source = self._book.get("raw_source_path", "") or ""
+        book_path = self._book.get("path", "") or ""
+        epub_path = next((p for p in (raw_source, book_path) if _is_epub_file(p)), "")
+        if not epub_path:
+            QMessageBox.warning(
+                self, "Translate chapter",
+                "Could not resolve the raw source EPUB for this book.")
+            return
+
+        gui = _find_translator_gui(self)
+        if gui is None:
+            QMessageBox.warning(
+                self, "Translate chapter",
+                "The main translator window is not available.")
+            return
+        thread = getattr(gui, "translation_thread", None)
+        if thread is not None and thread.is_alive():
+            QMessageBox.warning(
+                self, "Translate chapter",
+                "A translation is already running.\n"
+                "Please wait for it to finish (or stop it) first.")
+            return
+
+        title = (info.get("translated_title") or info.get("raw_title")
+                 or filename)
+        status = (info.get("status") or "").strip()
+        if status == "completed":
+            if QMessageBox.question(
+                    self, "Retranslate chapter",
+                    f"“{title}” is already translated.\n\n"
+                    "Delete its current translation and retranslate it now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                return
+
+        # Keep the output-directory override aligned with this book's
+        # workspace (same guard "Load for translation" uses).
+        parent_lib = self.parent()
+        if parent_lib is not None and hasattr(parent_lib,
+                                              "_ensure_output_override_matches"):
+            try:
+                if not parent_lib._ensure_output_override_matches([self._book]):
+                    return
+            except Exception:
+                logger.debug("Output override check failed: %s",
+                             traceback.format_exc())
+
+        # Reset any existing progress entry so the pipeline re-translates
+        # instead of skipping a chapter it considers done.
+        if status:
+            try:
+                out_folder = _resolve_book_output_folder(self._book)
+                if out_folder and os.path.isdir(out_folder):
+                    _mark_chapter_pending_for_retranslation(out_folder, filename)
+            except Exception:
+                logger.debug("Progress reset failed: %s", traceback.format_exc())
+
+        try:
+            started = bool(gui.start_single_chapter_translation(
+                epub_path, os.path.basename(filename)))
+        except Exception as exc:
+            QMessageBox.warning(self, "Translate chapter",
+                                f"Could not start translation:\n{exc}")
+            return
+        if started:
+            # The 2s auto-refresh timer will flip this row's badge to
+            # "in progress" as soon as the pipeline picks the chapter up.
+            try:
+                gui.append_log(
+                    f"\U0001f4d6 Library: translating single chapter "
+                    f"“{title}” ({os.path.basename(filename)})")
+            except Exception:
+                pass
 
     def _visible_counts(self) -> tuple[int, int]:
         """Return (done, total) considering the special-files toggle.
@@ -14998,6 +15228,9 @@ class _ChapterRow(QFrame):
     # "currently focused" chapter row. Separate from :attr:`activated` so
     # selecting a row doesn't also open the reader.
     clicked = Signal(int)
+    # Right-click → (chapter index, global QPoint). The parent dialog builds
+    # the actual QMenu (Translate, Open in Reader, …).
+    menu_requested = Signal(int, object)
 
     # Object-name selectors for the same reason as :class:`_BookCard`:
     # they match this exact widget reliably across Qt/PySide versions.
@@ -15103,6 +15336,13 @@ class _ChapterRow(QFrame):
         if event.button() == Qt.LeftButton:
             self.activated.emit(int(self.info.get("index", 0)))
         super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        # Right-click — also focus the row so the menu visibly applies to it.
+        idx = int(self.info.get("index", 0))
+        self.clicked.emit(idx)
+        self.menu_requested.emit(idx, event.globalPos())
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -16288,6 +16528,31 @@ class EpubReaderDialog(QDialog):
         self._loader_thread: _EpubLoaderThread | None = None
         self._overlay_thread: _OverlayMergeThread | None = None
 
+        # ── Live single-chapter translation state ──────────────────────
+        # The toolbar Translate button streams the chapter's translation
+        # straight into the reader: raw streamed text replaces the page
+        # while thinking/status lines collect in a discreet collapsible
+        # pane. ``_live_log_queue`` is filled from worker threads via the
+        # main GUI's log-listener hook and drained on a GUI-side QTimer.
+        self._live_translate_active = False
+        self._live_log_queue: deque = deque()
+        self._live_drain_timer: QTimer | None = None
+        self._live_poll_timer: QTimer | None = None
+        self._live_panel: QWidget | None = None
+        self._live_content_view = None
+        self._live_think_view = None
+        self._live_think_toggle = None
+        self._live_status_label = None
+        self._live_content_buf = ""
+        self._live_think_pending = ""
+        self._live_log_pending = ""
+        self._live_dirty = False
+        self._live_in_thinking = False
+        self._live_streaming_text = False
+        self._live_gui_ref = None
+        self._live_listener = None
+        self._live_target_row: int | None = None
+
         title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
         self._window_title_text = title_text
         self.setWindowTitle(f"\U0001f4d6 {title_text}")
@@ -16409,6 +16674,32 @@ class EpubReaderDialog(QDialog):
         # overlaid list actually differs from the raw one.
         self._raw_btn.hide()
         toolbar.addWidget(self._raw_btn)
+
+        toolbar.addSpacing(6)
+
+        # Translate-current-chapter button: runs a single-chapter
+        # translation through the main GUI and replaces the page with the
+        # raw streaming output while it runs (all streaming toggles are
+        # forced ON for the run). While a run is active the button flips
+        # between the live view and the normal reader.
+        self._translate_btn = QPushButton("\U0001f310  Translate")
+        self._translate_btn.setToolTip(
+            "Translate the current chapter now.\n"
+            "Only this chapter's HTML is extracted (full extraction is\n"
+            "skipped) and the live streaming output replaces the page\n"
+            "while the translation runs."
+        )
+        self._translate_btn.setFixedHeight(26)
+        self._translate_btn.setCursor(Qt.PointingHandCursor)
+        self._translate_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+        """)
+        self._translate_btn.setAutoDefault(False)
+        self._translate_btn.setDefault(False)
+        self._translate_btn.clicked.connect(self._on_translate_current_chapter)
+        toolbar.addWidget(self._translate_btn)
 
         toolbar.addSpacing(8)
 
@@ -19353,6 +19644,439 @@ class EpubReaderDialog(QDialog):
             self._toc_list.blockSignals(False)
             self._render_current()
 
+    # ── Live single-chapter translation ──────────────────────────────────
+
+    # First characters that mark a log line as pipeline status output
+    # rather than streamed translation content. Streamed chapter text is
+    # printed raw (usually HTML fragments), while status lines from the
+    # GUI / pipeline / API client virtually always lead with an emoji,
+    # bracket tag or separator run.
+    _LIVE_STATUS_CHARS = set(
+        "🚀📄📃📜📋✅⚠❌📚📦🔧📊🔍💾🖼🔄📌📸🧠🛰📡⏱⏳🟢🟡🟠🔴🎯📑📖🌐⚡🧪✨🎨💡"
+        "🔠🗑🧹📂📁🔁🔂📝🔑🗝🔒🔓🚫⛔💬🌍🌏🌎🐛📈📉🤖🆗═─=[#"
+    )
+
+    def _on_translate_current_chapter(self):
+        """Toolbar Translate: stream-translate the chapter being read."""
+        # While a live run is active the button toggles between the live
+        # view and the normal reader page.
+        if self._live_translate_active:
+            if self._reader_stack.currentWidget() is self._live_panel:
+                self._render_current()
+            elif self._live_panel is not None:
+                self._reader_stack.setCurrentWidget(self._live_panel)
+            return
+
+        if not self._chapters or not self._chapter_filenames:
+            QMessageBox.information(self, "Translate chapter",
+                                    "The EPUB is still loading — try again in a moment.")
+            return
+        row = max(0, min(self._current_row, len(self._chapter_filenames) - 1))
+        chapter_file = os.path.basename(str(self._chapter_filenames[row] or ""))
+        if not chapter_file:
+            QMessageBox.warning(self, "Translate chapter",
+                                "Could not resolve this chapter's source filename.")
+            return
+
+        # Source EPUB: in overlay mode ``_epub_path`` IS the raw source; in
+        # dual-path (compiled) mode prefer the raw counterpart.
+        epub_path = self._epub_path
+        if not self._translated_overlay and self._raw_epub_alt_path:
+            epub_path = self._raw_epub_alt_path
+        if not (epub_path and os.path.isfile(epub_path)
+                and epub_path.lower().endswith(".epub")):
+            QMessageBox.warning(self, "Translate chapter",
+                                "Could not resolve the source EPUB for this chapter.")
+            return
+
+        gui = _find_translator_gui(self)
+        if gui is None:
+            QMessageBox.warning(
+                self, "Translate chapter",
+                "The main translator window is not available — open the "
+                "reader from within Glossarion to use live translation.")
+            return
+        thread = getattr(gui, "translation_thread", None)
+        if thread is not None and thread.is_alive():
+            QMessageBox.warning(
+                self, "Translate chapter",
+                "A translation is already running.\n"
+                "Please wait for it to finish (or stop it) first.")
+            return
+
+        # Already-translated chapter → confirm + reset its progress entry
+        # so the pipeline doesn't skip it as completed.
+        overlay_entry = (self._translated_overlay or {}).get(chapter_file.lower())
+        if overlay_entry and overlay_entry.get("path"):
+            title = self._chapters[row][0] if row < len(self._chapters) else chapter_file
+            if QMessageBox.question(
+                    self, "Retranslate chapter",
+                    f"“{title}” is already translated.\n\n"
+                    "Delete its current translation and retranslate it live?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                return
+            out_dir = os.path.dirname(str(overlay_entry["path"]))
+            if out_dir and os.path.isdir(out_dir):
+                _mark_chapter_pending_for_retranslation(out_dir, chapter_file)
+
+        # Wire the live view up BEFORE starting so no early lines are lost.
+        self._ensure_live_panel()
+        self._reset_live_state()
+        self._live_gui_ref = gui
+        listener = self._on_live_log_line
+        self._live_listener = listener
+        try:
+            gui.add_log_listener(listener)
+        except Exception:
+            self._live_listener = None
+
+        started = False
+        try:
+            started = bool(gui.start_single_chapter_translation(
+                epub_path, chapter_file, force_stream_all=True))
+        except Exception as exc:
+            QMessageBox.warning(self, "Translate chapter",
+                                f"Could not start translation:\n{exc}")
+        if not started:
+            self._teardown_live_listener()
+            return
+
+        self._live_translate_active = True
+        self._live_target_row = row
+        self._translate_btn.setText("\U0001f6f0️  Live view")
+        self._live_status_label.setText(
+            f"\U0001f6f0️ Translating “{os.path.basename(chapter_file)}” — waiting for stream…")
+        self._reader_stack.setCurrentWidget(self._live_panel)
+        self._nav_bar.hide()
+
+        if self._live_drain_timer is None:
+            self._live_drain_timer = QTimer(self)
+            self._live_drain_timer.setInterval(90)
+            self._live_drain_timer.timeout.connect(lambda: self._drain_live_queue())
+        self._live_drain_timer.start()
+        if self._live_poll_timer is None:
+            self._live_poll_timer = QTimer(self)
+            self._live_poll_timer.setInterval(700)
+            self._live_poll_timer.timeout.connect(lambda: self._poll_live_done())
+        # Give the worker a moment to spin up before polling for liveness.
+        QTimer.singleShot(2500, lambda: (
+            self._live_poll_timer.start()
+            if self._live_translate_active and self._live_poll_timer else None))
+
+    def _ensure_live_panel(self):
+        """Create the streaming page (reader-stack index 2) on first use."""
+        if self._live_panel is not None:
+            return
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        header = QWidget()
+        h = QHBoxLayout(header)
+        h.setContentsMargins(10, 6, 10, 6)
+        h.setSpacing(8)
+        self._live_status_label = QLabel("")
+        self._live_status_label.setStyleSheet(
+            "color: #ffd166; font-size: 9pt; font-weight: bold;")
+        h.addWidget(self._live_status_label, 1)
+
+        self._live_think_toggle = QPushButton("\U0001f9e0  Thinking")
+        self._live_think_toggle.setCheckable(True)
+        self._live_think_toggle.setCursor(Qt.PointingHandCursor)
+        self._live_think_toggle.setToolTip(
+            "Show the model's thinking / pipeline log for this run.\n"
+            "Kept out of the page so the stream stays readable.")
+        self._live_think_toggle.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 3px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+            QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
+        """)
+        self._live_think_toggle.toggled.connect(self._on_live_think_toggled)
+        h.addWidget(self._live_think_toggle)
+
+        stop_btn = QPushButton("⏹  Stop")
+        stop_btn.setCursor(Qt.PointingHandCursor)
+        stop_btn.setToolTip("Stop the translation run.")
+        stop_btn.setStyleSheet("""
+            QPushButton { background: #3e2a2a; border: 1px solid #5e3a3a; border-radius: 4px;
+                color: #d0a0a0; font-size: 8.5pt; font-weight: bold; padding: 3px 10px; }
+            QPushButton:hover { background: #5e3a3a; color: #f0c0c0; }
+        """)
+        stop_btn.clicked.connect(self._stop_live_translation)
+        h.addWidget(stop_btn)
+
+        back_btn = QPushButton("✕  Hide")
+        back_btn.setCursor(Qt.PointingHandCursor)
+        back_btn.setToolTip(
+            "Return to the reader without stopping the translation.\n"
+            "The Translate button re-opens this live view.")
+        back_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; padding: 3px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+        """)
+        back_btn.clicked.connect(lambda: self._render_current())
+        h.addWidget(back_btn)
+        header.setStyleSheet("background: #16161f; border-bottom: 1px solid #2a2a3e;")
+        v.addWidget(header)
+
+        split = QSplitter(Qt.Vertical)
+        split.setHandleWidth(2)
+
+        # Main streamed-content view. A QTextBrowser (not a webengine view)
+        # so the accumulated HTML can be cheaply re-set every drain tick —
+        # Qt's rich-text engine parses tags/CSS in real time and tolerates
+        # the half-open tags that mid-stream HTML inevitably has.
+        self._live_content_view = QTextBrowser()
+        self._live_content_view.setOpenExternalLinks(False)
+        self._live_content_view.setOpenLinks(False)
+        self._live_content_view.setFrameShape(QFrame.NoFrame)
+        split.addWidget(self._live_content_view)
+
+        # Discreet thinking / pipeline-log pane (hidden until toggled).
+        self._live_think_view = QPlainTextEdit()
+        self._live_think_view.setReadOnly(True)
+        self._live_think_view.setFrameShape(QFrame.NoFrame)
+        self._live_think_view.setStyleSheet(
+            "QPlainTextEdit { background: #131318; color: #8a8fa8;"
+            " font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt;"
+            " padding: 8px; }")
+        self._live_think_view.hide()
+        split.addWidget(self._live_think_view)
+        split.setStretchFactor(0, 4)
+        split.setStretchFactor(1, 1)
+        self._live_splitter = split
+        v.addWidget(split, 1)
+
+        self._live_panel = panel
+        self._reader_stack.addWidget(panel)
+
+    def _reset_live_state(self):
+        self._live_log_queue.clear()
+        self._live_content_buf = ""
+        self._live_think_pending = ""
+        self._live_log_pending = ""
+        self._live_dirty = False
+        self._live_in_thinking = False
+        self._live_streaming_text = False
+        if self._live_content_view is not None:
+            self._live_content_view.clear()
+        if self._live_think_view is not None:
+            self._live_think_view.clear()
+        if self._live_think_toggle is not None:
+            self._live_think_toggle.setChecked(False)
+            self._live_think_toggle.setText("\U0001f9e0  Thinking")
+
+    def _on_live_think_toggled(self, checked: bool):
+        if self._live_think_view is not None:
+            self._live_think_view.setVisible(bool(checked))
+
+    def _on_live_log_line(self, message):
+        """Main-GUI log listener — called from worker threads. Only queue."""
+        try:
+            self._live_log_queue.append(str(message))
+        except Exception:
+            pass
+
+    def _classify_live_line(self, line: str) -> str:
+        """Route one log line to ``content`` / ``thinking`` / ``log``."""
+        s = line.rstrip("\n")
+        stripped = s.strip()
+        low = stripped.lower()
+
+        # Thinking block state markers (emitted by unified_api_client when
+        # STREAM_THINKING_LOGS is on — which the live view forces).
+        if "thinking complete" in low:
+            self._live_in_thinking = False
+            return "log"
+        if stripped.startswith("\U0001f9e0") or " thinking..." in low:
+            self._live_in_thinking = "thinking..." in low
+            return "log"
+        # Thinking content is printed with a 4-space indent.
+        if self._live_in_thinking and (s.startswith("    ")
+                                       or stripped == "​"):
+            return "thinking"
+
+        # Text-stream lifecycle markers.
+        if ("text streaming" in low or "first text token" in low):
+            self._live_streaming_text = True
+            return "log"
+        if "stream complete" in low or "translation completed" in low:
+            self._live_streaming_text = False
+            return "log"
+
+        if not stripped:
+            return "content" if self._live_streaming_text else "log"
+        first = stripped[0]
+        if first in self._LIVE_STATUS_CHARS:
+            return "log"
+        if stripped.startswith(("Traceback", "File \"", "[DEBUG]", "[INFO]",
+                                "[WARN", "[ERROR")):
+            return "log"
+        # Raw HTML fragments are always chapter content, even if a
+        # provider path never printed an explicit stream-start marker.
+        if first == "<":
+            self._live_streaming_text = True
+            return "content"
+        return "content" if self._live_streaming_text else "log"
+
+    def _drain_live_queue(self):
+        """GUI-thread timer: drain queued log lines into the live views."""
+        drained = 0
+        content_added = False
+        while self._live_log_queue and drained < 400:
+            try:
+                raw = self._live_log_queue.popleft()
+            except IndexError:
+                break
+            drained += 1
+            for line in str(raw).split("\n"):
+                kind = self._classify_live_line(line)
+                if kind == "content":
+                    self._live_content_buf += line + "\n"
+                    content_added = True
+                elif kind == "thinking":
+                    self._live_think_pending += line[4:] if line.startswith("    ") else line
+                    self._live_think_pending += "\n"
+                else:
+                    self._live_log_pending += line + "\n"
+        if not drained:
+            return
+
+        # Thinking + pipeline log share the discreet pane; thinking text is
+        # appended bare, status lines keep their prefixes.
+        if self._live_think_pending or self._live_log_pending:
+            view = self._live_think_view
+            if view is not None:
+                cursor = view.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                if self._live_think_pending:
+                    cursor.insertText(self._live_think_pending)
+                if self._live_log_pending:
+                    cursor.insertText(self._live_log_pending)
+                view.setTextCursor(cursor)
+                sb = view.verticalScrollBar()
+                sb.setValue(sb.maximum())
+                # Surface activity on the collapsed toggle.
+                if self._live_think_toggle is not None and not self._live_think_toggle.isChecked():
+                    n = self._live_think_view.blockCount()
+                    self._live_think_toggle.setText(f"\U0001f9e0  Thinking ({n})")
+            self._live_think_pending = ""
+            self._live_log_pending = ""
+
+        if content_added:
+            self._render_live_content()
+
+    def _render_live_content(self):
+        """Re-render the accumulated stream with live HTML/CSS parsing and
+        follow the output (auto page switching) unless the user scrolled up."""
+        view = self._live_content_view
+        if view is None:
+            return
+        sb = view.verticalScrollBar()
+        follow = sb.value() >= sb.maximum() - 8
+        view.setHtml(self._wrap_live_html(self._live_content_buf))
+        if follow:
+            sb = view.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _wrap_live_html(self, body: str) -> str:
+        """Style the streamed fragment buffer with the reader's theme/CSS."""
+        t = self._get_theme()
+        # Real-time line-break handling: HTML fragments rely on their own
+        # block tags; plain-text streams need explicit <br> conversion.
+        if not re.search(r"<(p|h[1-6]|div|br|li|ul|ol|table|blockquote)\b",
+                         body, re.I):
+            body = body.replace("\n", "<br>")
+        family = self._font_family
+        if not family or family == "Embedded CSS":
+            family = "Georgia, 'Noto Serif', serif"
+        else:
+            family = f"'{family}'"
+        return (
+            "<html><head><style>"
+            f"body {{ background: {t['bg']}; color: {t['fg']};"
+            f" font-family: {family}; font-size: {self._font_size}pt;"
+            f" line-height: {self._line_spacing}; padding: 24px 36px; }}"
+            f" h1, h2, h3, h4 {{ color: {t.get('heading', t['fg'])}; }}"
+            f" p {{ margin: 0 0 0.9em 0; }}"
+            "</style></head><body>"
+            f"{body}"
+            "</body></html>"
+        )
+
+    def _stop_live_translation(self):
+        gui = self._live_gui_ref
+        if gui is not None and hasattr(gui, "stop_translation"):
+            try:
+                gui.stop_translation()
+                if self._live_status_label is not None:
+                    self._live_status_label.setText("⏹ Stopping…")
+            except Exception:
+                logger.debug("Live stop failed: %s", traceback.format_exc())
+
+    def _poll_live_done(self):
+        """Watch the main GUI's worker; when it ends, wrap the live run up."""
+        if not self._live_translate_active:
+            return
+        gui = self._live_gui_ref
+        thread = getattr(gui, "translation_thread", None) if gui else None
+        if thread is not None and thread.is_alive():
+            return
+        self._finish_live_translation()
+
+    def _finish_live_translation(self):
+        if not self._live_translate_active:
+            return
+        self._live_translate_active = False
+        if self._live_poll_timer is not None:
+            self._live_poll_timer.stop()
+        # Final drain so trailing chunks aren't lost, then stop ticking.
+        try:
+            self._drain_live_queue()
+        except Exception:
+            pass
+        if self._live_drain_timer is not None:
+            self._live_drain_timer.stop()
+        self._teardown_live_listener()
+        self._translate_btn.setText("\U0001f310  Translate")
+        if self._live_status_label is not None:
+            self._live_status_label.setText(
+                "✅ Translation finished — loading the translated chapter…")
+        # Let the overlay auto-refresh pick the fresh response file up, then
+        # swap back to the normal reader page at the same chapter.
+        try:
+            self._on_overlay_refresh_tick()
+        except Exception:
+            pass
+
+        def _back_to_reader():
+            if self._closing or self._live_translate_active:
+                return
+            target = self._live_target_row
+            if isinstance(target, int) and 0 <= target < len(self._chapters):
+                self._current_row = target
+            if self._reader_stack.currentWidget() is self._live_panel:
+                self._render_current()
+
+        QTimer.singleShot(2200, _back_to_reader)
+
+    def _teardown_live_listener(self):
+        gui = self._live_gui_ref
+        listener = self._live_listener
+        if gui is not None and listener is not None:
+            try:
+                gui.remove_log_listener(listener)
+            except Exception:
+                pass
+        self._live_listener = None
+        self._live_gui_ref = None
+
     def closeEvent(self, event):
         """Persist reader settings back into config and flush to disk.
 
@@ -19385,11 +20109,20 @@ class EpubReaderDialog(QDialog):
         self._closing = True
         # Stop timers and browser loads before worker shutdown so no
         # queued callbacks can restart work while the dialog is closing.
+        # Live-translation cleanup: detach from the main GUI's log stream
+        # (the translation itself keeps running in the main window).
+        try:
+            self._live_translate_active = False
+            self._teardown_live_listener()
+        except Exception:
+            pass
         for timer_name in (
             "_spin_timer",
             "_overlay_refresh_timer",
             "_search_debounce_timer",
             "_search_render_timer",
+            "_live_drain_timer",
+            "_live_poll_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:

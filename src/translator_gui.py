@@ -15252,6 +15252,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self._current_auto_glossary_mode()
 
+                if getattr(self, '_single_chapter_filter', None) and auto_glossary_mode in ('balanced', 'full'):
+                    self.append_log("🎯 Single-chapter mode: skipping auto glossary extraction (jumping straight to translation)")
+                    auto_glossary_mode = 'off'
+
                 current_output_mode = self._active_translation_output_mode()
                 if current_output_mode == 'refinement' and auto_glossary_mode in ('balanced', 'full'):
                     self.append_log("✨ Skipping auto glossary extraction for refinement mode")
@@ -15431,7 +15435,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 for var in env_vars:
                     if var in os.environ:
                         del os.environ[var]
-                
+
+                # Single-chapter mode is strictly per-run — never leak the
+                # filter (or forced streaming) into the next regular run.
+                self._single_chapter_filter = None
+                self._force_stream_all = False
+                os.environ.pop('SINGLE_CHAPTER_FILTER', None)
+
                 self._clear_translation_run_overrides()
                 self.translation_thread = None
                 # Emit signal to update button (thread-safe)
@@ -15646,28 +15656,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Check stop after verification
             if self.stop_requested:
                 return False
-            # Sync streaming toggle to env for all backends
+            # Sync streaming toggle to env for all backends.
+            # ``_force_stream_all`` (set by the EPUB Reader's live "Translate"
+            # action) overrides every streaming toggle to ON for this run,
+            # regardless of the user's persisted settings.
+            _force_stream = bool(getattr(self, '_force_stream_all', False))
             try:
-                stream_on = bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
+                stream_on = _force_stream or bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
                 os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
                 self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
             except Exception:
                 pass
             try:
-                allow_batch_logs = bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
+                allow_batch_logs = _force_stream or bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
             except Exception:
                 pass
             try:
-                allow_authgpt_logs = bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
+                allow_authgpt_logs = _force_stream or bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
                 os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
             except Exception:
                 pass
             try:
-                stream_thinking = bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
+                stream_thinking = _force_stream or bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
+            if _force_stream:
+                os.environ['LOG_STREAM_CHUNKS'] = '1'
+                self.append_log("🛰️ Live view: all streaming toggles forced ON for this run")
 
             # SET GLOSSARY IN ENVIRONMENT
             # If a per-input mapping exists, we set MANUAL_GLOSSARY per file inside the loop.
@@ -17670,9 +17687,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
                         self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
                 
+                # ── Single-chapter mode (Library / Reader "Translate") ──
+                # Only the targeted HTML file is extracted from the EPUB and
+                # the run jumps straight to the translation phase. The filter
+                # is consumed by Chapter_Extractor._extract_chapters_universal.
+                _sc_filter = getattr(self, '_single_chapter_filter', None)
+                if _sc_filter:
+                    os.environ['SINGLE_CHAPTER_FILTER'] = str(_sc_filter)
+                    # Targeted extraction is tiny — run it in-process.
+                    os.environ['USE_ASYNC_CHAPTER_EXTRACTION'] = '0'
+                    # A leftover chapter range could exclude the target file.
+                    os.environ.pop('CHAPTER_RANGE', None)
+                    # Re-assert forced streaming AFTER large_env.update_env —
+                    # _get_environment_variables exports the user's toggle
+                    # values, which would otherwise override the live view.
+                    if getattr(self, '_force_stream_all', False):
+                        os.environ['ENABLE_STREAMING'] = '1'
+                        os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1'
+                        os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1'
+                        os.environ['STREAM_THINKING_LOGS'] = '1'
+                        os.environ['LOG_STREAM_CHUNKS'] = '1'
+                    self.append_log(
+                        f"🎯 Single-chapter mode: {os.path.basename(str(_sc_filter))} "
+                        "(skipping full extraction, jumping to translation)")
+                else:
+                    os.environ.pop('SINGLE_CHAPTER_FILTER', None)
+
                 # Set sys.argv to match what TransateKRtoEN.py expects
                 sys.argv = ['TransateKRtoEN.py', file_path]
-                
+
                 if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                     mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
                     self.append_log(f"🚀 Starting {mode_label} multipass refinement...")
@@ -22565,10 +22608,42 @@ Important rules:
         except Exception as e:
             pass  # Silent failure
     
+    def add_log_listener(self, callback):
+        """Register an external log listener (e.g. the EPUB Reader's live
+        streaming view). The callback receives every raw log line BEFORE any
+        GUI-side suppression/filtering, and may be invoked from worker
+        threads — listeners must be thread-safe."""
+        try:
+            listeners = getattr(self, '_extra_log_listeners', None)
+            if listeners is None:
+                listeners = []
+                self._extra_log_listeners = listeners
+            if callback not in listeners:
+                listeners.append(callback)
+        except Exception:
+            pass
+
+    def remove_log_listener(self, callback):
+        """Unregister a listener added via :meth:`add_log_listener`."""
+        try:
+            listeners = getattr(self, '_extra_log_listeners', None)
+            if listeners and callback in listeners:
+                listeners.remove(callback)
+        except Exception:
+            pass
+
     def append_log(self, message):
        """Append message to log with safety checks (fallback to print if GUI is gone).
        Also suppresses repeated stop/cancel notices once a stop has been requested.
        """
+       # Broadcast the raw line to any external listeners (EPUB Reader live
+       # streaming view, etc.) before GUI-side filtering. Exceptions in a
+       # listener must never break the main log path.
+       for _listener in list(getattr(self, '_extra_log_listeners', []) or []):
+           try:
+               _listener(message)
+           except Exception:
+               pass
        def _append():
            try:
                # Suppress expected graceful-stop pre-send cancellations (avoid noisy per-chapter lines)
@@ -24036,6 +24111,71 @@ Important rules:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open Library:\n{e}")
             return None
+
+    def start_single_chapter_translation(self, epub_path: str, chapter_filename: str,
+                                         force_stream_all: bool = False) -> bool:
+        """Translate exactly ONE chapter (HTML file) of *epub_path*.
+
+        Used by the Library's Book Details "Translate" context menu and the
+        EPUB Reader's Translate button. Mimics clicking Run, but the
+        extraction phase only pulls the targeted HTML file out of the EPUB
+        (numbering preserved) and the run jumps straight to the translation
+        phase \u2014 full extraction and auto-glossary are skipped.
+
+        When *force_stream_all* is True, every streaming toggle
+        (ENABLE_STREAMING / STREAM_THINKING_LOGS / ALLOW_BATCH_STREAM_LOGS /
+        ALLOW_AUTHGPT_BATCH_STREAM_LOGS / LOG_STREAM_CHUNKS) is forced ON for
+        this run regardless of its persisted state \u2014 the EPUB Reader's live
+        view depends on the streamed chunks appearing in the log.
+        """
+        try:
+            if not epub_path or not os.path.isfile(epub_path):
+                self.append_log(f"\u274c Single-chapter translate: source file not found: {epub_path}")
+                return False
+            if not chapter_filename:
+                self.append_log("\u274c Single-chapter translate: no chapter filename given")
+                return False
+            if (self.translation_thread and self.translation_thread.is_alive()) or \
+               (hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()):
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Process Running",
+                                    "A translation or glossary process is already running.\n"
+                                    "Please wait for it to finish (or stop it) first.")
+                return False
+
+            epub_path = os.path.abspath(epub_path)
+            # Mirror the "Load for translation" effect so the main window
+            # reflects what's being translated.
+            try:
+                if hasattr(self, 'entry_epub') and self.entry_epub is not None:
+                    self.entry_epub.setText(epub_path)
+            except Exception:
+                pass
+            self.selected_files = [epub_path]
+            try:
+                self.current_file_index = 0
+            except Exception:
+                pass
+
+            self._single_chapter_filter = os.path.basename(str(chapter_filename))
+            self._force_stream_all = bool(force_stream_all)
+
+            self.append_log(
+                f"\ud83c\udfaf Queued single-chapter translation: {self._single_chapter_filter} "
+                f"({os.path.basename(epub_path)})")
+            self.run_translation_thread()
+            # run_translation_thread can bail out early on validation \u2014
+            # confirm a worker actually started before reporting success.
+            started = bool(self.translation_thread and self.translation_thread.is_alive())
+            if not started:
+                self._single_chapter_filter = None
+                self._force_stream_all = False
+            return started
+        except Exception as e:
+            self.append_log(f"\u274c Failed to start single-chapter translation: {e}")
+            self._single_chapter_filter = None
+            self._force_stream_all = False
+            return False
 
     def _handle_library_import_epub(self, path: str):
         """Library \u2192 Import EPUB: set the picked file as the current input.
