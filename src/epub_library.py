@@ -14646,9 +14646,9 @@ class BookDetailsDialog(QDialog):
             QMessageBox.warning(self, "Compile EPUB",
                                 f"Could not start the EPUB converter:\n{exc}")
             return
-        # Give the worker a beat to spin up, then animate the button while
-        # the converter is running (no-op if a guard rejected the start).
-        QTimer.singleShot(300, self._begin_compile_animation_if_running)
+        # Animate immediately for instant click feedback; the poll ends the
+        # animation quickly if a guard rejected the start (worker never ran).
+        self._begin_compile_animation()
 
     def _compile_epub_running(self) -> bool:
         """True while the main GUI's EPUB converter worker is active."""
@@ -14669,35 +14669,88 @@ class BookDetailsDialog(QDialog):
             pass
         return False
 
-    def _begin_compile_animation_if_running(self):
+    def _compile_spin_frames(self) -> list:
+        """Build (and cache) pre-rendered high-DPI spinner frames.
+
+        Frames are rendered once from the highest-resolution icon source
+        available (PNG preferred over .ico) at the button's device pixel
+        ratio, so the spinning icon stays crisp on scaled displays and each
+        tick is just a cached ``setIcon`` — no per-frame painting.
+        """
+        dpr = 1.0
+        try:
+            dpr = float(self.devicePixelRatioF() or 1.0)
+        except Exception:
+            pass
+        cached = getattr(self, "_compile_spin_cache", None)
+        if cached is not None and cached.get("dpr") == dpr:
+            return cached["frames"]
+
+        # Pick the sharpest source: the PNG sibling of the resolved icon
+        # first (large raster), then whatever _find_halgakos_icon returned.
+        src = None
+        icon_path = _find_halgakos_icon() or ""
+        candidates = []
+        if icon_path:
+            candidates.append(os.path.splitext(icon_path)[0] + ".png")
+            candidates.append(icon_path)
+        for cand in candidates:
+            if cand and os.path.isfile(cand):
+                pm = QPixmap(cand)
+                if not pm.isNull():
+                    src = pm
+                    break
+        frames: list = []
+        if src is not None:
+            # Downscale the (potentially huge) source once to ~4x target so
+            # per-frame rotation+scale stays cheap but keeps detail.
+            work = src
+            if work.width() > 96 or work.height() > 96:
+                work = work.scaled(96, 96, Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+            logical = 18.0
+            size_px = max(1, int(round(logical * dpr)))
+            for step in range(15):  # 24° per frame
+                angle = step * 24
+                frame = QPixmap(size_px, size_px)
+                frame.setDevicePixelRatio(dpr)
+                frame.fill(Qt.transparent)
+                painter = QPainter(frame)
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                half = logical / 2.0
+                painter.translate(half, half)
+                painter.rotate(angle)
+                painter.drawPixmap(
+                    QRectF(-half, -half, logical, logical),
+                    work, QRectF(work.rect()))
+                painter.end()
+                frames.append(QIcon(frame))
+        self._compile_spin_cache = {"dpr": dpr, "frames": frames}
+        return frames
+
+    def _begin_compile_animation(self):
         if getattr(self, "_compile_anim_active", False):
-            return
-        if not self._compile_epub_running():
             return
         btn = getattr(self, "_compile_epub_btn", None)
         if btn is None:
             return
         self._compile_anim_active = True
-        self._compile_anim_angle = 0
+        self._compile_anim_step = 0
+        self._compile_anim_started = time.monotonic()
         self._compile_btn_text = btn.text()
         btn.setEnabled(False)
         btn.setText("  Compiling…")
-        # Spinner frames are rendered from the Halgakos icon; falls back to
-        # animated dots when the icon can't be loaded.
-        if not hasattr(self, "_compile_spin_pm"):
-            pm = QPixmap(_find_halgakos_icon() or "")
-            self._compile_spin_pm = (
-                pm.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                if not pm.isNull() else None)
         if getattr(self, "_compile_anim_timer", None) is None:
             self._compile_anim_timer = QTimer(self)
-            self._compile_anim_timer.setInterval(80)
+            self._compile_anim_timer.setInterval(70)
             self._compile_anim_timer.timeout.connect(
                 lambda: self._compile_anim_tick())
             self._compile_poll_timer = QTimer(self)
-            self._compile_poll_timer.setInterval(400)
+            self._compile_poll_timer.setInterval(150)
             self._compile_poll_timer.timeout.connect(
                 lambda: self._compile_anim_poll())
+        self._compile_anim_tick()  # first frame immediately, no 70ms wait
         self._compile_anim_timer.start()
         self._compile_poll_timer.start()
 
@@ -14705,30 +14758,22 @@ class BookDetailsDialog(QDialog):
         btn = getattr(self, "_compile_epub_btn", None)
         if btn is None:
             return
-        self._compile_anim_angle = (self._compile_anim_angle + 24) % 360
-        base = self._compile_spin_pm
-        if base is not None:
-            # Rotate inside a fixed-size frame so the icon doesn't jitter
-            # as the rotated bounding box grows/shrinks.
-            frame = QPixmap(base.size())
-            frame.fill(Qt.transparent)
-            painter = QPainter(frame)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            cx = base.width() / 2.0
-            cy = base.height() / 2.0
-            painter.translate(cx, cy)
-            painter.rotate(self._compile_anim_angle)
-            painter.translate(-cx, -cy)
-            painter.drawPixmap(0, 0, base)
-            painter.end()
-            btn.setIcon(QIcon(frame))
+        step = getattr(self, "_compile_anim_step", 0)
+        self._compile_anim_step = step + 1
+        frames = self._compile_spin_frames()
+        if frames:
+            btn.setIcon(frames[step % len(frames)])
             btn.setIconSize(QSize(18, 18))
         else:
-            dots = (self._compile_anim_angle // 24) % 4
+            dots = step % 4
             btn.setText("\U0001f4d8  Compiling" + "." * dots + " " * (3 - dots))
 
     def _compile_anim_poll(self):
         if self._compile_epub_running():
+            return
+        # Grace period: the executor needs a moment to surface the worker —
+        # don't kill the animation before it ever registers as running.
+        if (time.monotonic() - getattr(self, "_compile_anim_started", 0)) < 1.2:
             return
         self._end_compile_animation()
 
