@@ -5,7 +5,14 @@ import tiktoken
 
 class ChapterSplitter:
     """Split large chapters into smaller chunks while preserving structure"""
-    
+
+    # Generic wrapper tags the splitter may descend into when one of them
+    # alone exceeds the chunk budget. Scraper EPUBs often nest the ENTIRE
+    # chapter inside a single container (e.g. <div id="linewrap"> holding
+    # every <p class="line">), hiding the real paragraph boundaries from
+    # the top-level element scan.
+    _CONTAINER_TAGS = ('div', 'section', 'article', 'main')
+
     def __init__(self, model_name="gpt-3.5-turbo", target_tokens=80000, compression_factor=1.0):
         """
         Initialize splitter with token counter
@@ -88,6 +95,23 @@ class ChapterSplitter:
             # Check if we have actual HTML tags (not just text)
             # Count non-empty elements
             non_empty_elements = [elem for elem in elements if not (isinstance(elem, str) and elem.strip() == '')]
+
+            # Boundary rescue #1: when the body holds nothing but a single
+            # generic wrapper, unwrap it (repeatedly) so the splitter sees
+            # the real paragraphs instead of falling through to line-based
+            # splitting of raw HTML source.
+            _guard = 0
+            while (_guard < 8 and len(non_empty_elements) == 1
+                   and getattr(non_empty_elements[0], 'name', None)
+                   in self._CONTAINER_TAGS):
+                inner = [el for el in non_empty_elements[0].children
+                         if not (isinstance(el, str) and el.strip() == '')]
+                if not inner:
+                    break
+                elements = inner
+                non_empty_elements = inner
+                _guard += 1
+
             has_html_tags = any(hasattr(elem, 'name') for elem in non_empty_elements)
         else:
             # For plain text files, set these to trigger line-based mode
@@ -216,16 +240,39 @@ class ChapterSplitter:
             total_elements = sum(1 for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
             print(f"🏷️ Total HTML elements in file: {total_elements:,}")
         
-        # Pre-compute token counts for non-empty elements
+        # Pre-compute token counts for non-empty elements.
+        # Boundary rescue #2: a container that ALONE exceeds the chunk
+        # budget is flattened into its children so the paragraphs inside it
+        # become the split units. Without this, a scraper-style
+        # <h1> + <div id="linewrap">…whole chapter…</div> chapter split into
+        # a ~29-char chunk 1 (the header) and one giant unsplittable chunk 2
+        # that blew past the output limit.
         elem_html_list = []
         elem_tokens_list = []
-        for element in elements:
-            if isinstance(element, str) and element.strip() == '':
-                continue
-            element_html = str(element)
-            tokens = self.count_tokens(element_html)
-            elem_html_list.append(element_html)
+
+        def _collect_element(element, depth=0):
+            if isinstance(element, str):
+                if element.strip() == '':
+                    return
+                html = str(element)
+                elem_html_list.append(html)
+                elem_tokens_list.append(self.count_tokens(html))
+                return
+            html = str(element)
+            tokens = self.count_tokens(html)
+            if (tokens > effective_max_tokens and depth < 8
+                    and getattr(element, 'name', None) in self._CONTAINER_TAGS):
+                children = [ch for ch in element.children
+                            if not (isinstance(ch, str) and ch.strip() == '')]
+                if children:
+                    for ch in children:
+                        _collect_element(ch, depth + 1)
+                    return
+            elem_html_list.append(html)
             elem_tokens_list.append(tokens)
+
+        for element in elements:
+            _collect_element(element)
         
         if not elem_html_list:
             return [(chapter_html, 1, 1)]
@@ -248,13 +295,29 @@ class ChapterSplitter:
         for i, element_html in enumerate(elem_html_list):
             element_tokens = elem_tokens_list[i]
             
-            # Oversized single element: make it a standalone chunk
+            # Oversized single element (e.g. one giant <p>): sub-split it by
+            # sentences instead of emitting a chunk that blows past the
+            # output limit and silently truncates.
             if element_tokens > effective_max_tokens:
                 if current_chunk_elements:
                     chunks.append(self._create_chunk_html(current_chunk_elements))
                     current_chunk_elements = []
                     current_chunk_tokens = 0
-                chunks.append(element_html)
+                sub_chunks = []
+                try:
+                    parsed = BeautifulSoup(element_html, 'html.parser').find(True)
+                    if parsed is not None:
+                        sub_chunks = [s for s in self._split_large_element(
+                            parsed, effective_max_tokens) if s and s.strip()]
+                    else:
+                        sub_chunks = self._split_text_into_chunks(
+                            element_html, effective_max_tokens)
+                except Exception:
+                    sub_chunks = []
+                if len(sub_chunks) > 1:
+                    chunks.extend(sub_chunks)
+                else:
+                    chunks.append(element_html)
                 continue
             
             current_chunk_elements.append(element_html)
@@ -371,66 +434,101 @@ class ChapterSplitter:
         total_chunks = len(chunks)
         return [(chunk, i + 1, total_chunks) for i, chunk in enumerate(chunks)]
     
+    def _split_text_into_chunks(self, text, max_tokens):
+        """Sentence-pack plain text into chunks under ~80% of *max_tokens*.
+
+        Sentence boundaries cover western AND CJK terminators (CJK text
+        usually has no space after punctuation, so the split is zero-width).
+        A single "sentence" that alone exceeds the budget is hard-sliced by
+        character midpoint until it fits — better a mid-sentence cut than a
+        chunk that overflows the output limit and truncates.
+        """
+        budget = max(1, int(max_tokens * 0.8))
+        parts = [s for s in re.split(
+            r'(?<=[.!?。！？…])\s*', text) if s]
+        if not parts:
+            parts = [text]
+
+        def _slice(seg):
+            if self.count_tokens(seg) <= budget or len(seg) < 2:
+                return [seg]
+            mid = len(seg) // 2
+            return _slice(seg[:mid]) + _slice(seg[mid:])
+
+        sized = []
+        for part in parts:
+            sized.extend(_slice(part))
+
+        chunks = []
+        current = []
+        current_tokens = 0
+        for seg in sized:
+            seg_tokens = self.count_tokens(seg)
+            if current and current_tokens + seg_tokens > budget:
+                chunks.append(' '.join(current))
+                current = [seg]
+                current_tokens = seg_tokens
+            else:
+                current.append(seg)
+                current_tokens += seg_tokens
+        if current:
+            chunks.append(' '.join(current))
+        return chunks
+
     def _split_large_element(self, element, max_tokens):
         """Split a single large element (like a long paragraph)"""
         chunks = []
-        
+
         if element.name == 'p' or not hasattr(element, 'children'):
             # For paragraphs or text elements, split by sentences
             text = element.get_text()
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            
-            current_chunk = []
-            current_tokens = 0
-            
-            for sentence in sentences:
-                sentence_tokens = self.count_tokens(sentence)
-                
-                if current_tokens + sentence_tokens > max_tokens * 0.8 and current_chunk:
-                    # Create paragraph with current sentences
-                    chunk_text = ' '.join(current_chunk)
-                    chunks.append(f"<p>{chunk_text}</p>")
-                    current_chunk = [sentence]
-                    current_tokens = sentence_tokens
-                else:
-                    current_chunk.append(sentence)
-                    current_tokens += sentence_tokens
-            
-            if current_chunk:
-                chunk_text = ' '.join(current_chunk)
+            for chunk_text in self._split_text_into_chunks(text, max_tokens):
                 chunks.append(f"<p>{chunk_text}</p>")
-                
+
         else:
             # For other elements, try to split by children
             children = list(element.children)
             current_chunk = []
             current_tokens = 0
-            
-            for child in children:
-                child_html = str(child)
-                child_tokens = self.count_tokens(child_html)
-                
-                if current_tokens + child_tokens > max_tokens * 0.8 and current_chunk:
-                    # Wrap in parent element type
-                    wrapper = BeautifulSoup(f"<{element.name}></{element.name}>", 'html.parser')
-                    wrapper_elem = wrapper.find(element.name)
-                    for item in current_chunk:
-                        wrapper_elem.append(BeautifulSoup(item, 'html.parser'))
-                    chunks.append(str(wrapper))
-                    
-                    current_chunk = [child_html]
-                    current_tokens = child_tokens
-                else:
-                    current_chunk.append(child_html)
-                    current_tokens += child_tokens
-            
-            if current_chunk:
+
+            def _flush():
+                nonlocal current_chunk, current_tokens
+                if not current_chunk:
+                    return
                 wrapper = BeautifulSoup(f"<{element.name}></{element.name}>", 'html.parser')
                 wrapper_elem = wrapper.find(element.name)
                 for item in current_chunk:
                     wrapper_elem.append(BeautifulSoup(item, 'html.parser'))
                 chunks.append(str(wrapper))
-        
+                current_chunk = []
+                current_tokens = 0
+
+            for child in children:
+                child_html = str(child)
+                child_tokens = self.count_tokens(child_html)
+
+                # A child that alone exceeds the budget gets recursively
+                # split instead of being packed into an oversized group.
+                if child_tokens > max_tokens * 0.8:
+                    _flush()
+                    if getattr(child, 'name', None):
+                        chunks.extend(self._split_large_element(child, max_tokens))
+                    else:
+                        chunks.extend(
+                            f"<p>{t}</p>" for t in
+                            self._split_text_into_chunks(str(child), max_tokens))
+                    continue
+
+                if current_tokens + child_tokens > max_tokens * 0.8 and current_chunk:
+                    _flush()
+                    current_chunk = [child_html]
+                    current_tokens = child_tokens
+                else:
+                    current_chunk.append(child_html)
+                    current_tokens += child_tokens
+
+            _flush()
+
         return chunks
     
     def _create_chunk_html(self, elements):
