@@ -2322,9 +2322,27 @@ class FileUtilities:
 # =====================================================
 # UNIFIED PROGRESS MANAGER
 # =====================================================
+def _normalize_output_filename_stem(fname):
+    """Normalize a filename for output matching:
+    - drop leading response_ prefix
+    - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
+    - lowercase for case-insensitive matching on Windows
+    """
+    if not fname:
+        return ""
+    base = os.path.basename(fname)
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    while True:
+        base, ext = os.path.splitext(base)
+        if not ext:
+            break
+    return base.lower()
+
+
 class ProgressManager:
     """Unified progress management"""
-    
+
     def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
@@ -2591,10 +2609,61 @@ class ProgressManager:
         # No existing entry - use simple key for new entries
         return spine_key or chapter_key
     
+    def begin_deferred_save(self):
+        """Coalesce every save() into one write until end_deferred_save().
+
+        Used by the batch pre-scan ("Setting chapter numbers..."), where
+        per-chapter restores/auto-discoveries used to rewrite the whole
+        progress JSON hundreds of times — O(chapters x file size) disk
+        I/O for zero benefit.
+        """
+        with self._save_lock:
+            self._defer_saves = True
+            self._deferred_dirty = False
+
+    def end_deferred_save(self):
+        """Flush a deferred save (if anything changed) and resume normal saves."""
+        with self._save_lock:
+            was_dirty = getattr(self, "_deferred_dirty", False)
+            self._defer_saves = False
+            self._deferred_dirty = False
+        if was_dirty:
+            self.save()
+
+    def _cached_output_listing(self, output_dir):
+        """Directory-mtime-validated cache of ``os.listdir(output_dir)``.
+
+        Returns ``(names, norm_map)`` where ``norm_map`` maps each file's
+        normalized stem (see :func:`_normalize_output_filename_stem`) to the
+        first matching on-disk name (directory order, mirroring the old
+        first-match listdir loops). The cache invalidates automatically when
+        the directory's mtime changes (files added/removed), so repeated
+        per-chapter fallback scans stop being O(chapters x dir size).
+        """
+        try:
+            mtime = os.stat(output_dir).st_mtime_ns
+        except (OSError, TypeError):
+            return [], {}
+        cache = getattr(self, "_listing_cache", None)
+        if cache and cache[0] == output_dir and cache[1] == mtime:
+            return cache[2], cache[3]
+        try:
+            names = os.listdir(output_dir)
+        except OSError:
+            names = []
+        norm_map = {}
+        for n in names:
+            norm_map.setdefault(_normalize_output_filename_stem(n), n)
+        self._listing_cache = (output_dir, mtime, names, norm_map)
+        return names, norm_map
+
     def save(self):
         """Save progress to file with retry logic for Windows file locks"""
         temp_file = None
         with self._save_lock:
+            if getattr(self, "_defer_saves", False):
+                self._deferred_dirty = True
+                return
             try:
                 progress_dir = os.path.dirname(self.PROGRESS_FILE)
                 if progress_dir:
@@ -3496,17 +3565,7 @@ class ProgressManager:
             - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
             - lowercase for case-insensitive matching on Windows
             """
-            if not fname:
-                return ""
-            base = os.path.basename(fname)
-            if base.startswith("response_"):
-                base = base[len("response_"):]
-            # Strip all extensions, not just the last one
-            while True:
-                base, ext = os.path.splitext(base)
-                if not ext:
-                    break
-            return base.lower()
+            return _normalize_output_filename_stem(fname)
 
         def _existing_output_match(output_file=None, entry=None):
             """Find an existing translated output while tolerating response_/extension toggles."""
@@ -3542,9 +3601,10 @@ class ProgressManager:
             if not expected_norms:
                 return None
             try:
-                for fname in os.listdir(output_dir):
-                    path = os.path.join(output_dir, fname)
-                    if os.path.isfile(path) and _norm(fname) in expected_norms:
+                _names, norm_map = self._cached_output_listing(output_dir)
+                for en in expected_norms:
+                    fname = norm_map.get(en)
+                    if fname and os.path.isfile(os.path.join(output_dir, fname)):
                         return fname
             except Exception:
                 return None
@@ -3614,14 +3674,15 @@ class ProgressManager:
                     # Fallback: look for any file with same base name (ignore extensions)
                     expected_norm = _norm(output_file)
                     try:
-                        for f in os.listdir(output_dir):
-                            if _norm(f) == expected_norm:
-                                alt_path = os.path.join(output_dir, f)
-                                if os.path.exists(alt_path):
-                                    # Update stored filename to the discovered one
-                                    self.prog["chapters"][chapter_key]["output_file"] = f
-                                    self.save()
-                                    return False, f"Chapter {actual_num} already translated: {f}", f
+                        _names, norm_map = self._cached_output_listing(output_dir)
+                        f = norm_map.get(expected_norm)
+                        if f:
+                            alt_path = os.path.join(output_dir, f)
+                            if os.path.exists(alt_path):
+                                # Update stored filename to the discovered one
+                                self.prog["chapters"][chapter_key]["output_file"] = f
+                                self.save()
+                                return False, f"Chapter {actual_num} already translated: {f}", f
                     except Exception:
                         pass
 
@@ -20903,6 +20964,11 @@ def main(log_callback=None, stop_callback=None):
         # FIX: First pass to set actual chapter numbers for ALL chapters
         # This ensures batch mode has the same chapter numbering as non-batch mode
         print("📊 Setting chapter numbers...")
+        # Coalesce the scan's per-chapter progress saves (restores,
+        # auto-discoveries, empty/image-only completions) into ONE write —
+        # rewriting the whole progress JSON per chapter made this phase
+        # O(chapters x file size) and was the main reason it crawled.
+        progress_manager.begin_deferred_save()
         seq_counter = 0
         zero_phase = True
         for idx, c in enumerate(chapters):
@@ -21096,7 +21162,10 @@ def main(log_callback=None, stop_callback=None):
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
-        
+
+        # Flush the one coalesced progress write for the whole scan.
+        progress_manager.end_deferred_save()
+
         # Print skip summary for batch mode
         if hasattr(config, '_batch_skipped_chapters') and config._batch_skipped_chapters:
             skipped = config._batch_skipped_chapters
