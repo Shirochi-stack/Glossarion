@@ -14,7 +14,23 @@ import os
 import re
 import json
 import csv
+import time
+import threading
 from io import StringIO
+
+# Serialize glossary compression across translation worker threads.
+# Compression is pure-Python (terms x chapter-text substring scans); when
+# several chunk workers run it concurrently they monopolize the GIL and the
+# GUI thread stalls for seconds (verified via the freeze watchdog in frozen
+# builds). One compression at a time keeps the GUI responsive and costs
+# almost nothing overall since API latency dominates per-chunk time.
+_COMPRESS_GIL_LOCK = threading.Lock()
+
+
+def _gil_yield(counter, every=64):
+    """Briefly release the GIL every `every` iterations of a hot loop."""
+    if counter % every == 0:
+        time.sleep(0)
 
 try:
     from extract_glossary_from_epub import get_custom_entry_types as _get_custom_entry_types
@@ -359,19 +375,21 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto', glo
         else:
             return glossary_content
     
-    if glossary_format == 'csv':
-        return _compress_csv_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
-    elif glossary_format == 'json':
-        return _compress_json_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
-    elif glossary_format == 'text':
-        if _should_use_raw_name_fallback():
-            print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
-            return _compress_fallback_text(glossary_content, source_text)
+    # One compression at a time — see _COMPRESS_GIL_LOCK note above.
+    with _COMPRESS_GIL_LOCK:
+        if glossary_format == 'csv':
+            return _compress_csv_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+        elif glossary_format == 'json':
+            return _compress_json_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
+        elif glossary_format == 'text':
+            if _should_use_raw_name_fallback():
+                print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
+                return _compress_fallback_text(glossary_content, source_text)
+            else:
+                # Auto-generated glossary — skip raw-name scan, return as-is
+                return glossary_content
         else:
-            # Auto-generated glossary — skip raw-name scan, return as-is
             return glossary_content
-    else:
-        return glossary_content
 
 
 def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter_ref=None):
@@ -500,9 +518,10 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
             if scan_section_has_gender or _has_explicit_gender_value(gender):
                 _remember_available_gender(available_genders, raw_name, gender)
     
-    for line in lines:
+    for _yield_idx, line in enumerate(lines):
+        _gil_yield(_yield_idx)
         stripped = line.strip()
-        
+
         # Keep glossary header (e.g. "Glossary Columns: ...")
         if stripped.lower().startswith('glossary:') or stripped.lower().startswith('glossary columns:'):
             filtered_lines.append(line)
@@ -581,7 +600,8 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
             pass
     
     # Process each CSV row
-    for line in data_lines:
+    for _yield_idx, line in enumerate(data_lines):
+        _gil_yield(_yield_idx)
         if not line.strip():
             continue
         
@@ -672,7 +692,8 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         # Handle dict with 'entries' key
         if 'entries' in json_data:
             filtered_entries = {}
-            for key, value in json_data['entries'].items():
+            for _yield_idx, (key, value) in enumerate(json_data['entries'].items()):
+                _gil_yield(_yield_idx)
                 gender = value.get("gender", "") if isinstance(value, dict) else ""
                 is_char = _is_char_entry(value) or _has_explicit_gender_value(gender)
                 raw_name = value.get('raw_name') if isinstance(value, dict) else key
@@ -687,7 +708,8 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         else:
             # Simple dict format
             filtered_dict = {}
-            for key, value in json_data.items():
+            for _yield_idx, (key, value) in enumerate(json_data.items()):
+                _gil_yield(_yield_idx)
                 if key == 'metadata':
                     filtered_dict[key] = value
                 else:
@@ -703,7 +725,8 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
     elif isinstance(json_data, list):
         # List of entry objects
         filtered_list = []
-        for entry in json_data:
+        for _yield_idx, entry in enumerate(json_data):
+            _gil_yield(_yield_idx)
             if isinstance(entry, dict):
                 # Check various possible keys for the raw term
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
@@ -862,7 +885,8 @@ def _compress_fallback_text(content, source_text):
     # character-type detection.
     _gender_types = _get_gender_types()
     current_section_has_gender = False
-    for group in groups:
+    for _yield_idx, group in enumerate(groups):
+        _gil_yield(_yield_idx)
         if group['type'] == 'header':
             header_text = lines[group['line_indices'][0]].strip().upper()
             current_section_has_gender = any(
