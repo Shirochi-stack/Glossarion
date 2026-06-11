@@ -14361,17 +14361,82 @@ class RetranslationMixin:
         if data.get('dialog'):
             setattr(data['dialog'], '_refresh_func', animated_refresh)
 
-        # Auto-refresh every 3 seconds (silent, no animation)
+        # Auto-refresh every 2 seconds (silent, no animation).
+        # Two-phase to keep ALL disk I/O off the GUI thread: a daemon thread
+        # snapshots the progress JSON + directory listings, and the NEXT tick
+        # applies the snapshot to the widgets. During EPUB compile / heavy
+        # translation I/O even a single os.scandir or json read on the GUI
+        # thread stalls for seconds in frozen builds (verified via the freeze
+        # watchdog), so the GUI-thread pass must be pure in-memory work.
         def _silent_refresh():
             try:
                 # Skip if a manual refresh is already in progress
                 if not btn_refresh.isEnabled():
                     return
                 dlg = data.get('dialog')
-                if dlg and dlg.isVisible():
-                    self._refresh_retranslation_data(data)
+                if not (dlg and dlg.isVisible()):
+                    return
+
+                # Phase 2: apply the snapshot prefetched by the previous tick
+                if data.pop('_prefetch_ready', False):
+                    try:
+                        data['_refresh_read_only'] = True
+                        self._refresh_retranslation_data(data)
+                    finally:
+                        data['_refresh_read_only'] = False
+                        # Drop any unconsumed snapshot keys
+                        for _k in ('_prefetched_prog', '_prefetched_prog_path',
+                                   '_prefetched_output_listing', '_prefetched_tts_listing'):
+                            data.pop(_k, None)
+
+                # Phase 1: kick off the next disk snapshot in the background
+                if data.get('_prefetch_running'):
+                    return
+                data['_prefetch_running'] = True
+                _pf_path = data.get('progress_file')
+                _pf_outdir = data.get('output_dir')
+
+                def _bg_prefetch():
+                    prog = None
+                    listing = None
+                    tts_listing = set()
+                    try:
+                        try:
+                            with open(_pf_path, 'r', encoding='utf-8') as f:
+                                loaded = json.load(f)
+                            if isinstance(loaded, dict):
+                                prog = loaded
+                        except Exception:
+                            prog = None
+                        try:
+                            with os.scandir(_pf_outdir) as _scan:
+                                listing = {e.name for e in _scan if e.is_file()}
+                        except Exception:
+                            listing = None
+                        try:
+                            tts_listing = {
+                                name.lower()
+                                for name in os.listdir(os.path.join(_pf_outdir, "text_to_speech"))
+                            }
+                        except OSError:
+                            tts_listing = set()
+                    finally:
+                        if prog is not None:
+                            data['_prefetched_prog'] = prog
+                            data['_prefetched_prog_path'] = _pf_path
+                        if listing is not None:
+                            data['_prefetched_output_listing'] = listing
+                        data['_prefetched_tts_listing'] = tts_listing
+                        data['_prefetch_ready'] = True
+                        data['_prefetch_running'] = False
+
+                threading.Thread(
+                    target=_bg_prefetch,
+                    name="retrans-refresh-prefetch",
+                    daemon=True,
+                ).start()
             except Exception:
-                pass
+                data['_prefetch_running'] = False
 
         _auto_refresh_timer = QTimer(data.get('dialog') or self)
         _auto_refresh_timer.setInterval(2000)
@@ -15154,8 +15219,15 @@ class RetranslationMixin:
                 print("⚠️ Could not save selection state - widget was deleted")
                 return
             
-            # Reload progress file - check if it exists first
-            if not os.path.exists(data['progress_file']):
+            # Reload progress file. Prefer the snapshot prefetched off-thread by
+            # the silent auto-refresh — zero disk I/O on the GUI thread.
+            _prefetched_prog = data.pop('_prefetched_prog', None)
+            _prefetched_prog_path = data.pop('_prefetched_prog_path', None)
+            if _prefetched_prog is not None and _prefetched_prog_path == data.get('progress_file'):
+                data['prog'] = _prefetched_prog
+                data['_last_good_prog'] = copy.deepcopy(data['prog'])
+            # Check if the progress file exists first
+            elif not os.path.exists(data['progress_file']):
                 print(f"⚠️ Progress file not found: {data['progress_file']}")
                 # Recreate a minimal progress file and auto-discover completed files from output_dir
                 prog = {
@@ -15219,8 +15291,10 @@ class RetranslationMixin:
                     return
             
             # The translator may briefly lock/replace the JSON; retry and skip this tick if it stays locked.
-            data['prog'] = _read_progress_json_safely(data['progress_file'])
-            data['_last_good_prog'] = copy.deepcopy(data['prog'])
+            # Skipped when a prefetched snapshot was already applied above.
+            if _prefetched_prog is None or _prefetched_prog_path != data.get('progress_file'):
+                data['prog'] = _read_progress_json_safely(data['progress_file'])
+                data['_last_good_prog'] = copy.deepcopy(data['prog'])
 
             def _progress_has_active_entries(prog):
                 try:
@@ -15238,7 +15312,13 @@ class RetranslationMixin:
             # worker is importing that module right now (first Run Translation
             # click in a frozen build), the import lock would freeze the whole
             # GUI for the entire 10-20s import. Skip cleanup for this tick instead.
-            if not data.get('skip_cleanup', False) and not _progress_has_active_entries(data['prog']):
+            # Read-only ticks (silent auto-refresh on a prefetched snapshot) must
+            # not run disk-scanning cleanup or write the progress file: the
+            # snapshot may be ~2s stale, and cleanup itself stats the output dir.
+            _read_only_tick = bool(data.get('_refresh_read_only'))
+            if (not _read_only_tick
+                    and not data.get('skip_cleanup', False)
+                    and not _progress_has_active_entries(data['prog'])):
                 ProgressManager = _get_progress_manager_nonblocking()
                 if ProgressManager is not None:
                     before_cleanup = copy.deepcopy(data['prog'])
@@ -15252,7 +15332,7 @@ class RetranslationMixin:
                     if data['prog'] != before_cleanup:
                         _write_progress_json_safely(data['progress_file'], data['prog'])
 
-            if self._reconcile_tts_audio_files(data):
+            if self._reconcile_tts_audio_files(data) and not _read_only_tick:
                 _write_progress_json_safely(data['progress_file'], data['prog'])
             
             # Check if we're using OPF-based display or fallback
@@ -15446,13 +15526,16 @@ class RetranslationMixin:
                 composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
 
         # Cache directory listing to avoid thousands of exists calls.
-        # os.scandir gets the file type from the directory entry itself
-        # (no per-file stat on Windows), unlike listdir + os.path.isfile.
-        try:
-            with os.scandir(output_dir) as _scan:
-                existing_files = {e.name for e in _scan if e.is_file()}
-        except Exception:
-            existing_files = set()
+        # Prefer the snapshot prefetched off-thread by the silent auto-refresh;
+        # even a single scandir on the GUI thread can stall for seconds while
+        # EPUB compile saturates the disk (verified via the freeze watchdog).
+        existing_files = data.pop('_prefetched_output_listing', None)
+        if existing_files is None:
+            try:
+                with os.scandir(output_dir) as _scan:
+                    existing_files = {e.name for e in _scan if e.is_file()}
+            except Exception:
+                existing_files = set()
 
         def file_exists_fast(fname: str) -> bool:
             return fname in existing_files
@@ -16180,12 +16263,15 @@ class RetranslationMixin:
         # One directory listing per reconcile pass instead of per-candidate
         # os.path.exists probes (~chapters x ~18 stats each tick on the GUI
         # thread — the main "Not Responding" source during translation start).
-        try:
-            tts_dir_listing = {
-                name.lower() for name in os.listdir(os.path.join(output_dir, "text_to_speech"))
-            }
-        except OSError:
-            tts_dir_listing = set()
+        # Prefer the snapshot prefetched off-thread by the silent auto-refresh.
+        tts_dir_listing = data.pop('_prefetched_tts_listing', None)
+        if tts_dir_listing is None:
+            try:
+                tts_dir_listing = {
+                    name.lower() for name in os.listdir(os.path.join(output_dir, "text_to_speech"))
+                }
+            except OSError:
+                tts_dir_listing = set()
 
         changed = False
         now = time.time()
