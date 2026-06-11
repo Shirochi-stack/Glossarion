@@ -29332,7 +29332,58 @@ if __name__ == "__main__":
         # This was disabled in splash_utils to prevent macOS from auto-quitting
         # during the gap between splash close and main window creation.
         qapp.setQuitOnLastWindowClosed(True)
-        
+
+        # Make the GUI thread more responsive when background workers hammer
+        # the GIL (parallel parsing/imports at Run Translation start). Default
+        # is 5ms; a smaller interval lets the event loop grab the GIL sooner.
+        try:
+            sys.setswitchinterval(0.002)
+        except Exception:
+            pass
+
+        # --- GUI freeze watchdog (diagnostic) --------------------------------
+        # Heartbeats on the GUI thread; a daemon thread dumps ALL thread stacks
+        # to freeze_diagnostic.log whenever the GUI thread stalls >2s, so real
+        # freezes in frozen builds can be pinpointed instead of guessed at.
+        # Disable with GLOSSARION_FREEZE_WATCHDOG=0.
+        try:
+            if os.environ.get('GLOSSARION_FREEZE_WATCHDOG', '1').strip().lower() not in ('0', 'false', 'no', 'off'):
+                import faulthandler
+                import threading as _fw_threading
+                from PySide6.QtCore import QTimer as _FWTimer
+
+                _fw_beat = {'t': time.monotonic()}
+                _fw_timer = _FWTimer(main_window)
+                _fw_timer.setInterval(200)
+                _fw_timer.timeout.connect(lambda: _fw_beat.__setitem__('t', time.monotonic()))
+                _fw_timer.start()
+                main_window._freeze_watchdog_timer = _fw_timer
+                _fw_log_path = os.path.join(_get_app_dir(), 'freeze_diagnostic.log')
+
+                def _fw_watch():
+                    fh = None
+                    last_dump = 0.0
+                    while True:
+                        time.sleep(0.5)
+                        now = time.monotonic()
+                        stall = now - _fw_beat['t']
+                        if stall >= 2.0 and (now - last_dump) >= 5.0:
+                            last_dump = now
+                            try:
+                                if fh is None:
+                                    fh = open(_fw_log_path, 'a', encoding='utf-8')
+                                fh.write(f"\n{'='*70}\nGUI thread stalled {stall:.1f}s at {time.strftime('%Y-%m-%d %H:%M:%S')}\n{'='*70}\n")
+                                fh.flush()
+                                faulthandler.dump_traceback(file=fh, all_threads=True)
+                                fh.flush()
+                            except Exception:
+                                pass
+
+                _fw_threading.Thread(target=_fw_watch, name='freeze-watchdog', daemon=True).start()
+        except Exception as _fw_e:
+            print(f"⚠️ Freeze watchdog unavailable: {_fw_e}")
+        # ---------------------------------------------------------------------
+
         print("✅ Ready to use!")
         
         # Note: closeEvent is now handled by the TranslatorGUI.closeEvent method

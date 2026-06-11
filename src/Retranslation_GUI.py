@@ -15445,9 +15445,12 @@ class RetranslationMixin:
                 filename_noext = os.path.splitext(_normalize_opf_match_name(fname_for_comp))[0]
                 composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
 
-        # Cache directory listing to avoid thousands of exists calls
+        # Cache directory listing to avoid thousands of exists calls.
+        # os.scandir gets the file type from the directory entry itself
+        # (no per-file stat on Windows), unlike listdir + os.path.isfile.
         try:
-            existing_files = {f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))}
+            with os.scandir(output_dir) as _scan:
+                existing_files = {e.name for e in _scan if e.is_file()}
         except Exception:
             existing_files = set()
 
@@ -16106,10 +16109,10 @@ class RetranslationMixin:
         if not target_norms:
             return None, None
         try:
-            for fname in os.listdir(output_dir):
-                path = os.path.join(output_dir, fname)
-                if os.path.isfile(path) and self._normalize_progress_output_name(fname) in target_norms:
-                    return fname, path
+            with os.scandir(output_dir) as _scan:
+                for _e in _scan:
+                    if _e.is_file() and self._normalize_progress_output_name(_e.name) in target_norms:
+                        return _e.name, _e.path
         except Exception:
             pass
         return None, None
@@ -16144,8 +16147,25 @@ class RetranslationMixin:
             resolved.append((rel_path, abs_path))
         return resolved
 
-    def _existing_audio_for_entry(self, output_dir, entry):
+    def _existing_audio_for_entry(self, output_dir, entry, tts_dir_listing=None):
+        """Find an existing audio file for a progress entry.
+
+        When ``tts_dir_listing`` (a lowercase set of filenames inside
+        ``output_dir/text_to_speech``) is provided, candidates under that
+        folder are matched in memory instead of via os.path.exists. This
+        matters because the periodic GUI refresh otherwise issues thousands
+        of stat calls per tick (chapters x stem variants x extensions), which
+        stalls the GUI thread for seconds while translation workers and AV
+        scanning saturate the disk in frozen builds.
+        """
         for rel_path, abs_path in self._audio_candidates_for_entry(output_dir, entry):
+            if tts_dir_listing is not None:
+                rel_norm = str(rel_path).replace("\\", "/")
+                parent, _, base = rel_norm.rpartition("/")
+                if parent == "text_to_speech":
+                    if base.lower() in tts_dir_listing:
+                        return rel_path, abs_path
+                    continue
             if os.path.exists(abs_path):
                 return rel_path, abs_path
         return None, None
@@ -16157,6 +16177,16 @@ class RetranslationMixin:
         if not output_dir:
             return False
 
+        # One directory listing per reconcile pass instead of per-candidate
+        # os.path.exists probes (~chapters x ~18 stats each tick on the GUI
+        # thread — the main "Not Responding" source during translation start).
+        try:
+            tts_dir_listing = {
+                name.lower() for name in os.listdir(os.path.join(output_dir, "text_to_speech"))
+            }
+        except OSError:
+            tts_dir_listing = set()
+
         changed = False
         now = time.time()
         for _key, entry in prog.get('chapters', {}).items():
@@ -16165,7 +16195,7 @@ class RetranslationMixin:
             output_file = entry.get('output_file')
             if not output_file:
                 continue
-            rel_audio, _abs_audio = self._existing_audio_for_entry(output_dir, entry)
+            rel_audio, _abs_audio = self._existing_audio_for_entry(output_dir, entry, tts_dir_listing)
             tts_status = str(entry.get('tts_status') or 'no_tts').lower().strip()
 
             if rel_audio:
