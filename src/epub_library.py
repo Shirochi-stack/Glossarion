@@ -965,6 +965,25 @@ def _find_translator_gui(widget):
     return None
 
 
+def _epub_converter_running(gui) -> bool:
+    """True while the main GUI's EPUB converter worker is active."""
+    if gui is None:
+        return False
+    fut = getattr(gui, "epub_future", None)
+    try:
+        if fut is not None and not fut.done():
+            return True
+    except Exception:
+        pass
+    th = getattr(gui, "epub_thread", None)
+    try:
+        if th is not None and th.is_alive():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _mark_chapter_pending_for_retranslation(output_folder: str,
                                             chapter_filename: str) -> bool:
     """Reset a chapter's translation_progress.json entry to ``pending``.
@@ -5120,6 +5139,54 @@ class _BookCard(QFrame):
         except Exception:
             logger.debug("Set cover failed: %s", traceback.format_exc())
 
+    def set_compiling(self, active: bool) -> None:
+        """Swap the corner ribbon to a "COMPILING…" badge while the EPUB
+        converter runs for this card's workspace, restoring the original
+        ribbon (or removing the temporary one) when the run ends."""
+        ribbon = getattr(self, "_progress_ribbon", None)
+        if active:
+            if ribbon is None:
+                cover = getattr(self, "cover_label", None)
+                if cover is None:
+                    return
+                ribbon = QLabel("", cover)
+                ribbon.move(0, 0)
+                self._progress_ribbon = ribbon
+                self._compiling_ribbon_created = True
+            if not getattr(self, "_compiling_active", False):
+                self._compiling_active = True
+                self._saved_ribbon_state = (
+                    ribbon.text(), ribbon.styleSheet(), ribbon.isVisible())
+            ribbon.setText("⚙ COMPILING…")
+            ribbon.setStyleSheet(
+                "color: #1e1616; background: rgba(255, 209, 102, 0.95); "
+                "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
+                "border-bottom-right-radius: 3px;")
+            ribbon.adjustSize()
+            ribbon.show()
+            ribbon.raise_()
+        else:
+            if not getattr(self, "_compiling_active", False):
+                return
+            self._compiling_active = False
+            if getattr(self, "_compiling_ribbon_created", False):
+                # We created this ribbon just for the compile state —
+                # remove it instead of restoring an empty label.
+                self._compiling_ribbon_created = False
+                self._progress_ribbon = None
+                try:
+                    ribbon.hide()
+                    ribbon.deleteLater()
+                except Exception:
+                    pass
+            elif ribbon is not None:
+                text, style, visible = getattr(
+                    self, "_saved_ribbon_state", ("", "", False))
+                ribbon.setText(text)
+                ribbon.setStyleSheet(style)
+                ribbon.adjustSize()
+                ribbon.setVisible(visible)
+
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.clicked.emit(self.book)
@@ -8611,6 +8678,67 @@ class EpubLibraryDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Compile EPUB",
                                 f"Could not start the EPUB converter:\n{exc}")
+            return
+        # Flip the matching flash cards' corner ribbon to "COMPILING…" and
+        # watch the worker so the badge restores when the run ends.
+        self._set_cards_compiling(folder, True)
+        self._watch_compile_for_folder(folder, gui)
+
+    def _cards_for_output_folder(self, folder: str) -> list:
+        """Return every flash card whose workspace is *folder*."""
+        if not folder:
+            return []
+        target = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+        matches = []
+        for card in (*getattr(self, "_ip_cards", []),
+                     *getattr(self, "_comp_cards", [])):
+            try:
+                book = getattr(card, "book", None) or {}
+                if (book.get("type") or "").lower() == "in_progress":
+                    cand = book.get("output_folder") or book.get("path", "")
+                else:
+                    cand = _resolve_book_output_folder(book)
+                if cand and os.path.normcase(os.path.normpath(
+                        os.path.abspath(cand))) == target:
+                    matches.append(card)
+            except Exception:
+                continue
+        return matches
+
+    def _set_cards_compiling(self, folder: str, active: bool):
+        for card in self._cards_for_output_folder(folder):
+            try:
+                card.set_compiling(active)
+            except Exception:
+                pass
+
+    def _watch_compile_for_folder(self, folder: str, gui):
+        """Poll the converter worker; restore the cards' badge when done."""
+        self._compile_watch_folder = folder
+        self._compile_watch_gui = gui
+        self._compile_watch_started = time.monotonic()
+        timer = getattr(self, "_compile_watch_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(300)
+            timer.timeout.connect(lambda: self._compile_watch_tick())
+            self._compile_watch_timer = timer
+        timer.start()
+
+    def _compile_watch_tick(self):
+        if _epub_converter_running(getattr(self, "_compile_watch_gui", None)):
+            return
+        # Grace period: don't restore the badge before the executor has
+        # even surfaced the worker.
+        if (time.monotonic()
+                - getattr(self, "_compile_watch_started", 0)) < 1.2:
+            return
+        timer = getattr(self, "_compile_watch_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._set_cards_compiling(
+            getattr(self, "_compile_watch_folder", ""), False)
+        self._compile_watch_gui = None
 
     def _load_for_translation(self, book: dict):
         """Push the card's raw source path into the translator's input field.
@@ -14690,6 +14818,16 @@ class BookDetailsDialog(QDialog):
         # Animate immediately for instant click feedback; the poll ends the
         # animation quickly if a guard rejected the start (worker never ran).
         self._begin_compile_animation()
+        # Also flip this book's flash card ribbon to "COMPILING…" in the
+        # Library grid behind this dialog.
+        parent_lib = self.parent()
+        if parent_lib is not None and hasattr(parent_lib,
+                                              "_watch_compile_for_folder"):
+            try:
+                parent_lib._set_cards_compiling(out_folder, True)
+                parent_lib._watch_compile_for_folder(out_folder, gui)
+            except Exception:
+                pass
 
     def _compile_epub_running(self) -> bool:
         """True while the main GUI's EPUB converter worker is active."""
