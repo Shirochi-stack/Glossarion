@@ -13542,6 +13542,41 @@ def _is_root_output_html_path(path_or_name: str, out_dir: str) -> bool:
     except Exception:
         return False
 
+# Short-lived snapshot of the output directory used by
+# _find_existing_translated_output's last-resort scan. Without it, every
+# queued post-processing item re-listed the directory and stat'ed every file
+# WHILE HOLDING progress_lock — with large batch sizes that serialized
+# hundreds of thousands of disk stats at queue start and froze the GUI in
+# frozen builds (verified via the freeze watchdog).
+_OUTPUT_DIR_SNAPSHOT_CACHE = {}
+_OUTPUT_DIR_SNAPSHOT_TTL = 2.0
+_OUTPUT_DIR_SNAPSHOT_LOCK = threading.Lock()
+
+
+def _output_dir_norm_snapshot(out_dir):
+    """Return {normalized_basename: filename} for root output files (cached ~2s)."""
+    now = time.time()
+    with _OUTPUT_DIR_SNAPSHOT_LOCK:
+        cached = _OUTPUT_DIR_SNAPSHOT_CACHE.get(out_dir)
+        if cached is not None and (now - cached[0]) < _OUTPUT_DIR_SNAPSHOT_TTL:
+            return cached[1]
+    mapping = {}
+    try:
+        with os.scandir(out_dir) as _scan:
+            for entry in _scan:
+                if not entry.is_file():
+                    continue
+                if not _is_root_output_html_path(entry.path, out_dir):
+                    continue
+                # First match wins, mirroring the original listdir scan order
+                mapping.setdefault(_normalize_output_basename(entry.name), entry.name)
+    except Exception:
+        mapping = {}
+    with _OUTPUT_DIR_SNAPSHOT_LOCK:
+        _OUTPUT_DIR_SNAPSHOT_CACHE[out_dir] = (now, mapping)
+    return mapping
+
+
 def _find_existing_translated_output(out_dir, chapter, actual_num, progress_manager):
     expected = FileUtilities.create_chapter_filename(chapter, actual_num)
     candidates = [expected]
@@ -13605,13 +13640,15 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
         pass
 
     try:
-        for fname in os.listdir(out_dir):
+        # In-memory lookup against a short-lived directory snapshot instead of
+        # re-listing + stat'ing the whole directory per queued item. Positive
+        # hits are verified against the live filesystem, so semantics match
+        # the original scan (a hit only differs if the file appeared within
+        # the snapshot TTL — and then the next call's rebuilt snapshot sees it).
+        fname = _output_dir_norm_snapshot(out_dir).get(expected_norm)
+        if fname:
             path = os.path.join(out_dir, fname)
-            if not os.path.isfile(path):
-                continue
-            if not _is_root_output_html_path(path, out_dir):
-                continue
-            if _normalize_output_basename(fname) == expected_norm:
+            if os.path.exists(path):
                 return _as_output_file(fname), path
     except Exception:
         pass
