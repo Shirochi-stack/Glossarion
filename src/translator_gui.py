@@ -20154,8 +20154,14 @@ Important rules:
             self.append_log(f"❌ Error extracting glossary from {os.path.basename(file_path)}: {e}")
             return False
         
-    def epub_converter(self):
-       """Start EPUB converter in a separate thread"""
+    def epub_converter(self, folder=None):
+       """Start EPUB converter in a separate thread.
+
+       *folder* lets callers (e.g. the Library's "Compile EPUB" button)
+       pre-select the translation output folder and skip the directory
+       picker. Qt's ``clicked(bool)`` signal may pass a bool here — anything
+       that isn't an existing directory path falls back to the picker.
+       """
        if not self._lazy_load_modules():
            self.append_log("❌ Failed to load EPUB converter modules")
            return
@@ -20179,10 +20185,13 @@ Important rules:
            self.stop_epub_converter()
            return
        
-       folder = QFileDialog.getExistingDirectory(self, "Select translation output folder")
-       if not folder:
-           return
-       
+       if not (isinstance(folder, str) and folder and os.path.isdir(folder)):
+           folder = QFileDialog.getExistingDirectory(self, "Select translation output folder")
+           if not folder:
+               return
+       else:
+           self.append_log(f"📘 Compiling EPUB from: {folder}")
+
        self.epub_folder = folder
        self.stop_requested = False
        # Run via shared executor

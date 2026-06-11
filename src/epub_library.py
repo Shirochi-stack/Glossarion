@@ -1026,6 +1026,111 @@ def _mark_chapter_pending_for_retranslation(output_folder: str,
         return False
 
 
+def _chapter_completed_in_progress(output_folder: str,
+                                   chapter_filename: str) -> bool:
+    """True when the chapter has a ``completed`` progress entry whose
+    response file actually exists on disk."""
+    import json as _json
+    try:
+        progress_file = os.path.join(output_folder, "translation_progress.json")
+        if not os.path.isfile(progress_file):
+            return False
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+        target_stem = os.path.splitext(
+            os.path.basename(str(chapter_filename)))[0].strip().lower()
+        if not target_stem:
+            return False
+        for ch in (prog.get("chapters", {}) or {}).values():
+            if not isinstance(ch, dict):
+                continue
+            stems = set()
+            for field in ("original_basename", "output_file"):
+                val = str(ch.get(field) or "")
+                if val:
+                    stems.add(os.path.splitext(os.path.basename(val))[0].lower())
+            if target_stem not in stems:
+                continue
+            if str(ch.get("status") or "") != "completed":
+                continue
+            of = str(ch.get("output_file") or "")
+            if not of:
+                continue
+            candidate = of if os.path.isabs(of) else os.path.join(
+                output_folder, of)
+            if os.path.isfile(candidate):
+                return True
+        return False
+    except Exception:
+        logger.debug("Completion check failed: %s", traceback.format_exc())
+        return False
+
+
+def _cleanup_incomplete_chapter_output(output_folder: str,
+                                       chapter_filename: str) -> bool:
+    """Erase whatever an interrupted single-chapter run left behind.
+
+    A stopped/failed run can leave a partially-written ``response_*`` file
+    and an ``in_progress`` progress entry — the reader overlay would then
+    keep rendering the half-translated chapter. This deletes the partial
+    output file and resets the matching progress entry to ``pending``
+    (entries that genuinely completed are left untouched). Returns True
+    when anything changed.
+    """
+    import json as _json
+    try:
+        progress_file = os.path.join(output_folder, "translation_progress.json")
+        if not os.path.isfile(progress_file):
+            return False
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+        chapters = prog.get("chapters", {}) or {}
+        target_stem = os.path.splitext(
+            os.path.basename(str(chapter_filename)))[0].strip().lower()
+        if not target_stem:
+            return False
+        changed = False
+        for key, ch in chapters.items():
+            if not isinstance(ch, dict):
+                continue
+            stems = set()
+            for field in ("original_basename", "output_file"):
+                val = str(ch.get(field) or "")
+                if val:
+                    stems.add(os.path.splitext(os.path.basename(val))[0].lower())
+            if target_stem not in stems:
+                continue
+            status = str(ch.get("status") or "")
+            of = str(ch.get("output_file") or "")
+            candidate = ""
+            if of:
+                candidate = of if os.path.isabs(of) else os.path.join(
+                    output_folder, of)
+            # A genuine completion (status + file on disk) is left alone.
+            if status == "completed" and candidate and os.path.isfile(candidate):
+                continue
+            if candidate and os.path.isfile(candidate):
+                try:
+                    os.remove(candidate)
+                    logger.info("Removed partial translation %s", candidate)
+                    changed = True
+                except OSError as e:
+                    logger.warning("Could not delete %s: %s", candidate, e)
+            if status not in ("", "pending"):
+                ch["status"] = "pending"
+                ch["failure_reason"] = ""
+                ch["error_message"] = ""
+                changed = True
+        if changed:
+            with open(progress_file, "w", encoding="utf-8") as f:
+                _json.dump(prog, f, ensure_ascii=False, indent=2)
+        return changed
+    except Exception:
+        logger.warning("Incomplete-output cleanup failed: %s",
+                       traceback.format_exc())
+        return False
+
+
 def _extract_cover(epub_path: str) -> str | None:
     cache_dir = _cover_cache_dir()
     name_hash = hashlib.md5(epub_path.encode("utf-8")).hexdigest()[:12]
@@ -13365,6 +13470,32 @@ class BookDetailsDialog(QDialog):
         # Keep the old attribute name for helpers that only need setText().
         self._toc_toggle = self._toc_title
         chap_header.addWidget(self._toc_title)
+
+        # "Compile EPUB" — explicitly runs the EPUB converter phase on this
+        # book's output workspace. Single-chapter Translate actions (context
+        # menu / reader) intentionally never compile, so this is the way to
+        # build the output EPUB when you're ready.
+        self._compile_epub_btn = QPushButton("\U0001f4d8  Compile EPUB")
+        self._compile_epub_btn.setCursor(Qt.PointingHandCursor)
+        self._compile_epub_btn.setToolTip(
+            "Build the output EPUB from this book's translated chapters.\n"
+            "Single-chapter Translate runs skip the converter phase — use\n"
+            "this button when you want the compiled EPUB.")
+        self._compile_epub_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 6px 14px; font-size: 9.5pt; font-weight: bold; }
+            QPushButton:hover { background: #3a3a5e; border-color: #6c63ff; }
+        """)
+        self._compile_epub_btn.clicked.connect(self._on_compile_epub_clicked)
+        try:
+            _out_folder = _resolve_book_output_folder(self._book)
+            self._compile_epub_btn.setVisible(
+                bool(_out_folder and os.path.isdir(_out_folder)))
+        except Exception:
+            pass
+        chap_header.addWidget(self._compile_epub_btn)
+
         chap_header.addStretch()
 
         self._toc_first_btn = QPushButton("\u00ab")
@@ -14488,6 +14619,136 @@ class BookDetailsDialog(QDialog):
         if not self._chapters_loaded:
             return
         self._open_reader(initial_chapter=idx)
+
+    def _on_compile_epub_clicked(self):
+        """Run the EPUB converter on this book's output workspace."""
+        try:
+            out_folder = _resolve_book_output_folder(self._book)
+        except Exception:
+            out_folder = ""
+        if not out_folder or not os.path.isdir(out_folder):
+            QMessageBox.warning(
+                self, "Compile EPUB",
+                "Could not resolve this book's output folder.\n"
+                "Run a translation first so a workspace exists.")
+            return
+        gui = _find_translator_gui(self)
+        if gui is None or not hasattr(gui, "epub_converter"):
+            QMessageBox.warning(
+                self, "Compile EPUB",
+                "The main translator window is not available.")
+            return
+        try:
+            # epub_converter() handles its own busy-state guards
+            # (translation / glossary / converter already running).
+            gui.epub_converter(folder=out_folder)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compile EPUB",
+                                f"Could not start the EPUB converter:\n{exc}")
+            return
+        # Give the worker a beat to spin up, then animate the button while
+        # the converter is running (no-op if a guard rejected the start).
+        QTimer.singleShot(300, self._begin_compile_animation_if_running)
+
+    def _compile_epub_running(self) -> bool:
+        """True while the main GUI's EPUB converter worker is active."""
+        gui = _find_translator_gui(self)
+        if gui is None:
+            return False
+        fut = getattr(gui, "epub_future", None)
+        try:
+            if fut is not None and not fut.done():
+                return True
+        except Exception:
+            pass
+        th = getattr(gui, "epub_thread", None)
+        try:
+            if th is not None and th.is_alive():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _begin_compile_animation_if_running(self):
+        if getattr(self, "_compile_anim_active", False):
+            return
+        if not self._compile_epub_running():
+            return
+        btn = getattr(self, "_compile_epub_btn", None)
+        if btn is None:
+            return
+        self._compile_anim_active = True
+        self._compile_anim_angle = 0
+        self._compile_btn_text = btn.text()
+        btn.setEnabled(False)
+        btn.setText("  Compiling…")
+        # Spinner frames are rendered from the Halgakos icon; falls back to
+        # animated dots when the icon can't be loaded.
+        if not hasattr(self, "_compile_spin_pm"):
+            pm = QPixmap(_find_halgakos_icon() or "")
+            self._compile_spin_pm = (
+                pm.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if not pm.isNull() else None)
+        if getattr(self, "_compile_anim_timer", None) is None:
+            self._compile_anim_timer = QTimer(self)
+            self._compile_anim_timer.setInterval(80)
+            self._compile_anim_timer.timeout.connect(
+                lambda: self._compile_anim_tick())
+            self._compile_poll_timer = QTimer(self)
+            self._compile_poll_timer.setInterval(400)
+            self._compile_poll_timer.timeout.connect(
+                lambda: self._compile_anim_poll())
+        self._compile_anim_timer.start()
+        self._compile_poll_timer.start()
+
+    def _compile_anim_tick(self):
+        btn = getattr(self, "_compile_epub_btn", None)
+        if btn is None:
+            return
+        self._compile_anim_angle = (self._compile_anim_angle + 24) % 360
+        base = self._compile_spin_pm
+        if base is not None:
+            # Rotate inside a fixed-size frame so the icon doesn't jitter
+            # as the rotated bounding box grows/shrinks.
+            frame = QPixmap(base.size())
+            frame.fill(Qt.transparent)
+            painter = QPainter(frame)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            cx = base.width() / 2.0
+            cy = base.height() / 2.0
+            painter.translate(cx, cy)
+            painter.rotate(self._compile_anim_angle)
+            painter.translate(-cx, -cy)
+            painter.drawPixmap(0, 0, base)
+            painter.end()
+            btn.setIcon(QIcon(frame))
+            btn.setIconSize(QSize(18, 18))
+        else:
+            dots = (self._compile_anim_angle // 24) % 4
+            btn.setText("\U0001f4d8  Compiling" + "." * dots + " " * (3 - dots))
+
+    def _compile_anim_poll(self):
+        if self._compile_epub_running():
+            return
+        self._end_compile_animation()
+
+    def _end_compile_animation(self):
+        if not getattr(self, "_compile_anim_active", False):
+            return
+        self._compile_anim_active = False
+        for timer_name in ("_compile_anim_timer", "_compile_poll_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        btn = getattr(self, "_compile_epub_btn", None)
+        if btn is not None:
+            btn.setIcon(QIcon())
+            btn.setText(getattr(self, "_compile_btn_text",
+                                "\U0001f4d8  Compile EPUB"))
+            btn.setEnabled(True)
 
     def _show_chapter_context_menu(self, idx: int, global_pos):
         """Right-click menu for a chapter entry (Translate / Open in Reader)."""
@@ -16552,6 +16813,10 @@ class EpubReaderDialog(QDialog):
         self._live_gui_ref = None
         self._live_listener = None
         self._live_target_row: int | None = None
+        self._live_epub_path = ""
+        self._live_chapter_file = ""
+        self._live_follow_stream = True
+        self._live_scroll_guard = False
 
         title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
         self._window_title_text = title_text
@@ -17720,6 +17985,12 @@ class EpubReaderDialog(QDialog):
             self._render_current()
         else:
             self._update_nav_buttons()
+        # Overlay state may have changed for the current chapter (e.g. its
+        # translation just landed, or a partial one was cleaned up).
+        try:
+            self._update_translate_btn_visibility()
+        except Exception:
+            pass
 
     def _get_chapter_pages(self, chapter_idx):
         """Get page count for a chapter (cached or live-compute for current)."""
@@ -19090,6 +19361,11 @@ class EpubReaderDialog(QDialog):
         if not self._chapters:
             return
         self._apply_reader_style()  # refresh theme
+        # Translate button only applies to not-yet-translated chapters.
+        try:
+            self._update_translate_btn_visibility()
+        except Exception:
+            pass
 
         row = self._current_row
 
@@ -19744,6 +20020,8 @@ class EpubReaderDialog(QDialog):
 
         self._live_translate_active = True
         self._live_target_row = row
+        self._live_epub_path = epub_path
+        self._live_chapter_file = chapter_file
         self._translate_btn.setText("\U0001f6f0️  Live view")
         self._live_status_label.setText(
             f"\U0001f6f0️ Translating “{os.path.basename(chapter_file)}” — waiting for stream…")
@@ -19763,6 +20041,54 @@ class EpubReaderDialog(QDialog):
         QTimer.singleShot(2500, lambda: (
             self._live_poll_timer.start()
             if self._live_translate_active and self._live_poll_timer else None))
+
+    def _update_translate_btn_visibility(self):
+        """Hide the Translate button for chapters that are already translated.
+
+        Rules:
+          * While a live run is active the button stays visible (it toggles
+            the live view).
+          * Overlay mode (in-progress books): hidden when the current
+            chapter has a translated response file on disk.
+          * Dual-path mode (compiled output + raw source): hidden while the
+            compiled/translated EPUB is the active view — every chapter in
+            it is already translated. Flipping to Raw shows it again.
+          * Plain raw EPUBs: always visible.
+        """
+        btn = getattr(self, "_translate_btn", None)
+        if btn is None:
+            return
+        if self._live_translate_active:
+            btn.setVisible(True)
+            return
+        visible = True
+        try:
+            overlay = self._translated_overlay or {}
+            if overlay:
+                row = self._current_row
+                if 0 <= row < len(self._chapter_filenames):
+                    base = os.path.basename(
+                        str(self._chapter_filenames[row] or "")).lower()
+                    entry = overlay.get(base)
+                    if entry and entry.get("path") and os.path.isfile(
+                            str(entry["path"])):
+                        visible = False
+            elif self._raw_epub_alt_path:
+                # Compiled↔raw dual mode: the primary path is the
+                # translated output; only the raw flavor is translatable.
+                try:
+                    active = os.path.normcase(os.path.abspath(
+                        str(self._epub_path or "")))
+                    translated = os.path.normcase(os.path.abspath(
+                        str(self._translated_epub_path or "")))
+                    if active == translated:
+                        visible = False
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("Translate-button visibility check failed: %s",
+                         traceback.format_exc())
+        btn.setVisible(visible)
 
     def _ensure_live_panel(self):
         """Create the streaming page (reader-stack index 2) on first use."""
@@ -19836,6 +20162,10 @@ class EpubReaderDialog(QDialog):
         self._live_content_view.setOpenExternalLinks(False)
         self._live_content_view.setOpenLinks(False)
         self._live_content_view.setFrameShape(QFrame.NoFrame)
+        # Follow-the-stream tracking: user scrolls flip the flag, guarded
+        # programmatic scrolls (re-renders) don't. See _on_live_scroll_changed.
+        self._live_content_view.verticalScrollBar().valueChanged.connect(
+            lambda v: self._on_live_scroll_changed(v))
         split.addWidget(self._live_content_view)
 
         # Discreet thinking / pipeline-log pane (hidden until toggled).
@@ -19864,6 +20194,8 @@ class EpubReaderDialog(QDialog):
         self._live_dirty = False
         self._live_in_thinking = False
         self._live_streaming_text = False
+        self._live_follow_stream = True
+        self._live_scroll_guard = False
         if self._live_content_view is not None:
             self._live_content_view.clear()
         if self._live_think_view is not None:
@@ -19972,18 +20304,60 @@ class EpubReaderDialog(QDialog):
         if content_added:
             self._render_live_content()
 
+    def _on_live_scroll_changed(self, value: int):
+        """Track whether the user is following the stream.
+
+        Only USER-initiated scrolls may flip the follow flag —
+        ``setHtml()`` resets the scrollbar to 0 on every re-render, which
+        must not be mistaken for "the user scrolled to the top".
+        """
+        if getattr(self, "_live_scroll_guard", False):
+            return
+        view = self._live_content_view
+        if view is None:
+            return
+        sb = view.verticalScrollBar()
+        self._live_follow_stream = value >= sb.maximum() - 8
+
     def _render_live_content(self):
         """Re-render the accumulated stream with live HTML/CSS parsing and
         follow the output (auto page switching) unless the user scrolled up."""
         view = self._live_content_view
         if view is None:
             return
+        follow = getattr(self, "_live_follow_stream", True)
         sb = view.verticalScrollBar()
-        follow = sb.value() >= sb.maximum() - 8
-        view.setHtml(self._wrap_live_html(self._live_content_buf))
+        saved_pos = sb.value()
+        self._live_scroll_guard = True
+        try:
+            view.setHtml(self._wrap_live_html(self._live_content_buf))
+            if follow:
+                # Force the document layout to the end so maximum() is
+                # computed against the NEW content height, not the stale one.
+                cursor = view.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                view.setTextCursor(cursor)
+                view.ensureCursorVisible()
+                sb.setValue(sb.maximum())
+            else:
+                sb.setValue(min(saved_pos, sb.maximum()))
+        finally:
+            self._live_scroll_guard = False
         if follow:
-            sb = view.verticalScrollBar()
-            sb.setValue(sb.maximum())
+            # Late layout passes (images, long reflows) can still grow the
+            # document after this tick — snap again once the event loop has
+            # settled.
+            def _snap_bottom():
+                v = self._live_content_view
+                if v is None or not getattr(self, "_live_follow_stream", True):
+                    return
+                self._live_scroll_guard = True
+                try:
+                    bar = v.verticalScrollBar()
+                    bar.setValue(bar.maximum())
+                finally:
+                    self._live_scroll_guard = False
+            QTimer.singleShot(0, _snap_bottom)
 
     def _wrap_live_html(self, body: str) -> str:
         """Style the streamed fragment buffer with the reader's theme/CSS."""
@@ -20030,6 +20404,41 @@ class EpubReaderDialog(QDialog):
             return
         self._finish_live_translation()
 
+    def _resolve_live_output_folder(self) -> str:
+        """Locate the output workspace the live run wrote into.
+
+        Prefers the directory of an existing overlay response file for the
+        target chapter; otherwise resolves ``<output_root>/<epub_base>``
+        the same way the pipeline computes it.
+        """
+        chapter_file = (self._live_chapter_file or "").lower()
+        try:
+            entry = (self._translated_overlay or {}).get(chapter_file)
+            if entry and entry.get("path"):
+                folder = os.path.dirname(str(entry["path"]))
+                if os.path.isdir(folder):
+                    return folder
+        except Exception:
+            pass
+        epub_path = self._live_epub_path or self._epub_path
+        if not epub_path:
+            return ""
+        file_base = os.path.splitext(os.path.basename(epub_path))[0]
+        with_progress = ""
+        plain = ""
+        try:
+            for root in _resolve_output_roots(self._config):
+                cand = os.path.join(root, file_base)
+                if not os.path.isdir(cand):
+                    continue
+                if os.path.isfile(os.path.join(cand,
+                                               "translation_progress.json")):
+                    with_progress = with_progress or cand
+                plain = plain or cand
+        except Exception:
+            pass
+        return with_progress or plain
+
     def _finish_live_translation(self):
         if not self._live_translate_active:
             return
@@ -20043,12 +20452,41 @@ class EpubReaderDialog(QDialog):
             pass
         if self._live_drain_timer is not None:
             self._live_drain_timer.stop()
+        gui = self._live_gui_ref
+        was_stopped = bool(getattr(gui, "stop_requested", False)) if gui else False
         self._teardown_live_listener()
         self._translate_btn.setText("\U0001f310  Translate")
+
+        # Outcome check: a stopped/failed run leaves a partially-written
+        # response file and an in_progress progress entry behind — clear
+        # both so the reader doesn't keep rendering the half-translated
+        # chapter (and the chapter drops back to "pending").
+        chapter_file = self._live_chapter_file or ""
+        out_dir = self._resolve_live_output_folder() if chapter_file else ""
+        completed = bool(
+            out_dir and _chapter_completed_in_progress(out_dir, chapter_file))
+        if not completed and out_dir:
+            cleaned = _cleanup_incomplete_chapter_output(out_dir, chapter_file)
+            if cleaned and gui is not None:
+                try:
+                    gui.append_log(
+                        f"\U0001f9f9 Live view: cleared incomplete translation "
+                        f"for {chapter_file}")
+                except Exception:
+                    pass
+
         if self._live_status_label is not None:
-            self._live_status_label.setText(
-                "✅ Translation finished — loading the translated chapter…")
-        # Let the overlay auto-refresh pick the fresh response file up, then
+            if completed:
+                self._live_status_label.setText(
+                    "✅ Translation finished — loading the translated chapter…")
+            elif was_stopped:
+                self._live_status_label.setText(
+                    "⏹ Translation stopped — incomplete output cleared.")
+            else:
+                self._live_status_label.setText(
+                    "⚠️ Translation did not complete — incomplete output cleared.")
+        # Re-merge the overlay: picks the fresh response file up on success,
+        # or drops the deleted partial chapter after a stop/failure. Then
         # swap back to the normal reader page at the same chapter.
         try:
             self._on_overlay_refresh_tick()
@@ -20063,8 +20501,9 @@ class EpubReaderDialog(QDialog):
                 self._current_row = target
             if self._reader_stack.currentWidget() is self._live_panel:
                 self._render_current()
+            self._update_translate_btn_visibility()
 
-        QTimer.singleShot(2200, _back_to_reader)
+        QTimer.singleShot(2200 if completed else 1200, _back_to_reader)
 
     def _teardown_live_listener(self):
         gui = self._live_gui_ref

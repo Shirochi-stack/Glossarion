@@ -20649,7 +20649,9 @@ def main(log_callback=None, stop_callback=None):
             print("ℹ️ No images directory found")
 
         # 4) Build final EPUB (epub converter will respect IMAGE_MODE_EPUB_PASSTHROUGH)
-        if not check_stop():
+        if (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip():
+            print("🎯 Single-chapter mode: skipping EPUB converter phase")
+        elif not check_stop():
             print("\n📘 Building final EPUB…")
             try:
                 from epub_converter import fallback_compile_epub
@@ -24488,12 +24490,21 @@ def main(log_callback=None, stop_callback=None):
                 print(f"✅ Created {len(chapter_files)} placeholder response files")
                 print("⚠️ Note: The EPUB will contain untranslated content")
         
-        print("📘 Building final EPUB…")
+        # Single-chapter mode (Library / Reader "Translate"): never run the
+        # EPUB converter phase — use the Library's "Compile EPUB" button to
+        # build the output EPUB explicitly.
+        _single_chapter_run = bool(
+            (os.getenv("SINGLE_CHAPTER_FILTER", "") or "").strip())
+        if _single_chapter_run:
+            print("🎯 Single-chapter mode: skipping EPUB converter phase")
+        else:
+            print("📘 Building final EPUB…")
         try:
             from epub_converter import fallback_compile_epub
-            fallback_compile_epub(out, log_callback=log_callback)
-            print("✅ All done: your final EPUB is in", out)
-            
+            if not _single_chapter_run:
+                fallback_compile_epub(out, log_callback=log_callback)
+                print("✅ All done: your final EPUB is in", out)
+
             total_time = time.time() - translation_start_time
             hours = int(total_time // 3600)
             minutes = int((total_time % 3600) // 60)
