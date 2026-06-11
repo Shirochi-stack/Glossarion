@@ -3450,8 +3450,27 @@ class SDLXLIFFReviewDialog(QDialog):
             cls._review_lxml_available_flag = available
         return available
 
+    @staticmethod
+    def _unescape_html_document(text):
+        """Unescape an HTML payload ONLY when it is stored fully escaped.
+
+        Sidecars may store the whole document HTML-escaped (no literal
+        ``<`` anywhere) — those need one unescape pass before parsing.
+        But a document that already contains real markup must NOT be
+        blanket-unescaped: doing so turns literal text like
+        ``&lt;Prologue&gt;`` into a phantom ``<Prologue>`` tag that
+        swallows the heading's text, drops the unit (449 vs 450), and
+        shifts every following row's source/output + machine-translation
+        pairing off by one. HTML parsers decode entities inside text
+        nodes themselves, so escaped text must reach them escaped.
+        """
+        text = str(text or "")
+        if "<" not in text and ("&lt;" in text or "&gt;" in text or "&amp;" in text):
+            return html_lib.unescape(text)
+        return text
+
     def _extract_text_units(self, html_text):
-        text = html_lib.unescape(str(html_text or ""))
+        text = self._unescape_html_document(html_text)
         if self._review_lxml_available():
             try:
                 return self._extract_text_units_lxml(text)
@@ -6672,7 +6691,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return "\n".join(parts)
 
     def _extract_tooltip_batch_translations(self, translated_html, work):
-        translated_html = html_lib.unescape(str(translated_html or ""))
+        translated_html = self._unescape_html_document(translated_html)
         if not translated_html.strip() or not work:
             return {}
         try:
@@ -7438,7 +7457,11 @@ class SDLXLIFFReviewDialog(QDialog):
             from bs4 import BeautifulSoup
         except Exception:
             return piece.get("target_html", "")
-        target_html = html_lib.unescape(str(piece.get("target_html") or ""))
+        # NOTE: must use the guarded unescape — blanket-unescaping a real
+        # HTML document turns escaped text (&lt;Prologue&gt;) into phantom
+        # tags, and since this function WRITES the re-serialized soup back
+        # to the sidecar, that would permanently bake the corruption in.
+        target_html = self._unescape_html_document(piece.get("target_html"))
         soup = BeautifulSoup(target_html, "html.parser")
         tag_nodes = list(soup.find_all(self.TEXT_TAGS))
         target_index = row_data.get("target_index")
