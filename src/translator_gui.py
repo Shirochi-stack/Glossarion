@@ -29358,7 +29358,13 @@ if __name__ == "__main__":
                 _fw_timer.timeout.connect(lambda: _fw_beat.__setitem__('t', time.monotonic()))
                 _fw_timer.start()
                 main_window._freeze_watchdog_timer = _fw_timer
-                _fw_log_path = os.path.join(_get_app_dir(), 'freeze_diagnostic.log')
+                # Same logs folder as crash.log/run.log (exported during logging setup)
+                _fw_log_dir = os.environ.get("GLOSSARION_LOG_DIR") or os.path.join(_get_app_dir(), "logs")
+                try:
+                    os.makedirs(_fw_log_dir, exist_ok=True)
+                except Exception:
+                    _fw_log_dir = _get_app_dir()
+                _fw_log_path = os.path.join(_fw_log_dir, 'freeze_diagnostic.log')
 
                 def _fw_watch():
                     fh = None
