@@ -14891,9 +14891,19 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 if multipass_partial_mode:
                     total_targets = _partial_refinement_target_count(partial_targets)
                     partial_requests = []
+                    # partial.b sends ONE batched request below and never uses
+                    # per-fragment messages (partial_requests is cleared after
+                    # the batch send). Building them anyway ran build_system_prompt
+                    # — glossary compression + token counting — once per fragment,
+                    # spamming N duplicate "Glossary/Final system prompt" log lines
+                    # and burning CPU for messages that were thrown away.
+                    _partial_b_batch_mode = (partial_refinement_mode == "partial.b")
                     for target_index, target in enumerate(partial_targets, start=1):
                         if _force_stop_requested():
                             return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
+                        if _partial_b_batch_mode:
+                            partial_requests.append((target_index, target, None))
+                            continue
                         fragment_html = _partial_refinement_target_fragment(target, partial_document)
                         target_kind = target.get("kind", "tags")
                         fragment_qa_entry = _partial_refinement_qa_entry_for_fragment(
