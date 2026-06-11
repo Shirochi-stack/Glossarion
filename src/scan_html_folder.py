@@ -5233,6 +5233,11 @@ _truncation_embed_model = None
 _truncation_translator = None
 _truncation_translation_cache = {}
 
+# Limit concurrent AI-truncation HTML parses (pure-Python html.parser holds
+# the GIL); see run_ai_truncation_check.
+_AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
+
+
 def _extract_paragraphs(html):
     """Extract paragraph texts from HTML content."""
     soup = BeautifulSoup(html, "html.parser")
@@ -5623,9 +5628,15 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
     result = {'flagged': False, 'answer': '', 'details': ''}
 
     try:
-        # Extract plain text from HTML
-        source_paras = _extract_paragraphs(source_html)
-        trans_paras = _extract_paragraphs(trans_html)
+        # Extract plain text from HTML.
+        # Gated: in batch mode every worker thread (one per file at large
+        # batch sizes) lands here at once, and html.parser is pure Python —
+        # hundreds of concurrent parses monopolize the GIL and freeze the GUI
+        # before a single request is sent. Two at a time keeps prep far ahead
+        # of the API-delay stagger while leaving the GIL breathing room.
+        with _AI_TRUNCATION_PARSE_GATE:
+            source_paras = _extract_paragraphs(source_html)
+            trans_paras = _extract_paragraphs(trans_html)
 
         if not source_paras or not trans_paras:
             result['details'] = 'insufficient_text'
@@ -9320,6 +9331,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 with _ai_log_lock:
                     log(msg)
 
+            # Build the source lookup ONCE instead of every worker rescanning
+            # original_html_content per file (O(N²) dict iteration across
+            # hundreds of simultaneously spawned threads — needless GIL churn
+            # right before the requests queue up).
+            _ai_source_by_basename = {}
+            for _src_info in original_html_content.values():
+                if isinstance(_src_info, dict):
+                    _src_base = os.path.splitext(str(_src_info.get('filename', '')).lower())[0]
+                    if _src_base and _src_base not in _ai_source_by_basename:
+                        _ai_source_by_basename[_src_base] = _src_info.get('html')
+
             def _ai_check_one(result_obj):
                 """Run AI truncation check for a single file."""
                 # Check ALL stop flags — not just should_stop() but also env vars
@@ -9333,24 +9355,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     return None
                 try:
                     filename = result_obj['filename']
-                    matched_source_html = None
                     search_basename = os.path.splitext(filename.lower())[0]
                     if search_basename.startswith('response_'):
                         search_basename = search_basename[9:]
 
-                    for key, info in original_html_content.items():
-                        if isinstance(info, dict):
-                            orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
-                            if orig_basename == search_basename:
-                                matched_source_html = info['html']
-                                break
-                        elif isinstance(key, int):
-                            # EPUB mode: key is spine index, info is dict
-                            if isinstance(info, dict):
-                                orig_basename = os.path.splitext(info.get('filename', '').lower())[0]
-                                if orig_basename == search_basename:
-                                    matched_source_html = info['html']
-                                    break
+                    matched_source_html = _ai_source_by_basename.get(search_basename)
 
                     if not matched_source_html or should_stop():
                         return None
