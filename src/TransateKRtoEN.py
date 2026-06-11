@@ -4764,6 +4764,46 @@ class ContentProcessor:
         return body
 
 
+def _library_origins_raw_epubs_for_stem(folder_stem):
+    """Raw source EPUB paths in library_origins.txt matching *folder_stem*.
+
+    Matches against both the Library/Raw basename and the recorded
+    original path. Returns every hit so callers can detect ambiguity
+    (len > 1 == duplicate origins for one workspace name).
+    """
+    if not folder_stem:
+        return []
+    library_dir = os.path.join(
+        os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+    origins_path = os.path.join(library_dir, "library_origins.txt")
+    try:
+        with open(origins_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw_map = data.get("raw") or {}
+    if not isinstance(raw_map, dict):
+        return []
+    raw_dir = os.path.join(library_dir, "Raw")
+    stem_key = os.path.normcase(folder_stem)
+    matches = []
+    for lib_basename, original_path in raw_map.items():
+        lb = os.path.basename(str(lib_basename or ""))
+        lb_stem = os.path.splitext(lb)[0]
+        op = str(original_path or "")
+        op_stem = os.path.splitext(os.path.basename(op))[0]
+        if os.path.normcase(lb_stem) != stem_key and os.path.normcase(op_stem) != stem_key:
+            continue
+        lib_path = os.path.join(raw_dir, lb)
+        if lb and lb.lower().endswith(".epub") and os.path.isfile(lib_path):
+            matches.append(os.path.abspath(lib_path))
+        elif op and op.lower().endswith(".epub") and os.path.isfile(op):
+            matches.append(os.path.abspath(op))
+    return matches
+
+
 def _read_source_epub_html(chapter, output_dir):
     """Recover full source XHTML/HTML for older chapter caches."""
     rel_candidates = []
@@ -4772,19 +4812,38 @@ def _read_source_epub_html(chapter, output_dir):
         if value:
             rel_candidates.append(str(value).replace("\\", "/").lstrip("/"))
 
+    # Resolution order:
+    #   1. The ACTUAL input file path (EPUB_PATH) when it belongs to
+    #      this workspace — verified by matching its filename stem
+    #      against the output folder name. The stem guard is mandatory
+    #      because EPUB_PATH is process-global and goes stale in
+    #      multi-EPUB runs, and EPUBs share internal names
+    #      (chapter1.xhtml, …), so a wrong book would match silently.
+    #   2. The library origins registry (library_origins.txt) raw map —
+    #      a UNIQUE stem match resolves the raw source directly.
+    #   3. source_epub.txt — only consulted when the origins registry
+    #      is ambiguous (duplicate origins for one workspace) or has no
+    #      entry; the sidecar can be stale, so it is the last resort.
     epub_candidates = []
+    folder_stem = os.path.basename(os.path.normpath(output_dir or ""))
     env_epub = os.getenv("EPUB_PATH", "").strip()
     if env_epub:
-        epub_candidates.append(env_epub)
-    pointer_path = os.path.join(output_dir, "source_epub.txt")
-    if os.path.exists(pointer_path):
-        try:
-            with open(pointer_path, "r", encoding="utf-8") as f:
-                pointed = f.read().strip()
-            if pointed:
-                epub_candidates.append(pointed)
-        except Exception:
-            pass
+        env_stem = os.path.splitext(os.path.basename(env_epub))[0]
+        if not folder_stem or os.path.normcase(env_stem) == os.path.normcase(folder_stem):
+            epub_candidates.append(env_epub)
+    origin_matches = _library_origins_raw_epubs_for_stem(folder_stem)
+    if len(origin_matches) == 1:
+        epub_candidates.append(origin_matches[0])
+    else:
+        pointer_path = os.path.join(output_dir, "source_epub.txt")
+        if os.path.exists(pointer_path):
+            try:
+                with open(pointer_path, "r", encoding="utf-8") as f:
+                    pointed = f.read().strip()
+                if pointed:
+                    epub_candidates.append(pointed)
+            except Exception:
+                pass
 
     for epub_path in epub_candidates:
         if not epub_path or not os.path.isfile(epub_path):

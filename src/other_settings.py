@@ -127,6 +127,47 @@ from config_backup import (
 )
 
 
+def _library_origins_raw_sources_for_stem(folder_stem):
+    """Raw source paths in library_origins.txt whose stem matches *folder_stem*.
+
+    *folder_stem* is expected to be normcased already. Matches against
+    both the Library/Raw basename and the recorded original path.
+    Returns every hit so callers can detect ambiguity (len > 1 ==
+    duplicate origins for one workspace name).
+    """
+    if not folder_stem:
+        return []
+    library_dir = os.path.join(
+        os.path.expanduser('~'), 'Documents', 'Glossarion', 'Library')
+    origins_path = os.path.join(library_dir, 'library_origins.txt')
+    try:
+        with open(origins_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw_map = data.get('raw') or {}
+    if not isinstance(raw_map, dict):
+        return []
+    raw_dir = os.path.join(library_dir, 'Raw')
+    matches = []
+    for lib_basename, original_path in raw_map.items():
+        lb = os.path.basename(str(lib_basename or ''))
+        lb_stem = os.path.splitext(lb)[0]
+        op = str(original_path or '')
+        op_stem = os.path.splitext(os.path.basename(op))[0]
+        if (os.path.normcase(lb_stem) != folder_stem
+                and os.path.normcase(op_stem) != folder_stem):
+            continue
+        lib_path = os.path.join(raw_dir, lb)
+        if lb and os.path.isfile(lib_path):
+            matches.append(os.path.abspath(lib_path))
+        elif op and os.path.isfile(op):
+            matches.append(os.path.abspath(op))
+    return matches
+
+
 def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
     """Rename output files when the 'retain source extension' toggle changes.
 
@@ -196,16 +237,50 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
         # Fallback: extract content.opf from the source EPUB directly.
         # This handles the case where the output dir doesn't have it yet
         # (first run, cleaned output, etc.).
-        _epub = os.environ.get('EPUB_PATH', '')
+        #
+        # Resolution order matters: prefer the ACTUAL input file paths
+        # (EPUB_PATH / the selected input files) whose filename stem
+        # matches this output folder — the source_epub.txt sidecar is
+        # only a last-resort fallback because it can be stale or point
+        # at the wrong book. The stem guard is mandatory: EPUB_PATH /
+        # selected files are process-global and extracting the wrong
+        # book's content.opf into this folder would permanently poison
+        # its chapter mapping.
+        _folder_stem = os.path.normcase(
+            os.path.basename(os.path.normpath(output_dir)))
+
+        def _stem_matches(_p):
+            try:
+                return os.path.normcase(
+                    os.path.splitext(os.path.basename(str(_p)))[0]
+                ) == _folder_stem
+            except Exception:
+                return False
+
+        _epub = ''
+        # 1. EPUB_PATH env var — when it matches this workspace
+        _env_epub = os.environ.get('EPUB_PATH', '')
+        if _env_epub and _stem_matches(_env_epub):
+            _epub = _env_epub
+        # 2. Selected input files — the one matching this workspace
         if not _epub:
             _sf = getattr(gui, 'selected_files', None)
             if _sf:
                 for _f in _sf:
-                    if str(_f).lower().endswith('.epub'):
+                    if str(_f).lower().endswith('.epub') and _stem_matches(_f):
                         _epub = str(_f)
                         break
+        # 3. Library origins registry — a UNIQUE stem match resolves
+        #    the raw source directly; duplicates mean ambiguity and
+        #    drop through to the sidecar.
         if not _epub:
-            # Try source_epub.txt sidecar in the output dir
+            _origin_matches = _library_origins_raw_sources_for_stem(_folder_stem)
+            if len(_origin_matches) == 1 and _origin_matches[0].lower().endswith('.epub'):
+                _epub = _origin_matches[0]
+        # 4. source_epub.txt sidecar — last resort, only reached when
+        #    the origins registry is ambiguous (duplicate origins for
+        #    one workspace) or empty; the sidecar can be stale.
+        if not _epub:
             _sidecar = os.path.join(output_dir, 'source_epub.txt')
             if os.path.exists(_sidecar):
                 try:

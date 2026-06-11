@@ -100,8 +100,60 @@ def _load_library_origins_for_compile() -> dict:
     return data
 
 
+def _origins_raw_sources_for_stem(folder_stem: str) -> list:
+    """Raw source paths in library_origins.txt whose stem matches *folder_stem*.
+
+    Matches against both the Library/Raw basename and the recorded
+    original path. Returns every hit so callers can detect ambiguity
+    (len > 1 == duplicate origins for one workspace name).
+    """
+    if not folder_stem:
+        return []
+    origins = _load_library_origins_for_compile()
+    raw_map = origins.get("raw", {}) or {}
+    if not isinstance(raw_map, dict):
+        return []
+    raw_dir = os.path.join(_glossarion_library_dir(), "Raw")
+    stem_key = os.path.normcase(folder_stem)
+    matches = []
+    for lib_basename, original_path in raw_map.items():
+        lb = os.path.basename(str(lib_basename or ""))
+        lb_stem = os.path.splitext(lb)[0]
+        op = str(original_path or "")
+        op_stem = os.path.splitext(os.path.basename(op))[0]
+        if os.path.normcase(lb_stem) != stem_key and os.path.normcase(op_stem) != stem_key:
+            continue
+        lib_path = os.path.join(raw_dir, lb)
+        if lb and os.path.isfile(lib_path):
+            matches.append(os.path.abspath(lib_path))
+        elif op and os.path.isfile(op):
+            matches.append(os.path.abspath(op))
+    return matches
+
+
 def _read_compile_source_reference(output_dir: str) -> str:
     """Return the raw/source path used for this output folder, if known."""
+    # Resolution order:
+    #   1. The ACTUAL input file path (EPUB_PATH) when it belongs to
+    #      this workspace — verified by matching its filename stem
+    #      against the output folder name. The stem guard is mandatory
+    #      because EPUB_PATH is process-global and goes stale in
+    #      multi-EPUB runs — ordering chapters from the WRONG book's
+    #      source EPUB must never happen.
+    #   2. The library origins registry (library_origins.txt) raw map —
+    #      a UNIQUE stem match resolves the raw source directly.
+    #   3. source_epub.txt — only consulted when the origins registry
+    #      is ambiguous (duplicate origins for one workspace) or has no
+    #      entry; the sidecar can be stale, so it is the last resort.
+    folder_stem = os.path.basename(os.path.normpath(output_dir or ""))
+    env_epub = os.environ.get("EPUB_PATH", "").strip()
+    if env_epub:
+        env_stem = os.path.splitext(os.path.basename(env_epub))[0]
+        if not folder_stem or os.path.normcase(env_stem) == os.path.normcase(folder_stem):
+            return env_epub
+    origin_matches = _origins_raw_sources_for_stem(folder_stem)
+    if len(origin_matches) == 1:
+        return origin_matches[0]
     sidecar = os.path.join(output_dir, "source_epub.txt")
     try:
         with open(sidecar, "r", encoding="utf-8") as f:
@@ -110,7 +162,7 @@ def _read_compile_source_reference(output_dir: str) -> str:
                 return source_ref
     except OSError:
         pass
-    return os.environ.get("EPUB_PATH", "").strip()
+    return ""
 
 
 def _organized_library_replacement_target(output_dir: str) -> Optional[str]:

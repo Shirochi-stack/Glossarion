@@ -253,6 +253,11 @@ class SDLXLIFFReviewDialog(QDialog):
     }
     REVIEW_ROW_MIN_HEIGHT = 96
     REVIEW_ROW_MAX_HEIGHT = 1600
+    # Minimum height of the editable output entry in the two-column layout
+    # (2nd column). 72px ≈ two text lines (2*22 + 28 padding) so short
+    # entries get a comfortable click/edit target instead of the old
+    # one-line 50px sliver.
+    REVIEW_TARGET_EDIT_MIN_HEIGHT = 72
     REVIEW_PRELOAD_RADIUS = 2
     REVIEW_PRELOAD_BATCH_SIZE = 8
     REVIEW_PRELOAD_IDLE_MS = 350
@@ -5297,7 +5302,7 @@ class SDLXLIFFReviewDialog(QDialog):
             max_lines = max(max_lines, source_lines + tooltip_lines)
         if two_column_layout:
             source_height = max(34, (source_lines + tooltip_lines) * 22 + (28 if tooltip_lines else 10))
-            target_height = max(38, target_lines * 22 + 28)
+            target_height = max(cls.REVIEW_TARGET_EDIT_MIN_HEIGHT, target_lines * 22 + 28)
             text_height = 10 + source_height + 7 + target_height
             controls_height = 3 * 34 + 2 * 5 + 24
             height = min(
@@ -5987,6 +5992,16 @@ class SDLXLIFFReviewDialog(QDialog):
 
             tag_label = frame.findChild(QLabel, "SdlReviewTagLabel")
             if tag_label is not None:
+                # Recompute the label TEXT too — editing an "Empty" row
+                # creates the target node (row_data["target_tag"] is set in
+                # _target_html_with_edit), so the stale "Empty" caption must
+                # be replaced, not just recolored.
+                tag_label.setText(self._tag_label_rich_text(self._tag_label_text(
+                    row_data.get("source_tag"),
+                    row_data.get("target_tag"),
+                    row_data.get("source_tag_label"),
+                    row_data.get("target_tag_label"),
+                )))
                 tag_color = {
                     "green": self.THEME["success"],
                     "yellow": self.THEME["warning"],
@@ -7444,6 +7459,9 @@ class SDLXLIFFReviewDialog(QDialog):
             else:
                 soup.append(node)
             row_data["target_tag"] = tag_name
+            # Mirror the source label (with its ordinal) so the row caption
+            # renders as e.g. "p(3)" instead of "p(3) -> p" after the edit.
+            row_data["target_tag_label"] = row_data.get("source_tag_label") or tag_name
             row_data["target_index"] = len(list(soup.find_all(self.TEXT_TAGS))) - 1
 
         node.clear()
@@ -7640,8 +7658,8 @@ class SDLXLIFFReviewDialog(QDialog):
         target_lines = max(1, int(target_lines or 1))
         tooltip_lines = max(0, int(tooltip_lines or 0))
         source_height = max(34, (source_lines + tooltip_lines) * 22 + (28 if tooltip_lines else 10))
-        target_height = max(38, target_lines * 22 + 28)
-        available = max(38, int(row_height or self.REVIEW_ROW_MIN_HEIGHT) - 10)
+        target_height = max(self.REVIEW_TARGET_EDIT_MIN_HEIGHT, target_lines * 22 + 28)
+        available = max(self.REVIEW_TARGET_EDIT_MIN_HEIGHT, int(row_height or self.REVIEW_ROW_MIN_HEIGHT) - 10)
         return min(source_height, available), min(target_height, available)
 
     def _apply_review_row_text_geometry(
