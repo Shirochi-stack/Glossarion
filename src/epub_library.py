@@ -4656,6 +4656,23 @@ class _BookCard(QFrame):
         p = preset or _SIZE_PRESETS[SIZE_NORMAL]
         self._card_w = p["card_w"]
         self._cover_h = p["cover_h"]
+        # Smaller badge typography on the tiny presets (XS / 2XS) so the
+        # corner ribbon and the size / type badges don't dominate the
+        # shrunken cards. Preset is identified via its title size — the
+        # card width itself can be stretched by the grid's column fitting.
+        _title_pt = _parse_pt(p.get("title_size", "9pt"))
+        if _title_pt <= 7.5:      # 2XS
+            self._ribbon_pt = 5.0
+            self._badge_pt = 5.5
+            self._size_lbl_pt = 6.0
+        elif _title_pt <= 8.0:    # XS
+            self._ribbon_pt = 5.5
+            self._badge_pt = 6.0
+            self._size_lbl_pt = 6.5
+        else:
+            self._ribbon_pt = 6.5
+            self._badge_pt = 7.0
+            self._size_lbl_pt = 7.5
         self._has_cover = False
         self._selected = False
         self._hovered = False
@@ -4774,11 +4791,11 @@ class _BookCard(QFrame):
         info_row.setSpacing(4)
         size_lbl = QLabel(size_str)
         size_lbl.setAttribute(Qt.WA_TranslucentBackground)
-        size_lbl.setStyleSheet("color: #888; font-size: 7.5pt; background: transparent;")
+        size_lbl.setStyleSheet(f"color: #888; font-size: {self._size_lbl_pt}pt; background: transparent;")
         info_row.addWidget(size_lbl)
         badge_lbl = QLabel(badge_text)
         badge_lbl.setAttribute(Qt.WA_TranslucentBackground)
-        badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold; background: transparent;")
+        badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: {self._badge_pt}pt; font-weight: bold; background: transparent;")
         info_row.addWidget(badge_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
@@ -5014,7 +5031,7 @@ class _BookCard(QFrame):
                     if total:
                         pct_lbl = QLabel(f"{pct}%")
                         pct_lbl.setAttribute(Qt.WA_TranslucentBackground)
-                        pct_lbl.setStyleSheet("color: #8ab4d0; font-size: 7pt; font-weight: bold; background: transparent;")
+                        pct_lbl.setStyleSheet(f"color: #8ab4d0; font-size: {self._badge_pt}pt; font-weight: bold; background: transparent;")
                         progress_row.addWidget(pct_lbl)
                     ribbon_text = "IN PROGRESS"
                     ribbon_bg = "rgba(108, 99, 255, 0.92)"
@@ -5035,7 +5052,8 @@ class _BookCard(QFrame):
                 self._progress_ribbon = QLabel(ribbon_text, self.cover_label)
                 self._progress_ribbon.setStyleSheet(
                     f"color: #fff; background: {ribbon_bg}; "
-                    "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
+                    f"font-size: {self._ribbon_pt}pt; font-weight: bold; "
+                    "padding: 1px 5px; "
                     "border-bottom-right-radius: 3px;"
                 )
                 self._progress_ribbon.move(0, 0)
@@ -5160,7 +5178,8 @@ class _BookCard(QFrame):
             ribbon.setText("⚙ COMPILING…")
             ribbon.setStyleSheet(
                 "color: #1e1616; background: rgba(255, 209, 102, 0.95); "
-                "font-size: 6.5pt; font-weight: bold; padding: 1px 5px; "
+                f"font-size: {getattr(self, '_ribbon_pt', 6.5)}pt; "
+                "font-weight: bold; padding: 1px 5px; "
                 "border-bottom-right-radius: 3px;")
             ribbon.adjustSize()
             ribbon.show()
