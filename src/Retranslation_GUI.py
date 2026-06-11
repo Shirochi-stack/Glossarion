@@ -36,6 +36,51 @@ from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
 
+# --- Non-blocking access to TransateKRtoEN.ProgressManager ------------------
+# TransateKRtoEN is a very heavy import chain (tiktoken, ebooklib, bs4,
+# unified_api_client, GlossaryManager, ...). In frozen (PyInstaller onefile)
+# builds the first import can take 10-20s. When the translation worker thread
+# starts that import, any plain `from TransateKRtoEN import ProgressManager`
+# executed on the GUI thread (e.g. by this dialog's 2s auto-refresh timer)
+# blocks on Python's per-module import lock until the worker finishes —
+# freezing the entire GUI for the whole import. These helpers only ever do a
+# lock-free sys.modules/getattr lookup on the GUI thread and, if the module
+# isn't ready yet, warm it once in a background thread instead of blocking.
+_TRANSLATE_MODULE_WARMUP_STARTED = threading.Event()
+
+
+def _warm_translate_module_in_background():
+    """Kick off the heavy TransateKRtoEN import on a daemon thread (once)."""
+    if _TRANSLATE_MODULE_WARMUP_STARTED.is_set():
+        return
+    _TRANSLATE_MODULE_WARMUP_STARTED.set()
+
+    def _warm():
+        try:
+            import TransateKRtoEN  # noqa: F401
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, name="translate-module-warmup", daemon=True).start()
+
+
+def _get_progress_manager_nonblocking():
+    """Return TransateKRtoEN.ProgressManager without touching the import lock.
+
+    Returns None when TransateKRtoEN is not fully imported yet (e.g. it is
+    being imported right now by the translation worker in a frozen build).
+    Callers on the GUI thread should treat None as "skip this tick" rather
+    than importing the module themselves.
+    """
+    mod = sys.modules.get('TransateKRtoEN')
+    if mod is not None:
+        pm = getattr(mod, 'ProgressManager', None)
+        if pm is not None:
+            return pm
+    _warm_translate_module_in_background()
+    return None
+# -----------------------------------------------------------------------------
+
 
 class _GlossaryProgressAsyncBridge(QObject):
     finished = Signal(object)
@@ -9827,15 +9872,23 @@ class RetranslationMixin:
         
         # Clean up missing files and merged children when opening the GUI
         # This handles the case where parent files were manually deleted
-        from TransateKRtoEN import ProgressManager
-        temp_progress = ProgressManager(os.path.dirname(progress_file))
-        temp_progress.prog = prog
-        temp_progress.cleanup_missing_files(output_dir)
-        prog = temp_progress.prog
-        
-        # Save the cleaned progress back to file
-        with open(progress_file, 'w', encoding='utf-8') as f:
-            json.dump(prog, f, ensure_ascii=False, indent=2)
+        # NOTE: resolved without the import lock so opening this GUI can never
+        # freeze behind a translation worker that is mid-import of the heavy
+        # TransateKRtoEN module (10-20s in frozen builds).
+        ProgressManager = _get_progress_manager_nonblocking()
+        if ProgressManager is not None:
+            temp_progress = ProgressManager(os.path.dirname(progress_file))
+            temp_progress.prog = prog
+            temp_progress.cleanup_missing_files(output_dir)
+            prog = temp_progress.prog
+
+            # Save the cleaned progress back to file
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump(prog, f, ensure_ascii=False, indent=2)
+        else:
+            # Module still importing elsewhere — skip cleanup now; the 2s
+            # auto-refresh will run it once the module is ready.
+            print("⏳ TransateKRtoEN still loading — deferring progress cleanup to next refresh")
         
         _pump_loading("Reading progress data...")
         
@@ -15180,18 +15233,24 @@ class RetranslationMixin:
                     return False
             
             # Clean up missing files and merged children before display unless disabled
+            # NOTE: this runs on the GUI thread from a 2s QTimer. It must NEVER
+            # use a plain `from TransateKRtoEN import ...` — if the translation
+            # worker is importing that module right now (first Run Translation
+            # click in a frozen build), the import lock would freeze the whole
+            # GUI for the entire 10-20s import. Skip cleanup for this tick instead.
             if not data.get('skip_cleanup', False) and not _progress_has_active_entries(data['prog']):
-                from TransateKRtoEN import ProgressManager
-                before_cleanup = copy.deepcopy(data['prog'])
-                temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
-                temp_progress.prog = data['prog']
-                temp_progress.cleanup_missing_files(data['output_dir'])
-                data['prog'] = temp_progress.prog
-                
-                # Save only if cleanup really changed the file. During active translation
-                # refresh should be a reader, not another progress writer.
-                if data['prog'] != before_cleanup:
-                    _write_progress_json_safely(data['progress_file'], data['prog'])
+                ProgressManager = _get_progress_manager_nonblocking()
+                if ProgressManager is not None:
+                    before_cleanup = copy.deepcopy(data['prog'])
+                    temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
+                    temp_progress.prog = data['prog']
+                    temp_progress.cleanup_missing_files(data['output_dir'])
+                    data['prog'] = temp_progress.prog
+
+                    # Save only if cleanup really changed the file. During active translation
+                    # refresh should be a reader, not another progress writer.
+                    if data['prog'] != before_cleanup:
+                        _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if self._reconcile_tts_audio_files(data):
                 _write_progress_json_safely(data['progress_file'], data['prog'])

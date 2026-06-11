@@ -744,6 +744,44 @@ class SplashManager(QObject):
             # Widget deleted or not available
             pass
 
+    @staticmethod
+    def _configured_model_uses_vertex():
+        """Sniff config.json for a Vertex AI model without importing the GUI.
+
+        Mirrors unified_api_client's detection: 'vertex/' prefix, an '@' in
+        the model name, or the authgem-vertex flavor.
+        """
+        override = os.environ.get("GLOSSARION_PRELOAD_VERTEX", "").strip().lower()
+        if override in ("1", "true", "yes", "on"):
+            return True
+        if override in ("0", "false", "no", "off"):
+            return False
+        candidates = []
+        try:
+            if getattr(sys, 'frozen', False):
+                candidates.append(os.path.dirname(sys.executable))
+            candidates.append(os.path.dirname(os.path.abspath(__file__)))
+            candidates.append(os.getcwd())
+        except Exception:
+            pass
+        for base in candidates:
+            try:
+                cfg_path = os.path.join(base, "config.json")
+                if not os.path.isfile(cfg_path):
+                    continue
+                import json
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                model = str(cfg.get('model', '') or '').lower()
+                return (
+                    model.startswith('vertex/')
+                    or model.startswith('authgem-vertex')
+                    or '@' in model
+                )
+            except Exception:
+                continue
+        return False
+
     def _preload_optional_startup_modules(self):
         """Warm optional heavy modules without blocking the main startup path."""
         try:
@@ -753,19 +791,50 @@ class SplashManager(QObject):
         # Pre-load heavy SDLXLIFF / lxml chain so the first click on any
         # retranslation or glossary-progress feature doesn't freeze the GUI.
         # lxml in particular is slow to load from PyInstaller archives.
+        # Also warm everything Run Translation touches lazily on its worker
+        # thread (bs4/lxml.html re-renders, fitz, markdown, enhanced text
+        # extraction, free-translate fallback). In frozen onefile builds these
+        # first-time imports take seconds and starve the GUI thread mid-run.
         for _mod_name in (
             "lxml",
             "lxml.etree",
+            "lxml.html",
+            "bs4",
             "sdlxliff_extractor",
             "sdlxliff_converter",
             "sdlxliff_extraction_manager",
             "sdlxliff_sidecar_writer",
             "Retranslation_GUI",
+            "enhanced_text_extractor",
+            "google_free_translate",
+            "markdown",
+            "fitz",
         ):
             try:
                 importlib.import_module(_mod_name)
             except Exception:
                 pass
+        # Warm the tiktoken encoder cache (BPE ranks load lazily on first use,
+        # which otherwise lands in the middle of the first translation run).
+        try:
+            import tiktoken
+            tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            pass
+        # Vertex AI chain is enormous (1,265+ proto submodules, ~215 MB RAM),
+        # so only warm it when the configured model actually targets Vertex —
+        # the first API call would import it anyway; doing it here moves the
+        # 10-20s frozen-build import off the Run Translation click.
+        if self._configured_model_uses_vertex():
+            for _mod_name in (
+                "google.cloud.aiplatform",
+                "vertexai",
+                "vertexai.generative_models",
+            ):
+                try:
+                    importlib.import_module(_mod_name)
+                except Exception:
+                    pass
 
     def _preload_epub_webengine(self):
         """Warm Qt WebEngine imports while the splash is still visible."""
