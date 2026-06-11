@@ -8828,11 +8828,6 @@ def _build_single_pass_glossary_messages(messages, source_text):
         print(f"⚠️ Single Pass Glossary: failed to build glossary prompt: {e}")
         return messages
 
-    user_reminder = (
-        "\n\n[Single-Pass Output Reminder]\n"
-        "Return one <glossary>...</glossary> block first, then translate the complete source text after </glossary>. "
-        "Do not return only the glossary."
-    )
     wrapped = []
     system_wrapped = False
     for msg in messages:
@@ -8850,10 +8845,6 @@ def _build_single_pass_glossary_messages(messages, source_text):
             wrapped.append(dict(msg))
 
     if system_wrapped:
-        for idx in range(len(wrapped) - 1, -1, -1):
-            if wrapped[idx].get("role") == "user" and isinstance(wrapped[idx].get("content"), str):
-                wrapped[idx]["content"] = wrapped[idx]["content"].rstrip() + user_reminder
-                break
         print("📑 Single Pass Glossary: prompt merged into translation request")
     return wrapped
 

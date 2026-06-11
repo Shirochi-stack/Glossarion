@@ -11557,7 +11557,6 @@ class UnifiedClient:
             "[Translation Prompt]",
             "[Glossary Prompt]",
             "[Final Single-Pass Override]",
-            "[Single-Pass Output Reminder]",
             "You have two tasks for this request.",
             "You are ",
             "Rules:",
