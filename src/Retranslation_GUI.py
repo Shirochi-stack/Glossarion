@@ -595,6 +595,13 @@ class SDLXLIFFReviewDialog(QDialog):
         super().showEvent(event)
         if self._first_show_render_started:
             self._start_review_auto_refresh()
+            # Force an immediate refresh on re-show instead of waiting for
+            # the next auto-refresh tick and its cooldown window.
+            try:
+                if self._review_data_loaded and not getattr(self, '_review_refresh_scan_running', False):
+                    self._queue_review_refresh_scan(force=False, current_path=self.current_path, delay_ms=50)
+            except Exception:
+                pass
             return
         self._first_show_render_started = True
         try:
@@ -13188,6 +13195,24 @@ class RetranslationMixin:
                         pass
                     _original_gp_hide_event(event)
                 gp_dialog.hideEvent = _gp_hide_event
+
+                # Restart the timer AND force-refresh all panels whenever the
+                # cached dialog becomes visible again. Without this the auto-
+                # refresh stayed dead after the first hide (hideEvent stops it
+                # and nothing restarted it), and re-shown panels were stale.
+                _original_gp_show_event = gp_dialog.showEvent
+                def _gp_show_event(event):
+                    try:
+                        _original_gp_show_event(event)
+                    except Exception:
+                        pass
+                    try:
+                        if not _gp_timer.isActive():
+                            _gp_timer.start()
+                        QTimer.singleShot(0, _gp_refresh_all)
+                    except Exception:
+                        pass
+                gp_dialog.showEvent = _gp_show_event
                 
                 # Cache on parent dialog so all tabs share the same instance
                 dialog._glossary_progress_dialog = gp_dialog
@@ -14443,6 +14468,28 @@ class RetranslationMixin:
         _auto_refresh_timer.timeout.connect(_silent_refresh)
         _auto_refresh_timer.start()
         data['_auto_refresh_timer'] = _auto_refresh_timer
+
+        # Force-refresh whenever the (cached, hidden-on-close) Progress Manager
+        # becomes visible again: kick a background snapshot immediately and
+        # apply it as soon as it lands, instead of waiting up to two timer
+        # ticks. Uses the same prefetch path, so no disk I/O on the GUI thread.
+        _pm_dialog = data.get('dialog')
+        if _pm_dialog is not None:
+            _original_pm_show_event = _pm_dialog.showEvent
+
+            def _pm_show_event(event, _orig=_original_pm_show_event):
+                try:
+                    _orig(event)
+                except Exception:
+                    pass
+                try:
+                    _silent_refresh()                        # start snapshot now
+                    QTimer.singleShot(250, _silent_refresh)  # apply when ready
+                    QTimer.singleShot(900, _silent_refresh)  # slow-disk fallback
+                except Exception:
+                    pass
+
+            _pm_dialog.showEvent = _pm_show_event
 
         # ==== Context menu on listbox ====
         listbox = data['listbox']
@@ -18650,6 +18697,22 @@ class RetranslationMixin:
         _auto_refresh_timer.timeout.connect(_silent_refresh_images)
         _auto_refresh_timer.start()
         dialog._auto_refresh_timer = _auto_refresh_timer
+
+        # Force-refresh whenever the cached dialog is re-shown (close only
+        # hides it), instead of waiting for the next timer tick.
+        _original_img_show_event = dialog.showEvent
+
+        def _img_show_event(event, _orig=_original_img_show_event):
+            try:
+                _orig(event)
+            except Exception:
+                pass
+            try:
+                QTimer.singleShot(0, _silent_refresh_images)
+            except Exception:
+                pass
+
+        dialog.showEvent = _img_show_event
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")
