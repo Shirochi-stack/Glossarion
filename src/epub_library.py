@@ -8587,6 +8587,31 @@ class EpubLibraryDialog(QDialog):
 
         return True
 
+    def _compile_epub_for_folder(self, folder: str):
+        """Run the EPUB converter on *folder* via the main translator GUI.
+
+        Shared by the flash-card context menu's "Compile EPUB" action —
+        same behavior as the Book Details button: the converter runs in the
+        main window's worker with progress in the main log, and its own
+        busy-state guards apply.
+        """
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(
+                self, "Compile EPUB",
+                "Could not resolve this card's output folder.")
+            return
+        gui = _find_translator_gui(self)
+        if gui is None or not hasattr(gui, "epub_converter"):
+            QMessageBox.warning(
+                self, "Compile EPUB",
+                "The main translator window is not available.")
+            return
+        try:
+            gui.epub_converter(folder=folder)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compile EPUB",
+                                f"Could not start the EPUB converter:\n{exc}")
+
     def _load_for_translation(self, book: dict):
         """Push the card's raw source path into the translator's input field.
 
@@ -10504,6 +10529,22 @@ class EpubLibraryDialog(QDialog):
             output_folder = (_resolve_book_output_folder(book)
                              or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
+        # "Compile EPUB" — explicitly runs the EPUB converter phase on the
+        # card's output workspace (same action as the Book Details button;
+        # single-chapter Translate runs never compile on their own). Only
+        # offered when the workspace actually holds translation progress.
+        compile_folder = output_folder
+        if not (compile_folder and os.path.isfile(os.path.join(
+                compile_folder, "translation_progress.json"))):
+            compile_folder = _resolve_book_output_folder(book)
+        if compile_folder and os.path.isfile(os.path.join(
+                compile_folder, "translation_progress.json")):
+            compile_action = menu.addAction("\U0001f4d8  Compile EPUB")
+            compile_action.setToolTip(
+                f"Build the output EPUB from this workspace's translated "
+                f"chapters:\n{compile_folder}")
+            compile_action.triggered.connect(
+                lambda *_a, f=compile_folder: self._compile_epub_for_folder(f))
         # Reveal the raw source file \u2014 identical to the Book Details
         # \U0001f517 button. Resolves the same way (raw_source_path, then
         # origins lookup for Library/Translated entries, then book path).
@@ -14710,6 +14751,14 @@ class BookDetailsDialog(QDialog):
                                    Qt.SmoothTransformation)
             logical = 18.0
             size_px = max(1, int(round(logical * dpr)))
+            # Fit the source into the 18×18 logical box WITHOUT distorting
+            # it — scale by the limiting dimension and center the result.
+            sw = max(1, work.width())
+            sh = max(1, work.height())
+            fit = min(logical / sw, logical / sh)
+            tw = sw * fit
+            th = sh * fit
+            target = QRectF(-tw / 2.0, -th / 2.0, tw, th)
             for step in range(15):  # 24° per frame
                 angle = step * 24
                 frame = QPixmap(size_px, size_px)
@@ -14721,9 +14770,7 @@ class BookDetailsDialog(QDialog):
                 half = logical / 2.0
                 painter.translate(half, half)
                 painter.rotate(angle)
-                painter.drawPixmap(
-                    QRectF(-half, -half, logical, logical),
-                    work, QRectF(work.rect()))
+                painter.drawPixmap(target, work, QRectF(work.rect()))
                 painter.end()
                 frames.append(QIcon(frame))
         self._compile_spin_cache = {"dpr": dpr, "frames": frames}
