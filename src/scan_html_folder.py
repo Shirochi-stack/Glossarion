@@ -5748,6 +5748,18 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
                     _tls.active_api_delay_override = float(api_call_delay)
                 except Exception:
                     pass
+                # Also pin the delay on the client instance. The TLS override
+                # above is wiped by key rotation / first-call thread init, and
+                # the SEND_INTERVAL_SECONDS env override is racy across
+                # parallel QA threads (one thread's finally restores it while
+                # another is mid-send). _apply_api_call_stagger reads this
+                # attribute directly for qa_truncation-scoped calls, making
+                # the dialog's API Call Delay authoritative on every route
+                # (main key, single key, and dedicated QA Scan Keys pool).
+                try:
+                    client._qa_truncation_delay_override = float(api_call_delay)
+                except Exception:
+                    pass
             response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
 
         # Parse response

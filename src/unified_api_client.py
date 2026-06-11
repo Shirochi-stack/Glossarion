@@ -6145,6 +6145,11 @@ class UnifiedClient:
             temp._forced_image_output_resolution = getattr(self, '_forced_image_output_resolution', None)
             temp._suppress_custom_image_edit_endpoint = getattr(self, '_suppress_custom_image_edit_endpoint', False)
             temp._disable_internal_retry = getattr(self, '_disable_internal_retry', False)
+            # Carry the QA truncation delay override onto the dedicated temp
+            # client — its TLS is separate from the worker client's, so this
+            # instance attribute is the only reliable way the QA dialog's
+            # API Call Delay reaches _apply_api_call_stagger on this route.
+            temp._qa_truncation_delay_override = getattr(self, '_qa_truncation_delay_override', None)
             temp.context = context or getattr(self, 'context', None)
             temp.key_identifier = f"{key_prefix}#{key_idx + 1} ({getattr(key_entry, 'model', '')})"
             temp.current_key_index = key_idx
@@ -15210,12 +15215,25 @@ class UnifiedClient:
             api_delay = float(per_key) if per_key is not None else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         except Exception:
             api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-        
-        if api_delay <= 0:
-            return
-        
+
         thread_name = threading.current_thread().name
         stagger_scope = self._get_api_stagger_scope()
+
+        # AI truncation detection: the QA dialog's dedicated API Call Delay is
+        # authoritative for qa_truncation-scoped calls. The TLS override above
+        # is wiped by key rotation / thread init and the SEND_INTERVAL_SECONDS
+        # env override is racy across parallel QA threads, both of which let
+        # these calls bypass the configured delay.
+        if stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey'):
+            _qa_delay = getattr(self, '_qa_truncation_delay_override', None)
+            if _qa_delay is not None:
+                try:
+                    api_delay = float(_qa_delay)
+                except (TypeError, ValueError):
+                    pass
+
+        if api_delay <= 0:
+            return
         no_snap_scope = stagger_scope in ('context:qa_truncation', 'pool:AITruncationDetectionKey')
         
         # Initialize class-level tracking if needed
