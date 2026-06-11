@@ -2215,52 +2215,119 @@ def _origins_raw_sources_for_stem(folder_stem: str) -> list[str]:
     return matches
 
 
+def _validate_source_epub_for_workspace(folder: str, source_path: str) -> bool:
+    """Content check: does *source_path* look like the EPUB that actually
+    fed this workspace?
+
+    Compares the workspace's ``translation_progress.json``
+    ``original_basename`` stems against the EPUB's internal file names.
+    A poisoned mapping (e.g. a ``source_epub.txt`` overwritten during a
+    multi-EPUB run) points at a different book whose internals barely
+    overlap, so it fails here and the caller can invalidate the link.
+
+    Returns True when there is no evidence either way (non-EPUB source,
+    no progress file, unreadable data) — only a demonstrated mismatch
+    invalidates a candidate.
+    """
+    try:
+        if not source_path or not str(source_path).lower().endswith(".epub"):
+            return True
+        if not os.path.isfile(source_path):
+            return False
+        progress_file = os.path.join(folder, "translation_progress.json")
+        if not os.path.isfile(progress_file):
+            return True
+        import json as _json
+        with open(progress_file, "r", encoding="utf-8") as f:
+            prog = _json.load(f)
+        chapters = prog.get("chapters", {}) if isinstance(prog, dict) else {}
+        stems: set[str] = set()
+        for ch in chapters.values():
+            if isinstance(ch, dict):
+                ob = ch.get("original_basename")
+                if ob:
+                    stems.add(_special_file_stem(str(ob)))
+        stems.discard("")
+        if not stems:
+            return True
+        import zipfile as _zipfile
+        with _zipfile.ZipFile(source_path, "r") as zf:
+            epub_stems = {_special_file_stem(n) for n in zf.namelist()}
+        epub_stems.discard("")
+        if not epub_stems:
+            return False
+        overlap = len(stems & epub_stems)
+        # Majority overlap required: the true source contains (nearly)
+        # every tracked chapter; a wrong book matches at most a few
+        # generic names (cover, toc, …).
+        return overlap >= max(1, (len(stems) + 1) // 2)
+    except Exception:
+        logger.debug("Source-EPUB validation failed open-ended: %s",
+                     traceback.format_exc())
+        return True
+
+
 def _find_raw_source_for_folder(folder: str) -> str | None:
     """Try to locate the raw source file that fed this output folder.
 
-    Search order:
-      1. ``library_origins['raw']`` — a UNIQUE stem match resolves the
-         raw source directly. The origins registry is maintained by
-         organize/undo and is more reliable than the sidecar, which can
-         be stale or overwritten (e.g. by multi-EPUB runs).
-      2. ``<folder>/source_epub.txt`` — only consulted when the origins
-         registry is ambiguous (duplicate origins for one workspace) or
-         has no entry.
-      3. ``Library/Raw/<folder_basename>.<ext>`` — imported raw source.
-      4. Any entry in ``library_raw_inputs.txt`` whose stem matches.
+    Candidates are gathered in priority order and the FIRST one that
+    passes :func:`_validate_source_epub_for_workspace` wins:
+
+      1. ``library_origins['raw']`` stem matches — maintained by
+         organize/undo, survives sidecar corruption.
+      2. ``library_raw_inputs.txt`` stem matches — every raw the user
+         ever loaded, the broadest reliable registry.
+      3. ``Library/Raw/<folder_basename>.<ext>`` — direct name match.
+      4. ``<folder>/source_epub.txt`` — LAST RESORT: the sidecar can be
+         stale or overwritten by multi-EPUB runs.
+
+    A candidate that exists but fails content validation is skipped —
+    a poisoned pointer must never win just because the file exists.
+    Returns ``None`` when nothing validates (the link is invalidated
+    rather than mapped to the wrong book).
     """
     folder_name = os.path.basename(os.path.normpath(folder))
     if not folder_name:
         return None
-    # 1. Origins registry — unique match wins outright.
-    origin_matches = _origins_raw_sources_for_stem(folder_name)
-    if len(origin_matches) == 1:
-        return origin_matches[0]
-    # 2. source_epub.txt pointer — duplicate-origin tie-breaker / legacy
-    #    fallback. When the origins registry returned duplicates, only
-    #    trust a pointer that agrees with one of them.
-    pointed = _read_source_epub_pointer(folder)
-    if pointed and os.path.isfile(pointed):
-        if origin_matches:
-            pointed_key = os.path.normcase(os.path.normpath(pointed))
-            for cand in origin_matches:
-                if os.path.normcase(os.path.normpath(cand)) == pointed_key:
-                    return cand
-        else:
-            return pointed
-    # 3. Library/Raw
+    fn_key = os.path.normcase(folder_name)
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def _add(p):
+        if not p:
+            return
+        try:
+            if not os.path.isfile(p):
+                return
+            key = os.path.normcase(os.path.normpath(p))
+        except Exception:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(p)
+
+    # 1. Origins registry stem matches
+    for p in _origins_raw_sources_for_stem(folder_name):
+        _add(p)
+    # 2. Raw-inputs registry stem matches
+    for p in load_library_raw_inputs():
+        try:
+            stem = os.path.splitext(os.path.basename(p))[0]
+        except Exception:
+            continue
+        if os.path.normcase(stem) == fn_key:
+            _add(p)
+    # 3. Library/Raw direct name match
     raw_dir = get_library_raw_dir()
     for ext in (".epub", ".txt", ".pdf", ".html"):
-        candidate = os.path.join(raw_dir, folder_name + ext)
-        if os.path.isfile(candidate):
-            return candidate
-    # 4. Raw-inputs registry
-    for p in load_library_raw_inputs():
-        if not os.path.isfile(p):
-            continue
-        stem, _ = os.path.splitext(os.path.basename(p))
-        if stem == folder_name:
-            return p
+        _add(os.path.join(raw_dir, folder_name + ext))
+    # 4. source_epub.txt pointer — last resort
+    _add(_read_source_epub_pointer(folder))
+
+    for cand in candidates:
+        if _validate_source_epub_for_workspace(folder, cand):
+            return cand
     return None
 
 
@@ -3009,28 +3076,19 @@ def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
                 if summary is None:
                     continue
                 folder_name = entry.name
-                # 1. Origins registry — a unique stem match is the most
-                #    reliable mapping (the sidecar can be stale or
-                #    overwritten by multi-EPUB runs).
-                source_path = None
-                origin_matches = _origins_raw_sources_for_stem(folder_name)
-                if len(origin_matches) == 1:
-                    source_path = origin_matches[0]
-                # 2. source_epub.txt pointer — duplicate-origin
-                #    tie-breaker / legacy fallback.
+                # Shared validating resolver: origins registry →
+                # raw-inputs registry → Library/Raw → source_epub.txt
+                # (last resort). Every candidate is content-validated
+                # against translation_progress.json, so a sidecar
+                # poisoned by a multi-EPUB run is invalidated instead
+                # of mapping the card to the wrong book.
+                source_path = _find_raw_source_for_folder(folder)
+                # Fall back to folder-name↔basename match within the
+                # allowed roots — validated the same way.
                 if not source_path:
-                    pointed = _read_source_epub_pointer(folder)
-                    if pointed and origin_matches:
-                        pointed_key = os.path.normcase(os.path.normpath(pointed))
-                        for cand in origin_matches:
-                            if os.path.normcase(os.path.normpath(cand)) == pointed_key:
-                                source_path = cand
-                                break
-                    elif pointed:
-                        source_path = pointed
-                # 3. Fall back to folder-name↔basename match within the allowed roots.
-                if not source_path:
-                    source_path = epub_by_base.get(folder_name) or epub_by_base.get(folder_name.lower())
+                    candidate = epub_by_base.get(folder_name) or epub_by_base.get(folder_name.lower())
+                    if candidate and _validate_source_epub_for_workspace(folder, candidate):
+                        source_path = candidate
                 if not source_path or not os.path.isfile(source_path):
                     # No source EPUB visible — skip so we don't surface a ghost entry.
                     continue

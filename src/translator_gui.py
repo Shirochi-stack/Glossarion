@@ -20251,46 +20251,24 @@ Important rules:
             else:
                 os.environ.pop('EPUB_CSS_OVERRIDE_PATH', None)
 
-            # Resolve the source EPUB: library_origins.txt first (a unique
-            # stem match is the most reliable mapping), then the
-            # source_epub.txt sidecar — only trusted when the origins
-            # registry is ambiguous (duplicate origins) or has no entry,
-            # because the sidecar can be stale/overwritten by multi-EPUB runs.
+            # Resolve the source EPUB through the library's validating
+            # resolver: library_origins.txt → library_raw_inputs.txt →
+            # Library/Raw → source_epub.txt (last resort). Candidates are
+            # content-validated against translation_progress.json, so a
+            # sidecar poisoned by a multi-EPUB run is invalidated instead
+            # of ordering chapters from the wrong book.
             source_epub_path = ''
-            origin_matches = []
             try:
-                from epub_library import _origins_raw_sources_for_stem
-                origin_matches = _origins_raw_sources_for_stem(
-                    os.path.basename(os.path.normpath(folder)))
-            except Exception:
-                origin_matches = []
-            if len(origin_matches) == 1:
-                source_epub_path = origin_matches[0]
-            else:
-                source_epub_file = os.path.join(folder, 'source_epub.txt')
-                if os.path.exists(source_epub_file):
-                    try:
-                        with open(source_epub_file, 'r', encoding='utf-8') as f:
-                            pointed = f.read().strip()
-                        if pointed and origin_matches:
-                            # Duplicate origins: only trust a pointer that
-                            # agrees with one of the registered candidates.
-                            pointed_key = os.path.normcase(os.path.normpath(pointed))
-                            for cand in origin_matches:
-                                if os.path.normcase(os.path.normpath(cand)) == pointed_key:
-                                    source_epub_path = cand
-                                    break
-                        elif pointed:
-                            source_epub_path = pointed
-                    except Exception as e:
-                        self.append_log(f"⚠️ Could not read source EPUB reference: {e}")
+                from epub_library import _find_raw_source_for_folder
+                source_epub_path = _find_raw_source_for_folder(folder) or ''
+            except Exception as e:
+                self.append_log(f"⚠️ Could not resolve source EPUB reference: {e}")
+                source_epub_path = ''
             if source_epub_path and os.path.exists(source_epub_path):
                 os.environ['EPUB_PATH'] = source_epub_path
                 self.append_log(f"✅ Using source EPUB for proper chapter ordering: {os.path.basename(source_epub_path)}")
-            elif source_epub_path:
-                self.append_log(f"⚠️ Source EPUB file not found: {source_epub_path}")
             else:
-                self.append_log("ℹ️ No source EPUB reference found - using filename-based ordering")
+                self.append_log("ℹ️ No valid source EPUB reference found - using filename-based ordering")
             
             # Set API credentials and model
             api_key = self.api_key_entry.text()

@@ -131,6 +131,40 @@ def _origins_raw_sources_for_stem(folder_stem: str) -> list:
     return matches
 
 
+def _raw_inputs_sources_for_stem(folder_stem: str) -> list:
+    """Paths in library_raw_inputs.txt whose filename stem matches.
+
+    Checks the registry at the Library root and the legacy copy inside
+    ``Library/Raw``. Only existing files are returned.
+    """
+    if not folder_stem:
+        return []
+    stem_key = os.path.normcase(folder_stem)
+    lib_dir = _glossarion_library_dir()
+    matches = []
+    seen = set()
+    for reg_path in (os.path.join(lib_dir, "library_raw_inputs.txt"),
+                     os.path.join(lib_dir, "Raw", "library_raw_inputs.txt")):
+        try:
+            with open(reg_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            stem = os.path.splitext(os.path.basename(ln))[0]
+            if os.path.normcase(stem) != stem_key:
+                continue
+            key = os.path.normcase(os.path.normpath(ln))
+            if key in seen or not os.path.isfile(ln):
+                continue
+            seen.add(key)
+            matches.append(os.path.abspath(ln))
+    return matches
+
+
 def _read_compile_source_reference(output_dir: str) -> str:
     """Return the raw/source path used for this output folder, if known."""
     # Resolution order:
@@ -142,9 +176,11 @@ def _read_compile_source_reference(output_dir: str) -> str:
     #      source EPUB must never happen.
     #   2. The library origins registry (library_origins.txt) raw map —
     #      a UNIQUE stem match resolves the raw source directly.
-    #   3. source_epub.txt — only consulted when the origins registry
-    #      is ambiguous (duplicate origins for one workspace) or has no
-    #      entry; the sidecar can be stale, so it is the last resort.
+    #   3. The raw-inputs registry (library_raw_inputs.txt) — every raw
+    #      the user ever loaded; first stem match wins.
+    #   4. source_epub.txt — only consulted when no registry resolves
+    #      the workspace; the sidecar can be stale/overwritten by
+    #      multi-EPUB runs, so it is the last resort.
     folder_stem = os.path.basename(os.path.normpath(output_dir or ""))
     env_epub = os.environ.get("EPUB_PATH", "").strip()
     if env_epub:
@@ -154,6 +190,9 @@ def _read_compile_source_reference(output_dir: str) -> str:
     origin_matches = _origins_raw_sources_for_stem(folder_stem)
     if len(origin_matches) == 1:
         return origin_matches[0]
+    raw_input_matches = _raw_inputs_sources_for_stem(folder_stem)
+    if raw_input_matches:
+        return raw_input_matches[0]
     sidecar = os.path.join(output_dir, "source_epub.txt")
     try:
         with open(sidecar, "r", encoding="utf-8") as f:

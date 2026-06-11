@@ -4804,6 +4804,41 @@ def _library_origins_raw_epubs_for_stem(folder_stem):
     return matches
 
 
+def _library_raw_inputs_epubs_for_stem(folder_stem):
+    """EPUB paths in library_raw_inputs.txt whose filename stem matches.
+
+    Checks the registry at the Library root and the legacy copy inside
+    ``Library/Raw``. Only existing .epub files are returned.
+    """
+    if not folder_stem:
+        return []
+    stem_key = os.path.normcase(folder_stem)
+    lib_dir = os.path.join(
+        os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+    matches = []
+    seen = set()
+    for reg_path in (os.path.join(lib_dir, "library_raw_inputs.txt"),
+                     os.path.join(lib_dir, "Raw", "library_raw_inputs.txt")):
+        try:
+            with open(reg_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            ln = ln.strip()
+            if not ln or not ln.lower().endswith(".epub"):
+                continue
+            stem = os.path.splitext(os.path.basename(ln))[0]
+            if os.path.normcase(stem) != stem_key:
+                continue
+            key = os.path.normcase(os.path.normpath(ln))
+            if key in seen or not os.path.isfile(ln):
+                continue
+            seen.add(key)
+            matches.append(os.path.abspath(ln))
+    return matches
+
+
 def _read_source_epub_html(chapter, output_dir):
     """Recover full source XHTML/HTML for older chapter caches."""
     rel_candidates = []
@@ -4821,9 +4856,11 @@ def _read_source_epub_html(chapter, output_dir):
     #      (chapter1.xhtml, …), so a wrong book would match silently.
     #   2. The library origins registry (library_origins.txt) raw map —
     #      a UNIQUE stem match resolves the raw source directly.
-    #   3. source_epub.txt — only consulted when the origins registry
-    #      is ambiguous (duplicate origins for one workspace) or has no
-    #      entry; the sidecar can be stale, so it is the last resort.
+    #   3. The raw-inputs registry (library_raw_inputs.txt) — every raw
+    #      the user ever loaded; stem matches are appended as candidates.
+    #   4. source_epub.txt — only consulted when no registry resolves
+    #      the workspace; the sidecar can be stale/overwritten by
+    #      multi-EPUB runs, so it is the last resort.
     epub_candidates = []
     folder_stem = os.path.basename(os.path.normpath(output_dir or ""))
     env_epub = os.getenv("EPUB_PATH", "").strip()
@@ -4834,7 +4871,9 @@ def _read_source_epub_html(chapter, output_dir):
     origin_matches = _library_origins_raw_epubs_for_stem(folder_stem)
     if len(origin_matches) == 1:
         epub_candidates.append(origin_matches[0])
-    else:
+    raw_input_matches = _library_raw_inputs_epubs_for_stem(folder_stem)
+    epub_candidates.extend(raw_input_matches)
+    if len(origin_matches) != 1 and not raw_input_matches:
         pointer_path = os.path.join(output_dir, "source_epub.txt")
         if os.path.exists(pointer_path):
             try:

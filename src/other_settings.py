@@ -168,6 +168,41 @@ def _library_origins_raw_sources_for_stem(folder_stem):
     return matches
 
 
+def _library_raw_inputs_for_stem(folder_stem):
+    """Paths in library_raw_inputs.txt whose filename stem matches.
+
+    *folder_stem* is expected to be normcased already. Checks the
+    registry at the Library root and the legacy copy inside
+    ``Library/Raw``. Only existing files are returned.
+    """
+    if not folder_stem:
+        return []
+    lib_dir = os.path.join(
+        os.path.expanduser('~'), 'Documents', 'Glossarion', 'Library')
+    matches = []
+    seen = set()
+    for reg_path in (os.path.join(lib_dir, 'library_raw_inputs.txt'),
+                     os.path.join(lib_dir, 'Raw', 'library_raw_inputs.txt')):
+        try:
+            with open(reg_path, 'r', encoding='utf-8') as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            stem = os.path.splitext(os.path.basename(ln))[0]
+            if os.path.normcase(stem) != folder_stem:
+                continue
+            key = os.path.normcase(os.path.normpath(ln))
+            if key in seen or not os.path.isfile(ln):
+                continue
+            seen.add(key)
+            matches.append(os.path.abspath(ln))
+    return matches
+
+
 def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
     """Rename output files when the 'retain source extension' toggle changes.
 
@@ -272,14 +307,21 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
                         break
         # 3. Library origins registry — a UNIQUE stem match resolves
         #    the raw source directly; duplicates mean ambiguity and
-        #    drop through to the sidecar.
+        #    drop through to the next source.
         if not _epub:
             _origin_matches = _library_origins_raw_sources_for_stem(_folder_stem)
             if len(_origin_matches) == 1 and _origin_matches[0].lower().endswith('.epub'):
                 _epub = _origin_matches[0]
-        # 4. source_epub.txt sidecar — last resort, only reached when
-        #    the origins registry is ambiguous (duplicate origins for
-        #    one workspace) or empty; the sidecar can be stale.
+        # 4. Raw-inputs registry (library_raw_inputs.txt) — every raw
+        #    the user ever loaded; first stem match wins.
+        if not _epub:
+            for _f in _library_raw_inputs_for_stem(_folder_stem):
+                if _f.lower().endswith('.epub'):
+                    _epub = _f
+                    break
+        # 5. source_epub.txt sidecar — last resort, only reached when
+        #    no registry resolves this workspace; the sidecar can be
+        #    stale/overwritten by multi-EPUB runs.
         if not _epub:
             _sidecar = os.path.join(output_dir, 'source_epub.txt')
             if os.path.exists(_sidecar):
