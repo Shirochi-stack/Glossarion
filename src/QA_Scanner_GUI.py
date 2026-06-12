@@ -4795,6 +4795,24 @@ class QAScannerMixin:
                             ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', False) else '0'),
                         ]
 
+                        # CRITICAL: refresh the JSON snapshot too. The
+                        # post-translation scanning phase and worker-side
+                        # multipass scans load settings from
+                        # QA_SCANNER_SETTINGS_JSON *first* and only fall
+                        # back to the per-key env vars above when it is
+                        # absent — a stale snapshot kept running checks
+                        # (e.g. AI truncation detection) the user had just
+                        # toggled off in this dialog.
+                        try:
+                            qa_env_mappings.append(
+                                ('QA_SCANNER_SETTINGS_JSON', self._get_qa_scanner_settings_json()))
+                        except Exception:
+                            try:
+                                qa_env_mappings.append(
+                                    ('QA_SCANNER_SETTINGS_JSON', json.dumps(qa_settings, ensure_ascii=False)))
+                            except Exception:
+                                pass
+
                         for env_key, env_value in qa_env_mappings:
                             try:
                                 old_value = os.environ.get(env_key, '<NOT SET>')
