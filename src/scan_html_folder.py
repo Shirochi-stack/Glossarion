@@ -2845,30 +2845,65 @@ def process_enhance_duplicate_batch(args):
     return batch_results
 
 
+def _scan_config_json_path():
+    """Path to the REAL config.json: next to the frozen exe, or this script.
+
+    ``__file__`` alone is wrong in frozen builds (PyInstaller temp dir).
+    """
+    import sys as _sys
+    if getattr(_sys, 'frozen', False):
+        base_dir = os.path.dirname(os.path.abspath(_sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, 'config.json')
+
+
+def _resolve_scan_max_workers_config(extra_sections=()):
+    """Resolve the configured QA-scan parallel worker limit.
+
+    Resolution order:
+      1. ``AI_HUNTER_MAX_WORKERS`` env var — kept current by the QA
+         scanner settings GUI, works in frozen builds too.
+      2. ``config.json`` next to the frozen exe (``sys.executable``) or,
+         when running from source, next to this script. The old code
+         only looked next to ``__file__``, which in a frozen build is
+         the PyInstaller temp extraction dir — config.json never exists
+         there, so the limit silently fell back to 0 (= ALL cores) no
+         matter what the user configured.
+
+    Returns 0 for "use all cores".
+    """
+    env_raw = os.getenv('AI_HUNTER_MAX_WORKERS', '').strip()
+    if env_raw:
+        try:
+            return max(0, int(env_raw))
+        except ValueError:
+            pass
+    try:
+        config_path = _scan_config_json_path()
+        if not os.path.exists(config_path):
+            return 0
+        with open(config_path, 'r', encoding='utf-8') as f:
+            full_config = json.load(f)
+        for section in list(extra_sections) + ['qa_scanner_config']:
+            sec = full_config.get(section, {})
+            if isinstance(sec, dict) and 'max_workers' in sec:
+                return max(0, int(sec['max_workers']))
+        return max(0, int(full_config.get('ai_hunter_config', {})
+                          .get('ai_hunter_max_workers', 1)))
+    except Exception:
+        return 0
+
+
 def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""
-    
+
     log("🔍 Enhanced duplicate detection (different naming formats)...")
     log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
-    
+
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
-    max_workers_config = 0
-    
-    try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-                # Check multiple possible config locations
-                qa_config = full_config.get('qa_scanner_config', {})
-                ai_hunter_config = full_config.get('ai_hunter_config', {})
-                
-                # Priority: qa_scanner_config > ai_hunter_config
-                max_workers_config = qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 1))
-    except:
-        max_workers_config = 0
+    max_workers_config = _resolve_scan_max_workers_config()
     
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
@@ -2959,7 +2994,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         # Executor selection for enhanced duplicate detection (honours the
         # same QA-setting toggle as the main scan).
         try:
-            _load_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            _load_path = _scan_config_json_path()
             _cfg_use_threads = False
             if os.path.exists(_load_path):
                 with open(_load_path, 'r', encoding='utf-8') as _cf:
@@ -3633,22 +3668,8 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     cpu_count = multiprocessing.cpu_count()
     max_workers_config = 0
     
-    try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-                # Check multiple possible config locations
-                qa_config = full_config.get('qa_scanner_config', {})
-                deep_check_config = full_config.get('deep_check_config', {})
-                ai_hunter_config = full_config.get('ai_hunter_config', {})
-                
-                # Priority: deep_check_config > qa_scanner_config > ai_hunter_config
-                max_workers_config = deep_check_config.get('max_workers', 
-                                    qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 1)))
-    except:
-        max_workers_config = 0
+    # Priority: deep_check_config > qa_scanner_config > ai_hunter_config
+    max_workers_config = _resolve_scan_max_workers_config(('deep_check_config',))
     
     # Determine if we should use parallel processing
     use_parallel = True
@@ -8544,21 +8565,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     cpu_count = multiprocessing.cpu_count()
     max_workers_config = 0
     
-    try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-                # Check multiple possible config locations
-                qa_config = full_config.get('qa_scanner_config', {})
-                ai_hunter_config = full_config.get('ai_hunter_config', {})
-                
-                # Priority: qa_scanner_config > ai_hunter_config
-                max_workers_config = qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 1))
-    except:
-        max_workers_config = 0
-    
+    max_workers_config = _resolve_scan_max_workers_config()
+
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
         log(f"   🖥️ Using {max_workers} CPU cores for file processing (configured limit)")
@@ -9217,7 +9225,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _ai_config = qa_settings.get('_live_config', {})
             if not _ai_config:
                 # Fallback: try to load and decrypt config from file
-                _config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+                _config_path = _scan_config_json_path()
                 if os.path.exists(_config_path):
                     try:
                         from api_key_encryption import decrypt_config
@@ -10072,17 +10080,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     cpu_count = multiprocessing.cpu_count()
     max_workers_config = 0
     
-    try:
-        import json
-        import os
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-                ai_hunter_config = full_config.get('ai_hunter_config', {})
-                max_workers_config = ai_hunter_config.get('ai_hunter_max_workers', 1)
-    except:
-        max_workers_config = 0
+    max_workers_config = _resolve_scan_max_workers_config()
     
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
