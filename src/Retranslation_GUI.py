@@ -2713,9 +2713,19 @@ class SDLXLIFFReviewDialog(QDialog):
         QTimer.singleShot(0, lambda row=row: self._render_piece(row))
 
     def _candidate_epub_paths_from_context(self, parent):
-        candidates = []
+        # LIVE candidates = the files currently loaded in the input field /
+        # dialog. HISTORICAL candidates = paths persisted in config from
+        # past sessions (last_input_files / selected_files). Only the live
+        # set should drive the sidecar scan: using config history made the
+        # viewer enumerate + signature-scan the output folders of every
+        # book the user EVER loaded, holding "Checking SDLXLIFF
+        # sidecars..." on dialogs that only concern the current inputs.
+        # Config history is kept solely as a fallback for a standalone
+        # viewer launched with no live selection at all.
+        live_candidates = []
+        historical_candidates = []
 
-        def _add_many(values):
+        def _add_many(bucket, values):
             if not values:
                 return
             for value in values:
@@ -2730,19 +2740,19 @@ class SDLXLIFFReviewDialog(QDialog):
                         or RetranslationMixin._sdlxliff_is_extracted_epub_dir(path)
                     )
                 ):
-                    candidates.append(path)
+                    bucket.append(path)
 
         widget = parent
         seen_widgets = set()
         while widget is not None and id(widget) not in seen_widgets:
             seen_widgets.add(id(widget))
-            _add_many(getattr(widget, "_epub_files_in_dialog", None))
-            _add_many(getattr(widget, "selected_files", None))
+            _add_many(live_candidates, getattr(widget, "_epub_files_in_dialog", None))
+            _add_many(live_candidates, getattr(widget, "selected_files", None))
             try:
                 cfg = getattr(widget, "config", None)
                 if isinstance(cfg, dict):
-                    _add_many(cfg.get("last_input_files"))
-                    _add_many(cfg.get("selected_files"))
+                    _add_many(historical_candidates, cfg.get("last_input_files"))
+                    _add_many(historical_candidates, cfg.get("selected_files"))
             except Exception:
                 pass
             try:
@@ -2751,8 +2761,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 widget = None
 
         if isinstance(self._config, dict):
-            _add_many(self._config.get("last_input_files"))
-            _add_many(self._config.get("selected_files"))
+            _add_many(historical_candidates, self._config.get("last_input_files"))
+            _add_many(historical_candidates, self._config.get("selected_files"))
+
+        candidates = live_candidates if live_candidates else historical_candidates
 
         seen = set()
         resolved = []
