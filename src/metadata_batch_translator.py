@@ -1889,6 +1889,52 @@ def prepend_number_pattern_to_label(pattern, label, offset):
     return f"{numbered} {label}".strip() if label else numbered
 
 
+def _ncx_file_stem(name):
+    """Normalize an NCX src / chapter filename to a comparable stem."""
+    base = os.path.basename(str(name or '').split('#')[0]).lower()
+    if base.startswith('response_'):
+        base = base[len('response_'):]
+    while True:
+        stem, ext = os.path.splitext(base)
+        if ext in ('.html', '.xhtml', '.htm', '.xml'):
+            base = stem
+        else:
+            break
+    return base
+
+
+def toc_ncx_prepend_offset_map(html_dir):
+    """Map normalized chapter-file stem → 0-based navPoint position.
+
+    The "Prepend number pattern" numbers chapters BY THEIR TOC ENTRY:
+    the navPoint order defines each file's number, and files that no
+    navPoint links to get no number at all. Returns None when no
+    toc.ncx is found (callers fall back to sequential numbering).
+    """
+    candidates = []
+    for d in (html_dir, os.path.dirname(os.path.normpath(html_dir or ''))):
+        if d:
+            candidates.append(os.path.join(d, 'toc.ncx'))
+    toc_path = next((p for p in candidates if os.path.isfile(p)), None)
+    if not toc_path:
+        return None
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(toc_path).getroot()
+        ns = {'ncx': 'http://www.daisy.org/z3986/2005/ncx/'}
+        offset_map = {}
+        for pos, nav_point in enumerate(root.findall('.//ncx:navPoint', ns)):
+            content = nav_point.find('ncx:content', ns)
+            if content is None:
+                continue
+            stem = _ncx_file_stem(content.get('src') or '')
+            if stem and stem not in offset_map:
+                offset_map[stem] = pos
+        return offset_map or None
+    except Exception:
+        return None
+
+
 def prepend_number_pattern_to_headers(headers, ordered_source=None, config=None):
     """Prepend the configured number pattern to every header in *headers*.
 
@@ -2611,10 +2657,29 @@ class BatchHeaderTranslator:
         # Apply the optional "Prepend number pattern" HERE — this is the
         # lowest-level sink every header-update path funnels through
         # (pipeline translation, compile-time reuse of existing
-        # translations, standalone script), so numbering works even when
-        # callers bypass translate_and_save_headers. Idempotent, and
-        # never touches translated_headers.txt / TOC caches.
-        translated_headers = self._apply_prepend_number_pattern(translated_headers)
+        # translations, standalone script). Numbering is TOC-BASED: each
+        # chapter takes the 0-based position of the navPoint that links
+        # to its file, so the <h1> number always matches its TOC entry,
+        # and files with no TOC entry get no number. Falls back to
+        # sequential numbering only when no toc.ncx exists. Idempotent,
+        # and never touches translated_headers.txt / TOC caches.
+        _prepend_pattern = get_header_prepend_number_pattern(self.config)
+        if _prepend_pattern and translated_headers:
+            _offset_map = toc_ncx_prepend_offset_map(html_dir)
+            if _offset_map:
+                _numbered = {}
+                for _num, _title in translated_headers.items():
+                    _fname = ''
+                    if current_titles and _num in current_titles:
+                        _fname = (current_titles[_num] or {}).get('filename', '')
+                    _off = _offset_map.get(_ncx_file_stem(_fname)) if _fname else None
+                    _numbered[_num] = (
+                        prepend_number_pattern_to_label(_prepend_pattern, _title, _off)
+                        if _off is not None else _title)
+                translated_headers = _numbered
+                print(f"🔢 Prepending number pattern '{_prepend_pattern}' by TOC entry position")
+            else:
+                translated_headers = self._apply_prepend_number_pattern(translated_headers)
         updated_count = 0
         added_count = 0
         skipped_files = []  # collect up-to-date files for a single summary line
@@ -2741,7 +2806,12 @@ class BatchHeaderTranslator:
         """
         # See _update_html_headers_exact — numbering applies at this sink
         # so every caller gets it (idempotent; caches stay clean).
-        translated_headers = self._apply_prepend_number_pattern(translated_headers)
+        # TOC-based when a toc.ncx exists (per-file, inside the loop once
+        # the file is resolved); sequential fallback otherwise.
+        _prepend_pattern = get_header_prepend_number_pattern(self.config)
+        _offset_map = toc_ncx_prepend_offset_map(html_dir) if _prepend_pattern else None
+        if _prepend_pattern and _offset_map is None:
+            translated_headers = self._apply_prepend_number_pattern(translated_headers)
         updated_count = 0
         added_count = 0
         skipped_files = []  # collect up-to-date files for a single summary line
@@ -2780,7 +2850,15 @@ class BatchHeaderTranslator:
             if not html_file:
                 print(f"⚠️ No HTML file found for chapter {num}")
                 continue
-                
+
+            # TOC-based numbering: this file's number is its navPoint
+            # position; files without a TOC entry stay un-numbered.
+            if _prepend_pattern and _offset_map is not None:
+                _off = _offset_map.get(_ncx_file_stem(html_file))
+                if _off is not None:
+                    new_title = prepend_number_pattern_to_label(
+                        _prepend_pattern, new_title, _off)
+
             html_path = os.path.join(html_dir, html_file)
             
             try:

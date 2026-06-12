@@ -6430,14 +6430,16 @@ img {
         # Optional "Prepend number pattern" (Other Settings → Chapter
         # Headers): applied to the labels written into the compiled book's
         # TOC/NCX — the TOC.txt / translated_headers.txt caches stay clean.
-        # The helper is idempotent, so already-numbered labels pass through.
+        # Offsets use the SOURCE NCX ENTRY POSITION (idx - 1), the same
+        # base the chapter <h1> numbering uses, so TOC and headers always
+        # agree. The helper is idempotent, so already-numbered labels
+        # pass through.
         try:
             from metadata_batch_translator import (
                 get_header_prepend_number_pattern, prepend_number_pattern_to_label)
             _toc_prepend_pattern = get_header_prepend_number_pattern()
         except Exception:
             _toc_prepend_pattern = ''
-        _toc_prepend_offset = 0
         for idx, ent in enumerate(entries, 1):
             if toc_filter_nums is not None and idx not in toc_filter_nums:
                 # Entry was removed from TOC.txt by user; skip it entirely
@@ -6565,8 +6567,7 @@ img {
 
             if _toc_prepend_pattern:
                 label = prepend_number_pattern_to_label(
-                    _toc_prepend_pattern, label, _toc_prepend_offset)
-                _toc_prepend_offset += 1
+                    _toc_prepend_pattern, label, idx - 1)
 
             try:
                 toc_links.append(epub.Link(target_href, label or os.path.basename(target_base), f"toc_{idx}"))

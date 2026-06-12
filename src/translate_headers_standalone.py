@@ -664,17 +664,20 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
             print(message)
 
     # Optional "Prepend number pattern" (Other Settings → Chapter Headers):
-    # number the navLabel texts written into toc.ncx without touching the
-    # caller's dict or any translation cache files. Idempotent — labels
-    # that already carry the numbered prefix pass through unchanged.
+    # number the navLabel texts written into toc.ncx by NAVPOINT POSITION
+    # (the same base the chapter <h1> numbering uses), without touching
+    # the caller's dict or any translation cache files. Idempotent.
+    _prepend_pattern = ''
+    _prepend_label = None
     try:
         from metadata_batch_translator import (
-            get_header_prepend_number_pattern, prepend_number_pattern_to_headers)
-        if get_header_prepend_number_pattern():
-            translated_headers = prepend_number_pattern_to_headers(dict(translated_headers))
-            log("🔢 Applying prepend number pattern to toc.ncx navLabels")
+            get_header_prepend_number_pattern, prepend_number_pattern_to_label)
+        _prepend_pattern = get_header_prepend_number_pattern()
+        _prepend_label = prepend_number_pattern_to_label
+        if _prepend_pattern:
+            log("🔢 Applying prepend number pattern to toc.ncx navLabels (by navPoint position)")
     except Exception:
-        pass
+        _prepend_pattern = ''
 
     try:
         import xml.etree.ElementTree as ET
@@ -689,7 +692,7 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
         updated_count = 0
         
         # Find all navPoint elements
-        for navPoint in root.findall('.//ncx:navPoint', ns):
+        for nav_pos, navPoint in enumerate(root.findall('.//ncx:navPoint', ns)):
             # Get the content src to identify which chapter this is
             content = navPoint.find('ncx:content', ns)
             if content is not None:
@@ -697,10 +700,10 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
                 # Remove any fragment identifier (#...)
                 if '#' in src:
                     src = src.split('#')[0]
-                
+
                 # Try to match this with our chapter mappings
                 src_basename = os.path.basename(src)
-                
+
                 # Find which chapter this corresponds to
                 for chapter_num, info in current_titles_map.items():
                     if info['filename'] == src_basename:
@@ -712,9 +715,15 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
                                 text_elem = navLabel.find('ncx:text', ns)
                                 if text_elem is not None:
                                     old_text = text_elem.text
-                                    text_elem.text = translated_headers[chapter_num]
+                                    new_text = translated_headers[chapter_num]
+                                    if _prepend_pattern and _prepend_label:
+                                        # Number by navPoint position — the
+                                        # same base used for the <h1>s.
+                                        new_text = _prepend_label(
+                                            _prepend_pattern, new_text, nav_pos)
+                                    text_elem.text = new_text
                                     updated_count += 1
-                                    log(f"  ✓ Updated navPoint: '{old_text}' → '{translated_headers[chapter_num]}'")
+                                    log(f"  ✓ Updated navPoint: '{old_text}' → '{new_text}'")
                         break
         
         if updated_count > 0:
