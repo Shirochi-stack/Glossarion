@@ -9321,6 +9321,21 @@ class RetranslationMixin:
                 return False
         return True
 
+    def _progress_entry_is_skipped_special(self, ch):
+        """True when a Progress Manager entry is a skipped special file —
+        i.e. one of the rows the "Show skipped files" toggle reveals."""
+        if not isinstance(ch, dict):
+            return False
+        info = ch.get('info') if isinstance(ch.get('info'), dict) else {}
+        fname = (
+            ch.get('original_filename') or ch.get('filename')
+            or ch.get('output_file') or ch.get('href')
+            or info.get('original_filename') or info.get('output_file')
+            or info.get('key') or ''
+        )
+        return self._progress_file_is_skipped_special(
+            fname, bool(ch.get('is_special') or info.get('is_special')))
+
     def _apply_compact_inline_list_style(self, listbox, font=None, extra_row_px=0):
         """Use dense row spacing for inline status/list views."""
         try:
@@ -10765,8 +10780,8 @@ class RetranslationMixin:
             # Keep above the translator window but allow interaction with it
             # Parent-child windowing keeps this above the translator GUI
             dialog.setWindowModality(Qt.NonModal)
-            # Use 38% width, 40% height for 1920x1080
-            width, height = self._get_dialog_size(0.38, 0.4)
+            # Use 42% width, 40% height for 1920x1080
+            width, height = self._get_dialog_size(0.42, 0.4)
             dialog.resize(width, height)
 
             # Inherit/copy the main window stylesheet when available (ensures consistent dark theme).
@@ -13466,28 +13481,34 @@ class RetranslationMixin:
         stats_layout.setContentsMargins(0, 5, 0, 5)
         container_layout.addWidget(stats_frame)
         
-        # Calculate stats from the appropriate source
+        # Calculate stats from the appropriate source. Skipped special
+        # files (the rows the "Show skipped files" toggle reveals) get
+        # their own legend status and are excluded from the regular
+        # status counts so they aren't double-counted as Not Translated.
         _stats_data = {'prog': prog}
-        if spine_chapters:
-            total_chapters = len(spine_chapters)
-            completed = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'completed')
-            merged = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'merged')
-            in_progress = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'in_progress')
-            pending = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'pending')
-            missing = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) in ['not_translated', 'not_refined', 'no_tts'])
-            failed = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) in ['failed', 'qa_failed'])
-        else:
-            # For non-OPF files, calculate from chapter_display_info
-            total_chapters = len(chapter_display_info)
-            completed = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'completed')
-            merged = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'merged')
-            in_progress = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'in_progress')
-            pending = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'pending')
-            missing = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) in ['not_translated', 'not_refined', 'no_tts'])
-            failed = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) in ['failed', 'qa_failed'])
-        
+        _stats_entries = spine_chapters if spine_chapters else chapter_display_info
+        total_chapters = len(_stats_entries)
+        completed = merged = in_progress = pending = missing = failed = skipped = 0
+        for ch in _stats_entries:
+            if self._progress_entry_is_skipped_special(ch):
+                skipped += 1
+                continue
+            _st = self._progress_display_status(ch, _stats_data)
+            if _st == 'completed':
+                completed += 1
+            elif _st == 'merged':
+                merged += 1
+            elif _st == 'in_progress':
+                in_progress += 1
+            elif _st == 'pending':
+                pending += 1
+            elif _st in ('not_translated', 'not_refined', 'no_tts'):
+                missing += 1
+            elif _st in ('failed', 'qa_failed'):
+                failed += 1
+
         # Create labels (outside the if/else so they always appear)
-        stats_font = QFont('Arial', 10)
+        stats_font = QFont('Arial', 9)
         
         lbl_total = QLabel(f"Total: {total_chapters} | ")
         lbl_total.setFont(stats_font)
@@ -13540,6 +13561,18 @@ class RetranslationMixin:
         lbl_failed.setStyleSheet("color: red;")
         lbl_failed.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_failed)
+
+        # Skipped: special files excluded from translation — the rows the
+        # "Show skipped files" toggle reveals. Hidden when none exist.
+        lbl_skipped = QLabel(f"⏭️ Skipped: {skipped}")
+        lbl_skipped.setFont(stats_font)
+        lbl_skipped.setStyleSheet("color: #9aa0a6;")
+        lbl_skipped.setToolTip(
+            "Special files the translation pipeline skips\n"
+            "(toggle visibility with “Show skipped files”).")
+        stats_layout.addWidget(lbl_skipped)
+        if skipped == 0:
+            lbl_skipped.setVisible(False)
         
         
         stats_layout.addStretch()
@@ -16937,6 +16970,8 @@ class RetranslationMixin:
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
                             labels['failed'] = child
+                        elif text.startswith('⏭️ Skipped:'):
+                            labels['skipped'] = child
                     
                     # Recursively search children
                     labels.update(find_stats_labels(child))
@@ -16960,12 +16995,23 @@ class RetranslationMixin:
                     failed = 0
                 merged = 0
                 pending = 0
+                skipped = 0
                 status = self._progress_display_status(pdf_rows[0], data)
                 in_progress = 1 if status == 'in_progress' else 0
                 missing = max(0, total_chapters - completed - failed)
             else:
                 total_chapters = len(chapter_display_info)
-                display_statuses = [self._progress_display_status(info, data) for info in chapter_display_info]
+                # Skipped special files get their own count and are
+                # excluded from the regular statuses (mirrors the
+                # initial legend build).
+                non_skipped = []
+                skipped = 0
+                for info in chapter_display_info:
+                    if self._progress_entry_is_skipped_special(info):
+                        skipped += 1
+                    else:
+                        non_skipped.append(info)
+                display_statuses = [self._progress_display_status(info, data) for info in non_skipped]
                 completed = sum(1 for status in display_statuses if status == 'completed')
                 merged = sum(1 for status in display_statuses if status == 'merged')
                 in_progress = sum(1 for status in display_statuses if status == 'in_progress')
@@ -17002,6 +17048,9 @@ class RetranslationMixin:
                 stats_labels['missing'].setText(f"{missing_label}: {missing} | ")
             if 'failed' in stats_labels:
                 stats_labels['failed'].setText(f"❌ Failed: {failed} | ")
+            if 'skipped' in stats_labels:
+                stats_labels['skipped'].setText(f"⏭️ Skipped: {skipped}")
+                stats_labels['skipped'].setVisible(skipped > 0)
 
     def _refresh_image_folder_data(self, data):
         """Refresh the image folder retranslation dialog data by rescanning files"""
