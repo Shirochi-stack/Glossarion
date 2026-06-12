@@ -6715,6 +6715,34 @@ class SDLXLIFFReviewDialog(QDialog):
                     by_position[pos] = node.get_text(" ", strip=True)
                     claimed.add(id(node))
             if len(by_position) < len(work):
+                # Raw-markup recovery: providers often return literal angle
+                # brackets instead of entities (e.g. <Prologue> for
+                # &lt;Prologue&gt;). The parser then treats that as a tag,
+                # the wrapper node's text parses empty, and the unit is
+                # lost. Re-extract the wrapper's inner content straight
+                # from the UNPARSED response and treat it as literal text.
+                for pos in range(len(work)):
+                    if pos in by_position:
+                        continue
+                    m = re.search(
+                        r'<([a-zA-Z][\w-]*)\b[^>]*data-sdl-tip\s*=\s*["\']'
+                        + str(pos)
+                        + r'["\'][^>]*>(.*?)</\1\s*>',
+                        translated_html,
+                        re.S | re.I,
+                    )
+                    if not m:
+                        continue
+                    inner = m.group(2)
+                    # Drop well-formed formatting tags but keep unknown
+                    # angle-bracket content (it's the translation itself).
+                    inner = re.sub(
+                        r'</?(?:b|i|em|strong|span|u|small|sub|sup|br|a|font)\b[^>]*/?>',
+                        '', inner, flags=re.I)
+                    text = self._normalize_review_text(re.sub(r'\s+', ' ', inner))
+                    if text:
+                        by_position[pos] = text
+            if len(by_position) < len(work):
                 # Fill ONLY the missing positions, and ONLY from nodes that
                 # didn't claim a position via data-sdl-tip. The old fallback
                 # re-mapped ALL node texts onto positions 0..N in order, so
