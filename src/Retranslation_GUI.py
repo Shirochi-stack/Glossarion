@@ -9348,6 +9348,95 @@ class RetranslationMixin:
         return self._progress_file_is_skipped_special(
             fname, bool(ch.get('is_special') or info.get('is_special')))
 
+    _SPECIAL_KEYWORDS_DEFAULT = ('title, toc, copyright, preface, nav, message, '
+                                 'notice, colophon, dedication, epigraph, foreword, '
+                                 'acknowledgment, author, appendix, bibliography')
+    _SPECIAL_EXACT_DEFAULT = 'index, glossary, glossary_extension'
+
+    def _special_skip_keyword_lists(self):
+        """Active special-file keyword lists (mirrors Other Settings)."""
+        cfg = getattr(self, 'config', None)
+        cfg = cfg if isinstance(cfg, dict) else {}
+        kw_raw = (os.environ.get('SPECIAL_FILE_KEYWORDS')
+                  or cfg.get('special_file_keywords')
+                  or self._SPECIAL_KEYWORDS_DEFAULT)
+        exact_raw = (os.environ.get('SPECIAL_FILE_EXACT')
+                     or cfg.get('special_file_exact')
+                     or self._SPECIAL_EXACT_DEFAULT)
+        keywords = [t.strip().lower() for t in str(kw_raw).split(',') if t.strip()]
+        exact = [t.strip().lower() for t in str(exact_raw).split(',') if t.strip()]
+        return keywords, exact
+
+    @staticmethod
+    def _special_skip_stem(filename):
+        """Normalize a filename the way the special-file matcher does."""
+        base = os.path.basename(str(filename or '')).lower()
+        if base.startswith('response_'):
+            base = base[len('response_'):]
+        html_exts = {'.html', '.xhtml', '.htm', '.txt', '.xml'}
+        while True:
+            stem, ext = os.path.splitext(base)
+            if ext not in html_exts:
+                break
+            base = stem
+        return base
+
+    def _special_skip_keyword_for_filename(self, filename):
+        """Return the keyword that makes *filename* a skipped special file."""
+        stem = self._special_skip_stem(filename)
+        if not stem:
+            return None
+        keywords, exact = self._special_skip_keyword_lists()
+        if stem in exact:
+            return stem
+        for kw in keywords:
+            if kw and kw in stem:
+                return kw
+        return None
+
+    def _remove_special_skip_keyword(self, keyword):
+        """Drop *keyword* from the Other Settings special-file lists.
+
+        Updates the config dict, the live Other Settings vars, and the
+        environment so the translation pipeline and every skip check in
+        this dialog agree immediately. Returns True when anything changed.
+        """
+        keyword = str(keyword or '').strip().lower()
+        if not keyword:
+            return False
+        cfg = getattr(self, 'config', None)
+        cfg = cfg if isinstance(cfg, dict) else None
+        removed = False
+        for cfg_key, var_attr, env_key, default in (
+            ('special_file_keywords', 'special_file_keywords_var',
+             'SPECIAL_FILE_KEYWORDS', self._SPECIAL_KEYWORDS_DEFAULT),
+            ('special_file_exact', 'special_file_exact_var',
+             'SPECIAL_FILE_EXACT', self._SPECIAL_EXACT_DEFAULT),
+        ):
+            raw = (os.environ.get(env_key)
+                   or (cfg.get(cfg_key) if cfg else None)
+                   or getattr(self, var_attr, None)
+                   or default)
+            tokens = [t.strip() for t in str(raw).split(',') if t.strip()]
+            kept = [t for t in tokens if t.lower() != keyword]
+            if len(kept) == len(tokens):
+                continue
+            new_text = ', '.join(kept)
+            if cfg is not None:
+                cfg[cfg_key] = new_text
+            try:
+                setattr(self, var_attr, new_text)
+            except Exception:
+                pass
+            os.environ[env_key] = new_text
+            removed = True
+        if removed:
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        return removed
+
     def _apply_compact_inline_list_style(self, listbox, font=None, extra_row_px=0):
         """Use dense row spacing for inline status/list views."""
         try:
@@ -13579,6 +13668,7 @@ class RetranslationMixin:
         lbl_skipped = QLabel(f"⏭️ Skipped: {skipped}")
         lbl_skipped.setFont(stats_font)
         lbl_skipped.setStyleSheet("color: #9aa0a6;")
+        lbl_skipped.setCursor(Qt.PointingHandCursor)
         lbl_skipped.setToolTip(
             "Special files the translation pipeline skips\n"
             "(toggle visibility with “Show skipped files”).")
@@ -13656,6 +13746,7 @@ class RetranslationMixin:
         lbl_pending.mousePressEvent     = _make_cycle_handler(('pending',))
         lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated', 'not_refined', 'no_tts'))
         lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
+        lbl_skipped.mousePressEvent     = _make_cycle_handler(('skipped',))
         
         # Large progress lists are populated after result setup so the dialog can paint first.
         
@@ -14967,6 +15058,24 @@ class RetranslationMixin:
                 act_insert_img = menu.addAction("🖼️ Insert Missing Image")
                 
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+
+            # "Do not skip" — offered on skipped special files; removes the
+            # Other Settings keyword that caused the skip.
+            act_do_not_skip = None
+            _skip_keyword = None
+            try:
+                _skip_fname = (display_info.get('original_filename', '')
+                               or display_info.get('output_file', '')
+                               or display_info.get('key', ''))
+                if self._progress_file_is_skipped_special(
+                        _skip_fname, display_info.get('is_special', False)):
+                    _skip_keyword = self._special_skip_keyword_for_filename(_skip_fname)
+                    if _skip_keyword:
+                        act_do_not_skip = menu.addAction(
+                            f"⏭️ Do not skip (remove keyword '{_skip_keyword}')")
+            except Exception:
+                act_do_not_skip = None
+
             selected_infos = []
             try:
                 for selected_item in listbox.selectedItems():
@@ -15087,6 +15196,22 @@ class RetranslationMixin:
                     traceback.print_exc()
             elif act_restore_in_progress and chosen == act_restore_in_progress:
                 restore_in_progress_marks()
+            elif act_do_not_skip and chosen == act_do_not_skip:
+                if self._remove_special_skip_keyword(_skip_keyword):
+                    try:
+                        self._update_listbox_display(data)
+                    except Exception:
+                        pass
+                    try:
+                        self._update_statistics_display(data)
+                    except Exception:
+                        pass
+                    self._show_message(
+                        'info', "Do not skip",
+                        f"Removed special-file keyword '{_skip_keyword}' "
+                        "from Other Settings.\nMatching files will no longer "
+                        "be skipped during translation.",
+                        parent=data.get('dialog', self))
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
             elif act_notepad_qa and chosen == act_notepad_qa:
@@ -16483,6 +16608,14 @@ class RetranslationMixin:
 
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
+        # Skipped special files (the rows the "Show skipped files" toggle
+        # reveals) get their own display status instead of masquerading
+        # as Not Translated.
+        try:
+            if self._progress_entry_is_skipped_special(info):
+                return 'skipped'
+        except Exception:
+            pass
         status = info.get('status', 'unknown')
         entry = info.get('progress_entry') or info.get('info') or {}
         mode = self._current_progress_output_mode(data, entry)
@@ -16708,6 +16841,7 @@ class RetranslationMixin:
             'not_translated': '⬜',
             'not_refined': '✨',
             'no_tts': '🔊',
+            'skipped': '⏭️',
             'unknown': '❓'
         }
         status_labels = {
@@ -16720,6 +16854,7 @@ class RetranslationMixin:
             'not_translated': 'Not Translated',
             'not_refined': 'Not Refined',
             'no_tts': 'No TTS',
+            'skipped': 'Skipped',
             'unknown': 'Unknown'
         }
 
@@ -16792,6 +16927,8 @@ class RetranslationMixin:
             item.setForeground(QColor('#2b6cb0'))
         elif status in ['not_refined', 'no_tts']:
             item.setForeground(QColor('#8a63d2'))
+        elif status == 'skipped':
+            item.setForeground(QColor('#9aa0a6'))
         elif status == 'in_progress':
             item.setForeground(QColor('orange'))
         else:
