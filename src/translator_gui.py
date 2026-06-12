@@ -15247,6 +15247,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 _output_lang = self.config.get('output_language', 'English')
                 os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = self.config.get('batch_header_system_prompt', '').replace('{target_lang}', _output_lang)
                 os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '').replace('{target_lang}', _output_lang)
+                os.environ['BATCH_HEADER_PREPEND_NUMBER_PATTERN'] = str(
+                    self.config.get('batch_header_prepend_number_pattern', '') or '')
                 os.environ['OUTPUT_LANGUAGE'] = _output_lang
                 
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
@@ -18485,6 +18487,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'METADATA_BATCH_PROMPT': self.config.get('metadata_batch_prompt', ''),
             'BATCH_HEADER_SYSTEM_PROMPT': self.config.get('batch_header_system_prompt', ''),
             'BATCH_HEADER_PROMPT': self.config.get('batch_header_prompt', ''),
+            'BATCH_HEADER_PREPEND_NUMBER_PATTERN': str(self.config.get('batch_header_prepend_number_pattern', '') or ''),
             
             # AI Hunter configuration
             'AI_HUNTER_CONFIG': json.dumps(self.config.get('ai_hunter_config', {})),
@@ -20312,8 +20315,8 @@ Important rules:
             ).replace('{target_lang}', output_lang)
             os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = batch_header_system_prompt
             os.environ['BATCH_HEADER_PROMPT'] = batch_header_prompt
-            os.environ['BATCH_HEADER_APPEND_NUMBER_PATTERN'] = str(
-                self.config.get('batch_header_append_number_pattern', '') or '')
+            os.environ['BATCH_HEADER_PREPEND_NUMBER_PATTERN'] = str(
+                self.config.get('batch_header_prepend_number_pattern', '') or '')
             
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)

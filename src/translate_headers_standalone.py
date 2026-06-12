@@ -662,10 +662,23 @@ def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str],
             log_callback(message)
         else:
             print(message)
-    
+
+    # Optional "Prepend number pattern" (Other Settings → Chapter Headers):
+    # number the navLabel texts written into toc.ncx without touching the
+    # caller's dict or any translation cache files. Idempotent — labels
+    # that already carry the numbered prefix pass through unchanged.
+    try:
+        from metadata_batch_translator import (
+            get_header_prepend_number_pattern, prepend_number_pattern_to_headers)
+        if get_header_prepend_number_pattern():
+            translated_headers = prepend_number_pattern_to_headers(dict(translated_headers))
+            log("🔢 Applying prepend number pattern to toc.ncx navLabels")
+    except Exception:
+        pass
+
     try:
         import xml.etree.ElementTree as ET
-        
+
         # Parse the toc.ncx file
         tree = ET.parse(toc_path)
         root = tree.getroot()

@@ -15038,29 +15038,9 @@ class RetranslationMixin:
                 "  background-color: #138496;"
                 "}"
             )
-            act_open = menu.addAction("📂 Open File")
-            act_review_sdlxliff = None
-            if _source_exists_for_item(display_info) and qa_file_path:
-                act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
-            act_open_audio = None
-            act_delete_audio = None
-            if _find_audio_file_for_item(display_info):
-                act_open_audio = menu.addAction("🔊 Open Audio File")
-                act_delete_audio = menu.addAction("🗑️ Delete Audio File")
-            act_notepad_qa = None
-            if qa_file_path:
-                _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
-                act_notepad_qa = menu.addAction(_label)
-            act_retranslate = menu.addAction("🔁 Retranslate Selected")
-            
-            act_insert_img = None
-            if has_missing_images:
-                act_insert_img = menu.addAction("🖼️ Insert Missing Image")
-                
-            act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
-
-            # "Do not skip" — offered on skipped special files; removes the
-            # Other Settings keyword that caused the skip.
+            # Skipped special files get a single-purpose menu: the only
+            # meaningful action for them is "Do not skip" (removes the
+            # Other Settings keyword that caused the skip).
             act_do_not_skip = None
             _skip_keyword = None
             try:
@@ -15070,23 +15050,47 @@ class RetranslationMixin:
                 if self._progress_file_is_skipped_special(
                         _skip_fname, display_info.get('is_special', False)):
                     _skip_keyword = self._special_skip_keyword_for_filename(_skip_fname)
-                    if _skip_keyword:
-                        act_do_not_skip = menu.addAction(
-                            f"⏭️ Do not skip (remove keyword '{_skip_keyword}')")
             except Exception:
-                act_do_not_skip = None
+                _skip_keyword = None
 
+            act_open = act_review_sdlxliff = act_open_audio = None
+            act_delete_audio = act_notepad_qa = act_retranslate = None
+            act_insert_img = act_remove_qa = act_restore_in_progress = None
             selected_infos = []
-            try:
-                for selected_item in listbox.selectedItems():
-                    wrapper = selected_item.data(Qt.UserRole) or {}
-                    selected_infos.append(wrapper.get('info', {}))
-            except RuntimeError:
-                selected_infos = [display_info]
-            act_restore_in_progress = None
-            if any((info or {}).get('status') == 'in_progress' for info in selected_infos):
-                act_restore_in_progress = menu.addAction("Restore In Progress Status")
+
+            if _skip_keyword:
+                act_do_not_skip = menu.addAction(
+                    f"⏭️ Do not skip (remove keyword '{_skip_keyword}')")
+            else:
+                act_open = menu.addAction("📂 Open File")
+                if _source_exists_for_item(display_info) and qa_file_path:
+                    act_review_sdlxliff = menu.addAction(" 🔍Review source -> output")
+                if _find_audio_file_for_item(display_info):
+                    act_open_audio = menu.addAction("🔊 Open Audio File")
+                    act_delete_audio = menu.addAction("🗑️ Delete Audio File")
+                if qa_file_path:
+                    _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
+                    act_notepad_qa = menu.addAction(_label)
+                act_retranslate = menu.addAction("🔁 Retranslate Selected")
+
+                if has_missing_images:
+                    act_insert_img = menu.addAction("🖼️ Insert Missing Image")
+
+                act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+
+                try:
+                    for selected_item in listbox.selectedItems():
+                        wrapper = selected_item.data(Qt.UserRole) or {}
+                        selected_infos.append(wrapper.get('info', {}))
+                except RuntimeError:
+                    selected_infos = [display_info]
+                if any((info or {}).get('status') == 'in_progress' for info in selected_infos):
+                    act_restore_in_progress = menu.addAction("Restore In Progress Status")
             chosen = menu.exec(listbox.mapToGlobal(pos))
+            if chosen is None:
+                # Menu dismissed — must bail before the equality checks,
+                # otherwise `None == <unset action var>` would match.
+                return
             if chosen == act_open:
                 _open_file_for_item(display_info)
             elif act_review_sdlxliff and chosen == act_review_sdlxliff:

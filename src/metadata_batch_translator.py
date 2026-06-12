@@ -1123,26 +1123,29 @@ class MetadataBatchTranslatorUI:
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Append number pattern (optional, applied AFTER translation)
-        append_label = QLabel("Append number pattern")
-        append_font = QFont()
-        append_font.setPointSize(12)
-        append_font.setBold(True)
-        append_label.setFont(append_font)
-        tab_layout.addWidget(append_label)
+        # Prepend number pattern (optional, applied AFTER translation,
+        # only to the headers written into the HTML files)
+        prepend_label = QLabel("Prepend number pattern")
+        prepend_font = QFont()
+        prepend_font.setPointSize(12)
+        prepend_font.setBold(True)
+        prepend_label.setFont(prepend_font)
+        tab_layout.addWidget(prepend_label)
 
-        append_desc = QLabel(
-            "Optional. When filled, every translated header gets this pattern appended, "
+        prepend_desc = QLabel(
+            "Optional. When filled, every translated header gets this pattern prepended, "
             "with its number incrementing per chapter in reading order.\n"
-            "Examples: '0' → titles end with 0, 1, 2, …;  'Chapter 1' → titles end with "
-            "Chapter 1, Chapter 2, …  Leave blank to disable.")
-        append_desc.setStyleSheet("color: gray; font-size: 10pt;")
-        append_desc.setContentsMargins(0, 5, 0, 10)
-        tab_layout.addWidget(append_desc)
+            "Examples: 'Chapter 0' → 'Chapter 0 <title>', 'Chapter 1 <title>', …;  "
+            "'1.' → '1. <title>', '2. <title>', …  Leave blank to disable.\n"
+            "Applied only to the headers inside the HTML files — "
+            "translated_headers.txt and TOC files are not modified.")
+        prepend_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        prepend_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(prepend_desc)
 
-        self.header_append_number_entry = QLineEdit()
-        self.header_append_number_entry.setPlaceholderText("e.g. Chapter 0  (blank = disabled)")
-        self.header_append_number_entry.setStyleSheet("""
+        self.header_prepend_number_entry = QLineEdit()
+        self.header_prepend_number_entry.setPlaceholderText("e.g. Chapter 0  (blank = disabled)")
+        self.header_prepend_number_entry.setStyleSheet("""
             QLineEdit {
                 background-color: #1e1e1e;
                 color: #e0e0e0;
@@ -1155,9 +1158,9 @@ class MetadataBatchTranslatorUI:
                 border: 1px solid #5a9fd4;
             }
         """)
-        self.header_append_number_entry.setText(
-            str(self.gui.config.get('batch_header_append_number_pattern', '') or ''))
-        tab_layout.addWidget(self.header_append_number_entry)
+        self.header_prepend_number_entry.setText(
+            str(self.gui.config.get('batch_header_prepend_number_pattern', '') or ''))
+        tab_layout.addWidget(self.header_prepend_number_entry)
 
         # System prompt for batch headers
         system_label = QLabel("System Prompt (AI Instructions)")
@@ -1622,10 +1625,10 @@ class MetadataBatchTranslatorUI:
         # Batch header prompts
         self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.toPlainText().strip()
         self.gui.config['batch_header_prompt'] = self.header_batch_text.toPlainText().strip()
-        if hasattr(self, 'header_append_number_entry'):
-            _append_pattern = self.header_append_number_entry.text().strip()
-            self.gui.config['batch_header_append_number_pattern'] = _append_pattern
-            os.environ['BATCH_HEADER_APPEND_NUMBER_PATTERN'] = _append_pattern
+        if hasattr(self, 'header_prepend_number_entry'):
+            _prepend_pattern = self.header_prepend_number_entry.text().strip()
+            self.gui.config['batch_header_prepend_number_pattern'] = _prepend_pattern
+            os.environ['BATCH_HEADER_PREPEND_NUMBER_PATTERN'] = _prepend_pattern
         
         # Metadata prompts
         self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.toPlainText().strip()
@@ -1654,7 +1657,7 @@ class MetadataBatchTranslatorUI:
             'book_title_system_prompt', 'book_title_prompt',
             'metadata_system_prompt',
             'batch_header_system_prompt',
-            'batch_header_prompt', 'batch_header_append_number_pattern',
+            'batch_header_prompt', 'batch_header_prepend_number_pattern',
             'metadata_batch_prompt',
             'metadata_field_prompts', 'lang_prompt_behavior',
             'forced_source_lang', 'output_language'
@@ -1717,8 +1720,8 @@ class MetadataBatchTranslatorUI:
                 "- Preserve the chapter number format exactly as shown.\n"
                 "Return ONLY a JSON object with chapter numbers as keys.\n"
                 "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
-        if hasattr(self, 'header_append_number_entry'):
-            self.header_append_number_entry.setText('')
+        if hasattr(self, 'header_prepend_number_entry'):
+            self.header_prepend_number_entry.setText('')
 
         # Metadata Fields tab
         if hasattr(self, 'metadata_batch_text'):
@@ -1830,6 +1833,87 @@ class MetadataBatchTranslatorUI:
                 epub_path = self.gui.config.get('last_epub_path', '')
         
         return self._detect_all_metadata_fields_for_epub(epub_path)
+
+def get_header_prepend_number_pattern(config=None):
+    """Active "Prepend number pattern" (Other Settings → Chapter Headers).
+
+    Empty string = feature disabled.
+    """
+    return str(
+        (config or {}).get('batch_header_prepend_number_pattern')
+        or os.getenv('BATCH_HEADER_PREPEND_NUMBER_PATTERN')
+        or ''
+    ).strip()
+
+
+def _prepend_pattern_parts(pattern):
+    """Split *pattern* around its LAST number → (prefix, start, width, suffix).
+
+    Returns (None, 0, 0, None) when the pattern has no number.
+    """
+    num_match = None
+    for num_match in re.finditer(r'\d+', pattern):
+        pass  # keep the LAST number
+    if not num_match:
+        return None, 0, 0, None
+    return (pattern[:num_match.start()], int(num_match.group(0)),
+            len(num_match.group(0)), pattern[num_match.end():])
+
+
+def _prepend_pattern_already_applied(pattern, label):
+    """True when *label* already starts with this pattern's numbered form.
+
+    Makes the numbering idempotent: the workspace toc.ncx updater and the
+    compile-time TOC build can both run without stacking 'Chapter 1
+    Chapter 0 …' prefixes.
+    """
+    prefix, _start, _width, suffix = _prepend_pattern_parts(pattern)
+    if prefix is None:
+        skeleton = re.escape(pattern) + r'\s+\d+'
+    else:
+        skeleton = re.escape(prefix) + r'\d+' + re.escape(suffix)
+    return bool(re.match(r'\s*' + skeleton, str(label or '')))
+
+
+def prepend_number_pattern_to_label(pattern, label, offset):
+    """Prepend the numbered form of *pattern* (advanced by *offset*) to *label*."""
+    pattern = str(pattern or '').strip()
+    label = str(label or '').strip()
+    if not pattern or _prepend_pattern_already_applied(pattern, label):
+        return label
+    prefix, start, width, suffix = _prepend_pattern_parts(pattern)
+    if prefix is None:
+        numbered = f"{pattern} {offset}"
+    else:
+        numbered = prefix + str(start + offset).zfill(width) + suffix
+    return f"{numbered} {label}".strip() if label else numbered
+
+
+def prepend_number_pattern_to_headers(headers, ordered_source=None, config=None):
+    """Prepend the configured number pattern to every header in *headers*.
+
+    Returns a NEW dict; *headers* is untouched. Entries increment in the
+    order of *ordered_source* (reading order); without it, numeric keys
+    are sorted ascending. No-op when the pattern is blank.
+    """
+    pattern = get_header_prepend_number_pattern(config)
+    if not pattern or not headers:
+        return headers
+    keys = []
+    if ordered_source:
+        keys = [k for k in ordered_source if k in headers]
+    remaining = [k for k in headers if k not in keys]
+    if not keys:
+        try:
+            remaining = sorted(remaining)
+        except TypeError:
+            pass
+    keys.extend(remaining)
+    result = dict(headers)
+    for offset, key in enumerate(keys):
+        result[key] = prepend_number_pattern_to_label(pattern, result.get(key), offset)
+    return result
+
 
 class BatchHeaderTranslator:
     """Translate chapter headers in batches"""
@@ -1967,19 +2051,22 @@ class BatchHeaderTranslator:
         if not translated_headers:
             return {}
 
-        # Optional "Append number pattern" (Other Settings → Chapter Headers)
-        translated_headers = self._apply_append_number_pattern(
-            translated_headers, source_headers_full or headers_dict)
-        
-        # Save to file if requested
+        # Save to file if requested — always the PURE translations.
+        # The prepend-number pattern is deliberately not applied here so
+        # translated_headers.txt / TOC files keep the clean titles.
         if save_to_file:
             if output_dir is None:
                 output_dir = html_dir
             translations_file = os.path.join(output_dir, "translated_headers.txt")
             _full_dict = source_headers_full if source_headers_full else headers_dict
             self._save_translations_to_file(_full_dict, translated_headers, translations_file, current_titles)
-        
-        # Update HTML files if requested
+
+        # Update HTML files if requested. The optional "Prepend number
+        # pattern" (Other Settings → Chapter Headers) is applied inside
+        # the _update_html_headers* sinks themselves, so the numbering
+        # lands in the chapter HTML headers but neither in the saved
+        # translation files nor in the returned dict (which feeds
+        # TOC/NCX generation — numbered separately at its own sinks).
         if update_html:
             if current_titles:
                 # Use exact replacement method
@@ -1987,55 +2074,33 @@ class BatchHeaderTranslator:
             else:
                 # Fallback to pattern-based method
                 self._update_html_headers(html_dir, translated_headers)
-        
+
         return translated_headers
         
-    def _apply_append_number_pattern(self, translated_headers, ordered_source=None):
-        """Append an incrementing number pattern to every translated header.
+    def _apply_prepend_number_pattern(self, translated_headers, ordered_source=None):
+        """Prepend an incrementing number pattern to every translated header.
 
-        Pattern comes from config key ``batch_header_append_number_pattern``
+        Pattern comes from config key ``batch_header_prepend_number_pattern``
         (set in Other Settings → Configure Translation Prompts → Chapter
-        Headers) or the ``BATCH_HEADER_APPEND_NUMBER_PATTERN`` env var.
-        Blank = disabled (returns the headers untouched).
+        Headers) or the ``BATCH_HEADER_PREPEND_NUMBER_PATTERN`` env var.
+        Blank = disabled (returns the headers untouched). Returns a NEW
+        dict — callers apply it only to the HTML update so the saved
+        translation files (translated_headers.txt, TOC) stay clean.
 
         The LAST number in the pattern is the starting value and keeps its
-        zero-padding ('Chapter 0' → 'Chapter 0', 'Chapter 1', …; '01' →
-        '01', '02', …). A pattern with no number gets a space + counter
-        starting at 0 ('Part' → 'Part 0', 'Part 1', …). Entries increment
-        in reading order (the order of *ordered_source*, which callers pass
-        in OPF spine order).
+        zero-padding ('Chapter 0' → 'Chapter 0 <title>', 'Chapter 1 <title>',
+        …; '01' → '01 <title>', '02 <title>', …). A pattern with no number
+        gets a counter starting at 0 appended to it ('Part' → 'Part 0
+        <title>', …). Entries increment in reading order (the order of
+        *ordered_source*, which callers pass in OPF spine order).
         """
-        pattern = str(
-            self.config.get('batch_header_append_number_pattern')
-            or os.getenv('BATCH_HEADER_APPEND_NUMBER_PATTERN')
-            or ''
-        ).strip()
+        pattern = get_header_prepend_number_pattern(self.config)
         if not pattern or not translated_headers:
             return translated_headers
-        num_match = None
-        for num_match in re.finditer(r'\d+', pattern):
-            pass  # keep the LAST number in the pattern
-        # Reading order: ordered_source first (spine order), then any
-        # translated keys it doesn't cover.
-        keys = []
-        if ordered_source:
-            keys = [k for k in ordered_source if k in translated_headers]
-        for k in translated_headers:
-            if k not in keys:
-                keys.append(k)
-        result = dict(translated_headers)
-        for offset, key in enumerate(keys):
-            title = str(result.get(key, '') or '').strip()
-            if num_match:
-                start = int(num_match.group(0))
-                width = len(num_match.group(0))
-                numbered = (pattern[:num_match.start()]
-                            + str(start + offset).zfill(width)
-                            + pattern[num_match.end():])
-            else:
-                numbered = f"{pattern} {offset}"
-            result[key] = f"{title} {numbered}".strip() if title else numbered
-        print(f"🔢 Appended number pattern '{pattern}' to {len(keys)} header(s)")
+        result = prepend_number_pattern_to_headers(
+            translated_headers, ordered_source, self.config)
+        print(f"🔢 Prepended number pattern '{pattern}' to {len(result)} header(s) "
+              "(translated_headers.txt / TOC.txt caches left untouched)")
         return result
 
     def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
@@ -2538,11 +2603,18 @@ class BatchHeaderTranslator:
             traceback.print_exc()
             return False
     
-    def _update_html_headers_exact(self, html_dir: str, translated_headers: Dict[int, str], 
+    def _update_html_headers_exact(self, html_dir: str, translated_headers: Dict[int, str],
                                   current_titles: Dict[int, Dict[str, str]]):
         """Update HTML files by replacing exact current titles with translations
         Also handles HTML files without headers by adding them.
         """
+        # Apply the optional "Prepend number pattern" HERE — this is the
+        # lowest-level sink every header-update path funnels through
+        # (pipeline translation, compile-time reuse of existing
+        # translations, standalone script), so numbering works even when
+        # callers bypass translate_and_save_headers. Idempotent, and
+        # never touches translated_headers.txt / TOC caches.
+        translated_headers = self._apply_prepend_number_pattern(translated_headers)
         updated_count = 0
         added_count = 0
         skipped_files = []  # collect up-to-date files for a single summary line
@@ -2667,6 +2739,9 @@ class BatchHeaderTranslator:
         """Fallback: Update HTML files with translated headers using pattern matching
         Also handles HTML files without headers by adding them.
         """
+        # See _update_html_headers_exact — numbering applies at this sink
+        # so every caller gets it (idempotent; caches stay clean).
+        translated_headers = self._apply_prepend_number_pattern(translated_headers)
         updated_count = 0
         added_count = 0
         skipped_files = []  # collect up-to-date files for a single summary line
