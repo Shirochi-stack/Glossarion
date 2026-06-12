@@ -3726,7 +3726,31 @@ class QAScannerMixin:
                     ai_truncation_tail_spinbox.setStyleSheet("color: #909090;")
                     ai_trunc_tail_hint.setStyleSheet("color: #404040;")
 
+            def _persist_ai_truncation_toggle(checked):
+                """Persist the toggle IMMEDIATELY on click.
+
+                Waiting for the dialog's save button left a window where
+                the live config and the QA_SCANNER_SETTINGS_JSON /
+                QA_CHECK_AI_TRUNCATION_DETECTION env vars still carried
+                the OLD value — any scan started in that window (manual,
+                post-translation phase, multipass) ran the AI truncation
+                check the user had just visibly turned off.
+                """
+                try:
+                    qa_cfg = self.config.setdefault('qa_scanner_settings', {})
+                    qa_cfg['check_ai_truncation_detection'] = bool(checked)
+                    qa_settings['check_ai_truncation_detection'] = bool(checked)
+                    os.environ['QA_CHECK_AI_TRUNCATION_DETECTION'] = '1' if checked else '0'
+                    try:
+                        os.environ['QA_SCANNER_SETTINGS_JSON'] = self._get_qa_scanner_settings_json()
+                    except Exception:
+                        os.environ['QA_SCANNER_SETTINGS_JSON'] = json.dumps(qa_cfg, ensure_ascii=False)
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
+
             check_ai_truncation_checkbox.toggled.connect(_toggle_ai_truncation)
+            check_ai_truncation_checkbox.toggled.connect(_persist_ai_truncation_toggle)
             _toggle_ai_truncation(check_ai_truncation_checkbox.isChecked())
 
             yield

@@ -340,6 +340,17 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
             output_mode = getattr(config, "OUTPUT_MODE", os.getenv("OUTPUT_MODE", "text")) if config is not None else os.getenv("OUTPUT_MODE", "text")
 
     settings = normalize_qa_scan_settings(qa_settings, target_language=live_config.get("output_language"))
+    # The owner's SAVED config is the single source of truth for the AI
+    # truncation toggle — it must beat any stale settings snapshot the
+    # caller passed in (e.g. a dict captured before the user turned the
+    # check off).
+    if owner is not None:
+        try:
+            live_qa = (getattr(owner, "config", {}) or {}).get("qa_scanner_settings", {}) or {}
+            if "check_ai_truncation_detection" in live_qa:
+                settings["check_ai_truncation_detection"] = bool(live_qa["check_ai_truncation_detection"])
+        except Exception:
+            pass
     settings["_live_api_key"] = api_key
     settings["_live_model"] = model
     settings["_live_config"] = live_config
