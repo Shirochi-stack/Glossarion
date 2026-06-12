@@ -1122,7 +1122,43 @@ class MetadataBatchTranslatorUI:
         parent.setStyleSheet("background-color: #2b2b2b;")
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
-        
+
+        # Append number pattern (optional, applied AFTER translation)
+        append_label = QLabel("Append number pattern")
+        append_font = QFont()
+        append_font.setPointSize(12)
+        append_font.setBold(True)
+        append_label.setFont(append_font)
+        tab_layout.addWidget(append_label)
+
+        append_desc = QLabel(
+            "Optional. When filled, every translated header gets this pattern appended, "
+            "with its number incrementing per chapter in reading order.\n"
+            "Examples: '0' → titles end with 0, 1, 2, …;  'Chapter 1' → titles end with "
+            "Chapter 1, Chapter 2, …  Leave blank to disable.")
+        append_desc.setStyleSheet("color: gray; font-size: 10pt;")
+        append_desc.setContentsMargins(0, 5, 0, 10)
+        tab_layout.addWidget(append_desc)
+
+        self.header_append_number_entry = QLineEdit()
+        self.header_append_number_entry.setPlaceholderText("e.g. Chapter 0  (blank = disabled)")
+        self.header_append_number_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QLineEdit:focus {
+                border: 1px solid #5a9fd4;
+            }
+        """)
+        self.header_append_number_entry.setText(
+            str(self.gui.config.get('batch_header_append_number_pattern', '') or ''))
+        tab_layout.addWidget(self.header_append_number_entry)
+
         # System prompt for batch headers
         system_label = QLabel("System Prompt (AI Instructions)")
         system_font = QFont()
@@ -1586,6 +1622,10 @@ class MetadataBatchTranslatorUI:
         # Batch header prompts
         self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.toPlainText().strip()
         self.gui.config['batch_header_prompt'] = self.header_batch_text.toPlainText().strip()
+        if hasattr(self, 'header_append_number_entry'):
+            _append_pattern = self.header_append_number_entry.text().strip()
+            self.gui.config['batch_header_append_number_pattern'] = _append_pattern
+            os.environ['BATCH_HEADER_APPEND_NUMBER_PATTERN'] = _append_pattern
         
         # Metadata prompts
         self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.toPlainText().strip()
@@ -1614,7 +1654,8 @@ class MetadataBatchTranslatorUI:
             'book_title_system_prompt', 'book_title_prompt',
             'metadata_system_prompt',
             'batch_header_system_prompt',
-            'batch_header_prompt', 'metadata_batch_prompt',
+            'batch_header_prompt', 'batch_header_append_number_pattern',
+            'metadata_batch_prompt',
             'metadata_field_prompts', 'lang_prompt_behavior',
             'forced_source_lang', 'output_language'
         ]
@@ -1676,7 +1717,9 @@ class MetadataBatchTranslatorUI:
                 "- Preserve the chapter number format exactly as shown.\n"
                 "Return ONLY a JSON object with chapter numbers as keys.\n"
                 "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
-        
+        if hasattr(self, 'header_append_number_entry'):
+            self.header_append_number_entry.setText('')
+
         # Metadata Fields tab
         if hasattr(self, 'metadata_batch_text'):
             self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
@@ -1920,9 +1963,13 @@ class BatchHeaderTranslator:
             if not translated_headers:
                 translated_headers = {}
             translated_headers.update(reused_headers)
-        
+
         if not translated_headers:
             return {}
+
+        # Optional "Append number pattern" (Other Settings → Chapter Headers)
+        translated_headers = self._apply_append_number_pattern(
+            translated_headers, source_headers_full or headers_dict)
         
         # Save to file if requested
         if save_to_file:
@@ -1943,6 +1990,54 @@ class BatchHeaderTranslator:
         
         return translated_headers
         
+    def _apply_append_number_pattern(self, translated_headers, ordered_source=None):
+        """Append an incrementing number pattern to every translated header.
+
+        Pattern comes from config key ``batch_header_append_number_pattern``
+        (set in Other Settings → Configure Translation Prompts → Chapter
+        Headers) or the ``BATCH_HEADER_APPEND_NUMBER_PATTERN`` env var.
+        Blank = disabled (returns the headers untouched).
+
+        The LAST number in the pattern is the starting value and keeps its
+        zero-padding ('Chapter 0' → 'Chapter 0', 'Chapter 1', …; '01' →
+        '01', '02', …). A pattern with no number gets a space + counter
+        starting at 0 ('Part' → 'Part 0', 'Part 1', …). Entries increment
+        in reading order (the order of *ordered_source*, which callers pass
+        in OPF spine order).
+        """
+        pattern = str(
+            self.config.get('batch_header_append_number_pattern')
+            or os.getenv('BATCH_HEADER_APPEND_NUMBER_PATTERN')
+            or ''
+        ).strip()
+        if not pattern or not translated_headers:
+            return translated_headers
+        num_match = None
+        for num_match in re.finditer(r'\d+', pattern):
+            pass  # keep the LAST number in the pattern
+        # Reading order: ordered_source first (spine order), then any
+        # translated keys it doesn't cover.
+        keys = []
+        if ordered_source:
+            keys = [k for k in ordered_source if k in translated_headers]
+        for k in translated_headers:
+            if k not in keys:
+                keys.append(k)
+        result = dict(translated_headers)
+        for offset, key in enumerate(keys):
+            title = str(result.get(key, '') or '').strip()
+            if num_match:
+                start = int(num_match.group(0))
+                width = len(num_match.group(0))
+                numbered = (pattern[:num_match.start()]
+                            + str(start + offset).zfill(width)
+                            + pattern[num_match.end():])
+            else:
+                numbered = f"{pattern} {offset}"
+            result[key] = f"{title} {numbered}".strip() if title else numbered
+        print(f"🔢 Appended number pattern '{pattern}' to {len(keys)} header(s)")
+        return result
+
     def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
         """Translate headers/TOC entries in batches using configured prompts with parallel execution
         

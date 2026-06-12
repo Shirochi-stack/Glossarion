@@ -20312,6 +20312,8 @@ Important rules:
             ).replace('{target_lang}', output_lang)
             os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = batch_header_system_prompt
             os.environ['BATCH_HEADER_PROMPT'] = batch_header_prompt
+            os.environ['BATCH_HEADER_APPEND_NUMBER_PATTERN'] = str(
+                self.config.get('batch_header_append_number_pattern', '') or '')
             
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
