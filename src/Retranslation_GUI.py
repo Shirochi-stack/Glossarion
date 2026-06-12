@@ -6702,6 +6702,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 if node.get_text(" ", strip=True)
             ]
             by_position = {}
+            claimed = set()
             for node in nodes:
                 raw_pos = node.get("data-sdl-tip")
                 if raw_pos is None:
@@ -6712,14 +6713,26 @@ class SDLXLIFFReviewDialog(QDialog):
                     continue
                 if 0 <= pos < len(work):
                     by_position[pos] = node.get_text(" ", strip=True)
+                    claimed.add(id(node))
             if len(by_position) < len(work):
-                ordered_texts = [
+                # Fill ONLY the missing positions, and ONLY from nodes that
+                # didn't claim a position via data-sdl-tip. The old fallback
+                # re-mapped ALL node texts onto positions 0..N in order, so
+                # when the provider mangled one unit (e.g. returned literal
+                # <Prologue>, whose node parses empty and gets dropped),
+                # every translation shifted and row 0 displayed row 1's
+                # text. With aligned claims, a mangled unit now just stays
+                # blank instead of stealing its neighbor's translation.
+                unclaimed_texts = [
                     node.get_text(" ", strip=True)
                     for node in nodes
-                    if node.get_text(" ", strip=True)
+                    if id(node) not in claimed and node.get_text(" ", strip=True)
                 ]
-                for pos, text in enumerate(ordered_texts[:len(work)]):
-                    by_position.setdefault(pos, text)
+                missing_positions = [
+                    pos for pos in range(len(work)) if pos not in by_position
+                ]
+                for pos, text in zip(missing_positions, unclaimed_texts):
+                    by_position[pos] = text
             return {
                 key: by_position[pos]
                 for pos, (_row_idx, key, _source_text, _tag_name) in enumerate(work)
