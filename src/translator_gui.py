@@ -27860,7 +27860,8 @@ Important rules:
             self.config.setdefault('glossary_max_backups', 50)
             default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
-            self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
+            self.config.setdefault('ai_hunter_config', {}).setdefault(
+                'ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2))
             self.config.setdefault('save_partial_results', True)
             self.config.setdefault('save_prohibited_results', False)
             self.config.setdefault('disable_empty_safety_heuristic', False)
@@ -28522,7 +28523,7 @@ Important rules:
                 ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),
                 ('QA_CHECK_WORD_COUNT_RATIO', '1' if qa_settings.get('check_word_count_ratio', True) else '0'),
                 ('QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS', '1' if qa_settings.get('check_missing_beautifulsoup_tags', False) else '0'),
-                ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', 1))),
+                ('AI_HUNTER_MAX_WORKERS', str(ai_hunter_config.get('ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2)))),
             ]
             
             # Add Manga Integration and Manga Settings Dialog environment variables

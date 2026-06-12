@@ -2889,8 +2889,10 @@ def _resolve_scan_max_workers_config(extra_sections=()):
             sec = full_config.get(section, {})
             if isinstance(sec, dict) and 'max_workers' in sec:
                 return max(0, int(sec['max_workers']))
+        # Default: half the CPU cores (balanced speed vs responsiveness)
         return max(0, int(full_config.get('ai_hunter_config', {})
-                          .get('ai_hunter_max_workers', 1)))
+                          .get('ai_hunter_max_workers',
+                               max(1, (os.cpu_count() or 4) // 2))))
     except Exception:
         return 0
 

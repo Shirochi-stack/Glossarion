@@ -42,9 +42,11 @@ class AIHunterConfigGUI:
         self.window = None
         
         # Default AI Hunter settings structure
+        # Default workers: half the CPU cores — good speed without
+        # starving the rest of the system.
         self.default_ai_hunter = {
             'enabled': True,
-            'ai_hunter_max_workers': 1,
+            'ai_hunter_max_workers': max(1, (os.cpu_count() or 4) // 2),
             'retry_attempts': 6,
             'disable_temperature_change': False,
             'sample_size': 3000,

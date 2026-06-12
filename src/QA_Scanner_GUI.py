@@ -4446,9 +4446,10 @@ class QAScannerMixin:
             workers_label.setFont(QFont('Arial', 10))
             workers_layout.addWidget(workers_label)
 
-            # Get current value from AI Hunter config
+            # Get current value from AI Hunter config (default: half cores)
             ai_hunter_config = self.config.get('ai_hunter_config', {})
-            current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 1)
+            current_max_workers = ai_hunter_config.get(
+                'ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2))
 
             ai_hunter_workers_spinbox = QSpinBox()
             ai_hunter_workers_spinbox.setMinimum(0)
@@ -4808,7 +4809,7 @@ class QAScannerMixin:
                             ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
                             # Thread-vs-process executor for the scan
                             ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
-                            ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 1))),
+                            ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2)))),
                             # Counting mode: set env vars based on selection
                             ('QA_USE_WORD_COUNT', '1' if qa_settings.get('counting_mode') == 'word' else '0'),
                             ('QA_EXACT_CHAR_COUNT', '1' if qa_settings.get('counting_mode') == 'exact' else '0'),
