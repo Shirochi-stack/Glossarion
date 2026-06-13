@@ -6221,7 +6221,28 @@ Do not stop after the glossary."""
                # then let the normal parse path re-read it. This avoids re-indenting
                # hundreds of lines of the file-read block.
                if skip_file_read and self.current_glossary_data is not None:
+                   # Pause the auto-reload watcher and re-baseline its mtime around
+                   # our own write. Otherwise the 500ms watcher sees the file change,
+                   # treats the undo/redo write as an *external* edit, and triggers a
+                   # full reload that clears the undo stack and resets the change
+                   # baseline — which would make a Save after Undo find no changes and
+                   # fail to revert the output HTML files.
+                   _ar_timer = getattr(self, '_editor_auto_reload_timer', None)
+                   try:
+                       if _ar_timer is not None:
+                           _ar_timer.stop()
+                   except Exception:
+                       _ar_timer = None
                    save_current_glossary()
+                   try:
+                       self._editor_last_mtime = os.path.getmtime(path)
+                   except Exception:
+                       pass
+                   try:
+                       if _ar_timer is not None:
+                           _ar_timer.start()
+                   except Exception:
+                       pass
                elif not skip_file_read:
                    token = object()
                    self._editor_load_token = token
