@@ -4922,57 +4922,153 @@ class QAScannerMixin:
                     QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
 
             def _refresh_qa_widgets_from_config():
-                """Re-apply current saved settings to the dialog widgets.
+                """Re-apply ALL current saved settings to the dialog widgets.
 
                 The dialog is cached/prewarmed and built only once, so reopening it
                 via the early-return path never re-reads config. Without this the
                 dialog showed stale widget state ("settings not initialized") and a
-                subsequent Save could write the stale values back. Called whenever
-                the cached dialog is re-shown. Each widget is guarded individually
-                so a missing/renamed widget never breaks the refresh.
+                subsequent Save could write the stale values back. This mirrors the
+                full save_settings mapping in reverse so every control reflects what
+                is actually persisted. Each access is guarded so a missing/renamed
+                widget never breaks the rest of the refresh.
                 """
                 s = self.config.get('qa_scanner_settings', {}) or {}
 
-                def _set_value(widget, value):
+                def _apply(getter):
                     try:
-                        if widget is None:
-                            return
-                        if hasattr(widget, 'setChecked'):
-                            widget.setChecked(bool(value))
-                        elif hasattr(widget, 'setPlainText'):
-                            widget.setPlainText('' if value is None else str(value))
-                        elif hasattr(widget, 'setValue'):
-                            widget.setValue(value)
-                        elif hasattr(widget, 'setCurrentText'):
-                            widget.setCurrentText('' if value is None else str(value))
-                        elif hasattr(widget, 'setText'):
-                            widget.setText('' if value is None else str(value))
+                        getter()
                     except Exception:
                         pass
 
-                # Foreign Character Detection (the section most affected by the
-                # persistence bug) plus the core detection toggles.
-                for key, widget, default in (
+                def _set_value(widget, value):
+                    if widget is None:
+                        return
+                    if hasattr(widget, 'setChecked'):
+                        widget.setChecked(bool(value))
+                    elif hasattr(widget, 'setPlainText'):
+                        widget.setPlainText('' if value is None else str(value))
+                    elif hasattr(widget, 'setValue'):
+                        widget.setValue(value)
+                    elif hasattr(widget, 'setCurrentText'):
+                        widget.setCurrentText('' if value is None else str(value))
+                    elif hasattr(widget, 'setText'):
+                        widget.setText('' if value is None else str(value))
+
+                # --- Simple widgets: (config_key, widget, default) ---
+                # Mirrors core_settings_to_save / cache_settings_to_save in reverse.
+                simple = (
                     ('foreign_char_threshold', threshold_spinbox, 0),
                     ('excluded_characters', excluded_text, ''),
+                    ('target_language', target_language_combo, 'english'),
+                    ('source_language', source_lang_combo, 'auto'),
                     ('check_encoding_issues', check_encoding_checkbox, False),
                     ('check_repetition', check_repetition_checkbox, True),
                     ('check_translation_artifacts', check_artifacts_checkbox, True),
                     ('check_ai_artifacts', check_ai_artifacts_checkbox, True),
-                ):
-                    _set_value(widget, s.get(key, default))
+                    ('check_punctuation_mismatch', check_punctuation_checkbox, False),
+                    ('punctuation_loss_threshold', punct_threshold_spinbox, 49),
+                    ('flag_excess_punctuation', excess_punct_checkbox, False),
+                    ('excess_punctuation_threshold', excess_threshold_spinbox, 49),
+                    ('check_glossary_leakage', check_glossary_checkbox, True),
+                    ('check_potential_truncation', check_potential_truncation_checkbox, False),
+                    ('check_missing_images', check_missing_images_checkbox, True),
+                    ('min_file_length', min_length_spinbox, 0),
+                    ('min_duplicate_word_count', min_dup_words_spinbox, 500),
+                    ('min_text_length_for_spacing', min_spacing_text_spinbox, 0),
+                    ('auto_save_report', auto_save_checkbox, True),
+                    ('check_word_count_ratio', check_word_count_checkbox, True),
+                    ('check_multiple_headers', check_multiple_headers_checkbox, True),
+                    ('warn_name_mismatch', warn_mismatch_checkbox, True),
+                    ('check_missing_html_tag', check_missing_html_tag_checkbox, True),
+                    ('check_missing_beautifulsoup_tags', check_missing_beautifulsoup_tags_checkbox, False),
+                    ('check_body_tag', check_body_tag_checkbox, False),
+                    ('check_missing_header_tags', check_missing_header_tags_checkbox, True),
+                    ('check_all_text_in_header', check_all_text_in_header_checkbox, True),
+                    ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),
+                    ('check_paragraph_structure', check_paragraph_structure_checkbox, True),
+                    ('check_invalid_nesting', check_invalid_nesting_checkbox, False),
+                    ('check_silent_truncation', check_truncation_checkbox, False),
+                    ('truncation_cheap_threshold', truncation_cheap_slider, 12),
+                    ('truncation_borderline_score', truncation_borderline_slider, 40),
+                    ('truncation_length_threshold', truncation_length_slider, 30),
+                    ('truncation_embed_threshold', truncation_embed_slider, 30),
+                    ('check_ai_truncation_detection', check_ai_truncation_checkbox, False),
+                    ('ai_truncation_tail_chars', ai_truncation_tail_spinbox, 400),
+                    ('ai_truncation_api_key', ai_key_entry, ''),
+                    ('ai_truncation_model', ai_model_combo, ''),
+                    ('ai_truncation_temperature', ai_temp_spin, 0.0),
+                    ('ai_truncation_max_tokens', ai_tokens_spin, 0),
+                    ('ai_truncation_api_call_delay', ai_delay_spin, 0),
+                    ('ai_truncation_endpoint_url', ai_url_entry, ''),
+                    ('ai_truncation_disable_thinking', ai_disable_thinking_check, False),
+                    ('word_count_min_ratio', ratio_min_spin, 'Auto'),
+                    ('word_count_max_ratio', ratio_max_spin, 'Auto'),
+                    ('cache_enabled', cache_enabled_checkbox, True),
+                    ('cache_auto_size', auto_size_checkbox, False),
+                    ('cache_show_stats', show_stats_checkbox, False),
+                    ('use_thread_executor', use_threads_checkbox, False),
+                    ('use_auto_multipliers', auto_multipliers_checkbox, True),
+                )
+                for key, widget, default in simple:
+                    _apply(lambda k=key, w=widget, d=default: _set_value(w, s.get(k, d)))
 
-                # Language combos use display text, so set via their current text.
-                try:
-                    if s.get('source_language'):
-                        source_lang_combo.setCurrentText(str(s.get('source_language')))
-                except Exception:
-                    pass
-                try:
-                    if s.get('target_language'):
-                        target_language_combo.setCurrentText(str(s.get('target_language')))
-                except Exception:
-                    pass
+                # --- Report format radio group ---
+                def _set_report_format():
+                    target = s.get('report_format', 'detailed')
+                    for rb, value in format_radio_buttons:
+                        rb.setChecked(value == target)
+                _apply(_set_report_format)
+
+                # --- Counting mode combo (stored as currentData) ---
+                def _set_counting_mode():
+                    idx = counting_mode_combo.findData(s.get('counting_mode', 'exact'))
+                    if idx >= 0:
+                        counting_mode_combo.setCurrentIndex(idx)
+                _apply(_set_counting_mode)
+
+                # --- Paragraph threshold: stored as decimal, widget is percent ---
+                def _set_paragraph_threshold():
+                    val = s.get('paragraph_threshold', 0.3)
+                    paragraph_threshold_spinbox.setValue(int(round(float(val) * 100)))
+                _apply(_set_paragraph_threshold)
+
+                # --- AI truncation prompt holders (edited via sub-dialog) ---
+                _apply(lambda: _ai_trunc_prompt_holder.__setitem__(
+                    0, s.get('ai_truncation_prompt', _ai_trunc_prompt_holder[0])))
+                _apply(lambda: _ai_trunc_prompt_role_holder.__setitem__(
+                    0, s.get('ai_truncation_prompt_role', _ai_trunc_prompt_role_holder[0])))
+
+                # --- Per-cache size spinboxes ---
+                def _set_cache_sizes():
+                    for cache_name, spinbox in cache_spinboxes.items():
+                        v = s.get(f'cache_{cache_name}', None)
+                        if v is not None:
+                            try:
+                                spinbox.setValue(v)
+                            except Exception:
+                                pass
+                _apply(_set_cache_sizes)
+
+                # --- Word count multipliers (stored as multiplier, widget *100) ---
+                def _set_word_multipliers():
+                    wc = s.get('word_count_multipliers', {}) or {}
+                    for lang_key, widget in word_multiplier_sliders.items():
+                        if lang_key.endswith('__spin'):
+                            base_key = lang_key[:-6]
+                            val = wc.get(base_key, default_wordcount_defaults.get(base_key, 1.0))
+                            widget.setValue(int(val * 100))
+                        elif f"{lang_key}__spin" not in word_multiplier_sliders:
+                            val = wc.get(lang_key, default_wordcount_defaults.get(lang_key, 1.0))
+                            widget.setValue(int(val * 100))
+                _apply(_set_word_multipliers)
+
+                # --- AI Hunter max workers (lives under ai_hunter_config) ---
+                def _set_ai_hunter_workers():
+                    default_workers = max(1, (os.cpu_count() or 4) // 2)
+                    workers = self.config.get('ai_hunter_config', {}).get(
+                        'ai_hunter_max_workers', default_workers)
+                    ai_hunter_workers_spinbox.setValue(workers)
+                _apply(_set_ai_hunter_workers)
 
             try:
                 dialog._refresh_qa_widgets = _refresh_qa_widgets_from_config
