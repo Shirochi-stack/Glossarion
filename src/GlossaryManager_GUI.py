@@ -6155,6 +6155,10 @@ Do not stop after the glossary."""
                         width = 100
                     self.glossary_tree.setColumnWidth(idx, width)
 
+                # Hide the Section column from view (data is kept for round-trip on save)
+                if '_section' in column_fields:
+                    self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
+
                 items = []
                 for idx, entry in enumerate(entries):
                     values = [str(idx + 1)]
@@ -6640,7 +6644,11 @@ Do not stop after the glossary."""
                        width = 100
                    
                    self.glossary_tree.setColumnWidth(idx, width)
-               
+
+               # Hide the Section column from view (data is kept for round-trip on save)
+               if '_section' in column_fields:
+                   self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
+
                for idx, entry in enumerate(entries):
                    values = [str(idx + 1)]
                    for field in column_fields:
