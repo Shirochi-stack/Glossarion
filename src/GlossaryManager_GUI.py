@@ -6691,15 +6691,22 @@ Do not stop after the glossary."""
                    self._last_loaded_glossary_log = _log_msg
                self._last_find_text = ""
                self._last_find_pos = -1
-               # Capture baseline translated values for change tracking
-               if self.current_glossary_format in ['list', 'token_csv']:
-                   self._original_translated_map = {
-                       idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
-                   }
-               elif self.current_glossary_format == 'dict':
-                   self._original_translated_map = dict(self.current_glossary_data.get('entries', {}))
-               else:
-                   self._original_translated_map = {}
+               # Capture baseline translated values for change tracking.
+               # IMPORTANT: skip this on undo/redo restores (skip_file_read=True).
+               # The baseline must keep representing what is currently written to
+               # the output HTML files (i.e. the last *saved* state). If undo/redo
+               # overwrote it with the restored values, the baseline would equal
+               # the current data and a subsequent Save would detect no change,
+               # leaving the output files stuck on the change that undo reverted.
+               if not skip_file_read:
+                   if self.current_glossary_format in ['list', 'token_csv']:
+                       self._original_translated_map = {
+                           idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
+                       }
+                   elif self.current_glossary_format == 'dict':
+                       self._original_translated_map = dict(self.current_glossary_data.get('entries', {}))
+                   else:
+                       self._original_translated_map = {}
                # Clear any existing highlights
                for i in range(self.glossary_tree.topLevelItemCount()):
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
