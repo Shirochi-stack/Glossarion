@@ -366,6 +366,13 @@ AI_SINGLE_WORD_HEADERS = {
     'html', 'text', 'content', 'translation', 'output'
 }
 
+# First lines that look like AI artifacts but should NOT be flagged.
+# Compared after lowercasing and stripping punctuation/apostrophes, so e.g.
+# "Okay, I've Got It" -> "okay ive got it".
+AI_ARTIFACT_FIRSTLINE_EXCLUSIONS = {
+    'okay ive got it',
+}
+
 THINKING_TAG_PATTERNS = [
     (re.compile(r'<thinking>.*?</thinking>', re.IGNORECASE | re.DOTALL), 'thinking'),
     (re.compile(r'<think>.*?</think>', re.IGNORECASE | re.DOTALL), 'think'),
@@ -1281,6 +1288,12 @@ def detect_ai_artifacts(text):
         if line.strip():
             first_line = line.strip()
             break
+
+    if first_line:
+        # Skip phrases the user has whitelisted (compare without punctuation)
+        _normalized_first = re.sub(r'\s+', ' ', re.sub(r'[^a-z\s]', '', first_line.lower())).strip()
+        if _normalized_first in AI_ARTIFACT_FIRSTLINE_EXCLUSIONS:
+            first_line = ""
 
     if first_line:
         # Guard against false positives like "Sure enough, ..." in normal prose
