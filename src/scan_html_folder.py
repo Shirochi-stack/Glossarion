@@ -1075,8 +1075,16 @@ def detect_non_english_content(text, qa_settings=None):
     target_language = qa_settings.get('target_language', 'english').lower()
     excluded_chars = set()
     if qa_settings.get('excluded_characters'):
-        excluded_chars = set(qa_settings['excluded_characters'].split())
-    
+        raw_excluded = qa_settings['excluded_characters']
+        # Space-separated tokens (original behavior)
+        excluded_chars = set(raw_excluded.split())
+        # Also add every individual non-whitespace character. Foreign-char
+        # detection compares ONE character at a time (see loop below), so a
+        # multi-character token like "ㅇㅇ" would never match a single 'ㅇ'.
+        # Adding the characters individually makes the exclusion work
+        # regardless of how the user spaced their entry.
+        excluded_chars.update(ch for ch in raw_excluded if not ch.isspace())
+
     # Combine with existing separator chars
     all_excluded_chars = KOREAN_SEPARATOR_CHARS.copy()
     all_excluded_chars.update(excluded_chars)

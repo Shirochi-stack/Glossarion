@@ -15056,6 +15056,7 @@ class RetranslationMixin:
             act_open = act_review_sdlxliff = act_open_audio = None
             act_delete_audio = act_notepad_qa = act_retranslate = None
             act_insert_img = act_remove_qa = act_restore_in_progress = None
+            act_copy_qa = None
             selected_infos = []
 
             if _skip_keyword:
@@ -15071,6 +15072,8 @@ class RetranslationMixin:
                 if qa_file_path:
                     _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
                     act_notepad_qa = menu.addAction(_label)
+                if qa_issues:
+                    act_copy_qa = menu.addAction("📋 Copy QA issue")
                 act_retranslate = menu.addAction("🔁 Retranslate Selected")
 
                 if has_missing_images:
@@ -15099,6 +15102,35 @@ class RetranslationMixin:
                 _open_audio_file_for_item(display_info)
             elif act_delete_audio and chosen == act_delete_audio:
                 _delete_audio_file_for_item(display_info)
+            elif act_copy_qa and chosen == act_copy_qa:
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    lines = []
+                    for sel in listbox.selectedItems():
+                        try:
+                            w = sel.data(Qt.UserRole) or {}
+                            di = w.get('info', {})
+                            pe = di.get('info', {})
+                            issues_list = pe.get('qa_issues_found', [])
+                            if not isinstance(issues_list, list):
+                                issues_list = []
+                            issues_list = [str(i) for i in issues_list if str(i).strip()]
+                            if not issues_list:
+                                continue
+                            fname = (di.get('output_file') or di.get('original_filename')
+                                     or di.get('key') or '')
+                            if fname:
+                                lines.append(f"{fname}: " + ", ".join(issues_list))
+                            else:
+                                lines.append(", ".join(issues_list))
+                        except RuntimeError:
+                            continue
+                    if not lines and qa_issues:
+                        # Fall back to the right-clicked item's issues
+                        lines = [", ".join(str(i) for i in qa_issues)]
+                    QApplication.clipboard().setText("\n".join(lines))
+                except Exception as ex:
+                    print(f"Copy QA issue failed: {ex}")
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:
