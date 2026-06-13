@@ -1009,9 +1009,13 @@ class QAScannerMixin:
                         current_qa_settings['quick_scan_sample_size'] = quick_sample_spinbox.value()
                         try:
                             if hasattr(self, 'config'):
-                                if 'qa_scanner_settings' not in self.config:
-                                    self.config['qa_scanner_settings'] = {}
-                                self.config['qa_scanner_settings'].update(current_qa_settings)
+                                # Persist ONLY the key this handler owns. Do NOT
+                                # .update() the whole _qa_settings_ref snapshot here:
+                                # it is a stale copy loaded when the scan started and
+                                # would overwrite values just saved in the settings
+                                # dialog (e.g. excluded_characters), causing settings
+                                # to intermittently disappear after restart.
+                                self.config.setdefault('qa_scanner_settings', {})['quick_scan_sample_size'] = quick_sample_spinbox.value()
                                 # Save quietly to persist between runs
                                 if hasattr(self, 'save_config'):
                                     self.save_config(show_message=False)
@@ -2378,6 +2382,15 @@ class QAScannerMixin:
         try:
             existing = getattr(self, "_qa_settings_dialog", None)
             if existing is not None:
+                # Re-sync widgets with the latest saved config. The dialog is built
+                # only once (prewarmed), so without this it keeps showing stale
+                # state from the previous edit instead of what's in config.json.
+                try:
+                    _refresh = getattr(existing, "_refresh_qa_widgets", None)
+                    if callable(_refresh):
+                        _refresh()
+                except Exception:
+                    pass
                 existing.setModal(False)
                 existing.setWindowModality(Qt.NonModal)
                 if show:
@@ -4756,8 +4769,15 @@ class QAScannerMixin:
                     if debug_mode:
                         self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
                     try:
-                        old_qa_config = self.config.get('qa_scanner_settings', {})
-                        self.config['qa_scanner_settings'] = qa_settings
+                        old_qa_config = dict(self.config.get('qa_scanner_settings', {}) or {})
+                        # Merge into the LIVE config dict instead of replacing the
+                        # object reference. Replacing it created divergent copies:
+                        # the scan mode-selection handler keeps a separate snapshot
+                        # (_qa_settings_ref) and could clobber values just saved here
+                        # (e.g. excluded_characters). Merging keeps a single source
+                        # of truth so saves persist consistently.
+                        live_qa = self.config.setdefault('qa_scanner_settings', {})
+                        live_qa.update(qa_settings)
 
                         if debug_mode:
                             # Count changed settings
@@ -4900,6 +4920,64 @@ class QAScannerMixin:
                         self.append_log(f"❌ [DEBUG] QA save_settings traceback: {traceback.format_exc()}")
                     self.append_log(f"❌ Error saving QA settings: {str(e)}")
                     QMessageBox.critical(dialog, "Error", f"Failed to save settings: {str(e)}")
+
+            def _refresh_qa_widgets_from_config():
+                """Re-apply current saved settings to the dialog widgets.
+
+                The dialog is cached/prewarmed and built only once, so reopening it
+                via the early-return path never re-reads config. Without this the
+                dialog showed stale widget state ("settings not initialized") and a
+                subsequent Save could write the stale values back. Called whenever
+                the cached dialog is re-shown. Each widget is guarded individually
+                so a missing/renamed widget never breaks the refresh.
+                """
+                s = self.config.get('qa_scanner_settings', {}) or {}
+
+                def _set_value(widget, value):
+                    try:
+                        if widget is None:
+                            return
+                        if hasattr(widget, 'setChecked'):
+                            widget.setChecked(bool(value))
+                        elif hasattr(widget, 'setPlainText'):
+                            widget.setPlainText('' if value is None else str(value))
+                        elif hasattr(widget, 'setValue'):
+                            widget.setValue(value)
+                        elif hasattr(widget, 'setCurrentText'):
+                            widget.setCurrentText('' if value is None else str(value))
+                        elif hasattr(widget, 'setText'):
+                            widget.setText('' if value is None else str(value))
+                    except Exception:
+                        pass
+
+                # Foreign Character Detection (the section most affected by the
+                # persistence bug) plus the core detection toggles.
+                for key, widget, default in (
+                    ('foreign_char_threshold', threshold_spinbox, 0),
+                    ('excluded_characters', excluded_text, ''),
+                    ('check_encoding_issues', check_encoding_checkbox, False),
+                    ('check_repetition', check_repetition_checkbox, True),
+                    ('check_translation_artifacts', check_artifacts_checkbox, True),
+                    ('check_ai_artifacts', check_ai_artifacts_checkbox, True),
+                ):
+                    _set_value(widget, s.get(key, default))
+
+                # Language combos use display text, so set via their current text.
+                try:
+                    if s.get('source_language'):
+                        source_lang_combo.setCurrentText(str(s.get('source_language')))
+                except Exception:
+                    pass
+                try:
+                    if s.get('target_language'):
+                        target_language_combo.setCurrentText(str(s.get('target_language')))
+                except Exception:
+                    pass
+
+            try:
+                dialog._refresh_qa_widgets = _refresh_qa_widgets_from_config
+            except Exception:
+                pass
 
             def reset_defaults():
                 """Reset to default settings"""
