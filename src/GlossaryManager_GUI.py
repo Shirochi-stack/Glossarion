@@ -8418,36 +8418,82 @@ Do not stop after the glossary."""
         # ── Undo / Redo / Open Backups ──
         import copy as _copy
 
-        def _push_undo_snapshot():
-            """Snapshot current data onto the undo stack (call BEFORE mutation)."""
-            if self.current_glossary_data is None:
-                return
-            snap = _copy.deepcopy(self.current_glossary_data)
-            self._undo_stack.append(snap)
+        def _trim_undo_stack():
             if len(self._undo_stack) > self._undo_max:
                 self._undo_stack.pop(0)
+
+        def _push_undo_snapshot():
+            """Snapshot current glossary data onto the undo stack (call BEFORE mutation)."""
+            if self.current_glossary_data is None:
+                return
+            snap = {'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)}
+            self._undo_stack.append(snap)
+            _trim_undo_stack()
             self._redo_stack.clear()
             _update_undo_redo_state()
 
-        def _undo_action():
-            if not self._undo_stack or self.current_glossary_data is None:
+        def _push_html_undo_snapshot(changes):
+            """Record a direct output-file (HTML) Find/Replace so it can be undone.
+
+            ``changes`` is the list of (old, new) replacements that were just
+            applied to the output files. Undo re-applies them in reverse; redo
+            re-applies them forward. This is independent of the glossary data, so
+            it lets the 'update output files directly' path participate in undo.
+            """
+            if not changes:
                 return
-            # Push current state to redo
-            self._redo_stack.append(_copy.deepcopy(self.current_glossary_data))
-            # Pop last undo snapshot
-            restored = self._undo_stack.pop()
-            self.current_glossary_data = restored
+            self._undo_stack.append({'kind': 'html', 'changes': list(changes)})
+            _trim_undo_stack()
+            self._redo_stack.clear()
+            _update_undo_redo_state()
+
+        def _entry_kind(entry):
+            return entry.get('kind') if isinstance(entry, dict) and 'kind' in entry else 'glossary'
+
+        def _undo_action():
+            if not self._undo_stack:
+                return
+            entry = self._undo_stack.pop()
+            if _entry_kind(entry) == 'html':
+                # Reverse the output-file replacements (new -> old)
+                self._redo_stack.append(entry)
+                reverse = [(new, old) for (old, new) in entry.get('changes', [])]
+                try:
+                    files_updated, total_repl = update_html_files(reverse)
+                    self.append_log(f"↶ Undo: reverted {total_repl} replacement(s) across {files_updated} output file(s).")
+                except Exception as e:
+                    self.append_log(f"⚠️ Undo (output files) failed: {e}")
+                _update_undo_redo_state()
+                return
+            # Glossary snapshot
+            if self.current_glossary_data is None:
+                # Nothing to restore into; put it back and bail
+                self._undo_stack.append(entry)
+                return
+            self._redo_stack.append({'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)})
+            self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
         def _redo_action():
-            if not self._redo_stack or self.current_glossary_data is None:
+            if not self._redo_stack:
                 return
-            # Push current state to undo
-            self._undo_stack.append(_copy.deepcopy(self.current_glossary_data))
-            # Pop from redo
-            restored = self._redo_stack.pop()
-            self.current_glossary_data = restored
+            entry = self._redo_stack.pop()
+            if _entry_kind(entry) == 'html':
+                # Re-apply the output-file replacements (old -> new)
+                self._undo_stack.append(entry)
+                try:
+                    files_updated, total_repl = update_html_files(list(entry.get('changes', [])))
+                    self.append_log(f"↷ Redo: re-applied {total_repl} replacement(s) across {files_updated} output file(s).")
+                except Exception as e:
+                    self.append_log(f"⚠️ Redo (output files) failed: {e}")
+                _update_undo_redo_state()
+                return
+            if self.current_glossary_data is None:
+                self._redo_stack.append(entry)
+                return
+            self._undo_stack.append({'kind': 'glossary', 'data': _copy.deepcopy(self.current_glossary_data)})
+            self.current_glossary_data = entry.get('data') if isinstance(entry, dict) else entry
             load_glossary_for_editing(skip_file_read=True)
             _update_undo_redo_state()
 
@@ -8479,8 +8525,9 @@ Do not stop after the glossary."""
             else:
                 subprocess.Popen(['xdg-open', backup_dir])
 
-        # Expose snapshot helper so other functions (save_edit, delete, etc.) can call it
+        # Expose snapshot helpers so other functions (save_edit, delete, find/replace, etc.) can call them
         self._push_undo_snapshot = _push_undo_snapshot
+        self._push_html_undo_snapshot = _push_html_undo_snapshot
 
         # Separator
         sep = QLabel("│")
@@ -8746,18 +8793,36 @@ Do not stop after the glossary."""
                 return replacements
 
             def replace_current():
-                # Snapshot for undo
-                if hasattr(self, '_push_undo_snapshot'):
+                item = self.glossary_tree.currentItem()
+                find_text = find_edit.text()
+                # Only snapshot the undo state if this row actually contains a
+                # match, so a no-op Replace doesn't waste an undo step.
+                will_change = bool(find_text) and item is not None and any(
+                    re.search(re.escape(find_text), item.text(c), re.IGNORECASE)
+                    for c in range(1, item.columnCount())
+                )
+                if will_change and hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
-                count = replace_in_item(self.glossary_tree.currentItem())
+                count = replace_in_item(item)
                 status_label.setText(f"Replaced {count} occurrence(s) in current row" if count else "No matches in current row.")
 
             def replace_all():
                 total_items = self.glossary_tree.topLevelItemCount()
-                if total_items == 0 or not find_edit.text():
+                find_text = find_edit.text()
+                if total_items == 0 or not find_text:
                     return
-                # Snapshot for undo
-                if hasattr(self, '_push_undo_snapshot'):
+                # Only snapshot the undo state if at least one match exists, so a
+                # no-op Replace All doesn't push an empty undo step.
+                _find_re = re.compile(re.escape(find_text), re.IGNORECASE)
+                will_change = False
+                for idx in range(total_items):
+                    item = self.glossary_tree.topLevelItem(idx)
+                    if item is None:
+                        continue
+                    if any(_find_re.search(item.text(c)) for c in range(1, item.columnCount())):
+                        will_change = True
+                        break
+                if will_change and hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
                 total_repl = 0
                 for idx in range(total_items):
@@ -8780,6 +8845,9 @@ Do not stop after the glossary."""
                     prompt.setDefaultButton(QMessageBox.Yes)
                     if prompt.exec() == QMessageBox.Yes:
                         files_updated, total_file_repl = update_html_files([(old, new)])
+                        # Make this direct output-file edit undoable
+                        if total_file_repl > 0 and hasattr(self, '_push_html_undo_snapshot'):
+                            self._push_html_undo_snapshot([(old, new)])
                         self.append_log(f"Updated {files_updated} files directly from Find/Replace fallback ({total_file_repl} replacements).")
                         status_label.setText(f"Updated {files_updated} files directly ({total_file_repl} replacements).")
 
