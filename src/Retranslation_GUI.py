@@ -13377,7 +13377,7 @@ class RetranslationMixin:
                         pass
                 
                 _gp_timer = QTimer(gp_dialog)
-                _gp_timer.setInterval(2000)
+                _gp_timer.setInterval(1000)
                 _gp_timer.timeout.connect(_gp_refresh_all)
                 _gp_timer.start()
                 gp_dialog._gp_auto_refresh_timer = _gp_timer
@@ -14682,7 +14682,7 @@ class RetranslationMixin:
                 data['_prefetch_running'] = False
 
         _auto_refresh_timer = QTimer(data.get('dialog') or self)
-        _auto_refresh_timer.setInterval(2000)
+        _auto_refresh_timer.setInterval(1000)
         _auto_refresh_timer.timeout.connect(_silent_refresh)
         _auto_refresh_timer.start()
         data['_auto_refresh_timer'] = _auto_refresh_timer
