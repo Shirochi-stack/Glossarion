@@ -222,12 +222,38 @@ def cancel_stream() -> None:
 
 
 def reset_cancel() -> None:
-    """Clear the cancellation flag before a new request."""
+    """Clear the cancellation flag before a new request.
+
+    IMPORTANT: refuse to clear while a hard stop is active. ``_send_authnd`` and
+    ``reset_cleanup_state`` call this at the start of every attempt, and with up
+    to a few hundred concurrent AuthND workers a just-starting worker can wipe
+    the cancel signal that the Stop button just set. The AuthND browser helper
+    only observes ``_cancel_event`` (see ``_post_with_cancel`` /
+    ``_mint_captcha_token_subprocess``), so clearing it here lets an in-flight
+    request — and the browser child it spawned — bypass Stop and keep running,
+    which is also what leaves a child holding PyInstaller ``_MEIPASS`` DLLs and
+    triggers the "Failed to remove temporary directory" warning on exit.
+    """
+    if _hard_stop_active():
+        return
     _cancel_event.clear()
 
 
+def _hard_stop_active() -> bool:
+    """True when the GUI/translation engine has requested an immediate abort.
+
+    ``TRANSLATION_CANCELLED`` is set only on hard/immediate stop (never on a
+    graceful stop), so honoring it here is safe and mirrors the AuthGem route's
+    ``_is_externally_stopped()`` helper.
+    """
+    return os.environ.get("TRANSLATION_CANCELLED") == "1"
+
+
 def _is_cancelled() -> bool:
-    return _cancel_event.is_set()
+    # Also honor the hard-abort env var. The AuthND helper otherwise only sees
+    # _cancel_event, so a racing reset_cancel()/reset_cleanup_state() from
+    # another worker could let an in-flight request bypass Stop.
+    return _cancel_event.is_set() or _hard_stop_active()
 
 
 def _acquire_gate(

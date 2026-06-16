@@ -823,8 +823,36 @@ def request_hard_stop_for_shutdown(owner=None, translation_stop_flag=None, gloss
             unified_api_client.UnifiedClient._global_cancelled = True
             if hasattr(unified_api_client.UnifiedClient, "set_global_cancellation"):
                 unified_api_client.UnifiedClient.set_global_cancellation(True)
+            # Fire the browser-backed route cancels (AuthND / AuthGPT / AuthGem /
+            # AuthCD / Gemini-Free) and close in-flight HTTP sessions. This sets
+            # each helper module's _cancel_event and terminates their token-helper
+            # subprocesses, so a request that was mid-flight when the user hit Stop
+            # cannot keep running — and its Chromium child cannot linger holding
+            # PyInstaller _MEIPASS DLLs into the bootloader's temp-dir cleanup
+            # (the "Failed to remove temporary directory" warning).
+            if hasattr(unified_api_client.UnifiedClient, "hard_cancel_all"):
+                try:
+                    unified_api_client.UnifiedClient.hard_cancel_all()
+                except Exception:
+                    pass
     except Exception:
         pass
+
+    # Best-effort direct cancel of each browser-backed helper module, in case the
+    # unified client's hard_cancel_all path was unavailable (e.g. import order).
+    for _helper_module in (
+        "authnd_auth",
+        "authgpt_auth",
+        "authgem_auth",
+        "authcd_auth",
+        "gemini_free",
+    ):
+        try:
+            module = sys.modules.get(_helper_module)
+            if module is not None and hasattr(module, "cancel_stream"):
+                module.cancel_stream()
+        except Exception:
+            pass
 
 
 def _dedupe_paths(paths):

@@ -347,11 +347,19 @@ def _terminate_active_helper_processes(*, kill: bool = False) -> None:
 
 
 def reset_cancel() -> None:
+    # Refuse to clear while a hard stop is active. This is called per-attempt /
+    # per-chapter, so a just-starting worker must not wipe the cancel signal the
+    # Stop button set; the helper subprocess only observes _cancel_event.
+    # TRANSLATION_CANCELLED is only set on immediate stop (never graceful).
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return
     _cancel_event.clear()
 
 
 def _is_cancelled() -> bool:
-    return _cancel_event.is_set()
+    # Also honor the hard-abort env var so a racing reset_cancel() can't let an
+    # in-flight browser-backed request bypass Stop.
+    return _cancel_event.is_set() or os.environ.get("TRANSLATION_CANCELLED") == "1"
 
 
 def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:

@@ -41,11 +41,21 @@ def cancel_stream():
     _cancel_event.set()
 
 def reset_cancel():
-    """Clear the cancellation flag (call before starting a new request)."""
+    """Clear the cancellation flag (call before starting a new request).
+
+    Refuse to clear while a hard stop is active: this is called per-attempt and
+    per-chapter (reset_cleanup_state), so a just-starting worker must not wipe
+    the cancel signal the Stop button set. TRANSLATION_CANCELLED is only set on
+    an immediate stop (never graceful), so honoring it here is safe.
+    """
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return
     _cancel_event.clear()
 
 def is_cancelled() -> bool:
-    return _cancel_event.is_set()
+    # Also honor the hard-abort env var so a racing reset_cancel() can't let an
+    # in-flight browser-backed request bypass Stop.
+    return _cancel_event.is_set() or os.environ.get("TRANSLATION_CANCELLED") == "1"
 
 # ===========================================================================
 # Constants – mirror the values used by OpenAI's Codex CLI / OpenCode plugin
@@ -1280,7 +1290,7 @@ def _stream_with_httpx(
 
         # iter_lines() in httpx yields str lines as they arrive
         for line in resp.iter_lines():
-            if _cancel_event.is_set():
+            if is_cancelled():
                 resp.close()
                 raise RuntimeError("AuthGPT: stream cancelled by user")
             if _process_sse_line(line, state, _log, log_stream, t_start):
@@ -1335,7 +1345,7 @@ def _stream_with_requests(
         )
 
     for raw_line in resp.iter_lines(chunk_size=1):
-        if _cancel_event.is_set():
+        if is_cancelled():
             resp.close()
             raise RuntimeError("AuthGPT: stream cancelled by user")
         if raw_line is None:
