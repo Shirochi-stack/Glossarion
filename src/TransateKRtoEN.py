@@ -737,14 +737,28 @@ def _run_multipass_refinement_qa_scan(
             config=config,
         )
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan") as executor:
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan")
+    try:
         future = executor.submit(_scan)
         while not future.done():
             qa_log.flush()
+            # Stay responsive to Stop during the pre-refinement QA scan. The scan
+            # itself receives stop_flag and will unwind; we must not block the
+            # multipass phase here waiting for it, otherwise Stop appears dead
+            # while "something" (the scan) keeps running.
+            if callable(stop_flag) and stop_flag():
+                print("⏹️ Stop requested during multipass QA scan; abandoning scan wait.")
+                break
             time.sleep(0.05)
         while qa_log.flush(force=True):
             time.sleep(0.01)
-        return future.result()
+        if future.done():
+            return future.result()
+        return None
+    finally:
+        # Do not block on a still-running scan when stopping; let it exit via its
+        # own stop_flag instead of joining here.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 class TranslationConfig:

@@ -13325,8 +13325,25 @@ class UnifiedClient:
         unified_logger.setLevel(logging.INFO)
     
     def reset_cleanup_state(self):
-            """Reset cleanup state for new operations"""
+            """Reset cleanup state for new operations.
+
+            CRITICAL: ``_send_core()`` calls this at the START of every send. If a
+            hard stop is currently active, clearing the cancellation flags here
+            wipes the state the Stop button / ``hard_cancel_all()`` just set. With
+            many parallel sends (e.g. multipass refinement, which fires one send
+            per chapter across the whole batch at once) each send re-clears the
+            class-level ``_global_cancelled`` and the browser-route cancel events,
+            so ``send_with_interrupt``'s ``is_globally_cancelled()`` check never
+            sees the cancel and the run "won't stop". Only clear when no hard stop
+            is in progress. A brand-new run clears TRANSLATION_CANCELLED and the
+            stop flags BEFORE its first send, so legitimate fresh runs still reset
+            normally.
+            """
             self._in_cleanup = False
+            if self._hard_stop_in_progress():
+                # A stop is active: do not erase it. Still reset HTTP log levels.
+                self._reset_http_logs()
+                return
             self._cancelled = False
             # Reset global cancellation flag for new operations
             self.set_global_cancellation(False)
@@ -13355,6 +13372,26 @@ class UnifiedClient:
                 pass
             # Reset logging levels for new operations
             self._reset_http_logs()
+
+    def _hard_stop_in_progress(self) -> bool:
+        """True when an immediate (non-graceful) stop is currently active.
+
+        Mirrors the signals the Stop button raises for a hard stop. Graceful stop
+        is intentionally excluded: it is allowed to let in-flight calls finish and
+        does not depend on _global_cancelled. These signals are all cleared at the
+        start of a new run, so this never blocks a fresh run from resetting state.
+        """
+        try:
+            if os.environ.get('TRANSLATION_CANCELLED') == '1':
+                return True
+            if global_stop_flag:
+                return True
+            from TransateKRtoEN import is_stop_requested as _tk_is_stop
+            if _tk_is_stop():
+                return True
+        except Exception:
+            pass
+        return False
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
