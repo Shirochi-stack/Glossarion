@@ -15578,6 +15578,18 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 _record_result(result)
 
         if not all_requests:
+            # DIAGNOSTIC: partial.b2 collected zero refinement targets, so the run
+            # finishes here WITHOUT making any API calls. This is the point where
+            # "after scanning files the button turns green before api calls" — the
+            # translation thread returns and the GUI reverts the button to idle.
+            # If this fires unexpectedly, the QA scan did not mark any
+            # foreign-character QA issues for the chapters in range (so every
+            # chapter was excluded during collection above).
+            print(
+                f"⚠️ Partial.b2: no refinement targets collected from "
+                f"{len(chapters)} chapter(s) — nothing to refine, ending refinement "
+                f"phase without API calls."
+            )
             return
 
         request_ids = [request["request_id"] for request in all_requests]
