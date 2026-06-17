@@ -15445,6 +15445,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ.pop('SINGLE_CHAPTER_FILTER', None)
 
                 self._clear_translation_run_overrides()
+                # Reset stop flags ONCE, at the true end of the (possibly
+                # multi-phase) run. Moved here from run_translation_direct() so a
+                # chained phase (refinement → followup translation) does not reset
+                # Stop mid-run. The next run's setup also resets these, so this is
+                # just clean end-of-run state.
+                self.stop_requested = False
+                try:
+                    if translation_stop_flag:
+                        translation_stop_flag(False)
+                    if (hasattr(self, '_main_module') and self._main_module
+                            and hasattr(self._main_module, 'set_stop_flag')):
+                        self._main_module.set_stop_flag(False)
+                except Exception:
+                    pass
                 self.translation_thread = None
                 # Emit signal to update button (thread-safe)
                 self.thread_complete_signal.emit()
@@ -15975,22 +15989,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return False
         
         finally:
-            self.stop_requested = False
-            if translation_stop_flag:
-                translation_stop_flag(False)
-                
-            # Also reset the module's internal stop flag
-            try:
-                if hasattr(self, '_main_module') and self._main_module:
-                    if hasattr(self._main_module, 'set_stop_flag'):
-                        self._main_module.set_stop_flag(False)
-            except:
-                pass
-                
-            self.translation_thread = None
+            # IMPORTANT: do NOT reset stop flags, null the translation thread, or
+            # emit thread_complete_signal here.
+            #
+            # run_translation_direct() is only ever called from
+            # simple_thread_target(), which owns the thread/button lifecycle and
+            # performs this cleanup exactly once in its own finally. When a single
+            # run chains multiple phases — e.g. Partial.B2 multipass refinement
+            # followed by the "regular translation retry" of skipped QA-failed
+            # chapters — this finally runs after the FIRST phase and:
+            #   • fires thread_complete_signal → update_run_button() flips the run
+            #     button to green ("Run Translation") mid-run, during the 2nd
+            #     phase's chapter extraction, and
+            #   • sets self.stop_requested = False, which wipes a Stop the user
+            #     pressed during phase 1 AND makes the followup-gate
+            #     (`not self.stop_requested`) always true, so the 2nd phase always
+            #     runs and cannot be stopped.
+            # Both were the "button turns green / stop doesn't trigger during
+            # multipass" reports. Leave lifecycle + stop-flag reset to
+            # simple_thread_target()'s finally.
             self.current_file_index = 0
-            # Emit signal to update button (thread-safe)
-            self.thread_complete_signal.emit()
 
     def _process_image_file(self, image_path, combined_output_dir=None):
         """Process a single image file using the direct image translation API with progress tracking"""
