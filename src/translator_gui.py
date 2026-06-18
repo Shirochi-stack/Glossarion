@@ -27005,7 +27005,38 @@ Important rules:
         self.manual_glossary_manually_loaded = True
         self.append_log(f"📑 Loaded manual glossary: {path}")
         self._update_manual_glossary_status()
-        
+
+        # Loading a manual glossary implies "Manual Glossary Only" mode — reflect
+        # that in the auto-glossary dropdown(s) and disable auto-mapping, so the UI
+        # matches what will actually be used.
+        #
+        # IMPORTANT: update the combo(s) with blockSignals. The dropdown's change
+        # handler (_on_auto_glossary_shortcut_changed) performs real-time glossary
+        # path switching that CLEARS self.manual_glossary_path and re-runs
+        # auto-load — which would immediately discard the glossary we just loaded.
+        # So we set the index quietly and apply the mode state inline here.
+        try:
+            self.auto_glossary_mode_var = 'off_no_automap'
+            self.enable_auto_glossary_var = False
+            self.config['auto_glossary_mode'] = 'off_no_automap'
+            self.config['enable_auto_glossary'] = False
+            # "Manual Glossary Only" disables auto-mapping.
+            self.append_glossary_auto_load_var = False
+            self.config['append_glossary_auto_load'] = False
+            if hasattr(self, 'append_glossary_auto_load_checkbox'):
+                self.append_glossary_auto_load_checkbox.blockSignals(True)
+                self.append_glossary_auto_load_checkbox.setChecked(False)
+                self.append_glossary_auto_load_checkbox.blockSignals(False)
+            # Index 2 == "Manual Glossary Only" in both the shortcut and main combos.
+            for _combo_attr in ('auto_glossary_shortcut_combo', 'auto_glossary_mode_combo'):
+                _combo = getattr(self, _combo_attr, None)
+                if _combo is not None:
+                    _combo.blockSignals(True)
+                    _combo.setCurrentIndex(2)
+                    _combo.blockSignals(False)
+        except Exception:
+            pass
+
         # Save the file extension for later reference
         self.manual_glossary_file_extension = file_extension
         
