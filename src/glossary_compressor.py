@@ -428,13 +428,14 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
                               and not l.strip().lower().startswith('glossary'))
     
     if len(result_data_lines) == 0 and original_data_count > 0:
-        if _should_use_raw_name_fallback():
-            print("⚠️ Glossary compression: CSV produced 0 matching entries, falling back to raw-name scan")
-            return _compress_fallback_text(csv_content, source_text)
-        else:
-            print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter (no fallback in auto mode)")
-            return ""  # Return empty so the caller doesn't append a header-only glossary
-    
+        # 0 matching entries → send NO glossary for this chapter. Do NOT fall back
+        # to the raw-name scan: that returns (effectively) the whole glossary,
+        # which is what caused multipass/refinement to ship the full ~72k-char
+        # glossary. An empty result makes build_system_prompt skip the glossary
+        # append entirely.
+        print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter — sending no glossary entries")
+        return ""  # Return empty so the caller doesn't append a header-only/full glossary
+
     return result
 
 
