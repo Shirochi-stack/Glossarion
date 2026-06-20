@@ -11337,6 +11337,9 @@ class RetranslationMixin:
                 custom_types = {
                     'character': {'enabled': True},
                     'terms': {'enabled': True},
+                    'surnames': {'enabled': True},
+                    'titles': {'enabled': True},
+                    'nicknames': {'enabled': True},
                 }
 
             active_types = []

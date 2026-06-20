@@ -697,6 +697,9 @@ class GlossaryManagerMixin:
         custom_types = getattr(self, 'custom_entry_types', {}) or {
             'character': {'enabled': True, 'has_gender': True},
             'terms': {'enabled': True, 'has_gender': False},
+            'surnames': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': False},
+            'nicknames': {'enabled': True, 'has_gender': True},
         }
 
         type_map = {}
@@ -2014,7 +2017,10 @@ class GlossaryManagerMixin:
         # Always reload custom entry types from config to ensure latest saved state
         self.custom_entry_types = self.config.get('custom_entry_types', {
             'character': {'enabled': True, 'has_gender': True},
-            'terms': {'enabled': True, 'has_gender': False}
+            'terms': {'enabled': True, 'has_gender': False},
+            'surnames': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': False},
+            'nicknames': {'enabled': True, 'has_gender': True}
         })
         # Normalize legacy key "term" -> "terms"
         if 'term' in self.custom_entry_types and 'terms' not in self.custom_entry_types:
@@ -5666,7 +5672,7 @@ Do not stop after the glossary."""
         def _current_refinement_entry_types():
             custom_types = dict(getattr(self, 'custom_entry_types', {}) or self.config.get('custom_entry_types', {}) or {})
             if not custom_types:
-                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}}
+                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}, 'surnames': {'enabled': True}, 'titles': {'enabled': True}, 'nicknames': {'enabled': True}}
             if 'term' in custom_types and 'terms' not in custom_types:
                 custom_types['terms'] = custom_types.pop('term')
             if 'term' in custom_types and 'terms' in custom_types:
@@ -6291,6 +6297,9 @@ Do not stop after the glossary."""
                    custom_types = getattr(self, 'custom_entry_types', {}) or {
                        'character': {'enabled': True, 'has_gender': True},
                        'terms': {'enabled': True, 'has_gender': False},
+                       'surnames': {'enabled': True, 'has_gender': False},
+                       'titles': {'enabled': True, 'has_gender': False},
+                       'nicknames': {'enabled': True, 'has_gender': True},
                    }
 
                    type_map = {}
@@ -7525,7 +7534,10 @@ Do not stop after the glossary."""
                     # Apply gender filter to any type with has_gender
                     _custom_types = self.config.get('custom_entry_types', {
                         'character': {'enabled': True, 'has_gender': True},
-                        'terms': {'enabled': True, 'has_gender': False}
+                        'terms': {'enabled': True, 'has_gender': False},
+                        'surnames': {'enabled': True, 'has_gender': False},
+                        'titles': {'enabled': True, 'has_gender': False},
+                        'nicknames': {'enabled': True, 'has_gender': True}
                     })
                     entry_cfg = _custom_types.get(entry.get('type', ''), {})
                     if entry_cfg.get('has_gender', False) and entry.get('gender') != gender_value:
@@ -7650,7 +7662,10 @@ Do not stop after the glossary."""
                            writer = csv.writer(f)
                            _custom_types = self.config.get('custom_entry_types', {
                                'character': {'enabled': True, 'has_gender': True},
-                               'terms': {'enabled': True, 'has_gender': False}
+                               'terms': {'enabled': True, 'has_gender': False},
+                               'surnames': {'enabled': True, 'has_gender': False},
+                               'titles': {'enabled': True, 'has_gender': False},
+                               'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in exported:
                                entry_cfg = _custom_types.get(entry.get('type', ''), {})
@@ -8154,7 +8169,10 @@ Do not stop after the glossary."""
                        if self.current_glossary_format == 'list':
                            _custom_types = self.config.get('custom_entry_types', {
                                'character': {'enabled': True, 'has_gender': True},
-                               'terms': {'enabled': True, 'has_gender': False}
+                               'terms': {'enabled': True, 'has_gender': False},
+                               'surnames': {'enabled': True, 'has_gender': False},
+                               'titles': {'enabled': True, 'has_gender': False},
+                               'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in self.current_glossary_data:
                                entry_cfg = _custom_types.get(entry.get('type', ''), {})
@@ -9568,7 +9586,10 @@ Do not stop after the glossary."""
             # Get custom types for gender info
             custom_types = self.config.get('custom_entry_types', {
                 'character': {'enabled': True, 'has_gender': True},
-                'terms': {'enabled': True, 'has_gender': False}
+                'terms': {'enabled': True, 'has_gender': False},
+                'surnames': {'enabled': True, 'has_gender': False},
+                'titles': {'enabled': True, 'has_gender': False},
+                'nicknames': {'enabled': True, 'has_gender': True}
             })
             
             # Get custom fields

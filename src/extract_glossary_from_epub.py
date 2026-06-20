@@ -1959,14 +1959,20 @@ def get_custom_entry_types():
         if not result:
             return {
                 'character': {'enabled': True, 'has_gender': True},
-                'term': {'enabled': True, 'has_gender': False}
+                'term': {'enabled': True, 'has_gender': False},
+                'surnames': {'enabled': True, 'has_gender': False},
+                'titles': {'enabled': True, 'has_gender': False},
+                'nicknames': {'enabled': True, 'has_gender': True}
             }
         return result
     except:
         # Default configuration
         return {
             'character': {'enabled': True, 'has_gender': True},
-            'term': {'enabled': True, 'has_gender': False}
+            'term': {'enabled': True, 'has_gender': False},
+            'surnames': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': False},
+            'nicknames': {'enabled': True, 'has_gender': True}
         }
 
 def _normalize_gender_value(value) -> str:

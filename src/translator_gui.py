@@ -2127,7 +2127,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         self.custom_entry_types = self.config.get('custom_entry_types', {
             'character': {'enabled': True, 'has_gender': True},
-            'term': {'enabled': True, 'has_gender': False}
+            'term': {'enabled': True, 'has_gender': False},
+            'surnames': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': False},
+            'nicknames': {'enabled': True, 'has_gender': True}
         })
         
         # Initialize default prompts BEFORE using them
@@ -29018,7 +29021,10 @@ Important rules:
                 if not custom_entry_types:
                     custom_entry_types = {
                         'character': {'enabled': True, 'has_gender': True},
-                        'term': {'enabled': True, 'has_gender': False}
+                        'term': {'enabled': True, 'has_gender': False},
+                        'surnames': {'enabled': True, 'has_gender': False},
+                        'titles': {'enabled': True, 'has_gender': False},
+                        'nicknames': {'enabled': True, 'has_gender': True}
                     }
                 custom_types_json = json.dumps(custom_entry_types)
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
