@@ -707,6 +707,7 @@ class GlossaryManagerMixin:
             'terms': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
             'titles': {'enabled': True, 'has_gender': True},
+            'locations': {'enabled': True, 'has_gender': False},
             'nicknames': {'enabled': True, 'has_gender': True},
         }
 
@@ -2028,6 +2029,7 @@ class GlossaryManagerMixin:
             'terms': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
             'titles': {'enabled': True, 'has_gender': True},
+            'locations': {'enabled': True, 'has_gender': False},
             'nicknames': {'enabled': True, 'has_gender': True}
         })
         # Normalize legacy key "term" -> "terms"
@@ -5680,7 +5682,7 @@ Do not stop after the glossary."""
         def _current_refinement_entry_types():
             custom_types = dict(getattr(self, 'custom_entry_types', {}) or self.config.get('custom_entry_types', {}) or {})
             if not custom_types:
-                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}, 'surnames': {'enabled': True}, 'titles': {'enabled': True}, 'nicknames': {'enabled': True}}
+                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}, 'surnames': {'enabled': True}, 'titles': {'enabled': True}, 'locations': {'enabled': True}, 'nicknames': {'enabled': True}}
             if 'term' in custom_types and 'terms' not in custom_types:
                 custom_types['terms'] = custom_types.pop('term')
             if 'term' in custom_types and 'terms' in custom_types:
@@ -6307,6 +6309,7 @@ Do not stop after the glossary."""
                        'terms': {'enabled': True, 'has_gender': False},
                        'surnames': {'enabled': True, 'has_gender': False},
                        'titles': {'enabled': True, 'has_gender': True},
+                       'locations': {'enabled': True, 'has_gender': False},
                        'nicknames': {'enabled': True, 'has_gender': True},
                    }
 
@@ -7545,6 +7548,7 @@ Do not stop after the glossary."""
                         'terms': {'enabled': True, 'has_gender': False},
                         'surnames': {'enabled': True, 'has_gender': False},
                         'titles': {'enabled': True, 'has_gender': True},
+                        'locations': {'enabled': True, 'has_gender': False},
                         'nicknames': {'enabled': True, 'has_gender': True}
                     })
                     entry_cfg = _custom_types.get(entry.get('type', ''), {})
@@ -7673,6 +7677,7 @@ Do not stop after the glossary."""
                                'terms': {'enabled': True, 'has_gender': False},
                                'surnames': {'enabled': True, 'has_gender': False},
                                'titles': {'enabled': True, 'has_gender': True},
+                               'locations': {'enabled': True, 'has_gender': False},
                                'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in exported:
@@ -8180,6 +8185,7 @@ Do not stop after the glossary."""
                                'terms': {'enabled': True, 'has_gender': False},
                                'surnames': {'enabled': True, 'has_gender': False},
                                'titles': {'enabled': True, 'has_gender': True},
+                               'locations': {'enabled': True, 'has_gender': False},
                                'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in self.current_glossary_data:
@@ -9597,6 +9603,7 @@ Do not stop after the glossary."""
                 'terms': {'enabled': True, 'has_gender': False},
                 'surnames': {'enabled': True, 'has_gender': False},
                 'titles': {'enabled': True, 'has_gender': True},
+                'locations': {'enabled': True, 'has_gender': False},
                 'nicknames': {'enabled': True, 'has_gender': True}
             })
             

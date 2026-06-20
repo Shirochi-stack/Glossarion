@@ -11339,6 +11339,7 @@ class RetranslationMixin:
                     'terms': {'enabled': True},
                     'surnames': {'enabled': True},
                     'titles': {'enabled': True},
+                    'locations': {'enabled': True},
                     'nicknames': {'enabled': True},
                 }
 
