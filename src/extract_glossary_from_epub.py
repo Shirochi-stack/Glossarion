@@ -1961,7 +1961,7 @@ def get_custom_entry_types():
                 'character': {'enabled': True, 'has_gender': True},
                 'term': {'enabled': True, 'has_gender': False},
                 'surnames': {'enabled': True, 'has_gender': False},
-                'titles': {'enabled': True, 'has_gender': False},
+                'titles': {'enabled': True, 'has_gender': True},
                 'nicknames': {'enabled': True, 'has_gender': True}
             }
         return result
@@ -1971,7 +1971,7 @@ def get_custom_entry_types():
             'character': {'enabled': True, 'has_gender': True},
             'term': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': True},
             'nicknames': {'enabled': True, 'has_gender': True}
         }
 

@@ -706,7 +706,7 @@ class GlossaryManagerMixin:
             'character': {'enabled': True, 'has_gender': True},
             'terms': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': True},
             'nicknames': {'enabled': True, 'has_gender': True},
         }
 
@@ -2027,7 +2027,7 @@ class GlossaryManagerMixin:
             'character': {'enabled': True, 'has_gender': True},
             'terms': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': True},
             'nicknames': {'enabled': True, 'has_gender': True}
         })
         # Normalize legacy key "term" -> "terms"
@@ -6306,7 +6306,7 @@ Do not stop after the glossary."""
                        'character': {'enabled': True, 'has_gender': True},
                        'terms': {'enabled': True, 'has_gender': False},
                        'surnames': {'enabled': True, 'has_gender': False},
-                       'titles': {'enabled': True, 'has_gender': False},
+                       'titles': {'enabled': True, 'has_gender': True},
                        'nicknames': {'enabled': True, 'has_gender': True},
                    }
 
@@ -7544,7 +7544,7 @@ Do not stop after the glossary."""
                         'character': {'enabled': True, 'has_gender': True},
                         'terms': {'enabled': True, 'has_gender': False},
                         'surnames': {'enabled': True, 'has_gender': False},
-                        'titles': {'enabled': True, 'has_gender': False},
+                        'titles': {'enabled': True, 'has_gender': True},
                         'nicknames': {'enabled': True, 'has_gender': True}
                     })
                     entry_cfg = _custom_types.get(entry.get('type', ''), {})
@@ -7672,7 +7672,7 @@ Do not stop after the glossary."""
                                'character': {'enabled': True, 'has_gender': True},
                                'terms': {'enabled': True, 'has_gender': False},
                                'surnames': {'enabled': True, 'has_gender': False},
-                               'titles': {'enabled': True, 'has_gender': False},
+                               'titles': {'enabled': True, 'has_gender': True},
                                'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in exported:
@@ -8179,7 +8179,7 @@ Do not stop after the glossary."""
                                'character': {'enabled': True, 'has_gender': True},
                                'terms': {'enabled': True, 'has_gender': False},
                                'surnames': {'enabled': True, 'has_gender': False},
-                               'titles': {'enabled': True, 'has_gender': False},
+                               'titles': {'enabled': True, 'has_gender': True},
                                'nicknames': {'enabled': True, 'has_gender': True}
                            })
                            for entry in self.current_glossary_data:
@@ -9596,7 +9596,7 @@ Do not stop after the glossary."""
                 'character': {'enabled': True, 'has_gender': True},
                 'terms': {'enabled': True, 'has_gender': False},
                 'surnames': {'enabled': True, 'has_gender': False},
-                'titles': {'enabled': True, 'has_gender': False},
+                'titles': {'enabled': True, 'has_gender': True},
                 'nicknames': {'enabled': True, 'has_gender': True}
             })
             

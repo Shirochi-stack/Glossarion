@@ -2129,7 +2129,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             'character': {'enabled': True, 'has_gender': True},
             'term': {'enabled': True, 'has_gender': False},
             'surnames': {'enabled': True, 'has_gender': False},
-            'titles': {'enabled': True, 'has_gender': False},
+            'titles': {'enabled': True, 'has_gender': True},
             'nicknames': {'enabled': True, 'has_gender': True}
         })
         
@@ -29023,7 +29023,7 @@ Important rules:
                         'character': {'enabled': True, 'has_gender': True},
                         'term': {'enabled': True, 'has_gender': False},
                         'surnames': {'enabled': True, 'has_gender': False},
-                        'titles': {'enabled': True, 'has_gender': False},
+                        'titles': {'enabled': True, 'has_gender': True},
                         'nicknames': {'enabled': True, 'has_gender': True}
                     }
                 custom_types_json = json.dumps(custom_entry_types)
