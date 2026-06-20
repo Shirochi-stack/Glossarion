@@ -309,6 +309,7 @@ def get_model_options() -> List[str]:
         "search/gemini",
 
         # NVIDIA Build browser-backed route (no API key needed) - chat-tagged catalog models
+        "authnd/nvidia/nemotron-3-ultra-550b-a55b",
         "authnd/mistralai/mistral-medium-3.5-128b",
         "authnd/deepseek-ai/deepseek-v4-flash",
         "authnd/deepseek-ai/deepseek-v4-pro",
