@@ -308,7 +308,15 @@ class GlossaryManagerMixin:
             for name in profiles.keys():
                 if not self._is_default_glossary_prompt_profile(name):
                     combo.addItem(name)
-            combo.setCurrentText(selected_name)
+            idx = combo.findText(selected_name)
+            if idx < 0:
+                idx = 0
+            combo.setCurrentIndex(idx)
+            try:
+                if combo.isEditable() and combo.lineEdit() is not None:
+                    combo.lineEdit().setText(selected_name)
+            except Exception:
+                pass
             self._apply_halgakos_combo_icons(combo)
         finally:
             try:
