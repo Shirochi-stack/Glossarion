@@ -4,7 +4,7 @@
 
 # 📚 Glossarion
 
-**Glossarion** is a comprehensive AI-powered translation suite for Korean, Japanese, and Chinese light novels, web novels, manga, and documents. Built to transform EPUB files, raw .txt files, PDFs, and manga images into high-quality, context-aware English translations. It supports **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — with a modern PySide6 GUI that gives you total control over every step of the translation process.
+**Glossarion** is a comprehensive AI-powered translation suite for light novels, web novels, manga, and documents in virtually any language — with first-class support for Korean, Japanese, and Chinese. Built to transform EPUB files, raw .txt files, PDFs, manga images, and SDLXLIFF translation files into high-quality, context-aware translations, it doubles as a dedicated **manga translator** and as a **translation-editing tool** through its SDLXLIFF support. It works with **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — and, beyond those, **any OpenAI-compatible model or endpoint**, all through a modern PySide6 GUI that gives you total control over every step of the translation process.
 
 ---
 
