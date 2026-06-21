@@ -656,6 +656,43 @@ class GlossaryManagerMixin:
 
         self._set_glossary_tree_font_size(current + int(delta), persist=True)
 
+    def _clear_glossary_editor(self):
+        """Clear the inline glossary editor (tree, file combo, stats and the
+        in-memory data). Called when the associated input file has been cleared
+        so stale auto-loaded entries do not linger in the editor."""
+        try:
+            tree = getattr(self, 'glossary_tree', None)
+            if tree is not None:
+                tree.clear()
+        except Exception:
+            pass
+        try:
+            combo = getattr(self, 'editor_file_combo', None)
+            if combo is not None:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.blockSignals(False)
+        except Exception:
+            pass
+        self.current_glossary_data = None
+        self.current_glossary_format = None
+        try:
+            if hasattr(self, 'current_glossary_sections'):
+                self.current_glossary_sections = []
+        except Exception:
+            pass
+        try:
+            stats = getattr(self, 'stats_label', None)
+            if stats is not None:
+                stats.setText("No glossary loaded")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_update_editor_nav_buttons'):
+                self._update_editor_nav_buttons()
+        except Exception:
+            pass
+
     @staticmethod
     def _sep_for_display(text):
         """Replace raw Unit Separator (\x1F) with visible literal '\x1F' for QTextEdit display."""
@@ -6064,6 +6101,12 @@ Do not stop after the glossary."""
         self.current_glossary_format = None
         self.glossary_column_fields = []
         self._original_translated_map = {}
+        # Tracks whether the editor's current content came from an explicit
+        # user Browse/Load (True) versus auto-association with an input file
+        # (False). Used to avoid wiping deliberately loaded glossaries when
+        # the input file path is cleared.
+        if not hasattr(self, '_glossary_editor_manual_source'):
+            self._glossary_editor_manual_source = False
 
         class _EditorLoadBridge(QObject):
             loaded = Signal(object)
@@ -6783,6 +6826,7 @@ Do not stop after the glossary."""
                "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
            )
            if path:
+               self._glossary_editor_manual_source = True
                self.editor_file_entry.setText(path)
                load_glossary_for_editing()
 
@@ -8282,6 +8326,11 @@ Do not stop after the glossary."""
                         pass
 
                 if not epub_paths:
+                    # The input-file association was cleared. Don't leave stale
+                    # auto-loaded entries in the editor. Preserve a glossary the
+                    # user explicitly browsed/loaded.
+                    if not getattr(self, '_glossary_editor_manual_source', False):
+                        self._clear_glossary_editor()
                     return
 
                 # ----------------------------------------------------------
@@ -8415,8 +8464,13 @@ Do not stop after the glossary."""
 
                 # Load the first one
                 if found_glossaries:
+                    self._glossary_editor_manual_source = False
                     self.editor_file_combo.setCurrentIndex(0)
                     load_glossary_for_editing()
+                elif not getattr(self, '_glossary_editor_manual_source', False):
+                    # Input selected but no associated glossary exists — clear
+                    # stale entries rather than leaving them on screen.
+                    self._clear_glossary_editor()
 
             except Exception as e:
                 print(f"⚠️ auto_select_current_glossary failed: {e}")
@@ -9083,6 +9137,7 @@ Do not stop after the glossary."""
                 self.auto_loaded_glossary_for_file = None
                 self.manual_glossary_path = path
                 self.manual_glossary_manually_loaded = True
+                self._glossary_editor_manual_source = True
                 self.manual_glossary_file_extension = os.path.splitext(path)[1].lower()
                 self.append_glossary_var = True
                 self.config['append_glossary'] = True
