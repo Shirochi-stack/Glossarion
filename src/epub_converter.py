@@ -3281,7 +3281,7 @@ class EPUBCompiler:
                     if text_dirname:
                         chapter_file_name = f"{text_dirname}/{chapter_file_name}"
                     chapter = epub.EpubHtml(
-                        title=html.unescape(chapter_data['title']),
+                        title=XMLValidator.clean_for_xml(html.unescape(chapter_data['title'])),
                         file_name=chapter_file_name,
                         lang=metadata.get("language", "en")
                     )
@@ -3340,7 +3340,7 @@ class EPUBCompiler:
     def _add_error_chapter_from_data(self, book, chapter_data, spine, toc, metadata):
         """Helper to add an error placeholder chapter"""
         try:
-            title = chapter_data.get('title', f"Chapter {chapter_data['num']}")
+            title = XMLValidator.clean_for_xml(str(chapter_data.get('title', f"Chapter {chapter_data['num']}")))
             text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
             err_file = f"chapter_{chapter_data['num']:03d}.xhtml"
             if text_dirname:
@@ -3892,11 +3892,11 @@ class EPUBCompiler:
             if text_dirname:
                 chapter_file_name = f"{text_dirname}/{chapter_file_name}"
             chapter = epub.EpubHtml(
-                title=html.unescape(title),
+                title=XMLValidator.clean_for_xml(html.unescape(title)),
                 file_name=chapter_file_name,
                 lang=metadata.get("language", "en")
             )
-            
+
             chapter.content = FileUtils.ensure_bytes(final_content)
             
             if is_problem_chapter:
@@ -4326,7 +4326,21 @@ class EPUBCompiler:
     def _create_book(self, metadata: dict) -> epub.EpubBook:
         """Create and configure EPUB book with complete metadata"""
         book = epub.EpubBook()
-        
+
+        # Sanitize all metadata strings for XML safety BEFORE writing them into
+        # the OPF/NCX. AI-translated titles/metadata can contain NULL bytes or
+        # other control characters that lxml rejects at write_epub() time with
+        # "All strings must be XML compatible". Chapter *body* content is already
+        # cleaned in XHTMLConverter.validate(), but metadata bypasses that path.
+        def _clean_meta(value):
+            if isinstance(value, str):
+                return XMLValidator.clean_for_xml(value)
+            if isinstance(value, list):
+                return [XMLValidator.clean_for_xml(v) if isinstance(v, str) else v
+                        for v in value]
+            return value
+        metadata = {k: _clean_meta(v) for k, v in metadata.items()}
+
         # Set identifier
         book.set_identifier(metadata.get("identifier", f"translated-{os.path.basename(self.base_dir)}"))
         
