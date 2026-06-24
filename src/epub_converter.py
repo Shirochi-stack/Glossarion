@@ -5839,31 +5839,84 @@ img {
 
                 ncx_bytes = zf.read(ncx_path)
 
-            # Parse outside zip context
-            root = ET.fromstring(ncx_bytes)
-            ns_uri = ''
-            if root.tag.startswith('{'):
-                ns_uri = root.tag[1:root.tag.index('}')]
-            ns = {'ncx': ns_uri} if ns_uri else {}
+            # Parse outside the zip context. Source NCX files are frequently
+            # malformed (unescaped '&', stray control characters, bad entities),
+            # which makes a strict parse raise "not well-formed (invalid token)".
+            # Try strict parsing first, then progressively more tolerant parsers
+            # so a slightly-broken source TOC still yields its real navPoints
+            # instead of silently falling back to a generated TOC.
+            def _extract_navpoints_et(xml_data):
+                root_el = ET.fromstring(xml_data)
+                ns_uri = ''
+                if root_el.tag.startswith('{'):
+                    ns_uri = root_el.tag[1:root_el.tag.index('}')]
+                nsm = {'ncx': ns_uri} if ns_uri else {}
+                nps = root_el.findall('.//ncx:navPoint', nsm) if nsm else root_el.findall('.//navPoint')
+                out = []
+                for np in nps:
+                    label = ''
+                    src = ''
+                    nav_text = np.find('ncx:navLabel/ncx:text', nsm) if nsm else np.find('navLabel/text')
+                    if nav_text is not None and nav_text.text:
+                        label = nav_text.text.strip()
+                    content = np.find('ncx:content', nsm) if nsm else np.find('content')
+                    if content is not None:
+                        src = (content.get('src') or '').strip()
+                    if label or src:
+                        out.append({'label': label, 'src': src})
+                return out
 
-            navpoints = root.findall('.//ncx:navPoint', ns) if ns else root.findall('.//navPoint')
-            for np in navpoints:
-                label = ''
-                src = ''
+            # Attempt 1: strict parse (the common, well-formed case)
+            try:
+                return _extract_navpoints_et(ncx_bytes)
+            except ET.ParseError as parse_err:
+                self.log(f"⚠️ Source toc.ncx not well-formed ({parse_err}); attempting recovery")
 
-                nav_text = np.find('ncx:navLabel/ncx:text', ns) if ns else np.find('navLabel/text')
-                if nav_text is not None and nav_text.text:
-                    label = nav_text.text.strip()
+            # Attempt 2: repair the two most common faults (illegal control
+            # characters and bare ampersands), then re-parse strictly. Re-encode
+            # to bytes so ElementTree doesn't reject the XML encoding declaration.
+            try:
+                text = ncx_bytes.decode('utf-8', errors='replace')
+                text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F]', '', text)
+                text = re.sub(
+                    r'&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);)',
+                    '&amp;', text
+                )
+                repaired = _extract_navpoints_et(text.encode('utf-8'))
+                if repaired:
+                    self.log(f"✅ Recovered {len(repaired)} toc.ncx entries after repairing malformed XML")
+                    return repaired
+            except Exception:
+                pass
 
-                content = np.find('ncx:content', ns) if ns else np.find('content')
-                if content is not None:
-                    src = (content.get('src') or '').strip()
+            # Attempt 3: BeautifulSoup, which is far more tolerant of broken
+            # markup. Try the XML parser first, then the very lenient HTML
+            # parser (which lowercases tags to <navpoint>).
+            for parser_name, np_tag in (('xml', 'navPoint'), ('html.parser', 'navpoint')):
+                try:
+                    soup = BeautifulSoup(ncx_bytes, parser_name)
+                    nps = soup.find_all(np_tag)
+                    if not nps:
+                        continue
+                    out = []
+                    for np in nps:
+                        text_el = np.find('text')
+                        content_el = np.find('content')
+                        label = text_el.get_text(strip=True) if text_el else ''
+                        src = (content_el.get('src') if content_el else '') or ''
+                        if label or src.strip():
+                            out.append({'label': label, 'src': src.strip()})
+                    if out:
+                        self.log(f"✅ Recovered {len(out)} toc.ncx entries via tolerant '{parser_name}' parser")
+                        return out
+                except Exception:
+                    continue
 
-                if label or src:
-                    entries.append({'label': label, 'src': src})
+            self.log("⚠️ Source toc.ncx could not be recovered even with tolerant parsing; using generated TOC")
+            return entries
 
         except Exception as e:
-            self.log(f"⚠️ Failed to parse source toc.ncx: {e}")
+            self.log(f"⚠️ Failed to read source toc.ncx: {e}")
             return []
 
         return entries
