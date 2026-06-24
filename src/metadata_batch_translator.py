@@ -3572,7 +3572,23 @@ def enhance_epub_compiler(compiler_instance):
             print("[DEBUG] No translation features requested")
     
     return compiler_instance
-    
+
+
+def _strip_xml_control_chars(text: str) -> str:
+    """Remove XML-illegal control characters from extracted header/title text.
+
+    Corrupted source EPUBs sometimes embed control bytes (e.g. ESC 0x1B, DC1
+    0x11) inside <h1>/<title>. BeautifulSoup preserves them, but the toc.ncx
+    path strips them during XML parsing — so the same title would otherwise
+    appear differently in translated_headers.txt vs TOC.txt. Stripping the same
+    set here keeps both extraction paths consistent and XML-safe. Visible
+    characters (including junk like '>' or '?') are left untouched.
+    """
+    if not text:
+        return ''
+    return re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text).strip()
+
+
 def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str]]:
     """Extract source headers AND current titles from HTML files using STRICT OPF ordering
     
@@ -3669,7 +3685,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     tag = soup.find(tag_name)
                     if tag:
-                        text = tag.get_text().strip()
+                        text = _strip_xml_control_chars(tag.get_text())
                         if text:
                             current_title = text
                             break
@@ -3702,7 +3718,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                     tag = soup.find(tag_name)
                     if tag:
-                        text = tag.get_text().strip()
+                        text = _strip_xml_control_chars(tag.get_text())
                         if text:
                             current_title = text
                             break
@@ -3835,7 +3851,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     for tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
                         tag = soup.find(tag_name)
                         if tag:
-                            text = tag.get_text().strip()
+                            text = _strip_xml_control_chars(tag.get_text())
                             if text:
                                 title = text
                                 break
