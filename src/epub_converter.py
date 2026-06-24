@@ -2371,8 +2371,11 @@ class EPUBCompiler:
                     self.log("⚠️ No header translator available")
 
             # ── Post-reconciliation: ensure TOC.txt and translated_headers.txt are consistent ──
-            if (getattr(self, 'translate_toc_ncx', False) and
-                    hasattr(self, 'batch_translate_headers') and self.batch_translate_headers):
+            # Run whenever toc.ncx translation is enabled; the chapter headers may
+            # have been produced by the standalone/main path (not the batch path),
+            # so don't gate on batch_translate_headers. _reconcile_toc_and_headers
+            # itself no-ops unless both files exist.
+            if getattr(self, 'translate_toc_ncx', False):
                 try:
                     self._reconcile_toc_and_headers()
                 except Exception as _recon_err:
@@ -6035,10 +6038,14 @@ img {
     def _reconcile_toc_and_headers(self):
         """After both TOC and header translations complete, ensure consistency.
 
-        Loads both TOC.txt and translated_headers.txt, and for any entries that
-        share identical raw/original text but received different translations,
-        picks the translation from whichever file was modified most recently
-        (cross-platform: uses os.path.getmtime) and propagates it to the other file.
+        Loads both TOC.txt and translated_headers.txt and matches entries by the
+        OUTPUT FILE they point to (normalized), not by chapter number — the two
+        files legitimately number chapters differently. The chapter-header
+        translation is treated as authoritative (it comes from the actual
+        translated chapter content), so any TOC navLabel translation that
+        disagrees for the same output file is rewritten to match it. Falls back
+        to identical raw-source-text matching when no output-file match exists.
+        Only TOC.txt is updated; translated_headers.txt is left untouched.
         """
         toc_path = os.path.join(self.output_dir, 'TOC.txt')
         headers_path = os.path.join(self.output_dir, 'translated_headers.txt')
@@ -6063,108 +6070,57 @@ img {
             if not toc_orig or not hdr_orig:
                 return
 
-            # Build raw -> translated maps
-            hdr_raw_to_trans: Dict[str, str] = {}
-            for idx, raw in hdr_orig.items():
+            # ── Match by OUTPUT FILE (normalized), not chapter number ──
+            # TOC.txt (from toc.ncx navLabels) and translated_headers.txt (from the
+            # actual translated chapter headers) legitimately use *different* chapter
+            # numbering — e.g. translated_headers.txt counts the title/info page that
+            # toc.ncx omits — so the reliable cross-file key is the OUTPUT FILE each
+            # entry points to, never the chapter number. The chapter-header
+            # translation is derived from the real translated chapter content, so it
+            # is authoritative; a toc.ncx navLabel translation that disagrees (e.g.
+            # because the source label was corrupted) is rewritten to match it.
+            def _real_trans(trans: str, raw: str) -> bool:
+                t = (trans or '').strip()
+                return bool(t) and t != (raw or '').strip()
+
+            # Primary key: output-file core name -> clean header translation
+            hdr_by_core: Dict[str, str] = {}
+            for hidx, out_ref in hdr_out.items():
+                core = self._normalize_core_name(out_ref)
+                trans = (hdr_trans.get(hidx) or '').strip()
+                if core and _real_trans(trans, hdr_orig.get(hidx, '')):
+                    hdr_by_core.setdefault(core, trans)
+
+            # Secondary key: identical raw source text (used when no output-file match)
+            hdr_by_raw: Dict[str, str] = {}
+            for hidx, raw in hdr_orig.items():
                 key = (raw or '').strip()
-                if key and idx in hdr_trans:
-                    hdr_raw_to_trans[key] = hdr_trans[idx]
+                trans = (hdr_trans.get(hidx) or '').strip()
+                if key and _real_trans(trans, key):
+                    hdr_by_raw.setdefault(key, trans)
 
-            toc_raw_to_trans: Dict[str, str] = {}
-            for idx, raw in toc_orig.items():
-                key = (raw or '').strip()
-                if key and idx in toc_trans:
-                    toc_raw_to_trans[key] = toc_trans[idx]
-
-            # ── Determine authority: whichever file was saved most recently wins ──
-            # os.path.getmtime returns a float (POSIX timestamp) on all platforms.
-            try:
-                toc_mtime = os.path.getmtime(toc_path)
-                hdr_mtime = os.path.getmtime(headers_path)
-                toc_is_newer = toc_mtime > hdr_mtime
-            except OSError:
-                # Fallback: keep original behaviour (headers win)
-                toc_is_newer = False
-
-            authority_label = "TOC.txt" if toc_is_newer else "translated_headers.txt"
-            loser_label = "translated_headers.txt" if toc_is_newer else "TOC.txt"
-
-            # Find mismatches: same raw text, different translation
-            conflicts = []  # list of (toc_idx, raw, toc_version, hdr_version)
-            for idx, raw in toc_orig.items():
-                key = (raw or '').strip()
-                if not key:
-                    continue
-                if key in hdr_raw_to_trans and idx in toc_trans:
-                    toc_version = toc_trans[idx]
-                    hdr_version = hdr_raw_to_trans[key]
-                    if toc_version != hdr_version:
-                        conflicts.append((idx, raw, toc_version, hdr_version))
-
-            if not conflicts:
+            if not hdr_by_core and not hdr_by_raw:
                 self.log("✅ TOC and header translations are already consistent")
                 return
 
-            self.log(
-                f"🔄 Reconciling {len(conflicts)} conflicting translation(s): "
-                f"{authority_label} is newer and will be treated as authoritative"
-            )
+            # ── Rewrite TOC entries whose translation disagrees with the header ──
+            updates = 0
+            for tidx in list(toc_trans.keys()):
+                toc_core = self._normalize_core_name(toc_out.get(tidx, ''))
+                toc_version = (toc_trans.get(tidx) or '').strip()
+                canonical = hdr_by_core.get(toc_core)
+                if not canonical:
+                    canonical = hdr_by_raw.get((toc_orig.get(tidx) or '').strip())
+                if canonical and canonical != toc_version:
+                    self.log(f"  [{tidx}] TOC \"{toc_version}\" → \"{canonical}\" (file: {toc_core or '?'})")
+                    toc_trans[tidx] = canonical
+                    updates += 1
 
-            toc_updates: Dict[int, str] = {}
-            hdr_updates: Dict[int, str] = {}
-
-            for idx, raw, toc_version, hdr_version in conflicts:
-                if toc_is_newer:
-                    # TOC wins → propagate toc_version into headers
-                    canonical = toc_version
-                    old_val = hdr_version
-                    for hidx, hraw in hdr_orig.items():
-                        if (hraw or '').strip() == (raw or '').strip():
-                            hdr_updates[hidx] = canonical
-                            break
-                else:
-                    # Headers win → propagate hdr_version into TOC
-                    canonical = hdr_version
-                    old_val = toc_version
-                    toc_updates[idx] = canonical
-
-                self.log(f"  [{idx}] \"{old_val}\" → \"{canonical}\" (raw: {raw!r})")
-
-            # Apply TOC updates (headers were authoritative)
-            if toc_updates:
-                for idx, new_trans in toc_updates.items():
-                    toc_trans[idx] = new_trans
+            if updates:
                 self._save_toc_translations_file(toc_path, toc_orig, toc_trans, toc_out)
-                self.log(f"✅ Updated {loser_label} with {len(toc_updates)} reconciled translation(s)")
-
-            # Apply header updates (TOC was authoritative)
-            if hdr_updates:
-                for idx, new_trans in hdr_updates.items():
-                    hdr_trans[idx] = new_trans
-                try:
-                    with open(headers_path, 'w', encoding='utf-8') as f:
-                        f.write("Chapter Header Translations\n")
-                        f.write("=" * 50 + "\n\n")
-                        for num in sorted(hdr_orig.keys()):
-                            orig = hdr_orig.get(num, "Unknown")
-                            trans = hdr_trans.get(num, orig)
-                            f.write(f"Chapter {num}:\n")
-                            f.write(f"  Original:   {orig}\n")
-                            f.write(f"  Translated: {trans}\n")
-                            if num in hdr_out and hdr_out[num]:
-                                f.write(f"  Output File: {hdr_out[num]}\n")
-                            if num not in hdr_trans:
-                                f.write("  Status:     ⚠️ Using original (translation failed)\n")
-                            f.write("-" * 40 + "\n")
-                        all_nums = sorted(hdr_orig.keys())
-                        f.write("\nSummary:\n")
-                        f.write(f"Total chapters: {len(all_nums)}\n")
-                        if all_nums:
-                            f.write(f"Chapter range: {min(all_nums)} to {max(all_nums)}\n")
-                        f.write(f"Successfully translated: {len(hdr_trans)}\n")
-                    self.log(f"✅ Updated {loser_label} with {len(hdr_updates)} reconciled translation(s)")
-                except Exception as write_err:
-                    self.log(f"⚠️ Failed to write updated translated_headers.txt: {write_err}")
+                self.log(f"✅ Reconciled {updates} TOC translation(s) with chapter headers (matched by output file)")
+            else:
+                self.log("✅ TOC and header translations are already consistent")
 
         except Exception as e:
             self.log(f"⚠️ Post-reconciliation failed: {e}")
@@ -6654,6 +6610,17 @@ img {
         if missing:
             self.log(f"⚠️ toc.ncx mapping: skipped {missing} entry(ies) that couldn't be matched to output chapters")
         self.log(f"✅ Built TOC from source toc.ncx: {len(toc_links)} entries")
+
+        # TOC.txt has now been (re)written this run. Reconcile it against the
+        # chapter headers so any corrupted/garbled navLabel translation is
+        # replaced by the clean chapter-header translation (matched by output
+        # file). This also corrects stale entries loaded from a cached TOC.txt.
+        if getattr(self, 'translate_toc_ncx', False):
+            try:
+                self._reconcile_toc_and_headers()
+            except Exception as _recon_err:
+                self.log(f"⚠️ TOC/header reconciliation after build failed: {_recon_err}")
+
         return toc_links + extras
 
     def _create_nav_content(self, toc_items, book_title="Book"):
