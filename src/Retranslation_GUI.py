@@ -3573,6 +3573,71 @@ class SDLXLIFFReviewDialog(QDialog):
             })
         return units
 
+    def _review_remove_duplicate_h1_p_enabled(self):
+        """Mirror the translator's "Remove duplicate H1-H6+P pairs" toggle.
+
+        Reads the same ``remove_duplicate_h1_p`` config key the header
+        translation pipeline uses, falling back to the ``REMOVE_DUPLICATE_H1_P``
+        environment variable the packaged app exports from that setting.
+        """
+        try:
+            cfg = self._config or {}
+            if "remove_duplicate_h1_p" in cfg:
+                return bool(cfg.get("remove_duplicate_h1_p"))
+        except Exception:
+            pass
+        try:
+            return str(os.environ.get("REMOVE_DUPLICATE_H1_P", "")).strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _heading_paragraph_dedupe_key(text):
+        """Comparison key matching html_duplicate_cleanup._comparison_text."""
+        import unicodedata
+        value = unicodedata.normalize("NFKC", str(text or "").replace("\xa0", " ").strip())
+        return " ".join(value.split()).casefold()
+
+    def _dedupe_heading_paragraph_units(self, units):
+        """Drop a <p> unit that duplicates an adjacent heading's text.
+
+        This reproduces ``remove_duplicate_heading_paragraph_pairs`` at the
+        extracted-unit level so the reviewer hides the same title echoes the
+        translation pipeline strips when the setting is on. Each surviving
+        unit keeps its original ``index`` (the position of its node in the raw
+        HTML), so target write-back and machine-translation keys stay valid —
+        only the duplicate is omitted from the displayed/aligned rows.
+        """
+        units = list(units or [])
+        if len(units) < 2:
+            return units
+        key = self._heading_paragraph_dedupe_key
+        drop = set()
+        count = len(units)
+        for idx, unit in enumerate(units):
+            tag = str((unit or {}).get("tag", "") or "").strip().lower()
+            if not re.fullmatch(r"h[1-6]", tag):
+                continue
+            heading_key = key(unit.get("text", ""))
+            if not heading_key:
+                continue
+            # Prefer the following <p> (matches check_next), then the previous
+            # one (check_previous); skip units already marked for removal.
+            nxt = idx + 1
+            if nxt < count and nxt not in drop:
+                cand = units[nxt]
+                if str((cand or {}).get("tag", "")).strip().lower() == "p" and key(cand.get("text", "")) == heading_key:
+                    drop.add(nxt)
+                    continue
+            prv = idx - 1
+            if prv >= 0 and prv not in drop:
+                cand = units[prv]
+                if str((cand or {}).get("tag", "")).strip().lower() == "p" and key(cand.get("text", "")) == heading_key:
+                    drop.add(prv)
+        if not drop:
+            return units
+        return [unit for i, unit in enumerate(units) if i not in drop]
+
     @staticmethod
     def _normalize_review_text(text):
         text = html_lib.unescape(str(text or ""))
@@ -4538,6 +4603,12 @@ class SDLXLIFFReviewDialog(QDialog):
             source_html, target_html = self._read_sdlxliff_html_pair(path)
             source_units = self._extract_text_units(source_html)
             target_units = self._extract_text_units(target_html)
+            if self._review_remove_duplicate_h1_p_enabled():
+                # Hide the same duplicate H1-H6 + <p> title echoes the header
+                # translation pipeline removes, so the surplus source unit no
+                # longer shows up as a flagged "Empty" row.
+                source_units = self._dedupe_heading_paragraph_units(source_units)
+                target_units = self._dedupe_heading_paragraph_units(target_units)
             source_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(source_units))
             target_review_units = self._annotate_review_tag_labels(self._non_empty_text_units(target_units))
             rows = []
