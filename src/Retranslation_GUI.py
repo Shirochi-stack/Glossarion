@@ -734,6 +734,7 @@ class SDLXLIFFReviewDialog(QDialog):
             "autogen_signature": last_autogen_signature,
             "sidecar_changed": False,
             "sidecar_path_set_changed": False,
+            "settings_changed": False,
             "changed_sidecar_paths": [],
             "machine_translation_changed": False,
             "autogen_changed": False,
@@ -771,6 +772,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 "autogen_signature": autogen_signature,
                 "sidecar_changed": sidecar_changed,
                 "sidecar_path_set_changed": self._review_signature_path_set_changed(last_review_signature, review_signature),
+                "settings_changed": self._review_signature_settings(review_signature) != self._review_signature_settings(last_review_signature),
                 "changed_sidecar_paths": self._changed_review_signature_paths(last_review_signature, review_signature, stats),
                 "machine_translation_changed": mt_changed,
                 "autogen_changed": autogen_changed,
@@ -792,6 +794,22 @@ class SDLXLIFFReviewDialog(QDialog):
             except Exception:
                 continue
         return path_map
+
+    @staticmethod
+    def _review_signature_settings(signature):
+        """Non-file portion of the review signature (e.g. the dedupe toggle).
+
+        Changes here don't map to any sidecar path, so the incremental reload
+        would short-circuit; callers treat a settings change as a full rebuild.
+        """
+        settings = []
+        for entry in signature or ():
+            try:
+                if entry and entry[0] == "review_settings":
+                    settings.append(tuple(entry))
+            except Exception:
+                continue
+        return tuple(sorted(settings))
 
     @classmethod
     def _review_signature_path_set_changed(cls, old_signature, new_signature):
@@ -1527,7 +1545,12 @@ class SDLXLIFFReviewDialog(QDialog):
                     except Exception:
                         pass
                 else:
-                    changed_paths = result.get("changed_sidecar_paths") if not result.get("sidecar_path_set_changed") else None
+                    # A settings-only change (e.g. the dedupe toggle) doesn't map
+                    # to any changed sidecar path, so force a full reload (None)
+                    # instead of the incremental path - otherwise it would
+                    # short-circuit below and rebuild nothing.
+                    force_full_reload = bool(result.get("sidecar_path_set_changed") or result.get("settings_changed"))
+                    changed_paths = None if force_full_reload else result.get("changed_sidecar_paths")
                     if changed_paths is not None:
                         changed_paths = self._refresh_visible_sidecar_paths(changed_paths)
                         if not changed_paths:
@@ -4483,6 +4506,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._streaming_piece_selected_row = 0
             self._streaming_piece_rendered_row = None
             self._streaming_piece_visible_count = 0
+            self._streaming_piece_skipped = 0
             self._streaming_piece_last_pump = time.monotonic()
             self._set_loading_progress(0, len(work_items), f"0/{len(work_items)} SDLXLIFF entries")
         except Exception:
@@ -4504,7 +4528,16 @@ class SDLXLIFFReviewDialog(QDialog):
     def _stream_piece_list_item(self, original_index, piece):
         trace_started = time.perf_counter()
         try:
+            total = int(getattr(self, "_streaming_piece_total", 0) or 0)
             if self._review_piece_is_empty_sidecar(piece):
+                # Empty sidecars (e.g. the cover page) are never shown; drop them
+                # from the denominator so the bar can reach 100% instead of
+                # resting at e.g. 15/16 and looking stuck.
+                self._streaming_piece_skipped = int(getattr(self, "_streaming_piece_skipped", 0)) + 1
+                visible_count = int(getattr(self, "_streaming_piece_visible_count", 0) or 0)
+                if total:
+                    effective = max(visible_count, total - self._streaming_piece_skipped)
+                    self._set_loading_progress(visible_count, effective, f"{visible_count}/{effective} SDLXLIFF entries")
                 return
             visible_row = int(getattr(self, "_streaming_piece_visible_count", 0) or 0)
             piece = dict(piece)
@@ -4514,13 +4547,13 @@ class SDLXLIFFReviewDialog(QDialog):
             self.piece_list.addItem(item)
             self._streaming_piece_visible_count = visible_row + 1
             try:
-                total = int(getattr(self, "_streaming_piece_total", 0) or 0)
                 if total:
-                    self.save_status_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{total}")
+                    effective = max(visible_row + 1, total - int(getattr(self, "_streaming_piece_skipped", 0)))
+                    self.save_status_label.setText(f"Loaded SDLXLIFF entry {visible_row + 1}/{effective}")
                     self._set_loading_progress(
                         visible_row + 1,
-                        total,
-                        f"{visible_row + 1}/{total} SDLXLIFF entries",
+                        effective,
+                        f"{visible_row + 1}/{effective} SDLXLIFF entries",
                     )
             except Exception:
                 pass
