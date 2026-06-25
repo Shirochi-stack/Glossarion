@@ -4032,15 +4032,35 @@ class SDLXLIFFReviewDialog(QDialog):
         rows = []
         i = 0
         j = 0
+        # Track the most recently consumed unit on each side (and the most
+        # recent source heading) so we can recognise a side-only "echo" — a
+        # unit that simply repeats an earlier line and has no counterpart on
+        # the other side.
+        last_src = None
+        last_tgt = None
+        last_src_heading = None
+
+        def _same_text(unit_a, unit_b):
+            if not unit_a or not unit_b:
+                return False
+            return (
+                self._normalize_review_text(unit_a.get("text", ""))
+                == self._normalize_review_text(unit_b.get("text", ""))
+            )
+
         while i < len(source_units) or j < len(target_units):
             src = source_units[i] if i < len(source_units) else None
             tgt = target_units[j] if j < len(target_units) else None
             if src is None:
                 rows.append((None, tgt))
+                last_tgt = tgt
                 j += 1
                 continue
             if tgt is None:
                 rows.append((src, None))
+                last_src = src
+                if self._review_unit_is_heading(src):
+                    last_src_heading = src
                 i += 1
                 continue
             next_src = source_units[i + 1] if i + 1 < len(source_units) else None
@@ -4051,22 +4071,51 @@ class SDLXLIFFReviewDialog(QDialog):
             if self._review_unit_is_heading(src) and self._review_unit_is_paragraph(tgt):
                 if source_remaining > target_remaining and next_src is not None and self._review_units_are_compatible(next_src, tgt):
                     rows.append((src, None))
+                    last_src = src
+                    last_src_heading = src
                     i += 1
                     continue
 
             if self._review_unit_is_paragraph(src) and self._review_unit_is_heading(tgt):
                 if target_remaining > source_remaining and next_tgt is not None and self._review_units_are_compatible(src, next_tgt):
                     rows.append((None, tgt))
+                    last_tgt = tgt
                     j += 1
                     continue
 
-            if self._review_units_are_compatible(src, tgt):
-                rows.append((src, tgt))
-                i += 1
-                j += 1
-                continue
+            # The source carries a surplus unit the target lacks — most often
+            # the chapter title echoed as the first <p> (the heading and the
+            # echo are both present in the source, but the cleaned output keeps
+            # the title only once). Both sides are usually <p> here, so the
+            # tag-based checks above can't see it; pairing 1:1 would shift every
+            # following row's source/output + machine-translation pairing off by
+            # one. Detect the surplus unit as an echo of an earlier source line
+            # (its predecessor or the most recent heading) and emit a gap so the
+            # rest of the chapter stays aligned.
+            if source_remaining > target_remaining:
+                src_is_echo = _same_text(src, last_src) or _same_text(src, last_src_heading)
+                tgt_is_echo = _same_text(tgt, last_tgt)
+                if src_is_echo and not tgt_is_echo:
+                    rows.append((src, None))
+                    last_src = src
+                    i += 1
+                    continue
+
+            # Symmetric case: the target repeats a line the source does not.
+            if target_remaining > source_remaining:
+                tgt_is_echo = _same_text(tgt, last_tgt)
+                src_is_echo = _same_text(src, last_src)
+                if tgt_is_echo and not src_is_echo:
+                    rows.append((None, tgt))
+                    last_tgt = tgt
+                    j += 1
+                    continue
 
             rows.append((src, tgt))
+            last_src = src
+            last_tgt = tgt
+            if self._review_unit_is_heading(src):
+                last_src_heading = src
             i += 1
             j += 1
         return rows
