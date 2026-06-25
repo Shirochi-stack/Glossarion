@@ -6,6 +6,11 @@
 
 **Glossarion** is a comprehensive AI-powered translation suite for light novels, web novels, manga, and documents in virtually any language, with preconfigured profiles for Korean, Japanese, and Chinese via its profile system. Built to transform EPUB files, raw .txt files, and PDFs into high-quality, context-aware translations, it also includes a dedicated **manga translator** panel that combines multiple AI models to translate .cbz archives and direct image files, plus a **translation-editing tool** for .sdlxliff files. It works with **40+ AI providers** — including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, xAI Grok, Mistral, and local LLMs via Ollama — and, beyond those, **any OpenAI-compatible model or endpoint**, all through a modern PySide6 GUI that gives you total control over every step of the translation process.
 
+<p align="center">
+  <a href="docs/Glossarion_User_Guide_Jun-22-2026.md"><strong>📖 Read the Complete User Guide →</strong></a><br/>
+  <em>Every button and setting explained in plain language — including how to translate for free.</em>
+</p>
+
 ---
 
 ## 🏷️ Badges
@@ -240,6 +245,8 @@ cryptography
 ---
 
 ## 🚀 Usage
+
+> 📖 **For a full walkthrough of every feature and setting, see the [Complete User Guide](docs/Glossarion_User_Guide_Jun-22-2026.md).** The quick steps below get you started.
 
 ### Basic Translation
 1. Launch `translator_gui.py`
