@@ -911,6 +911,7 @@ class SDLXLIFFReviewDialog(QDialog):
             self._piece_render_complete.clear()
             self._generation_streaming_active = True
             self._generation_stream_seen_paths = set()
+            self._generation_stream_skipped = 0
             self._generation_stream_pending_pieces = []
             self._generation_stream_finished_message = ""
             self._generation_stream_preserve_after_finish = False
@@ -1113,15 +1114,23 @@ class SDLXLIFFReviewDialog(QDialog):
                 metadata["display_position"] = int(metadata["opf_position"]) + 1
             metadata["label"] = self._review_label_from_metadata(metadata)
             piece = self._build_piece(path, row, metadata)
+            total = int(getattr(self, "_generation_stream_total", 0) or 0)
             if self._review_piece_is_empty_sidecar(piece):
+                # Empty sidecars (e.g. the cover page, which has no text units)
+                # are never shown, so drop them from the streamed denominator —
+                # otherwise the bar rests at e.g. 15/16 and looks stuck.
+                self._generation_stream_skipped = int(getattr(self, "_generation_stream_skipped", 0)) + 1
+                if total:
+                    effective = max(len(self.pieces), total - self._generation_stream_skipped)
+                    self._set_loading_progress(len(self.pieces), effective, f"{len(self.pieces)}/{effective} SDLXLIFF entries")
                 return False
             piece["index"] = row
             self.pieces.append(piece)
             self.piece_list.addItem(self._piece_list_item_for_piece(piece, row))
-            total = int(getattr(self, "_generation_stream_total", 0) or 0)
             if total:
-                self.save_status_label.setText(f"Loaded SDLXLIFF entry {len(self.pieces)}/{total}")
-                self._set_loading_progress(len(self.pieces), total, f"{len(self.pieces)}/{total} SDLXLIFF entries")
+                effective = max(len(self.pieces), total - int(getattr(self, "_generation_stream_skipped", 0)))
+                self.save_status_label.setText(f"Loaded SDLXLIFF entry {len(self.pieces)}/{effective}")
+                self._set_loading_progress(len(self.pieces), effective, f"{len(self.pieces)}/{effective} SDLXLIFF entries")
             if row == 0:
                 previous_block = self.piece_list.blockSignals(True)
                 self.piece_list.setCurrentRow(0)
@@ -1618,6 +1627,10 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _current_review_signature(self):
         signature = []
+        # Fold the "remove duplicate H1-H6+P pairs" toggle into the signature so
+        # flipping it counts as a change: the next refresh (auto or F5) rebuilds
+        # the rows with the new setting instead of needing a program restart.
+        signature.append(("review_settings", "remove_dup_h1p", 1 if self._review_remove_duplicate_h1_p_enabled() else 0, 0))
         for output_dir in self._review_output_dirs():
             for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
                 try:
@@ -3577,15 +3590,17 @@ class SDLXLIFFReviewDialog(QDialog):
         """Mirror the translator's "Remove duplicate H1-H6+P pairs" toggle.
 
         Reads the same ``remove_duplicate_h1_p`` config key the header
-        translation pipeline uses, falling back to the ``REMOVE_DUPLICATE_H1_P``
-        environment variable the packaged app exports from that setting.
+        translation pipeline uses. The live parent config is checked first so
+        toggling the setting takes effect on the next refresh without a program
+        restart; the ``REMOVE_DUPLICATE_H1_P`` env var the packaged app exports
+        is the final fallback.
         """
-        try:
-            cfg = self._config or {}
-            if "remove_duplicate_h1_p" in cfg:
-                return bool(cfg.get("remove_duplicate_h1_p"))
-        except Exception:
-            pass
+        for cfg in (getattr(getattr(self, "_context_parent", None), "config", None), self._config):
+            try:
+                if isinstance(cfg, dict) and "remove_duplicate_h1_p" in cfg:
+                    return bool(cfg.get("remove_duplicate_h1_p"))
+            except Exception:
+                continue
         try:
             return str(os.environ.get("REMOVE_DUPLICATE_H1_P", "")).strip().lower() in ("1", "true", "yes", "on")
         except Exception:
