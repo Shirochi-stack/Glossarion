@@ -299,6 +299,39 @@ class APIKeyEntry:
             'last_test_time': getattr(self, 'last_test_time', None),
             'last_test_message': getattr(self, 'last_test_message', None)
         }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Create an APIKeyEntry from a saved dictionary (inverse of to_dict).
+
+        Tolerant of missing/extra fields so it can load keys exported by older
+        versions or hand-written JSON. Restores the persisted usage counter and
+        last-test metadata that to_dict() writes out.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("APIKeyEntry.from_dict expects a dict")
+        entry = cls(
+            api_key=data.get('api_key', ''),
+            model=data.get('model', ''),
+            cooldown=data.get('cooldown', 60),
+            enabled=data.get('enabled', True),
+            google_credentials=data.get('google_credentials'),
+            azure_endpoint=data.get('azure_endpoint'),
+            google_region=data.get('google_region'),
+            azure_api_version=data.get('azure_api_version'),
+            use_individual_endpoint=data.get('use_individual_endpoint', False),
+            individual_output_token_limit=data.get('individual_output_token_limit'),
+            individual_key_temperature=data.get('individual_key_temperature'),
+            api_call_delay=data.get('api_call_delay', 0.0),
+        )
+        # Restore persisted usage counter and last-test results
+        entry.times_used = data.get('times_used', 0) or 0
+        entry.last_test_result = data.get('last_test_result')
+        entry.last_test_time = data.get('last_test_time')
+        entry.last_test_message = data.get('last_test_message')
+        return entry
+
+
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
     def __init__(self, pool_name: str = "API key pool"):
@@ -8097,62 +8130,329 @@ class MultiAPIKeyDialog(QDialog):
             self._refresh_key_list()
             self._show_status(f"Updated cooldown to {value}s")
 
+    # ------------------------------------------------------------------
+    # Pool-aware import / export
+    #
+    # Export writes a single JSON file containing *every* key pool (the main
+    # Translation pool, the Fallback pool, and all dedicated pools) so it can be
+    # used as a complete backup or to transfer a setup between machines. Import
+    # understands that structured format and also still accepts the legacy flat
+    # list (which is restored into the Translation pool).
+    # ------------------------------------------------------------------
+
+    def _export_pool_order(self):
+        """Logical pool order: main, fallback, then the dedicated pools."""
+        order = ['main', 'fallback']
+        try:
+            order.extend(sorted(self._dedicated_pool_specs().keys()))
+        except Exception:
+            pass
+        return order
+
+    def _pool_title(self, pool_name: str) -> str:
+        if pool_name == 'main':
+            return 'Translation Keys'
+        if pool_name == 'fallback':
+            return 'Fallback Keys'
+        try:
+            return self._dedicated_pool_spec(pool_name).get('title', pool_name)
+        except Exception:
+            return pool_name
+
+    def _pool_toggle_key(self, pool_name: str):
+        if pool_name == 'main':
+            return 'use_multi_api_keys'
+        if pool_name == 'fallback':
+            return 'use_fallback_keys'
+        try:
+            return self._dedicated_pool_spec(pool_name).get('toggle_key')
+        except Exception:
+            return None
+
+    def _read_pool_keys(self, pool_name: str):
+        """Return the current list of key dicts for a pool."""
+        cfg = self.translator_gui.config
+        if pool_name == 'main':
+            # Prefer live edits held in the key pool object; fall back to config.
+            try:
+                keys = [k.to_dict() for k in self.key_pool.get_all_keys()]
+            except Exception:
+                keys = []
+            if not keys:
+                keys = list(cfg.get('multi_api_keys', []) or [])
+            return keys
+        if pool_name == 'fallback':
+            return list(cfg.get('fallback_keys', []) or [])
+        try:
+            return list(self._dedicated_keys(pool_name) or [])
+        except Exception:
+            return []
+
+    def _collect_pools_for_export(self):
+        cfg = self.translator_gui.config
+        pools = {}
+        for pool_name in self._export_pool_order():
+            toggle_key = self._pool_toggle_key(pool_name)
+            pools[pool_name] = {
+                'title': self._pool_title(pool_name),
+                'enabled': bool(cfg.get(toggle_key, False)) if toggle_key else False,
+                'keys': self._read_pool_keys(pool_name),
+            }
+        return pools
+
+    @staticmethod
+    def _set_checkbox_silent(checkbox, value):
+        """Set a checkbox state without firing its toggled handlers."""
+        if checkbox is None:
+            return
+        try:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(value))
+        except Exception:
+            pass
+        finally:
+            try:
+                checkbox.blockSignals(False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _sanitize_imported_keys(raw_keys):
+        """Filter a raw list down to valid key dicts (lossless, native shape).
+
+        Returns (clean_keys, skipped_count).
+        """
+        clean, skipped = [], 0
+        if not isinstance(raw_keys, list):
+            return clean, skipped
+        for kd in raw_keys:
+            if isinstance(kd, dict) and 'api_key' in kd and 'model' in kd:
+                clean.append(kd)
+            else:
+                skipped += 1
+        return clean, skipped
+
     def _import_keys(self):
-        """Import keys from JSON file"""
+        """Import keys from a JSON file.
+
+        Supported formats:
+          * Pool-aware export: {"format": "glossarion-key-pools", "pools": {...}}
+            -> each recognized pool in the file is restored to its matching pool.
+          * Legacy flat list:  [ {api_key, model, ...}, ... ]
+            -> imported into the Translation (main) pool for backwards compat.
+        """
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Import API Keys",
             "",
             "JSON files (*.json);;All files (*.*)"
         )
+        if not filename:
+            return
 
-        if filename:
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+            return
+
+        try:
+            if isinstance(data, dict) and isinstance(data.get('pools'), dict):
+                self._import_pool_aware(data['pools'])
+            elif isinstance(data, list):
+                self._import_legacy_list(data)
+            elif isinstance(data, dict) and 'api_key' in data and 'model' in data:
+                # A single bare key object
+                self._import_legacy_list([data])
+            else:
+                QMessageBox.critical(self, "Error", "Invalid or unrecognized key file format")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+
+    def _import_legacy_list(self, data):
+        """Append a flat list of keys to the Translation pool (legacy format)."""
+        valid, skipped = self._sanitize_imported_keys(data)
+        if not valid:
+            QMessageBox.critical(self, "Error", "No valid keys found in file")
+            return
+
+        imported = 0
+        for kd in valid:
             try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                self.key_pool.add_key(APIKeyEntry.from_dict(kd))
+                imported += 1
+            except Exception:
+                skipped += 1
 
-                if isinstance(data, list):
-                    # Load keys
-                    imported_count = 0
-                    for key_data in data:
-                        if isinstance(key_data, dict) and 'api_key' in key_data and 'model' in key_data:
-                            self.key_pool.add_key(APIKeyEntry.from_dict(key_data))
-                            imported_count += 1
+        # Persist the appended state so it survives even before pressing Save.
+        try:
+            self.translator_gui.config['multi_api_keys'] = [
+                k.to_dict() for k in self.key_pool.get_all_keys()
+            ]
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+        try:
+            self._refresh_key_list()
+        except Exception:
+            pass
+        try:
+            self._notify_authgpt_visibility()
+        except Exception:
+            pass
 
-                    self._refresh_key_list()
-                    self._notify_authgpt_visibility()
-                    QMessageBox.information(self, "Success", f"Imported {imported_count} API keys")
-                else:
-                    QMessageBox.critical(self, "Error", "Invalid file format")
+        msg = f"Imported {imported} API key(s) into the Translation pool"
+        if skipped:
+            msg += f" ({skipped} skipped)"
+        QMessageBox.information(self, "Success", msg)
 
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
+    def _apply_imported_pool(self, pool_name: str, keys, enabled=None):
+        """Replace a single pool's keys (and optional enable toggle)."""
+        cfg = self.translator_gui.config
+        toggle_key = self._pool_toggle_key(pool_name)
+
+        if pool_name == 'main':
+            cfg['multi_api_keys'] = keys
+            try:
+                self.key_pool.load_from_list(keys)
+            except Exception:
+                pass
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(getattr(self, 'enabled_checkbox', None), enabled)
+            try:
+                self._refresh_key_list()
+            except Exception:
+                pass
+        elif pool_name == 'fallback':
+            cfg['fallback_keys'] = keys
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(getattr(self, 'use_fallback_checkbox', None), enabled)
+            try:
+                self._load_fallback_keys()
+            except Exception:
+                pass
+        else:
+            # Dedicated pool: _dedicated_set_keys writes config + refreshes views.
+            try:
+                self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=True)
+            except Exception:
+                try:
+                    cfg[self._dedicated_pool_spec(pool_name)['config_key']] = keys
+                except Exception:
+                    pass
+            if enabled is not None and toggle_key:
+                cfg[toggle_key] = bool(enabled)
+                self._set_checkbox_silent(self._dedicated_widget(pool_name, 'keys_checkbox'), enabled)
+
+    def _import_pool_aware(self, pools_obj):
+        """Restore every recognized pool found in a structured export file."""
+        known = set(self._export_pool_order())
+        plan = []            # list of (pool_name, clean_keys, enabled)
+        total_skipped = 0
+        unknown_pools = []
+
+        for pool_name, value in pools_obj.items():
+            if pool_name not in known:
+                unknown_pools.append(str(pool_name))
+                continue
+            if isinstance(value, dict):
+                raw_keys = value.get('keys', [])
+                enabled = value.get('enabled', None)
+            elif isinstance(value, list):
+                raw_keys = value
+                enabled = None
+            else:
+                continue
+            clean, skipped = self._sanitize_imported_keys(raw_keys)
+            total_skipped += skipped
+            plan.append((pool_name, clean, enabled))
+
+        if not plan:
+            QMessageBox.critical(self, "Error", "No recognizable pools found in file")
+            return
+
+        # Confirm — a structured import REPLACES the contents of listed pools.
+        summary = "\n".join(
+            f"  • {self._pool_title(pn)}: {len(keys)} key(s)" for pn, keys, _en in plan
+        )
+        confirm = QMessageBox.question(
+            self,
+            "Import key pools",
+            "This will REPLACE the contents of these pools:\n\n"
+            f"{summary}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        applied_keys = 0
+        for pool_name, keys, enabled in plan:
+            self._apply_imported_pool(pool_name, keys, enabled)
+            applied_keys += len(keys)
+
+        # Persist everything once, then refresh all visible views.
+        try:
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+        try:
+            self._refresh_visible_key_pool_views()
+        except Exception:
+            pass
+        try:
+            self._notify_authgpt_visibility()
+        except Exception:
+            pass
+
+        msg = f"Imported {applied_keys} key(s) across {len(plan)} pool(s)"
+        extras = []
+        if total_skipped:
+            extras.append(f"{total_skipped} invalid key(s) skipped")
+        if unknown_pools:
+            extras.append("ignored unknown pool(s): " + ", ".join(unknown_pools))
+        if extras:
+            msg += "\n" + "; ".join(extras)
+        QMessageBox.information(self, "Success", msg)
 
     def _export_keys(self):
-        """Export keys to JSON file"""
-        if not self.key_pool.keys:
-            QMessageBox.warning(self, "Warning", "No keys to export")
+        """Export every key pool to a single pool-aware JSON file."""
+        pools = self._collect_pools_for_export()
+        total_keys = sum(len(p['keys']) for p in pools.values())
+        if total_keys == 0:
+            QMessageBox.warning(self, "Warning", "No keys to export in any pool")
             return
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
-            "Export API Keys",
+            "Export API Keys (all pools)",
             "",
             "JSON files (*.json);;All files (*.*)"
         )
+        if not filename:
+            return
+        if not filename.lower().endswith('.json'):
+            filename += '.json'
 
-        if filename:
-            try:
-                # Convert keys to list of dicts
-                key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
-
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(key_list, f, indent=2, ensure_ascii=False)
-
-                QMessageBox.information(self, "Success", f"Exported {len(key_list)} API keys")
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
+        payload = {
+            'format': 'glossarion-key-pools',
+            'version': 1,
+            'exported_at': datetime.now().isoformat(timespec='seconds'),
+            'pools': pools,
+        }
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            non_empty = sum(1 for p in pools.values() if p['keys'])
+            QMessageBox.information(
+                self, "Success",
+                f"Exported {total_keys} API key(s) across {non_empty} pool(s)"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
 
     def _show_status(self, message: str):
         """Show status message"""
