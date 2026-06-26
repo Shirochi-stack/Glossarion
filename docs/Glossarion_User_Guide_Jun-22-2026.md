@@ -535,8 +535,6 @@ If you hit rate limits a lot, or have several keys, let Glossarion juggle them.
 
 ## 15. Refinement & output modes
 
-Two newer features worth knowing about in 9.3.3.
-
 ### Output Mode (what kind of output you want)
 
 A small selector (also synced into Other Settings → Image Translation) chooses what Glossarion produces:
@@ -558,7 +556,7 @@ Turn on a second pass that re-reads and improves your finished translation:
 - **Failed** — run a quick QA scan first, then only refine the chapters still marked failed.
 - **Partial / Partial.b / Partial.b2** — increasingly targeted/batched passes that fix only the specific problem spots (e.g. chapters with leftover foreign characters), bundling them efficiently to save requests.
 
-> **✅ DO try `Failed` refinement** as a cheap cleanup: it only spends money on the chapters that actually need help.
+> **✅ DO try `Partial.b` refinement** as a cheap cleanup: it only uses requests on chapters with leftover raw characters.
 
 ### Review generator
 
