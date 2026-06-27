@@ -11,6 +11,7 @@ matches the user-selected behaviour ("Identical, just extensions").
 """
 
 import os
+import re
 import threading
 
 try:
@@ -21,6 +22,20 @@ except Exception:  # pragma: no cover - stdlib always present
 
 
 _HTML_EXTS = (".html", ".htm", ".xhtml")
+
+# html2text escapes Markdown-significant characters with a backslash so the
+# output round-trips as valid Markdown (e.g. a paragraph that starts with
+# "- " becomes "\- " so it is not parsed as a list, "1." becomes "1\.",
+# etc.). For a human-readable .md/.txt export those backslashes are just
+# noise, so we strip them. This only affects the MD/TXT sidecars — the
+# shared EnhancedTextExtractor used for the AI translation input is untouched.
+_MD_ESCAPE_RE = re.compile(r'\\([\\`*_{}\[\]()#+.!>~|-])')
+
+
+def _strip_markdown_escapes(text):
+    if not text or '\\' not in text:
+        return text
+    return _MD_ESCAPE_RE.sub(r'\1', text)
 
 
 def _md_enabled():
@@ -60,7 +75,7 @@ def extract_markdown_from_html(target_html):
     display_text, translation_text, _title = extractor.extract_chapter_content(
         target_html, extraction_mode="comprehensive"
     )
-    return display_text or translation_text or ""
+    return _strip_markdown_escapes(display_text or translation_text or "")
 
 
 def _write_text(path, text):
