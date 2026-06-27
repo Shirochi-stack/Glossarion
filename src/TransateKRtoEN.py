@@ -178,6 +178,12 @@ from sdlxliff_sidecar_writer import (
     _write_html_sdlxliff_sidecar,
 )
 
+try:
+    from md_txt_sidecar_writer import _write_html_md_txt_sidecars
+except Exception:  # pragma: no cover - module should always be importable
+    def _write_html_md_txt_sidecars(*_args, **_kwargs):
+        return None
+
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
 
@@ -7784,6 +7790,7 @@ class BatchTranslationProcessor:
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
                 _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, chapter_body, cleaned)
+                _write_html_md_txt_sidecars(self.out_dir, fname, cleaned)
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
 
@@ -8635,6 +8642,7 @@ class BatchTranslationProcessor:
                             f.write(section_content)
                         if not getattr(self, 'is_text_file', False) and not merged_truncated:
                             _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, content, section_content)
+                            _write_html_md_txt_sidecars(self.out_dir, fname, section_content)
 
                         saved_files.append((actual_num, fname, idx, chapter, content_hash))
                         print(f"      💾 Saved Chapter {actual_num}: {fname} ({len(section_content)} chars)")
@@ -8715,6 +8723,7 @@ class BatchTranslationProcessor:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                             f.write(cleaned_to_save)
                         _write_html_sdlxliff_sidecar(self.out_dir, fname, parent_chapter, merged_content, cleaned_to_save)
+                        _write_html_md_txt_sidecars(self.out_dir, fname, cleaned_to_save)
                     print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
                 
                 with self.progress_lock:
@@ -17477,7 +17486,27 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     # (escape_tag_like already ran above before the html2text pass)
     plain_text = _escape_untracked_atx_headings(plain_text, markdown_provenance)
-    
+
+    # -------------------------------------------------------------------------
+    # SKIP MARKDOWN -> HTML TAG CONVERSION (user toggle)
+    # When SKIP_MARKDOWN_TO_HTML is enabled we keep the safety escaping passes
+    # that already ran above (invalid angle-bracket escaping + html2text strip
+    # pre-pass + untracked ATX-heading guard) but DO NOT convert markdown
+    # (#, **, lists, blockquotes, ...) into HTML tags. We still restore the
+    # protected image/ruby tags so image-only chapters and furigana survive,
+    # then return the (markdown) text as-is.
+    # -------------------------------------------------------------------------
+    if os.getenv('SKIP_MARKDOWN_TO_HTML', '0') == '1':
+        result = plain_text
+        result = re.sub(
+            r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area|ruby|rt|rp|rb|rtc)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption|ruby|rt|rp|rb|rtc)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
+            r'<\1>',
+            result,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        result = _fix_img_p_nesting(result)
+        return result
+
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
     
@@ -23829,6 +23858,7 @@ def main(log_callback=None, stop_callback=None):
                             f.write(section_content)
                         if not is_text_file and not was_truncated:
                             _write_html_sdlxliff_sidecar(out, split_fname, g_chapter, g_chapter.get("body", ""), section_content)
+                            _write_html_md_txt_sidecars(out, split_fname, section_content)
 
                         # Verify file was written successfully
                         if os.path.exists(split_output_path):
@@ -23884,6 +23914,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 if not was_truncated and not (is_text_file and not is_pdf_file):
                     _write_html_sdlxliff_sidecar(out, parent_fname, parent_chapter, merged_content, cleaned_to_save)
+                    _write_html_md_txt_sidecars(out, parent_fname, cleaned_to_save)
 
                 if was_truncated:
                     # For truncated merged responses, mark ALL chapters as qa_failed
@@ -24093,6 +24124,7 @@ def main(log_callback=None, stop_callback=None):
 
                 if chapter_status == "completed":
                     _write_html_sdlxliff_sidecar(out, fname, c, c.get("body", ""), cleaned)
+                    _write_html_md_txt_sidecars(out, fname, cleaned)
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
                 # Clear any stale watchdog entries for this chapter
                 try:

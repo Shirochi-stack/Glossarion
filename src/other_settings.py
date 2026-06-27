@@ -8929,6 +8929,192 @@ def _create_processing_options_section(self, parent):
     output_sdlxliff_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(output_sdlxliff_desc)
 
+    # ---- Output MD / Output TXT sidecar files for HTML translations ----
+    # Each writes a MD/ or TXT/ subfolder next to where the SDLXLIFF folder is
+    # created. The "Generate" button next to each toggle retroactively builds
+    # the MD/TXT for the currently selected input files from their HTML outputs
+    # (re-run through the html2text extractor so the valid HTML tag list is
+    # always applied). Generation runs on a background thread + thread pool so
+    # the GUI never lags.
+    def _start_retro_md_txt_gen(kind, button, default_text):
+        import threading
+        from PySide6.QtCore import QObject, Signal, QTimer
+
+        if getattr(self, '_md_txt_retro_running', False):
+            return
+
+        files = list(getattr(self, 'selected_files', None) or [])
+        if not files:
+            try:
+                _p = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ''
+            except Exception:
+                _p = ''
+            if _p and _p.lower() != 'no file selected' and os.path.isfile(_p):
+                files = [_p]
+        if not files:
+            button.setText("⚠️ No input files")
+            QTimer.singleShot(2500, lambda: button.setText(default_text))
+            try:
+                self.append_log("⚠️ MD/TXT generation: no input files selected.")
+            except Exception:
+                pass
+            return
+
+        class _RetroGenSignals(QObject):
+            done = Signal(int, int)
+
+        sig = _RetroGenSignals()
+        self._md_txt_retro_running = True
+        button.setEnabled(False)
+        button.setText("⏳ Generating…")
+
+        def _finish(ok, fail):
+            self._md_txt_retro_running = False
+            button.setEnabled(True)
+            button.setText(f"✅ {ok} done" if not fail else f"✅ {ok} / ⚠️ {fail}")
+            QTimer.singleShot(4000, lambda: button.setText(default_text))
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK if not fail else winsound.MB_ICONEXCLAMATION)
+            except Exception:
+                pass
+
+        sig.done.connect(_finish)
+        button._retro_sig = sig  # keep a reference alive
+
+        def _worker():
+            ok = fail = 0
+            try:
+                from md_txt_sidecar_writer import generate_md_txt_for_output_dir
+                seen = set()
+                for f in files:
+                    if not f or f == '__generative_mode__':
+                        continue
+                    try:
+                        out_dir = self._resolve_translation_output_dir(f)
+                    except Exception:
+                        out_dir = None
+                    if not out_dir:
+                        continue
+                    key = os.path.abspath(out_dir)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        self.append_log(f"📝 [{kind.upper()}] {out_dir}")
+                    except Exception:
+                        pass
+                    r_ok, r_fail, _r_total = generate_md_txt_for_output_dir(
+                        out_dir,
+                        do_md=(kind == 'md'),
+                        do_txt=(kind == 'txt'),
+                        max_workers=4,
+                        log=getattr(self, 'append_log', None),
+                        should_stop=lambda: bool(getattr(self, 'stop_requested', False)),
+                    )
+                    ok += r_ok
+                    fail += r_fail
+                try:
+                    self.append_log(
+                        f"✅ [{kind.upper()}] Generation complete: {ok} file(s)"
+                        + (f", {fail} failed" if fail else "")
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    self.append_log(f"⚠️ [{kind.upper()}] Generation error: {e}")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    sig.done.emit(ok, fail)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    _retro_btn_style = (
+        "QPushButton { background-color: #17a2b8; color: white; padding: 3px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+
+    # Output MD
+    output_md_cb = self._create_styled_checkbox("Output MD")
+    try:
+        if not hasattr(self, 'output_md_var'):
+            self.output_md_var = self.config.get('output_md', False)
+        output_md_cb.setChecked(bool(self.output_md_var))
+    except Exception:
+        pass
+    def _on_output_md_toggle(checked):
+        try:
+            self.output_md_var = bool(checked)
+            self.config['output_md'] = self.output_md_var
+            os.environ['OUTPUT_MD'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_md_cb.toggled.connect(_on_output_md_toggle)
+    output_md_cb.setContentsMargins(0, 2, 0, 0)
+
+    md_gen_btn = QPushButton("Generate MD")
+    md_gen_btn.setToolTip("Generate .md files for the currently selected input file(s) from their HTML outputs.\nRe-runs the html2text extraction so the valid HTML tag list is applied.")
+    md_gen_btn.setMinimumWidth(110)
+    md_gen_btn.setStyleSheet(_retro_btn_style)
+    md_gen_btn.clicked.connect(lambda: _start_retro_md_txt_gen('md', md_gen_btn, "Generate MD"))
+
+    md_row = QWidget()
+    md_row_h = QHBoxLayout(md_row)
+    md_row_h.setContentsMargins(0, 2, 0, 0)
+    md_row_h.addWidget(output_md_cb)
+    md_row_h.addStretch()
+    md_row_h.addWidget(md_gen_btn)
+    left_v.addWidget(md_row)
+
+    output_md_desc = QLabel("Writes a MD/ subfolder with a .md (html2text/markdown) copy of each HTML output.")
+    output_md_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_md_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_md_desc)
+
+    # Output TXT
+    output_txt_cb = self._create_styled_checkbox("Output TXT")
+    try:
+        if not hasattr(self, 'output_txt_var'):
+            self.output_txt_var = self.config.get('output_txt', False)
+        output_txt_cb.setChecked(bool(self.output_txt_var))
+    except Exception:
+        pass
+    def _on_output_txt_toggle(checked):
+        try:
+            self.output_txt_var = bool(checked)
+            self.config['output_txt'] = self.output_txt_var
+            os.environ['OUTPUT_TXT'] = '1' if checked else '0'
+        except Exception:
+            pass
+    output_txt_cb.toggled.connect(_on_output_txt_toggle)
+    output_txt_cb.setContentsMargins(0, 2, 0, 0)
+
+    txt_gen_btn = QPushButton("Generate TXT")
+    txt_gen_btn.setToolTip("Generate .txt files for the currently selected input file(s) from their HTML outputs.\nRe-runs the html2text extraction so the valid HTML tag list is applied.")
+    txt_gen_btn.setMinimumWidth(110)
+    txt_gen_btn.setStyleSheet(_retro_btn_style)
+    txt_gen_btn.clicked.connect(lambda: _start_retro_md_txt_gen('txt', txt_gen_btn, "Generate TXT"))
+
+    txt_row = QWidget()
+    txt_row_h = QHBoxLayout(txt_row)
+    txt_row_h.setContentsMargins(0, 2, 0, 0)
+    txt_row_h.addWidget(output_txt_cb)
+    txt_row_h.addStretch()
+    txt_row_h.addWidget(txt_gen_btn)
+    left_v.addWidget(txt_row)
+
+    output_txt_desc = QLabel("Writes a TXT/ subfolder with a .txt (html2text) copy of each HTML output.")
+    output_txt_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    output_txt_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(output_txt_desc)
+
     # Skip Thinking for Lightweight Tasks
     skip_thinking_title = QLabel("Skip Thinking for Lightweight Tasks")
     skip_thinking_title.setStyleSheet("font-weight: bold; font-size: 11pt; margin-top: 8px;")
@@ -9270,6 +9456,38 @@ def _create_processing_options_section(self, parent):
     preserve_desc.setStyleSheet("color: gray; font-size: 8pt;")
     preserve_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(preserve_desc)
+
+    # Skip markdown -> HTML tag conversion
+    skip_md2html_cb = self._create_styled_checkbox("SKIP markdown -> html tag conversion")
+    skip_md2html_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Skip the markdown→HTML tag converter. The safety passes still run "
+        "(invalid angle-bracket escaping, html2text strip, image/ruby restore), "
+        "but markdown (#, **, lists, &gt; quotes) is left as-is instead of being "
+        "turned into &lt;h1&gt;/&lt;strong&gt;/&lt;li&gt; tags."
+        "</p></qt>"
+    )
+    try:
+        if not hasattr(self, 'skip_markdown_to_html_var'):
+            self.skip_markdown_to_html_var = self.config.get('skip_markdown_to_html', False)
+        skip_md2html_cb.setChecked(bool(self.skip_markdown_to_html_var))
+    except Exception:
+        pass
+    def _on_skip_md2html_toggle(checked):
+        try:
+            self.skip_markdown_to_html_var = bool(checked)
+            self.config['skip_markdown_to_html'] = self.skip_markdown_to_html_var
+            os.environ['SKIP_MARKDOWN_TO_HTML'] = '1' if checked else '0'
+        except Exception:
+            pass
+    skip_md2html_cb.toggled.connect(_on_skip_md2html_toggle)
+    skip_md2html_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(skip_md2html_cb)
+
+    skip_md2html_desc = QLabel("Leave markdown as-is (don't convert # / ** / lists into HTML tags)")
+    skip_md2html_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    skip_md2html_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(skip_md2html_desc)
 
     allow_ai_md_headers_cb = self._create_styled_checkbox("Allow AI-created Markdown headers")
     try:
@@ -14599,176 +14817,4 @@ def _create_debug_controls_section(self, parent_frame):
             }
         """)
         
-        debug_layout = QVBoxLayout(debug_group)
-        debug_layout.setSpacing(10)
-        debug_layout.setContentsMargins(15, 15, 15, 15)
-        
-        # Description label
-        desc_label = QLabel(
-            "Advanced debugging tools for troubleshooting environment variables and system configuration. "
-            "Only enable debug mode when investigating issues."
-        )
-        desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #888; font-size: 9pt; font-weight: normal; margin-bottom: 10px;")
-        debug_layout.addWidget(desc_label)
-        
-        # Button container
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(15)
-        
-        # Debug Mode Toggle Button
-        def _toggle_debug_mode():
-            try:
-                current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
-                new_debug_state = not current_debug_state
-                
-                # Update config
-                if not hasattr(self, 'config'):
-                    self.config = {}
-                self.config['show_debug_buttons'] = new_debug_state
-                
-                # Set environment variable for debug mode
-                os.environ['DEBUG_MODE'] = '1' if new_debug_state else '0'
-                
-                # Save config
-                self.save_config(show_message=False)
-                
-                # Update button appearance
-                if new_debug_state:
-                    debug_toggle_btn.setText("🔍 Debug Mode: ON")
-                    debug_toggle_btn.setStyleSheet(
-                        "QPushButton { "
-                        "  background-color: #dc3545; "
-                        "  color: white; "
-                        "  padding: 10px 20px; "
-                        "  font-size: 11pt; "
-                        "  font-weight: bold; "
-                        "  border-radius: 6px; "
-                        "  border: none; "
-                        "} "
-                        "QPushButton:hover { background-color: #c82333; }"
-                        "QPushButton:pressed { background-color: #bd2130; }"
-                    )
-                    self.append_log("✅ [DEBUG MODE] Debug mode ENABLED - enhanced debugging active")
-                    self.append_log("🔧 [DEBUG MODE] Debug features now available:")
-                    self.append_log("   • Enhanced environment variable debugging in save functions")
-                    self.append_log("   • Comprehensive variable verification")
-                    self.append_log("   • Detailed before/after tracking")
-                    
-                    # Show debug action button
-                    debug_action_btn.setVisible(True)
-                    
-                else:
-                    debug_toggle_btn.setText("🔒 Debug Mode: OFF")
-                    debug_toggle_btn.setStyleSheet(
-                        "QPushButton { "
-                        "  background-color: #6c757d; "
-                        "  color: white; "
-                        "  padding: 10px 20px; "
-                        "  font-size: 11pt; "
-                        "  font-weight: bold; "
-                        "  border-radius: 6px; "
-                        "  border: none; "
-                        "} "
-                        "QPushButton:hover { background-color: #5a6268; }"
-                        "QPushButton:pressed { background-color: #545b62; }"
-                    )
-                    self.append_log("🔒 [DEBUG MODE] Debug mode DISABLED - standard logging only")
-                    
-                    # Hide debug action button
-                    debug_action_btn.setVisible(False)
-                
-            except Exception as e:
-                self.append_log(f"❌ [DEBUG MODE] Failed to toggle debug mode: {e}")
-        
-        def _run_debug_check():
-            try:
-                self.append_log("🔍 [DEBUG ACTION] Running comprehensive environment variable check...")
-                # First initialize if needed
-                init_success = self.initialize_environment_variables()
-                # Then debug
-                debug_success = self.debug_environment_variables(show_all=True)
-                
-                if init_success and debug_success:
-                    self.append_log("✅ [DEBUG ACTION] Environment variables are properly configured")
-                else:
-                    self.append_log("❌ [DEBUG ACTION] Environment variable issues detected - check log for details")
-                    
-            except Exception as e:
-                self.append_log(f"❌ [DEBUG ACTION] Debug check failed: {e}")
-        
-        # Create buttons
-        current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
-        debug_toggle_btn = QPushButton("🔍 Debug Mode: ON" if current_debug_state else "🔒 Debug Mode: OFF")
-        debug_toggle_btn.clicked.connect(_toggle_debug_mode)
-        debug_toggle_btn.setMinimumHeight(45)
-        debug_toggle_btn.setMinimumWidth(180)
-        
-        if current_debug_state:
-            debug_toggle_btn.setStyleSheet(
-                "QPushButton { "
-                "  background-color: #dc3545; "
-                "  color: white; "
-                "  padding: 10px 20px; "
-                "  font-size: 11pt; "
-                "  font-weight: bold; "
-                "  border-radius: 6px; "
-                "  border: none; "
-                "} "
-                "QPushButton:hover { background-color: #c82333; }"
-                "QPushButton:pressed { background-color: #bd2130; }"
-            )
-        else:
-            debug_toggle_btn.setStyleSheet(
-                "QPushButton { "
-                "  background-color: #6c757d; "
-                "  color: white; "
-                "  padding: 10px 20px; "
-                "  font-size: 11pt; "
-                "  font-weight: bold; "
-                "  border-radius: 6px; "
-                "  border: none; "
-                "} "
-                "QPushButton:hover { background-color: #5a6268; }"
-                "QPushButton:pressed { background-color: #545b62; }"
-            )
-        
-        button_layout.addWidget(debug_toggle_btn)
-        
-        # Debug Action Button (only visible when debug mode is on)
-        debug_action_btn = QPushButton("🔍 Check Environment Variables")
-        debug_action_btn.clicked.connect(_run_debug_check)
-        debug_action_btn.setMinimumHeight(45)
-        debug_action_btn.setMinimumWidth(220)
-        debug_action_btn.setStyleSheet(
-            "QPushButton { "
-            "  background-color: #17a2b8; "
-            "  color: white; "
-            "  padding: 10px 20px; "
-            "  font-size: 11pt; "
-            "  font-weight: bold; "
-            "  border-radius: 6px; "
-            "  border: none; "
-            "} "
-            "QPushButton:hover { background-color: #138496; }"
-            "QPushButton:pressed { background-color: #117a8b; }"
-        )
-        
-        # Only show action button if debug mode is currently enabled
-        debug_action_btn.setVisible(current_debug_state)
-        button_layout.addWidget(debug_action_btn)
-        
-        # Add stretch to center buttons
-        button_layout.addStretch()
-        
-        debug_layout.addLayout(button_layout)
-        
-        # Store references for potential future use
-        self._debug_toggle_btn = debug_toggle_btn
-        self._debug_action_btn = debug_action_btn
-        
-        # Add debug group to the grid, spanning both columns at the bottom
-        grid.addWidget(debug_group, current_row, 0, 1, 2)
-        
-    except Exception as e:
-        print(f"Error creating debug controls section: {e}")
+        debug_layout 

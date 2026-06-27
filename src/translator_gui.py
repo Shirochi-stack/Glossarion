@@ -2312,6 +2312,8 @@ Text to analyze:
         self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
         self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
         self.output_sdlxliff_var = self.config.get('output_sdlxliff', True)
+        self.output_md_var = self.config.get('output_md', False)
+        self.output_txt_var = self.config.get('output_txt', False)
         _raw_ns = self.config.get('number_spacing_token_fix', '0')
         if isinstance(_raw_ns, bool):
             _raw_ns = '1' if _raw_ns else '0'
@@ -2323,6 +2325,8 @@ Text to analyze:
         os.environ['FIX_STRAY_P_GT_EPUB'] = '1' if self.fix_stray_p_gt_epub_var else '0'
         os.environ['FIX_STRAY_P_GT_BS'] = '1' if self.fix_stray_p_gt_bs_var else '0'
         os.environ['OUTPUT_SDLXLIFF'] = '1' if self.output_sdlxliff_var else '0'
+        os.environ['OUTPUT_MD'] = '1' if self.output_md_var else '0'
+        os.environ['OUTPUT_TXT'] = '1' if self.output_txt_var else '0'
         os.environ['NUMBER_SPACING_TOKEN_FIX'] = self.number_spacing_token_fix_var
         
         # Graceful stop - wait for in-flight API calls to complete instead of aborting them
@@ -2382,7 +2386,12 @@ Text to analyze:
         # Single line break toggle
         if not hasattr(self, 'enhanced_single_line_break_var'):
             self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
-        
+
+        # Skip markdown -> HTML tag conversion toggle (default OFF)
+        if not hasattr(self, 'skip_markdown_to_html_var'):
+            self.skip_markdown_to_html_var = self.config.get('skip_markdown_to_html', False)
+        os.environ['SKIP_MARKDOWN_TO_HTML'] = '1' if self.skip_markdown_to_html_var else '0'
+
         # Markdown2 converter toggle (default OFF to avoid legacy converter)
         if not hasattr(self, 'use_markdown2_converter_var'):
             self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
@@ -18375,9 +18384,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', True) else "0",
             "ENHANCED_SINGLE_LINE_BREAK": "1" if getattr(self, 'enhanced_single_line_break_var', False) else "0",
+            "SKIP_MARKDOWN_TO_HTML": "1" if getattr(self, 'skip_markdown_to_html_var', False) else "0",
             "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
             'OUTPUT_SDLXLIFF': '1' if getattr(self, 'output_sdlxliff_var', True) else '0',
+            'OUTPUT_MD': '1' if getattr(self, 'output_md_var', False) else '0',
+            'OUTPUT_TXT': '1' if getattr(self, 'output_txt_var', False) else '0',
             'FIX_STRAY_P_GT_EPUB': '1' if getattr(self, 'fix_stray_p_gt_epub_var', self.config.get('fix_stray_p_gt_epub', False)) else '0',
             'FIX_STRAY_P_GT_BS': '1' if getattr(self, 'fix_stray_p_gt_bs_var', self.config.get('fix_stray_p_gt_bs', False)) else '0',
 
@@ -27657,11 +27669,14 @@ Important rules:
                 ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
                 ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
                 ('enhanced_single_line_break', ['enhanced_single_line_break_var'], False, bool),
+                ('skip_markdown_to_html', ['skip_markdown_to_html_var'], False, bool),
                 ('html2text_escape_snob', ['html2text_escape_snob_var'], False, bool),
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
                 ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
                 ('output_sdlxliff', ['output_sdlxliff_var'], True, bool),
+                ('output_md', ['output_md_var'], False, bool),
+                ('output_txt', ['output_txt_var'], False, bool),
                 ('fix_stray_p_gt_epub', ['fix_stray_p_gt_epub_var'], False, bool),
                 ('fix_stray_p_gt_bs', ['fix_stray_p_gt_bs_var'], False, bool),
 
