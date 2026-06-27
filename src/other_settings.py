@@ -14817,4 +14817,176 @@ def _create_debug_controls_section(self, parent_frame):
             }
         """)
         
-        debug_layout 
+        debug_layout = QVBoxLayout(debug_group)
+        debug_layout.setSpacing(10)
+        debug_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Description label
+        desc_label = QLabel(
+            "Advanced debugging tools for troubleshooting environment variables and system configuration. "
+            "Only enable debug mode when investigating issues."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #888; font-size: 9pt; font-weight: normal; margin-bottom: 10px;")
+        debug_layout.addWidget(desc_label)
+        
+        # Button container
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(15)
+        
+        # Debug Mode Toggle Button
+        def _toggle_debug_mode():
+            try:
+                current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
+                new_debug_state = not current_debug_state
+                
+                # Update config
+                if not hasattr(self, 'config'):
+                    self.config = {}
+                self.config['show_debug_buttons'] = new_debug_state
+                
+                # Set environment variable for debug mode
+                os.environ['DEBUG_MODE'] = '1' if new_debug_state else '0'
+                
+                # Save config
+                self.save_config(show_message=False)
+                
+                # Update button appearance
+                if new_debug_state:
+                    debug_toggle_btn.setText("🔍 Debug Mode: ON")
+                    debug_toggle_btn.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #dc3545; "
+                        "  color: white; "
+                        "  padding: 10px 20px; "
+                        "  font-size: 11pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 6px; "
+                        "  border: none; "
+                        "} "
+                        "QPushButton:hover { background-color: #c82333; }"
+                        "QPushButton:pressed { background-color: #bd2130; }"
+                    )
+                    self.append_log("✅ [DEBUG MODE] Debug mode ENABLED - enhanced debugging active")
+                    self.append_log("🔧 [DEBUG MODE] Debug features now available:")
+                    self.append_log("   • Enhanced environment variable debugging in save functions")
+                    self.append_log("   • Comprehensive variable verification")
+                    self.append_log("   • Detailed before/after tracking")
+                    
+                    # Show debug action button
+                    debug_action_btn.setVisible(True)
+                    
+                else:
+                    debug_toggle_btn.setText("🔒 Debug Mode: OFF")
+                    debug_toggle_btn.setStyleSheet(
+                        "QPushButton { "
+                        "  background-color: #6c757d; "
+                        "  color: white; "
+                        "  padding: 10px 20px; "
+                        "  font-size: 11pt; "
+                        "  font-weight: bold; "
+                        "  border-radius: 6px; "
+                        "  border: none; "
+                        "} "
+                        "QPushButton:hover { background-color: #5a6268; }"
+                        "QPushButton:pressed { background-color: #545b62; }"
+                    )
+                    self.append_log("🔒 [DEBUG MODE] Debug mode DISABLED - standard logging only")
+                    
+                    # Hide debug action button
+                    debug_action_btn.setVisible(False)
+                
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG MODE] Failed to toggle debug mode: {e}")
+        
+        def _run_debug_check():
+            try:
+                self.append_log("🔍 [DEBUG ACTION] Running comprehensive environment variable check...")
+                # First initialize if needed
+                init_success = self.initialize_environment_variables()
+                # Then debug
+                debug_success = self.debug_environment_variables(show_all=True)
+                
+                if init_success and debug_success:
+                    self.append_log("✅ [DEBUG ACTION] Environment variables are properly configured")
+                else:
+                    self.append_log("❌ [DEBUG ACTION] Environment variable issues detected - check log for details")
+                    
+            except Exception as e:
+                self.append_log(f"❌ [DEBUG ACTION] Debug check failed: {e}")
+        
+        # Create buttons
+        current_debug_state = getattr(self, 'config', {}).get('show_debug_buttons', False)
+        debug_toggle_btn = QPushButton("🔍 Debug Mode: ON" if current_debug_state else "🔒 Debug Mode: OFF")
+        debug_toggle_btn.clicked.connect(_toggle_debug_mode)
+        debug_toggle_btn.setMinimumHeight(45)
+        debug_toggle_btn.setMinimumWidth(180)
+        
+        if current_debug_state:
+            debug_toggle_btn.setStyleSheet(
+                "QPushButton { "
+                "  background-color: #dc3545; "
+                "  color: white; "
+                "  padding: 10px 20px; "
+                "  font-size: 11pt; "
+                "  font-weight: bold; "
+                "  border-radius: 6px; "
+                "  border: none; "
+                "} "
+                "QPushButton:hover { background-color: #c82333; }"
+                "QPushButton:pressed { background-color: #bd2130; }"
+            )
+        else:
+            debug_toggle_btn.setStyleSheet(
+                "QPushButton { "
+                "  background-color: #6c757d; "
+                "  color: white; "
+                "  padding: 10px 20px; "
+                "  font-size: 11pt; "
+                "  font-weight: bold; "
+                "  border-radius: 6px; "
+                "  border: none; "
+                "} "
+                "QPushButton:hover { background-color: #5a6268; }"
+                "QPushButton:pressed { background-color: #545b62; }"
+            )
+        
+        button_layout.addWidget(debug_toggle_btn)
+        
+        # Debug Action Button (only visible when debug mode is on)
+        debug_action_btn = QPushButton("🔍 Check Environment Variables")
+        debug_action_btn.clicked.connect(_run_debug_check)
+        debug_action_btn.setMinimumHeight(45)
+        debug_action_btn.setMinimumWidth(220)
+        debug_action_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #17a2b8; "
+            "  color: white; "
+            "  padding: 10px 20px; "
+            "  font-size: 11pt; "
+            "  font-weight: bold; "
+            "  border-radius: 6px; "
+            "  border: none; "
+            "} "
+            "QPushButton:hover { background-color: #138496; }"
+            "QPushButton:pressed { background-color: #117a8b; }"
+        )
+        
+        # Only show action button if debug mode is currently enabled
+        debug_action_btn.setVisible(current_debug_state)
+        button_layout.addWidget(debug_action_btn)
+        
+        # Add stretch to center buttons
+        button_layout.addStretch()
+        
+        debug_layout.addLayout(button_layout)
+        
+        # Store references for potential future use
+        self._debug_toggle_btn = debug_toggle_btn
+        self._debug_action_btn = debug_action_btn
+        
+        # Add debug group to the grid, spanning both columns at the bottom
+        grid.addWidget(debug_group, current_row, 0, 1, 2)
+        
+    except Exception as e:
+        print(f"Error creating debug controls section: {e}")
