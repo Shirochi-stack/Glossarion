@@ -6248,6 +6248,55 @@ Do not stop after the glossary."""
             except Exception:
                 pass
 
+        def _populate_editor_tree_from_data_batched(visible_source_indices=None, final_stats_text=None, batch_size=24):
+            column_fields, specs = _editor_data_row_specs()
+            visible_set = None if visible_source_indices is None else set(visible_source_indices)
+            rows = [
+                (source_ref, entry)
+                for source_idx, source_ref, entry in specs
+                if visible_set is None or source_idx in visible_set
+            ]
+            token = object()
+            self._editor_tree_populate_token = token
+            self.glossary_tree.clear()
+            _configure_editor_tree_columns(column_fields)
+            total_rows = len(rows)
+            if total_rows == 0:
+                if final_stats_text:
+                    self.stats_label.setText(final_stats_text)
+                try:
+                    self.glossary_tree.viewport().update()
+                except Exception:
+                    pass
+                return
+
+            def add_batch(start_idx=0):
+                if getattr(self, '_editor_tree_populate_token', None) is not token:
+                    return
+                end_idx = min(total_rows, start_idx + max(1, int(batch_size)))
+                items = []
+                for row_idx in range(start_idx, end_idx):
+                    source_ref, entry = rows[row_idx]
+                    item = _make_editor_tree_item(row_idx + 1, source_ref, entry, column_fields)
+                    for col_idx, field in enumerate(column_fields, start=1):
+                        if field in ['translated_name', 'translated']:
+                            update_row_highlight(item, field, item.text(col_idx))
+                    items.append(item)
+                if items:
+                    self.glossary_tree.addTopLevelItems(items)
+                if end_idx < total_rows:
+                    self.stats_label.setText(f"Applying filtered entries: {end_idx}/{total_rows}")
+                    QTimer.singleShot(0, lambda: add_batch(end_idx))
+                    return
+                if final_stats_text:
+                    self.stats_label.setText(final_stats_text)
+                try:
+                    self.glossary_tree.viewport().update()
+                except Exception:
+                    pass
+
+            add_batch(0)
+
         def _loaded_glossary_stats_text(entries):
             stats = [f"Total entries: {len(entries)}"]
             if self.current_glossary_format in ['list', 'token_csv'] and entries and isinstance(entries[0], dict) and 'type' in entries[0]:
@@ -9022,8 +9071,8 @@ Do not stop after the glossary."""
                         last_progress_emit = now
             return texts, errors
 
-        def _set_all_editor_rows_visible():
-            _populate_editor_tree_from_data()
+        def _set_all_editor_rows_visible(final_stats_text=None):
+            _populate_editor_tree_from_data_batched(final_stats_text=final_stats_text)
 
         def _apply_hide_unused_entries_progress(payload):
             if payload.get('token') is not getattr(self, '_hide_unused_filter_token', None):
@@ -9055,8 +9104,9 @@ Do not stop after the glossary."""
             self._hide_unused_filter_token = None
             total = int(payload.get('total') or 0)
             if not payload.get('ok'):
-                _set_all_editor_rows_visible()
-                self.stats_label.setText(f"Hide unused failed: {payload.get('error', 'Unknown error')}")
+                _set_all_editor_rows_visible(
+                    final_stats_text=f"Hide unused failed: {payload.get('error', 'Unknown error')}"
+                )
                 return
 
             for line in payload.get('errors', []) or []:
@@ -9067,14 +9117,17 @@ Do not stop after the glossary."""
 
             output_dir = payload.get('output_dir') or ''
             if payload.get('no_files'):
-                _set_all_editor_rows_visible()
-                self.stats_label.setText(f"No translated output files found in: {output_dir}")
+                _set_all_editor_rows_visible(
+                    final_stats_text=f"No translated output files found in: {output_dir}"
+                )
                 return
 
             used_rows = set(payload.get('used_rows', []))
-            _populate_editor_tree_from_data(used_rows)
-            used_count = self.glossary_tree.topLevelItemCount()
-            self.stats_label.setText(f"Showing {used_count}/{total} used entries in translated output")
+            used_count = len(used_rows)
+            _populate_editor_tree_from_data_batched(
+                used_rows,
+                final_stats_text=f"Showing {used_count}/{total} used entries in translated output",
+            )
 
         self._hide_unused_filter_bridge.progress.connect(_apply_hide_unused_entries_progress)
         self._hide_unused_filter_bridge.finished.connect(_apply_hide_unused_entries_result)
@@ -9085,19 +9138,25 @@ Do not stop after the glossary."""
             total = len(all_specs)
             self._hide_unused_filter_token = None
             if checkbox is None or not checkbox.isChecked():
-                _set_all_editor_rows_visible()
                 base_stats = getattr(self, '_glossary_editor_base_stats_text', None)
                 if base_stats:
-                    self.stats_label.setText(base_stats)
+                    final_stats = base_stats
                 elif total:
-                    self.stats_label.setText(f"Total entries: {total}")
+                    final_stats = f"Total entries: {total}"
+                else:
+                    final_stats = None
+                if self.glossary_tree.topLevelItemCount() != total:
+                    _populate_editor_tree_from_data_batched(final_stats_text=final_stats)
+                elif final_stats:
+                    self.stats_label.setText(final_stats)
                 return
             if total <= 0:
                 return
             output_dir = _editor_translated_output_dir()
             if not output_dir:
-                _set_all_editor_rows_visible()
-                self.stats_label.setText("Hide unused entries needs a translated output folder")
+                _set_all_editor_rows_visible(
+                    final_stats_text="Hide unused entries needs a translated output folder"
+                )
                 return
             token = object()
             self._hide_unused_filter_token = token

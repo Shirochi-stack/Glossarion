@@ -30,6 +30,7 @@ import subprocess
 import platform
 import time
 import threading
+import queue
 import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
@@ -13381,18 +13382,32 @@ class RetranslationMixin:
                         )
                     )
 
-                summary_bridge = _GlossaryProgressAsyncBridge(
-                    on_finished=_on_summary_finished,
-                    on_failed=_on_summary_failed,
-                    on_progress=_on_summary_progress,
-                    parent=summary_dialog,
-                )
+                summary_queue = queue.Queue()
+                summary_timer = QTimer(summary_dialog)
+                summary_timer.setInterval(50)
+
+                def _drain_summary_queue():
+                    handled = False
+                    while True:
+                        try:
+                            kind, payload = summary_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        handled = True
+                        if kind == "progress":
+                            _on_summary_progress(payload)
+                        elif kind == "finished":
+                            summary_timer.stop()
+                            _on_summary_finished(payload if isinstance(payload, dict) else {})
+                        elif kind == "failed":
+                            summary_timer.stop()
+                            _on_summary_failed(str(payload))
+                    return handled
+
+                summary_timer.timeout.connect(_drain_summary_queue)
 
                 def _emit_summary_progress(payload):
-                    try:
-                        summary_bridge.progress.emit(payload)
-                    except RuntimeError:
-                        pass
+                    summary_queue.put(("progress", payload))
 
                 def _summary_worker():
                     try:
@@ -13425,19 +13440,16 @@ class RetranslationMixin:
                             progress_callback=_progress_callback,
                             skip_unmatched_entries=_gp_skip_unmatched_entries(),
                         )
-                        try:
-                            summary_bridge.finished.emit({"summary_path": summary_path, "content": content})
-                        except RuntimeError:
-                            pass
+                        summary_queue.put(("finished", {"summary_path": summary_path, "content": content}))
                     except Exception as exc:
-                        try:
-                            summary_bridge.failed.emit(str(exc))
-                        except RuntimeError:
-                            pass
+                        summary_queue.put(("failed", str(exc)))
 
                 summary_dialog.show()
+                summary_timer.start()
+                summary_thread = threading.Thread(target=_summary_worker, name="GlossaryCompletedSummary", daemon=True)
+                summary_thread.start()
                 QApplication.processEvents(QEventLoop.AllEvents, 50)
-                threading.Thread(target=_summary_worker, name="GlossaryCompletedSummary", daemon=True).start()
+                _drain_summary_queue()
                 summary_dialog.exec()
             
             # Right-click context menu to delete entries from progress
