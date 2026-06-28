@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QComboBox, QMenu, QInputDialog)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
+from glossary_usage import build_usage_index, read_epub_spine_chapters
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -676,6 +677,7 @@ class GlossaryManagerMixin:
             pass
         self.current_glossary_data = None
         self.current_glossary_format = None
+        self._glossary_editor_base_stats_text = "No glossary loaded"
         try:
             if hasattr(self, 'current_glossary_sections'):
                 self.current_glossary_sections = []
@@ -5909,6 +5911,11 @@ Do not stop after the glossary."""
         self.update_html_on_save_checkbox.setToolTip(
             "When enabled, saving will also replace updated translated names in direct files in the book output folder."
         )
+        self.hide_unused_entries_checkbox = self._create_styled_checkbox("Hide unused entries")
+        self.hide_unused_entries_checkbox.setChecked(False)
+        self.hide_unused_entries_checkbox.setToolTip(
+            "Hide glossary rows whose raw/source term does not appear in the associated EPUB."
+        )
         def _persist_update_html(state):
             self.config['update_html_on_save'] = bool(state)
             try:
@@ -5917,6 +5924,8 @@ Do not stop after the glossary."""
                 pass
         self.update_html_on_save_checkbox.stateChanged.connect(_persist_update_html)
         html_toggle_layout.addWidget(self.update_html_on_save_checkbox)
+        html_toggle_layout.addSpacing(12)
+        html_toggle_layout.addWidget(self.hide_unused_entries_checkbox)
         html_toggle_layout.addStretch()
         # We'll place this above the save buttons inside the toolbar later
 
@@ -6243,6 +6252,7 @@ Do not stop after the glossary."""
                 self.glossary_tree.setUpdatesEnabled(True)
 
             self.stats_label.setText(payload.get('stats_text', f"Total entries: {len(entries)}"))
+            self._glossary_editor_base_stats_text = self.stats_label.text()
             log_msg = f"Loaded {len(entries)} entries from glossary"
             if getattr(self, '_last_loaded_glossary_log', '') != log_msg:
                 self.append_log(log_msg)
@@ -6265,6 +6275,8 @@ Do not stop after the glossary."""
             if hasattr(self, '_undo_btn'):
                 self._undo_btn.setEnabled(False)
                 self._redo_btn.setEnabled(False)
+            if hasattr(self, '_apply_hide_unused_entries_filter'):
+                self._apply_hide_unused_entries_filter()
 
         self._editor_load_bridge.loaded.connect(apply_loaded_glossary_result)
 
@@ -6769,6 +6781,7 @@ Do not stop after the glossary."""
                
                self._editor_load_token = None
                self.stats_label.setText(" | ".join(stats))
+               self._glossary_editor_base_stats_text = self.stats_label.text()
                _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
                if getattr(self, '_last_loaded_glossary_log', '') != _log_msg:
                    self.append_log(_log_msg)
@@ -6801,6 +6814,8 @@ Do not stop after the glossary."""
                if hasattr(self, '_undo_btn'):
                    self._undo_btn.setEnabled(len(self._undo_stack) > 0)
                    self._redo_btn.setEnabled(len(self._redo_stack) > 0)
+               if hasattr(self, '_apply_hide_unused_entries_filter'):
+                   self._apply_hide_unused_entries_filter()
                
            except Exception as e:
                import traceback
@@ -8372,6 +8387,7 @@ Do not stop after the glossary."""
                 use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full', 'single_pass'))
 
                 found_glossaries = []  # list of (display_name, full_path)
+                found_glossary_epubs = {}
 
                 for epub_path in epub_paths:
                     if not epub_path or not os.path.exists(epub_path):
@@ -8452,9 +8468,11 @@ Do not stop after the glossary."""
                             display = self._display_glossary_path(cand)
                             if not any(fp == cand for _, fp in found_glossaries):
                                 found_glossaries.append((display, cand))
+                                found_glossary_epubs[cand] = epub_path
                             break
 
                 # Populate combo
+                self._editor_glossary_epub_map = dict(found_glossary_epubs)
                 self.editor_file_combo.blockSignals(True)
                 self.editor_file_combo.clear()
                 for display, fpath in found_glossaries:
@@ -8780,6 +8798,116 @@ Do not stop after the glossary."""
                 pass
         self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
         self._show_tree_context_menu_slot = show_tree_context_menu
+
+        def _editor_associated_epub_path():
+            glossary_path = self.editor_file_entry.text()
+            try:
+                mapped = getattr(self, '_editor_glossary_epub_map', {}) or {}
+                if glossary_path in mapped and os.path.exists(mapped[glossary_path]):
+                    return mapped[glossary_path]
+            except Exception:
+                pass
+            try:
+                files = list(getattr(self, 'selected_files', []) or [])
+                epub_paths = [p for p in files if str(p).lower().endswith('.epub') and os.path.exists(p)]
+                if len(epub_paths) == 1:
+                    return epub_paths[0]
+            except Exception:
+                pass
+            for getter_name in ('get_current_epub_path',):
+                try:
+                    getter = getattr(self, getter_name, None)
+                    if callable(getter):
+                        path = getter()
+                        if path and str(path).lower().endswith('.epub') and os.path.exists(path):
+                            return path
+                except Exception:
+                    pass
+            for attr_name in ('file_path',):
+                try:
+                    path = getattr(self, attr_name, None)
+                    if path and str(path).lower().endswith('.epub') and os.path.exists(path):
+                        return path
+                except Exception:
+                    pass
+            try:
+                path = self.config.get('last_epub_path') if hasattr(self, 'config') else None
+                if path and str(path).lower().endswith('.epub') and os.path.exists(path):
+                    return path
+            except Exception:
+                pass
+            return None
+
+        def _editor_tree_usage_entries():
+            entries = []
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            for row in range(self.glossary_tree.topLevelItemCount()):
+                item = self.glossary_tree.topLevelItem(row)
+                if item is None:
+                    continue
+                entry = {'source_index': row}
+                for field_idx, field in enumerate(fields, start=1):
+                    entry[field] = item.text(field_idx)
+                if not entry.get('raw_name'):
+                    for fallback in ('original_name', 'original'):
+                        if entry.get(fallback):
+                            entry['raw_name'] = entry.get(fallback)
+                            break
+                if not entry.get('translated_name'):
+                    for fallback in ('name', 'translated'):
+                        if entry.get(fallback):
+                            entry['translated_name'] = entry.get(fallback)
+                            break
+                entries.append(entry)
+            return entries
+
+        def _set_all_editor_rows_visible():
+            for row in range(self.glossary_tree.topLevelItemCount()):
+                item = self.glossary_tree.topLevelItem(row)
+                if item is not None:
+                    item.setHidden(False)
+
+        def _apply_hide_unused_entries_filter():
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            total = self.glossary_tree.topLevelItemCount()
+            if checkbox is None or not checkbox.isChecked():
+                _set_all_editor_rows_visible()
+                base_stats = getattr(self, '_glossary_editor_base_stats_text', None)
+                if base_stats:
+                    self.stats_label.setText(base_stats)
+                elif total:
+                    self.stats_label.setText(f"Total entries: {total}")
+                return
+            if total <= 0:
+                return
+            epub_path = _editor_associated_epub_path()
+            if not epub_path:
+                _set_all_editor_rows_visible()
+                self.stats_label.setText("Hide unused entries needs an associated EPUB")
+                return
+            try:
+                self.stats_label.setText("Scanning source chapters for glossary usage...")
+                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                chapters = read_epub_spine_chapters(epub_path, translate_special=translate_special, include_text=True)
+                entries = _editor_tree_usage_entries()
+                usage, _chapter_matches = build_usage_index(entries, chapters)
+                used_count = 0
+                for row in range(total):
+                    item = self.glossary_tree.topLevelItem(row)
+                    if item is None:
+                        continue
+                    is_used = bool(usage.get(row))
+                    item.setHidden(not is_used)
+                    if is_used:
+                        used_count += 1
+                self.stats_label.setText(f"Showing {used_count}/{total} used entries")
+            except Exception as exc:
+                _set_all_editor_rows_visible()
+                self.stats_label.setText(f"Hide unused failed: {exc}")
+
+        self._apply_hide_unused_entries_filter = _apply_hide_unused_entries_filter
+        self.hide_unused_entries_checkbox.toggled.connect(lambda _checked: _apply_hide_unused_entries_filter())
        
         def find_in_tree():
             import re

@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
                                 QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
-                                QLineEdit, QProgressBar, QGraphicsOpacityEffect)
+                                QLineEdit, QProgressBar, QGraphicsOpacityEffect,
+                                QApplication)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
@@ -32,6 +33,12 @@ import threading
 import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
+from glossary_usage import (
+    build_chapter_footnote,
+    parse_glossary_file,
+    read_epub_spine_chapters,
+    write_completed_summary,
+)
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
@@ -12676,6 +12683,108 @@ class RetranslationMixin:
                             pass
 
                 threading.Thread(target=_worker, name="glossary-progress-mark-completed", daemon=True).start()
+
+            def _gp_usage_inputs(show_errors=True):
+                glossary_path = _find_glossary_file()
+                if not glossary_path or not os.path.isfile(glossary_path):
+                    if show_errors:
+                        QMessageBox.information(
+                            gp_listbox,
+                            "No Glossary Found",
+                            "No glossary file could be found for this progress file.",
+                        )
+                    return None
+                try:
+                    entries = parse_glossary_file(glossary_path)
+                except Exception as exc:
+                    if show_errors:
+                        QMessageBox.critical(gp_listbox, "Glossary Footnote", f"Could not parse glossary:\n{exc}")
+                    return None
+                if not entries:
+                    if show_errors:
+                        QMessageBox.information(gp_listbox, "Glossary Footnote", "The glossary has no parseable entries.")
+                    return None
+                try:
+                    translate_special = bool(panel_state.get('translate_special'))
+                    chapters = read_epub_spine_chapters(fp, translate_special=translate_special, include_text=True)
+                except Exception as exc:
+                    if show_errors:
+                        QMessageBox.critical(gp_listbox, "Glossary Footnote", f"Could not read EPUB source chapters:\n{exc}")
+                    return None
+                if not chapters:
+                    if show_errors:
+                        QMessageBox.information(gp_listbox, "Glossary Footnote", "No source chapters could be read from this EPUB.")
+                    return None
+                progress_path = _find_gp_for_file(fp) or gp_path
+                progress_data = _gp_load_progress_dict(progress_path) if progress_path and os.path.isfile(progress_path) else dict(gp_data or {})
+                return entries, chapters, progress_data
+
+            def _show_gp_footnote_dialog(text, title="Glossary Footnote"):
+                footnote_dialog = QDialog(gp_listbox)
+                footnote_dialog.setWindowTitle(title)
+                footnote_dialog.resize(760, 560)
+                layout = QVBoxLayout(footnote_dialog)
+                editor = QPlainTextEdit()
+                editor.setReadOnly(True)
+                editor.setPlainText(text)
+                try:
+                    editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                except AttributeError:
+                    editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+                layout.addWidget(editor)
+                buttons = QHBoxLayout()
+                copy_btn = QPushButton("Copy")
+                close_btn = QPushButton("Close")
+                copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(editor.toPlainText()))
+                close_btn.clicked.connect(footnote_dialog.accept)
+                buttons.addStretch()
+                buttons.addWidget(copy_btn)
+                buttons.addWidget(close_btn)
+                layout.addLayout(buttons)
+                footnote_dialog.exec()
+
+            def _gp_show_footnotes(targets):
+                loaded = _gp_usage_inputs(show_errors=True)
+                if not loaded:
+                    return
+                entries, chapters, progress_data = loaded
+                chapter_by_index = {
+                    int(chapter.get("chapter_index", idx)): chapter
+                    for idx, chapter in enumerate(chapters)
+                }
+                parts = []
+                missing = []
+                for _item, (_kind, value) in targets:
+                    try:
+                        ci = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    chapter = chapter_by_index.get(ci)
+                    if not chapter:
+                        missing.append(ci)
+                        continue
+                    parts.append(build_chapter_footnote(entries, chapter, progress_data).rstrip())
+                if not parts:
+                    detail = f" Missing chapter indices: {missing}" if missing else ""
+                    QMessageBox.information(gp_listbox, "Glossary Footnote", f"No selected chapters could be mapped to source text.{detail}")
+                    return
+                _show_gp_footnote_dialog("\n\n".join(parts) + "\n", "Glossary Footnote")
+
+            def _gp_generate_completed_summary():
+                loaded = _gp_usage_inputs(show_errors=True)
+                if not loaded:
+                    return
+                entries, chapters, progress_data = loaded
+                book_base = os.path.splitext(os.path.basename(fp))[0]
+                try:
+                    summary_path, content = write_completed_summary(entries, chapters, progress_data, output_dir, book_base)
+                except Exception as exc:
+                    QMessageBox.critical(gp_listbox, "Glossary Footnote Summary", f"Could not write completed summary:\n{exc}")
+                    return
+                _show_gp_footnote_dialog(
+                    f"Saved to:\n{summary_path}\n\n{content}",
+                    "Completed Glossary Footnote Summary",
+                )
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -12688,6 +12797,7 @@ class RetranslationMixin:
                 deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed', 'not_refined')
                 removable_targets = []
                 mark_completed_targets = []
+                footnote_targets = []
                 for it in selected:
                     status = it.data(Qt.UserRole)
                     refinement_key = it.data(Qt.UserRole + 3)
@@ -12699,11 +12809,13 @@ class RetranslationMixin:
                         target = ('chapter', chapter_index)
                     if not target:
                         continue
+                    if target[0] == 'chapter':
+                        footnote_targets.append((it, target))
                     if status in deletable_statuses:
                         removable_targets.append((it, target))
                     if status != 'completed':
                         mark_completed_targets.append((it, target))
-                if not removable_targets and not mark_completed_targets:
+                if not removable_targets and not mark_completed_targets and not footnote_targets:
                     return
                 
                 from PySide6.QtWidgets import QMenu
@@ -12718,9 +12830,20 @@ class RetranslationMixin:
                 if mark_completed_targets:
                     mark_action = menu.addAction("✅Mark as Completed")
 
+                footnote_action = None
+                summary_action = None
+                if footnote_targets:
+                    if mark_action is not None:
+                        menu.addSeparator()
+                    label = "Show Glossary Footnote" if len(footnote_targets) == 1 else f"Show Glossary Footnotes ({len(footnote_targets)})"
+                    footnote_action = menu.addAction(label)
+                    summary_action = menu.addAction("Generate completed summary")
+                    summary_action.setCheckable(True)
+                    summary_action.setChecked(False)
+
                 remove_action = None
                 if removable_targets:
-                    if mark_action is not None:
+                    if mark_action is not None or footnote_action is not None:
                         menu.addSeparator()
                     n = len(removable_targets)
                     if n == 1:
@@ -12733,6 +12856,12 @@ class RetranslationMixin:
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
                 if mark_action is not None and chosen == mark_action:
                     _gp_mark_targets_completed(mark_completed_targets)
+                    return
+                if footnote_action is not None and chosen == footnote_action:
+                    _gp_show_footnotes(footnote_targets)
+                    return
+                if summary_action is not None and chosen == summary_action:
+                    _gp_generate_completed_summary()
                     return
                 if remove_action is None or chosen != remove_action:
                     return

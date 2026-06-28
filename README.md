@@ -352,7 +352,7 @@ Built using:
 - Designed with assistance from ChatGPT & Claude
 - Community feedback and contributions
 - OMORIO - contributed the SDLXLIFF source-to-output reviewer workflow
-- TK - contributed the Gemma stray p&gt; token fix regex
+- TK - contributed the Gemma stray p&gt; and number spacing token fixes
 - Open source libraries and tools
 - comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
 

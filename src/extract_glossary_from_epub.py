@@ -31,6 +31,7 @@ from glossary_refinement import (
     refine_glossary_entries,
     refinement_enabled as _glossary_refinement_enabled,
 )
+from glossary_usage import compact_extracted_entries
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
@@ -7348,6 +7349,7 @@ def main(log_callback=None, stop_callback=None):
                     unit_indices = [u_idx for u_idx, _ in unit]
                     model_updates = {}
                     key_updates = {}
+                    extracted_entry_updates = {}
 
                     def _collect_request_metadata(result, target_indices=None):
                         if not isinstance(result, dict):
@@ -7383,6 +7385,7 @@ def main(log_callback=None, stop_callback=None):
                             model_update_indices=sorted(set(model_updates) | set(key_updates)),
                             model_updates=model_updates,
                             key_updates=key_updates,
+                            extracted_entries_updates=extracted_entry_updates,
                         )
 
                     try:
@@ -7438,6 +7441,7 @@ def main(log_callback=None, stop_callback=None):
                                                     break
                                         tracker_buckets.setdefault(matched_idx, []).append(entry)
                                     for tracker_idx, tracker_entries in tracker_buckets.items():
+                                        extracted_entry_updates[int(tracker_idx)] = list(tracker_entries)
                                         update_gender_tracker(
                                             tracker_entries,
                                             args.output,
@@ -7473,6 +7477,7 @@ def main(log_callback=None, stop_callback=None):
                                         ch_finish = result.get('finish_reason', 'stop')
                                         _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                                     else:
+                                        extracted_entry_updates.setdefault(int(idx), list(data or []))
                                         completed.append(idx)
                                         
                                         # Mark truncated chapters as failed so they get retried
@@ -7547,6 +7552,7 @@ def main(log_callback=None, stop_callback=None):
                                 ch_finish = result.get('finish_reason', 'stop')
                                 _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                             else:
+                                extracted_entry_updates[int(idx)] = list(data or [])
                                 completed.append(idx)
                                 
                                 # Mark truncated chapters as failed so they get retried
@@ -8009,6 +8015,7 @@ def main(log_callback=None, stop_callback=None):
             current_progress_indices = [g_idx for g_idx, _ in merge_groups[idx]] if idx in merge_groups else [idx]
             current_model_updates = {}
             current_key_updates = {}
+            current_extracted_entry_updates = {}
 
             def _remember_current_request_metadata():
                 model_name = _current_glossary_model_name({}, prefer_thread=True)
@@ -8552,6 +8559,7 @@ def main(log_callback=None, stop_callback=None):
                                     break
                         tracker_buckets.setdefault(matched_idx, []).append(entry)
                     for tracker_idx, tracker_entries in tracker_buckets.items():
+                        current_extracted_entry_updates[int(tracker_idx)] = list(tracker_entries)
                         update_gender_tracker(
                             tracker_entries,
                             args.output,
@@ -8562,6 +8570,7 @@ def main(log_callback=None, stop_callback=None):
                         )
                     glossary.extend(data)
                     glossary[:] = skip_duplicate_entries(glossary)
+                    current_extracted_entry_updates.setdefault(int(idx), list(data or []))
                     completed.append(idx)
                     
                     # Mark truncated chapters as failed so they get retried
@@ -8617,6 +8626,7 @@ def main(log_callback=None, stop_callback=None):
                     model_update_indices=sorted(set(current_model_updates) | set(current_key_updates)),
                     model_updates=current_model_updates,
                     key_updates=current_key_updates,
+                    extracted_entries_updates=current_extracted_entry_updates,
                 )
                 save_glossary_json(glossary, args.output)
                 save_glossary_csv(glossary, args.output)
@@ -8773,7 +8783,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None, model_updates=None, key_updates=None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None, model_updates=None, key_updates=None, extracted_entries_updates=None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
@@ -8839,6 +8849,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
 
         existing_chapters_by_idx = {}
         existing_refinement = {}
+        existing_extracted_entries = {}
         preserved_in_progress = []
         externally_failed = []
         manual_removed_indices = []
@@ -8854,6 +8865,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     manual_removed_indices = _unique_int_list(existing_progress.get("manual_removed_indices", []))
                 if isinstance(existing_progress, dict) and isinstance(existing_progress.get("refinement"), dict):
                     existing_refinement = existing_progress.get("refinement", {})
+                if isinstance(existing_progress, dict) and isinstance(existing_progress.get("chapter_extracted_entries"), dict):
+                    existing_extracted_entries = {
+                        str(k): v
+                        for k, v in existing_progress.get("chapter_extracted_entries", {}).items()
+                        if isinstance(v, list)
+                    }
                 existing_chapters = existing_progress.get("chapters", {}) if isinstance(existing_progress, dict) else {}
                 if isinstance(existing_chapters, dict):
                     for existing_key, existing_info in existing_chapters.items():
@@ -9151,7 +9168,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
             "chapter_count": total_chapters,
             "glossary_output_file": output_file,
-            "progress_schema_version": "2.0",
+            "progress_schema_version": "2.1",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             "in_progress": in_progress_clean,
@@ -9167,6 +9184,16 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             progress_data["key_pool"] = progress_key_pool
         if existing_refinement:
             progress_data["refinement"] = existing_refinement
+        entry_index = dict(existing_extracted_entries)
+        if isinstance(extracted_entries_updates, dict):
+            for idx, entries in extracted_entries_updates.items():
+                try:
+                    key = str(int(idx))
+                except (TypeError, ValueError):
+                    continue
+                entry_index[key] = compact_extracted_entries(entries)
+        if entry_index:
+            progress_data["chapter_extracted_entries"] = entry_index
         if manual_removed_indices:
             progress_data["manual_removed_indices"] = manual_removed_indices
             progress_data["manual_removed_session_id"] = _GLOSSARY_PROGRESS_SESSION_ID
