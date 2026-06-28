@@ -12775,7 +12775,7 @@ class RetranslationMixin:
                         desc_parts = parts[1:]
                     blocks = ['<div class="entry-meta">']
                     if tags:
-                        tag_text = " Â· ".join(html_lib.escape(part) for part in tags)
+                        tag_text = " | ".join(html_lib.escape(part) for part in tags)
                         blocks.append(f'<div class="entry-tags">{tag_text}</div>')
                     if desc_parts:
                         desc_text = html_lib.escape("; ".join(desc_parts))
@@ -12917,7 +12917,7 @@ class RetranslationMixin:
                         desc_parts = parts[1:]
                     blocks = ['<div class="entry-meta">']
                     if tags:
-                        tag_text = " · ".join(html_lib.escape(part) for part in tags)
+                        tag_text = " | ".join(html_lib.escape(part) for part in tags)
                         blocks.append(f'<div class="entry-tags">{tag_text}</div>')
                     if desc_parts:
                         desc_text = html_lib.escape("; ".join(desc_parts))
