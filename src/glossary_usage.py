@@ -8,6 +8,7 @@ import os
 import posixpath
 import re
 import time
+import unicodedata
 import zipfile
 from io import StringIO
 from urllib.parse import unquote
@@ -432,6 +433,98 @@ def build_usage_index(entries, chapters):
     return usage, chapter_matches
 
 
+def _fold_output_match_text(value):
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    value = "".join(ch if ch.isalnum() else " " for ch in value)
+    return _WHITESPACE_RE.sub(" ", value).strip()
+
+
+def _output_contains_term(output_text, term):
+    term = _WHITESPACE_RE.sub(" ", _norm_text(term)).casefold()
+    if not term:
+        return False
+    text = _WHITESPACE_RE.sub(" ", str(output_text or "")).casefold()
+    if not text:
+        return False
+    if all(ord(ch) < 128 for ch in term) and (term[0].isalnum() or term[-1].isalnum()):
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", text):
+            return True
+    elif term in text:
+        return True
+    folded_term = _fold_output_match_text(term)
+    folded_text = _fold_output_match_text(text)
+    if not folded_term or not folded_text:
+        return False
+    if all(ord(ch) < 128 for ch in folded_term):
+        return re.search(r"(?<![A-Za-z0-9_])" + re.escape(folded_term) + r"(?![A-Za-z0-9_])", folded_text) is not None
+    return folded_term in folded_text
+
+
+def entry_matches_translated_output(entry, output_text):
+    candidates = [
+        entry.get("translated_name"),
+        entry.get("translated"),
+        entry.get("name"),
+    ]
+    if not any(_norm_text(value) for value in candidates):
+        candidates.extend(
+            [
+                entry.get("raw_name"),
+                entry.get("original_name"),
+                entry.get("original"),
+            ]
+        )
+    return any(_output_contains_term(output_text, value) for value in candidates)
+
+
+def build_translated_usage_index(entries, output_texts):
+    usage = {int(entry["source_index"]): set() for entry in entries}
+    for text_idx, output_text in enumerate(output_texts or []):
+        for entry in entries:
+            if entry_matches_translated_output(entry, output_text):
+                usage.setdefault(int(entry["source_index"]), set()).add(text_idx)
+    return usage
+
+
+def read_translated_output_text(path):
+    if not path or not os.path.isfile(path):
+        return ""
+    with open(path, "rb") as f:
+        raw_bytes = f.read()
+    try:
+        content = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        content = raw_bytes.decode("utf-8", errors="replace")
+    if os.path.splitext(path)[1].lower() in {".html", ".htm", ".xhtml", ".xml"}:
+        content = html_to_text(content)
+    return content
+
+
+def chapter_output_text(output_dir, chapter, progress_data=None):
+    meta = _chapter_metadata(progress_data if isinstance(progress_data, dict) else {}, chapter)
+    filename = meta.get("filename") or chapter.get("filename") or ""
+    candidates = []
+    if filename:
+        if os.path.isabs(filename):
+            candidates.append(filename)
+        if output_dir:
+            candidates.append(os.path.join(output_dir, filename))
+            candidates.append(os.path.join(output_dir, os.path.basename(filename)))
+            stem, ext = os.path.splitext(os.path.basename(filename))
+            if stem and not ext:
+                for suffix in (".xhtml", ".html", ".htm", ".txt", ".md"):
+                    candidates.append(os.path.join(output_dir, stem + suffix))
+    seen = set()
+    for candidate in candidates:
+        norm = os.path.normcase(os.path.abspath(candidate))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(candidate):
+            return read_translated_output_text(candidate), candidate
+    return None, candidates[0] if candidates else ""
+
+
 def extracted_entry_match_keys(progress_data, chapter_index):
     """Return loose keys the AI extracted for a chapter from progress/tracker data."""
     keys = {"identities": set(), "raw_names": set(), "translated_names": set()}
@@ -514,16 +607,37 @@ def _format_entry_line(entry, skipped=False, confirmed=False):
 
 def _chapter_metadata(progress_data, chapter):
     ci = int(chapter.get("chapter_index", 0))
-    info = {}
+    info = chapter.get("progress_entry") if isinstance(chapter, dict) else {}
+    if not isinstance(info, dict):
+        info = {}
     chapters = progress_data.get("chapters", {}) if isinstance(progress_data, dict) else {}
-    if isinstance(chapters, dict):
+    if not info and isinstance(chapters, dict):
         info = chapters.get(str(ci)) or chapters.get(ci) or {}
     if not isinstance(info, dict):
         info = {}
     spine_number = chapter.get("spine_number") or ci + 1
-    chapter_num = info.get("chapter_num", info.get("actual_num", chapter.get("chapter_num", ci + 1)))
-    filename = info.get("output_file") or info.get("chapter_file") or chapter.get("filename") or f"chapter {ci + 1}"
-    model = info.get("model_name") or info.get("model") or progress_data.get("model_name", "") if isinstance(progress_data, dict) else ""
+    chapter_num = (
+        chapter.get("progress_chapter_num")
+        or chapter.get("display_chapter_num")
+        or info.get("chapter_num")
+        or info.get("actual_num")
+        or chapter.get("chapter_num")
+        or ci + 1
+    )
+    filename = (
+        chapter.get("output_file")
+        or info.get("output_file")
+        or info.get("chapter_file")
+        or chapter.get("filename")
+        or f"chapter {ci + 1}"
+    )
+    model = (
+        chapter.get("model_name")
+        or chapter.get("model")
+        or info.get("model_name")
+        or info.get("model")
+        or (progress_data.get("model_name", "") if isinstance(progress_data, dict) else "")
+    )
     return {
         "chapter_index": ci,
         "spine_number": spine_number,
@@ -534,11 +648,28 @@ def _chapter_metadata(progress_data, chapter):
     }
 
 
-def build_chapter_footnote(entries, chapter, progress_data=None, include_unavailable_note=True):
+def build_chapter_footnote(
+    entries,
+    chapter,
+    progress_data=None,
+    include_unavailable_note=True,
+    output_dir=None,
+    output_text=None,
+    output_available=None,
+):
     progress_data = progress_data if isinstance(progress_data, dict) else {}
     matches = match_entries_for_text(entries, chapter.get("text", ""))
     extracted_keys = extracted_entry_match_keys(progress_data, chapter.get("chapter_index", 0))
     can_detect_skips = _has_extracted_keys(extracted_keys)
+    output_path = ""
+    if output_available is None:
+        if output_text is not None:
+            output_available = True
+        elif output_dir:
+            output_text, output_path = chapter_output_text(output_dir, chapter, progress_data)
+            output_available = output_text is not None
+        else:
+            output_available = False
     meta = _chapter_metadata(progress_data, chapter)
     lines = [
         f"## Chapter {meta['chapter_num']} Glossary Footnote",
@@ -553,15 +684,28 @@ def build_chapter_footnote(entries, chapter, progress_data=None, include_unavail
     if not matches:
         lines.append("- No glossary entries matched this source chapter.")
     else:
+        entry_lines = []
         for entry in matches:
-            confirmed = can_detect_skips and entry_was_extracted(entry, extracted_keys)
-            skipped = can_detect_skips and not confirmed
-            lines.append(_format_entry_line(entry, skipped=skipped, confirmed=confirmed))
-    if include_unavailable_note and not can_detect_skips:
+            if output_available:
+                confirmed = entry_matches_translated_output(entry, output_text or "")
+                skipped = not confirmed
+            else:
+                confirmed = can_detect_skips and entry_was_extracted(entry, extracted_keys)
+                skipped = False
+            if confirmed:
+                status_order = 0
+            elif skipped:
+                status_order = 2
+            else:
+                status_order = 1
+            entry_lines.append((status_order, len(entry_lines), _format_entry_line(entry, skipped=skipped, confirmed=confirmed)))
+        lines.extend(line for _status, _idx, line in sorted(entry_lines))
+    if include_unavailable_note and not output_available:
+        detail = f" ({output_path})" if output_path else ""
         lines.extend(
             [
                 "",
-                f"- {WARNING_PREFIX} Skipped-entry detection is unavailable for this chapter because this progress file has no per-chapter extracted-entry index.",
+                f"- {WARNING_PREFIX} Output-file usage check is unavailable{detail}; entries are not marked skipped from extraction data alone.",
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
@@ -601,7 +745,7 @@ def completed_chapter_indices(progress_data):
     return sorted(result - merged - failed)
 
 
-def build_completed_summary(entries, chapters, progress_data=None, title=None):
+def build_completed_summary(entries, chapters, progress_data=None, title=None, output_dir=None):
     progress_data = progress_data if isinstance(progress_data, dict) else {}
     chapter_by_index = {int(ch.get("chapter_index", idx)): ch for idx, ch in enumerate(chapters)}
     indices = completed_chapter_indices(progress_data)
@@ -619,7 +763,15 @@ def build_completed_summary(entries, chapters, progress_data=None, title=None):
         chapter = chapter_by_index.get(ci)
         if not chapter:
             continue
-        lines.append(build_chapter_footnote(entries, chapter, progress_data, include_unavailable_note=False).rstrip())
+        lines.append(
+            build_chapter_footnote(
+                entries,
+                chapter,
+                progress_data,
+                include_unavailable_note=False,
+                output_dir=output_dir,
+            ).rstrip()
+        )
         lines.append("")
     if not any(line.startswith("## ") for line in lines):
         lines.append("No completed chapters could be mapped back to source EPUB chapters.")
@@ -631,7 +783,13 @@ def write_completed_summary(entries, chapters, progress_data, output_dir, book_b
     folder = os.path.join(output_dir or os.getcwd(), "glossary_footnotes")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{safe_base}_completed_glossary_footnotes.md")
-    content = build_completed_summary(entries, chapters, progress_data, title=progress_data.get("book_title") if isinstance(progress_data, dict) else None)
+    content = build_completed_summary(
+        entries,
+        chapters,
+        progress_data,
+        title=progress_data.get("book_title") if isinstance(progress_data, dict) else None,
+        output_dir=output_dir,
+    )
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     return path, content

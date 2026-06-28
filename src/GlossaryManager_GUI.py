@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QComboBox, QMenu, QInputDialog)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
-from glossary_usage import build_usage_index, read_epub_spine_chapters
+from glossary_usage import build_translated_usage_index, html_to_text
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -5914,7 +5914,7 @@ Do not stop after the glossary."""
         self.hide_unused_entries_checkbox = self._create_styled_checkbox("Hide unused entries")
         self.hide_unused_entries_checkbox.setChecked(False)
         self.hide_unused_entries_checkbox.setToolTip(
-            "Hide glossary rows whose raw/source term does not appear in the associated EPUB."
+            "Hide glossary rows whose translated term does not appear in the translated output files."
         )
         def _persist_update_html(state):
             self.config['update_html_on_save'] = bool(state)
@@ -8861,6 +8861,114 @@ Do not stop after the glossary."""
                 entries.append(entry)
             return entries
 
+        def _editor_output_dir_from_epub(epub_path):
+            if not epub_path:
+                return None
+            file_base = os.path.splitext(os.path.basename(epub_path))[0]
+            candidates = []
+            override_dir = None
+            try:
+                for value in (
+                    os.environ.get('OUTPUT_DIRECTORY'),
+                    os.environ.get('OUTPUT_DIR'),
+                    self.config.get('output_directory') if hasattr(self, 'config') else None,
+                ):
+                    value = str(value or '').strip().strip('"')
+                    if value:
+                        override_dir = value
+                        break
+            except Exception:
+                override_dir = None
+            if override_dir:
+                candidates.append(os.path.join(os.path.abspath(override_dir), file_base))
+            candidates.append(os.path.join(os.path.dirname(os.path.abspath(epub_path)), file_base))
+            candidates.append(os.path.abspath(file_base))
+            for candidate in candidates:
+                if candidate and os.path.isdir(candidate):
+                    return candidate
+            return None
+
+        def _editor_output_dir_from_glossary(glossary_path):
+            if not glossary_path or not os.path.exists(glossary_path):
+                return None
+            glossary_dir = os.path.dirname(os.path.abspath(glossary_path))
+            glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]
+            parent_of_glossary_dir = os.path.dirname(glossary_dir)
+            is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
+            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
+
+            if is_shared_glossary_folder:
+                book_name = None
+                for suffix in ('_glossary', '_Glossary'):
+                    if glossary_fname.endswith(suffix):
+                        book_name = glossary_fname[:-len(suffix)]
+                        break
+                if not book_name:
+                    book_name = glossary_fname
+                if book_name:
+                    candidate = os.path.join(parent_of_glossary_dir, book_name)
+                    if os.path.isdir(candidate):
+                        return candidate
+                return parent_of_glossary_dir if os.path.isdir(parent_of_glossary_dir) else None
+
+            if is_book_glossary_subfolder:
+                book_name = os.path.basename(glossary_dir)
+                grandparent = os.path.dirname(parent_of_glossary_dir)
+                candidate = os.path.join(grandparent, book_name)
+                return candidate if os.path.isdir(candidate) else grandparent
+
+            return glossary_dir if os.path.isdir(glossary_dir) else None
+
+        def _editor_translated_output_dir():
+            epub_dir = _editor_output_dir_from_epub(_editor_associated_epub_path())
+            if epub_dir:
+                return epub_dir
+            return _editor_output_dir_from_glossary(self.editor_file_entry.text())
+
+        def _editor_translated_output_files(output_dir):
+            if not output_dir or not os.path.isdir(output_dir):
+                return []
+            readable_exts = {'.html', '.htm', '.xhtml', '.xml', '.txt', '.md'}
+            excluded_names = {
+                'metadata.json',
+                'metadata.opf',
+                'metadata.xml',
+                'content.opf',
+                'toc.ncx',
+                'glossary.csv',
+                'glossary.json',
+                'translation_progress.json',
+            }
+            paths = []
+            for name in sorted(os.listdir(output_dir)):
+                path = os.path.join(output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                lower_name = name.lower()
+                if lower_name in excluded_names:
+                    continue
+                if os.path.splitext(lower_name)[1] not in readable_exts:
+                    continue
+                paths.append(path)
+            return paths
+
+        def _read_translated_output_texts(paths):
+            texts = []
+            for path in paths:
+                try:
+                    with open(path, 'rb') as f:
+                        raw_bytes = f.read()
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('utf-8', errors='replace')
+                    if os.path.splitext(path)[1].lower() in {'.html', '.htm', '.xhtml', '.xml'}:
+                        content = html_to_text(content)
+                    texts.append(content)
+                except Exception as exc:
+                    self.append_log(f"Failed to read translated output file for hide-unused: {path}: {exc}")
+            return texts
+
         def _set_all_editor_rows_visible():
             for row in range(self.glossary_tree.topLevelItemCount()):
                 item = self.glossary_tree.topLevelItem(row)
@@ -8880,18 +8988,22 @@ Do not stop after the glossary."""
                 return
             if total <= 0:
                 return
-            epub_path = _editor_associated_epub_path()
-            if not epub_path:
+            output_dir = _editor_translated_output_dir()
+            if not output_dir:
                 _set_all_editor_rows_visible()
-                self.stats_label.setText("Hide unused entries needs an associated EPUB")
+                self.stats_label.setText("Hide unused entries needs a translated output folder")
                 return
             try:
-                self.stats_label.setText("Scanning source chapters for glossary usage...")
+                self.stats_label.setText("Scanning translated output for glossary usage...")
                 QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-                translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                chapters = read_epub_spine_chapters(epub_path, translate_special=translate_special, include_text=True)
+                output_files = _editor_translated_output_files(output_dir)
+                if not output_files:
+                    _set_all_editor_rows_visible()
+                    self.stats_label.setText("No translated output files found for hide unused entries")
+                    return
+                output_texts = _read_translated_output_texts(output_files)
                 entries = _editor_tree_usage_entries()
-                usage, _chapter_matches = build_usage_index(entries, chapters)
+                usage = build_translated_usage_index(entries, output_texts)
                 used_count = 0
                 for row in range(total):
                     item = self.glossary_tree.topLevelItem(row)
@@ -8901,7 +9013,7 @@ Do not stop after the glossary."""
                     item.setHidden(not is_used)
                     if is_used:
                         used_count += 1
-                self.stats_label.setText(f"Showing {used_count}/{total} used entries")
+                self.stats_label.setText(f"Showing {used_count}/{total} used entries in translated output")
             except Exception as exc:
                 _set_all_editor_rows_visible()
                 self.stats_label.setText(f"Hide unused failed: {exc}")

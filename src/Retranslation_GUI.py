@@ -38,6 +38,7 @@ from glossary_usage import (
     WARNING_PREFIX,
     build_chapter_footnote,
     parse_glossary_file,
+    read_translated_output_text,
     read_epub_spine_chapters,
     write_completed_summary,
 )
@@ -12876,6 +12877,51 @@ class RetranslationMixin:
                     int(chapter.get("chapter_index", idx)): chapter
                     for idx, chapter in enumerate(chapters)
                 }
+                chapter_by_filename_key = {}
+                for idx, chapter in enumerate(chapters):
+                    for filename in (
+                        chapter.get("filename"),
+                        chapter.get("member_path"),
+                    ):
+                        for key in _gp_filename_keys(filename):
+                            chapter_by_filename_key.setdefault(key, chapter)
+
+                def _gp_source_chapter_for_row(ci):
+                    fname = (panel_state.get('chapter_map') or {}).get(ci, "")
+                    for key in _gp_filename_keys(fname):
+                        if key in chapter_by_filename_key:
+                            return chapter_by_filename_key[key]
+                    return chapter_by_index.get(ci)
+
+                def _gp_output_text_for_row(ci, progress_entry_key, progress_entry, fname):
+                    progress_entry = progress_entry if isinstance(progress_entry, dict) else {}
+                    output_file = progress_entry.get('output_file') or fname
+                    display_info = {
+                        'output_file': output_file,
+                        'original_filename': progress_entry.get('original_filename') or fname,
+                        'original_basename': progress_entry.get('original_basename') or fname,
+                        'num': _gp_display_chapter_num(ci, fname),
+                        'info': progress_entry,
+                        'progress_key': progress_entry_key,
+                    }
+                    resolved_output_file = None
+                    resolved_output_path = None
+                    try:
+                        resolved_output_file, resolved_output_path = self._resolve_existing_output_path(
+                            output_dir,
+                            output_file,
+                            display_info=display_info,
+                            prog=prog,
+                        )
+                    except Exception:
+                        resolved_output_file, resolved_output_path = None, None
+                    if not resolved_output_path:
+                        return None, False, resolved_output_file or output_file
+                    try:
+                        return read_translated_output_text(resolved_output_path), True, resolved_output_file or output_file
+                    except Exception:
+                        return None, False, resolved_output_file or output_file
+
                 parts = []
                 missing = []
                 for _item, (_kind, value) in targets:
@@ -12883,11 +12929,37 @@ class RetranslationMixin:
                         ci = int(value)
                     except (TypeError, ValueError):
                         continue
-                    chapter = chapter_by_index.get(ci)
+                    chapter = _gp_source_chapter_for_row(ci)
                     if not chapter:
                         missing.append(ci)
                         continue
-                    parts.append(build_chapter_footnote(entries, chapter, progress_data).rstrip())
+                    fname = (panel_state.get('chapter_map') or {}).get(ci, chapter.get("filename", ""))
+                    progress_entry_key, progress_entry = _gp_chapter_entry_map(progress_data).get(ci, (None, {}))
+                    output_text, output_available, resolved_output_file = _gp_output_text_for_row(
+                        ci,
+                        progress_entry_key,
+                        progress_entry,
+                        fname,
+                    )
+                    chapter_for_footnote = dict(chapter)
+                    chapter_for_footnote.update(
+                        {
+                            "chapter_index": ci,
+                            "progress_entry": progress_entry if isinstance(progress_entry, dict) else {},
+                            "progress_chapter_num": _gp_display_chapter_num(ci, fname),
+                            "spine_number": (panel_state.get('spine_index_map') or {}).get(ci, chapter.get("spine_number", ci + 1)),
+                            "output_file": resolved_output_file or (progress_entry.get('output_file') if isinstance(progress_entry, dict) else "") or fname,
+                        }
+                    )
+                    parts.append(
+                        build_chapter_footnote(
+                            entries,
+                            chapter_for_footnote,
+                            progress_data,
+                            output_text=output_text,
+                            output_available=output_available,
+                        ).rstrip()
+                    )
                 if not parts:
                     detail = f" Missing chapter indices: {missing}" if missing else ""
                     QMessageBox.information(gp_listbox, "Glossary Footnote", f"No selected chapters could be mapped to source text.{detail}")
