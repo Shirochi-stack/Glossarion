@@ -17154,9 +17154,11 @@ class UnifiedClient:
         """
         client_type = getattr(self, 'client_type', 'openai')
         model_snapshot = self._get_active_request_model()
-        provider_from_model = self._provider_from_model_name(model_snapshot)
-        if provider_from_model:
-            return provider_from_model
+
+        # Per-key and global OpenAI-compatible endpoints own the model namespace.
+        # Check them before model-prefix routing, otherwise a model like
+        # "mistral-nemo" can resolve to the native Mistral handler even after
+        # client_type was intentionally switched to openai.
         try:
             tls = self._get_thread_local_client()
             endpoint = getattr(tls, 'azure_endpoint', None)
@@ -17174,6 +17176,13 @@ class UnifiedClient:
             if client_type in ('openai', 'azure'):
                 return client_type
 
+        provider_from_model = self._provider_from_model_name(model_snapshot)
+        if self._global_custom_endpoint_should_own_provider(model_snapshot, provider_from_model):
+            return 'openai'
+
+        if provider_from_model:
+            return provider_from_model
+
         # _original_client_type is only valid while the active client is an
         # OpenAI-compatible transport. Vision/glossary key overrides can swap
         # the same UnifiedClient instance from Gemini/OpenAI mode to Vertex AI;
@@ -17182,6 +17191,22 @@ class UnifiedClient:
         if client_type == 'openai' and getattr(self, '_original_client_type', None):
             return self._original_client_type
         return client_type
+
+    def _global_custom_endpoint_should_own_provider(self, model_snapshot: str, provider_from_model: Optional[str]) -> bool:
+        """Return True when the global OpenAI-compatible endpoint overrides native routing."""
+        try:
+            if getattr(self, 'client_type', None) != 'openai':
+                return False
+            if provider_from_model in ('custom_openai', 'openrouter', 'opencode', 'vertex_model_garden'):
+                return False
+            if provider_from_model == 'gemini' and not self._should_override_gemma_to_custom_endpoint(model_snapshot):
+                return False
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+            if not custom_base_url or custom_base_url == 'https://api.openai.com/v1':
+                return False
+            return os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        except Exception:
+            return False
 
     def _extract_chapter_label(self, messages) -> str:
         """Extract a concise chapter/chunk label from messages for logging."""
