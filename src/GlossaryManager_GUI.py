@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 from glossary_usage import (
+    build_prepared_output_index,
+    entry_matches_output_index,
     entry_matches_prepared_translated_output,
     html_to_text,
     prepare_translated_output_text,
@@ -9194,7 +9196,7 @@ Do not stop after the glossary."""
                             ),
                         )
                         emit_progress({'stage': 'starting', 'total': total, 'total_files': len(output_texts)})
-                        prepared_outputs = [prepare_translated_output_text(text) for text in output_texts]
+                        output_index = build_prepared_output_index(output_texts)
                         used_rows = []
 
                         def _source_idx_for_entry(entry, fallback_idx):
@@ -9204,43 +9206,28 @@ Do not stop after the glossary."""
                             except (TypeError, ValueError):
                                 return fallback_idx
 
-                        def _match_entry_chunk(chunk):
-                            chunk_used = []
-                            for fallback_idx, entry in chunk:
-                                source_idx = _source_idx_for_entry(entry, fallback_idx)
-                                if entry_matches_prepared_translated_output(entry, prepared_outputs):
-                                    chunk_used.append(source_idx)
-                            return chunk_used, len(chunk)
-
-                        if entries and prepared_outputs:
-                            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-                            worker_count = min(max(1, total), max(2, min(8, os.cpu_count() or 4)))
-                            chunk_size = max(8, min(64, (total + worker_count - 1) // worker_count))
-                            indexed_entries = list(enumerate(entries))
-                            chunks = [
-                                indexed_entries[start:start + chunk_size]
-                                for start in range(0, len(indexed_entries), chunk_size)
-                            ]
+                        if entries and output_index['outputs']:
+                            # Token-set matching is ~microseconds per entry, so a plain
+                            # loop in this worker thread keeps the UI responsive without
+                            # the overhead (and GIL ping-pong) of a thread pool.
                             checked = 0
                             last_emit = 0.0
-                            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="GlossaryHideUnused") as executor:
-                                futures = [executor.submit(_match_entry_chunk, chunk) for chunk in chunks]
-                                for future in as_completed(futures):
-                                    chunk_used, chunk_checked = future.result()
-                                    used_rows.extend(chunk_used)
-                                    checked += chunk_checked
-                                    now = time.monotonic()
-                                    if checked == total or now - last_emit >= 0.5:
-                                        emit_progress(
-                                            {
-                                                'stage': 'matching',
-                                                'checked': checked,
-                                                'total': total,
-                                                'used': len(used_rows),
-                                            }
-                                        )
-                                        last_emit = now
+                            for fallback_idx, entry in enumerate(entries):
+                                source_idx = _source_idx_for_entry(entry, fallback_idx)
+                                if entry_matches_output_index(entry, output_index):
+                                    used_rows.append(source_idx)
+                                checked += 1
+                                now = time.monotonic()
+                                if checked == total or now - last_emit >= 0.5:
+                                    emit_progress(
+                                        {
+                                            'stage': 'matching',
+                                            'checked': checked,
+                                            'total': total,
+                                            'used': len(used_rows),
+                                        }
+                                    )
+                                    last_emit = now
                         else:
                             emit_progress(
                                 {

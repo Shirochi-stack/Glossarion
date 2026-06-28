@@ -34,6 +34,13 @@ GLOSSARY_SEP = "\x1F"
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
+# Maximal runs of ASCII "word" characters, matching the boundary class used by
+# the output-matching regexes: (?<![A-Za-z0-9_]) ... (?![A-Za-z0-9_])
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+# Translation table for folding ASCII text: non-alphanumeric -> space. Produces
+# byte-for-byte the same result as the char-by-char generator for ASCII input,
+# but runs ~3x faster via str.translate (used on whole output files).
+_ASCII_FOLD_TABLE = {i: (chr(i) if chr(i).isalnum() else " ") for i in range(128)}
 
 
 def _norm_text(value):
@@ -435,7 +442,13 @@ def build_usage_index(entries, chapters):
 
 def _fold_output_match_text(value):
     value = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    value = "".join(ch if ch.isalnum() else " " for ch in value)
+    if value.isascii():
+        # Fast path for ASCII (the common case for translated English output):
+        # str.translate is far faster than a Python-level char generator and
+        # yields an identical result.
+        value = value.translate(_ASCII_FOLD_TABLE)
+    else:
+        value = "".join(ch if ch.isalnum() else " " for ch in value)
     return _WHITESPACE_RE.sub(" ", value).strip()
 
 
@@ -463,9 +476,16 @@ def _output_contains_term(output_text, term):
 def prepare_translated_output_text(output_text):
     """Precompute expensive normalized output-text forms for repeated entry matching."""
     text = _WHITESPACE_RE.sub(" ", str(output_text or "")).casefold()
+    folded = _fold_output_match_text(text)
     return {
         "text": text,
-        "folded": _fold_output_match_text(text),
+        "folded": folded,
+        # Sets of maximal [A-Za-z0-9_]+ runs. Membership in these sets is exactly
+        # equivalent to a (?<![A-Za-z0-9_])term(?![A-Za-z0-9_]) regex match for any
+        # term that is itself a single such run, letting the common case skip the
+        # full-text regex scan entirely.
+        "tokens": frozenset(_TOKEN_RE.findall(text)),
+        "folded_tokens": frozenset(_TOKEN_RE.findall(folded)),
     }
 
 
@@ -508,6 +528,97 @@ def entry_matches_prepared_translated_output(entry, prepared_outputs):
         _output_contains_term_prepared(prepared_output, value)
         for prepared_output in prepared_outputs or []
         for value in candidates
+    )
+
+
+def _entry_match_candidates(entry):
+    """Candidate strings to look for, mirroring entry_matches_prepared_translated_output."""
+    candidates = [
+        entry.get("translated_name"),
+        entry.get("translated"),
+        entry.get("name"),
+    ]
+    if not any(_norm_text(value) for value in candidates):
+        candidates.extend(
+            [
+                entry.get("raw_name"),
+                entry.get("original_name"),
+                entry.get("original"),
+            ]
+        )
+    return candidates
+
+
+def build_prepared_output_index(output_texts):
+    """Build a combined index over several translated output files for fast usage matching.
+
+    Returns a dict with the per-file prepared payloads (for the rare fallback paths)
+    plus unioned token sets across all files. Matching a glossary term against this
+    index is O(1) for the overwhelmingly common case of single-token names, instead
+    of an O(text) regex scan per file. Results are identical to repeatedly calling
+    entry_matches_prepared_translated_output over the per-file prepared payloads.
+    """
+    outputs = [prepare_translated_output_text(text) for text in (output_texts or [])]
+    tokens = set()
+    folded_tokens = set()
+    for prepared in outputs:
+        tokens |= prepared["tokens"]
+        folded_tokens |= prepared["folded_tokens"]
+    return {
+        "outputs": outputs,
+        "tokens": tokens,
+        "folded_tokens": folded_tokens,
+    }
+
+
+def _boundary_match(term, text):
+    return re.search(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", text) is not None
+
+
+def _output_index_contains_term(index, term):
+    """Exact equivalent of "_output_contains_term_prepared matches in any file",
+    accelerated with the index's unioned token sets."""
+    term = _WHITESPACE_RE.sub(" ", _norm_text(term)).casefold()
+    if not term:
+        return False
+    outputs = index["outputs"]
+    # ---- Path 1: raw (whitespace-collapsed, casefolded) text ----
+    if term.isascii() and (term[0].isalnum() or term[-1].isalnum()):
+        if _TOKEN_RE.fullmatch(term):
+            # A lone token: membership is exactly the boundary-regex result.
+            if term in index["tokens"]:
+                return True
+        else:
+            # Multi-part ascii term (spaces/hyphens/punctuation). Every word run in
+            # the term must appear somewhere as a token for the boundary regex to
+            # have any chance; this prefilter avoids scanning when it cannot match.
+            parts = _TOKEN_RE.findall(term)
+            if parts and all(part in index["tokens"] for part in parts):
+                if any(_boundary_match(term, out["text"]) for out in outputs):
+                    return True
+    else:
+        # Non-ascii (or no alnum at either end) term: plain substring search.
+        if any(term in out["text"] for out in outputs):
+            return True
+    # ---- Path 2: folded text (alphanumerics only, single-spaced) ----
+    folded_term = _fold_output_match_text(term)
+    if not folded_term:
+        return False
+    if folded_term.isascii():
+        if _TOKEN_RE.fullmatch(folded_term):
+            return folded_term in index["folded_tokens"]
+        parts = _TOKEN_RE.findall(folded_term)
+        if parts and all(part in index["folded_tokens"] for part in parts):
+            return any(_boundary_match(folded_term, out["folded"]) for out in outputs)
+        return False
+    return any(folded_term in out["folded"] for out in outputs)
+
+
+def entry_matches_output_index(entry, index):
+    """Fast equivalent of entry_matches_prepared_translated_output using a combined index."""
+    return any(
+        _output_index_contains_term(index, value)
+        for value in _entry_match_candidates(entry)
     )
 
 
