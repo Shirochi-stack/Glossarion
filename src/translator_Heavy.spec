@@ -300,6 +300,7 @@ app_files = [
     
     # Glossary extractors
     ('extract_glossary_from_epub.py', '.'),
+    ('glossary_usage.py', '.'),
     ('glossary_refinement.py', '.'),
     ('extract_glossary_from_txt.py', '.'),
     ('glossary_process_worker.py', '.'),  # Glossary subprocess worker
@@ -431,6 +432,7 @@ app_modules = [
     'TransateKRtoEN',
     'refinement_prompts',
     'extract_glossary_from_epub',
+    'glossary_usage',
     'glossary_refinement',
     'extract_glossary_from_txt',
     'glossary_process_worker',  # Glossary subprocess worker

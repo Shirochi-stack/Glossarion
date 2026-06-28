@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - fallback for isolated imports
         return False
 
 
+CHECK_PREFIX = "\u2705"
 WARNING_PREFIX = "\u26a0\ufe0f"
 GLOSSARY_SEP = "\x1F"
 
@@ -431,11 +432,11 @@ def build_usage_index(entries, chapters):
     return usage, chapter_matches
 
 
-def extracted_entry_identities(progress_data, chapter_index):
-    """Return identities the AI extracted for a chapter from progress/tracker data."""
-    identities = set()
+def extracted_entry_match_keys(progress_data, chapter_index):
+    """Return loose keys the AI extracted for a chapter from progress/tracker data."""
+    keys = {"identities": set(), "raw_names": set(), "translated_names": set()}
     if not isinstance(progress_data, dict):
-        return identities
+        return keys
     extracted = progress_data.get("chapter_extracted_entries") or progress_data.get("chapter_entry_index") or {}
     values = None
     if isinstance(extracted, dict):
@@ -445,16 +446,51 @@ def extracted_entry_identities(progress_data, chapter_index):
     if isinstance(values, list):
         for value in values:
             if isinstance(value, dict):
-                identities.add(_entry_identity(value))
+                normalized = _normalize_entry(value, 0)
+                keys["identities"].add(normalized.get("identity"))
+                raw = normalized.get("raw_name", "").casefold()
+                translated = normalized.get("translated_name", "").casefold()
+                if raw:
+                    keys["raw_names"].add(raw)
+                if translated:
+                    keys["translated_names"].add(translated)
             elif isinstance(value, str):
-                identities.add((value.strip().casefold(), "", "", ""))
-    return identities
+                raw = value.strip().casefold()
+                if raw:
+                    keys["raw_names"].add(raw)
+    keys["identities"].discard(None)
+    return keys
 
 
-def _format_entry_line(entry, skipped=False):
-    prefix = (WARNING_PREFIX + " ") if skipped else "- "
+def extracted_entry_identities(progress_data, chapter_index):
+    """Return legacy exact identities for callers that still need them."""
+    return extracted_entry_match_keys(progress_data, chapter_index).get("identities", set())
+
+
+def _has_extracted_keys(extracted_keys):
+    return any(extracted_keys.get(name) for name in ("identities", "raw_names", "translated_names"))
+
+
+def entry_was_extracted(entry, extracted_keys):
+    if not isinstance(entry, dict) or not isinstance(extracted_keys, dict):
+        return False
+    identity = entry.get("identity")
+    raw = _norm_text(entry.get("raw_name")).casefold()
+    translated = _norm_text(entry.get("translated_name")).casefold()
+    return (
+        bool(identity and identity in extracted_keys.get("identities", set()))
+        or bool(raw and raw in extracted_keys.get("raw_names", set()))
+        or bool(translated and translated in extracted_keys.get("translated_names", set()))
+    )
+
+
+def _format_entry_line(entry, skipped=False, confirmed=False):
     if skipped:
-        prefix = WARNING_PREFIX + " "
+        prefix = f"- {WARNING_PREFIX} "
+    elif confirmed:
+        prefix = f"- {CHECK_PREFIX} "
+    else:
+        prefix = "- "
     raw = _norm_text(entry.get("raw_name"))
     translated = _norm_text(entry.get("translated_name"))
     typ = _norm_text(entry.get("type"))
@@ -501,8 +537,8 @@ def _chapter_metadata(progress_data, chapter):
 def build_chapter_footnote(entries, chapter, progress_data=None, include_unavailable_note=True):
     progress_data = progress_data if isinstance(progress_data, dict) else {}
     matches = match_entries_for_text(entries, chapter.get("text", ""))
-    extracted_identities = extracted_entry_identities(progress_data, chapter.get("chapter_index", 0))
-    can_detect_skips = bool(extracted_identities)
+    extracted_keys = extracted_entry_match_keys(progress_data, chapter.get("chapter_index", 0))
+    can_detect_skips = _has_extracted_keys(extracted_keys)
     meta = _chapter_metadata(progress_data, chapter)
     lines = [
         f"## Chapter {meta['chapter_num']} Glossary Footnote",
@@ -518,13 +554,14 @@ def build_chapter_footnote(entries, chapter, progress_data=None, include_unavail
         lines.append("- No glossary entries matched this source chapter.")
     else:
         for entry in matches:
-            skipped = can_detect_skips and entry.get("identity") not in extracted_identities
-            lines.append(_format_entry_line(entry, skipped=skipped))
+            confirmed = can_detect_skips and entry_was_extracted(entry, extracted_keys)
+            skipped = can_detect_skips and not confirmed
+            lines.append(_format_entry_line(entry, skipped=skipped, confirmed=confirmed))
     if include_unavailable_note and not can_detect_skips:
         lines.extend(
             [
                 "",
-                f"{WARNING_PREFIX} Skipped-entry detection is unavailable for this chapter because this progress file has no per-chapter extracted-entry index.",
+                f"- {WARNING_PREFIX} Skipped-entry detection is unavailable for this chapter because this progress file has no per-chapter extracted-entry index.",
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
@@ -620,4 +657,3 @@ def compact_extracted_entries(entries):
             }
         )
     return compact
-

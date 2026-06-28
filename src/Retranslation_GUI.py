@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu, QAbstractItemView,
-                                QPlainTextEdit, QStackedWidget, QComboBox, QInputDialog,
+                                QPlainTextEdit, QTextBrowser, QStackedWidget, QComboBox, QInputDialog,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect,
                                 QApplication)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
@@ -34,6 +34,8 @@ import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
 from glossary_usage import (
+    CHECK_PREFIX,
+    WARNING_PREFIX,
     build_chapter_footnote,
     parse_glossary_file,
     read_epub_spine_chapters,
@@ -12720,22 +12722,144 @@ class RetranslationMixin:
                 return entries, chapters, progress_data
 
             def _show_gp_footnote_dialog(text, title="Glossary Footnote"):
+                def _split_entry_line(line):
+                    content = line[2:].strip()
+                    status = ""
+                    for marker, marker_status in ((WARNING_PREFIX, "warning"), (CHECK_PREFIX, "confirmed")):
+                        marker_prefix = f"{marker} "
+                        if content.startswith(marker_prefix):
+                            status = marker_status
+                            content = content[len(marker_prefix):].strip()
+                            break
+                    label = content
+                    details = ""
+                    if content.endswith(")"):
+                        details_start = content.rfind(" (")
+                        if details_start > -1:
+                            label = content[:details_start].strip()
+                            details = content[details_start + 2:-1].strip()
+                    return status, label, details
+
+                def _entry_details_html(details):
+                    if not details:
+                        return ""
+                    parts = [part.strip() for part in details.split(";") if part.strip()]
+                    tags = []
+                    desc_parts = []
+                    if parts:
+                        tags.append(parts[0])
+                    if len(parts) > 1 and parts[1].casefold() in {"male", "female", "unknown", "nonbinary", "non-binary", "other"}:
+                        tags.append(parts[1])
+                        desc_parts = parts[2:]
+                    else:
+                        desc_parts = parts[1:]
+                    blocks = ['<div class="entry-meta">']
+                    if tags:
+                        tag_text = " · ".join(html_lib.escape(part) for part in tags)
+                        blocks.append(f'<div class="entry-tags">{tag_text}</div>')
+                    if desc_parts:
+                        desc_text = html_lib.escape("; ".join(desc_parts))
+                        blocks.append(f'<div class="entry-desc">{desc_text}</div>')
+                    blocks.append("</div>")
+                    return "".join(blocks)
+
+                def _footnote_markdown_to_html(markdown_text):
+                    html_parts = [
+                        "<html><head><style>",
+                        "body { background: #2d2d2d; color: #f2f2f2; font-family: Segoe UI, Arial, sans-serif; font-size: 15px; line-height: 1.35; }",
+                        "h1, h2 { margin: 0 0 12px 0; font-size: 26px; font-weight: 700; }",
+                        "h3 { margin: 18px 0 10px 0; font-size: 20px; font-weight: 700; }",
+                        "p { margin: 4px 0 10px 0; }",
+                        "ul.meta-list { margin: 0 0 14px 28px; }",
+                        "ul.entry-list { margin: 6px 0 0 28px; }",
+                        "li { margin: 5px 0; }",
+                        "li.entry { margin: 0 0 12px 0; }",
+                        ".entry-label { color: #ffffff; font-weight: 600; }",
+                        ".entry-warning { color: #ffca66; font-weight: 700; }",
+                        ".entry-confirmed { color: #8bdc81; font-weight: 700; }",
+                        ".entry-meta { margin-top: 2px; color: #c5c9d1; font-size: 13px; line-height: 1.35; }",
+                        ".entry-tags { color: #9ecbff; font-weight: 600; }",
+                        ".entry-desc { color: #c7cbd2; }",
+                        ".saved-path { color: #d8d8d8; font-family: Consolas, monospace; }",
+                        "</style></head><body>",
+                    ]
+                    list_kind = None
+                    in_entries = False
+
+                    def close_list():
+                        nonlocal list_kind
+                        if list_kind:
+                            html_parts.append("</ul>")
+                            list_kind = None
+
+                    def open_list(kind):
+                        nonlocal list_kind
+                        if list_kind == kind:
+                            return
+                        close_list()
+                        class_name = "entry-list" if kind == "entries" else "meta-list"
+                        html_parts.append(f'<ul class="{class_name}">')
+                        list_kind = kind
+
+                    for raw_line in markdown_text.splitlines():
+                        line = raw_line.strip()
+                        if not line:
+                            close_list()
+                            continue
+                        if line.startswith("### "):
+                            close_list()
+                            heading = line[4:].strip()
+                            in_entries = heading.casefold() == "matched glossary entries"
+                            html_parts.append(f"<h3>{html_lib.escape(heading)}</h3>")
+                        elif line.startswith("## "):
+                            close_list()
+                            in_entries = False
+                            html_parts.append(f"<h2>{html_lib.escape(line[3:].strip())}</h2>")
+                        elif line.startswith("# "):
+                            close_list()
+                            in_entries = False
+                            html_parts.append(f"<h1>{html_lib.escape(line[2:].strip())}</h1>")
+                        elif line.startswith("- "):
+                            if in_entries:
+                                open_list("entries")
+                                status, label, details = _split_entry_line(line)
+                                marker = ""
+                                if status == "warning":
+                                    marker = f'<span class="entry-warning">{html_lib.escape(WARNING_PREFIX)}</span> '
+                                elif status == "confirmed":
+                                    marker = f'<span class="entry-confirmed">{html_lib.escape(CHECK_PREFIX)}</span> '
+                                html_parts.append(
+                                    '<li class="entry">'
+                                    f'<div class="entry-label">{marker}{html_lib.escape(label)}</div>'
+                                    f"{_entry_details_html(details)}"
+                                    "</li>"
+                                )
+                            else:
+                                open_list("meta")
+                                html_parts.append(f"<li>{html_lib.escape(line[2:].strip())}</li>")
+                        else:
+                            close_list()
+                            escaped = html_lib.escape(line)
+                            if os.path.isabs(line):
+                                html_parts.append(f'<p class="saved-path">{escaped}</p>')
+                            else:
+                                html_parts.append(f"<p>{escaped}</p>")
+                    close_list()
+                    html_parts.append("</body></html>")
+                    return "".join(html_parts)
+
                 footnote_dialog = QDialog(gp_listbox)
                 footnote_dialog.setWindowTitle(title)
                 footnote_dialog.resize(760, 560)
                 layout = QVBoxLayout(footnote_dialog)
-                editor = QPlainTextEdit()
-                editor.setReadOnly(True)
-                editor.setPlainText(text)
-                try:
-                    editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-                except AttributeError:
-                    editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-                layout.addWidget(editor)
+                viewer = QTextBrowser()
+                viewer.setReadOnly(True)
+                viewer.setHtml(_footnote_markdown_to_html(text))
+                layout.addWidget(viewer)
                 buttons = QHBoxLayout()
-                copy_btn = QPushButton("Copy")
+                copy_btn = QPushButton("📋 Copy")
                 close_btn = QPushButton("Close")
-                copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(editor.toPlainText()))
+                copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text))
                 close_btn.clicked.connect(footnote_dialog.accept)
                 buttons.addStretch()
                 buttons.addWidget(copy_btn)
@@ -12821,25 +12945,23 @@ class RetranslationMixin:
                 from PySide6.QtWidgets import QMenu
                 menu = QMenu(gp_listbox)
                 menu.setStyleSheet(
-                    "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 10px 4px 4px; }"
-                    "QMenu::item { padding: 6px 28px 6px 12px; }"
+                    "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 8px 4px 4px; }"
+                    "QMenu::item { padding: 6px 24px 6px 6px; }"
                     "QMenu::item:selected { background-color: #c0392b; }"
                 )
                 
                 mark_action = None
                 if mark_completed_targets:
-                    mark_action = menu.addAction("✅Mark as Completed")
+                    mark_action = menu.addAction("✅ Mark as Completed")
 
                 footnote_action = None
                 summary_action = None
                 if footnote_targets:
                     if mark_action is not None:
                         menu.addSeparator()
-                    label = "Show Glossary Footnote" if len(footnote_targets) == 1 else f"Show Glossary Footnotes ({len(footnote_targets)})"
+                    label = "📝 Show Glossary Footnote" if len(footnote_targets) == 1 else f"📝 Show Glossary Footnotes ({len(footnote_targets)})"
                     footnote_action = menu.addAction(label)
-                    summary_action = menu.addAction("Generate completed summary")
-                    summary_action.setCheckable(True)
-                    summary_action.setChecked(False)
+                    summary_action = menu.addAction("📄 Generate completed summary")
 
                 remove_action = None
                 if removable_targets:
