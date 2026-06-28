@@ -460,6 +460,57 @@ def _output_contains_term(output_text, term):
     return folded_term in folded_text
 
 
+def prepare_translated_output_text(output_text):
+    """Precompute expensive normalized output-text forms for repeated entry matching."""
+    text = _WHITESPACE_RE.sub(" ", str(output_text or "")).casefold()
+    return {
+        "text": text,
+        "folded": _fold_output_match_text(text),
+    }
+
+
+def _output_contains_term_prepared(prepared_output, term):
+    term = _WHITESPACE_RE.sub(" ", _norm_text(term)).casefold()
+    if not term:
+        return False
+    text = prepared_output.get("text", "") if isinstance(prepared_output, dict) else ""
+    if not text:
+        return False
+    if all(ord(ch) < 128 for ch in term) and (term[0].isalnum() or term[-1].isalnum()):
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])", text):
+            return True
+    elif term in text:
+        return True
+    folded_term = _fold_output_match_text(term)
+    folded_text = prepared_output.get("folded", "") if isinstance(prepared_output, dict) else ""
+    if not folded_term or not folded_text:
+        return False
+    if all(ord(ch) < 128 for ch in folded_term):
+        return re.search(r"(?<![A-Za-z0-9_])" + re.escape(folded_term) + r"(?![A-Za-z0-9_])", folded_text) is not None
+    return folded_term in folded_text
+
+
+def entry_matches_prepared_translated_output(entry, prepared_outputs):
+    candidates = [
+        entry.get("translated_name"),
+        entry.get("translated"),
+        entry.get("name"),
+    ]
+    if not any(_norm_text(value) for value in candidates):
+        candidates.extend(
+            [
+                entry.get("raw_name"),
+                entry.get("original_name"),
+                entry.get("original"),
+            ]
+        )
+    return any(
+        _output_contains_term_prepared(prepared_output, value)
+        for prepared_output in prepared_outputs or []
+        for value in candidates
+    )
+
+
 def entry_matches_translated_output(entry, output_text):
     candidates = [
         entry.get("translated_name"),
@@ -656,11 +707,10 @@ def build_chapter_footnote(
     output_dir=None,
     output_text=None,
     output_available=None,
+    skip_unmatched_entries=False,
 ):
     progress_data = progress_data if isinstance(progress_data, dict) else {}
     matches = match_entries_for_text(entries, chapter.get("text", ""))
-    extracted_keys = extracted_entry_match_keys(progress_data, chapter.get("chapter_index", 0))
-    can_detect_skips = _has_extracted_keys(extracted_keys)
     output_path = ""
     if output_available is None:
         if output_text is not None:
@@ -685,27 +735,29 @@ def build_chapter_footnote(
         lines.append("- No glossary entries matched this source chapter.")
     else:
         entry_lines = []
+        skipped_unmatched_count = 0
         for entry in matches:
             if output_available:
                 confirmed = entry_matches_translated_output(entry, output_text or "")
                 skipped = not confirmed
             else:
-                confirmed = can_detect_skips and entry_was_extracted(entry, extracted_keys)
-                skipped = False
-            if confirmed:
-                status_order = 0
-            elif skipped:
-                status_order = 2
-            else:
-                status_order = 1
+                confirmed = False
+                skipped = True
+            if skip_unmatched_entries and skipped:
+                skipped_unmatched_count += 1
+                continue
+            status_order = 0 if confirmed else 1
             entry_lines.append((status_order, len(entry_lines), _format_entry_line(entry, skipped=skipped, confirmed=confirmed)))
-        lines.extend(line for _status, _idx, line in sorted(entry_lines))
+        if entry_lines:
+            lines.extend(line for _status, _idx, line in sorted(entry_lines))
+        elif skipped_unmatched_count:
+            lines.append("- No matched glossary entries remained after skipping unmatched entries.")
     if include_unavailable_note and not output_available:
         detail = f" ({output_path})" if output_path else ""
         lines.extend(
             [
                 "",
-                f"- {WARNING_PREFIX} Output-file usage check is unavailable{detail}; entries are not marked skipped from extraction data alone.",
+                f"- {WARNING_PREFIX} Output-file usage check is unavailable{detail}; resolve the translated output file before trusting entry status.",
             ]
         )
     return "\n".join(lines).rstrip() + "\n"

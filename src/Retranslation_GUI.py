@@ -93,15 +93,23 @@ def _get_progress_manager_nonblocking():
 
 
 class _GlossaryProgressAsyncBridge(QObject):
+    progress = Signal(object)
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, on_finished=None, on_failed=None, parent=None):
+    def __init__(self, on_finished=None, on_failed=None, on_progress=None, parent=None):
         super().__init__(parent)
         self._on_finished = on_finished
         self._on_failed = on_failed
+        self._on_progress = on_progress
+        self.progress.connect(self._handle_progress)
         self.finished.connect(self._handle_finished)
         self.failed.connect(self._handle_failed)
+
+    @Slot(object)
+    def _handle_progress(self, payload):
+        if callable(self._on_progress):
+            self._on_progress(payload)
 
     @Slot(object)
     def _handle_finished(self, payload):
@@ -12687,7 +12695,9 @@ class RetranslationMixin:
 
                 threading.Thread(target=_worker, name="glossary-progress-mark-completed", daemon=True).start()
 
-            def _gp_usage_inputs(show_errors=True):
+            def _gp_usage_inputs(show_errors=True, progress_callback=None):
+                if callable(progress_callback):
+                    progress_callback("Finding glossary file...")
                 glossary_path = _find_glossary_file()
                 if not glossary_path or not os.path.isfile(glossary_path):
                     if show_errors:
@@ -12698,6 +12708,8 @@ class RetranslationMixin:
                         )
                     return None
                 try:
+                    if callable(progress_callback):
+                        progress_callback(f"Parsing glossary: {os.path.basename(glossary_path)}")
                     entries = parse_glossary_file(glossary_path)
                 except Exception as exc:
                     if show_errors:
@@ -12709,6 +12721,8 @@ class RetranslationMixin:
                     return None
                 try:
                     translate_special = bool(panel_state.get('translate_special'))
+                    if callable(progress_callback):
+                        progress_callback("Reading EPUB source chapters...")
                     chapters = read_epub_spine_chapters(fp, translate_special=translate_special, include_text=True)
                 except Exception as exc:
                     if show_errors:
@@ -12718,9 +12732,155 @@ class RetranslationMixin:
                     if show_errors:
                         QMessageBox.information(gp_listbox, "Glossary Footnote", "No source chapters could be read from this EPUB.")
                     return None
+                if callable(progress_callback):
+                    progress_callback(f"Loaded {len(entries)} glossary entries and {len(chapters)} source chapters.")
                 progress_path = _find_gp_for_file(fp) or gp_path
+                if callable(progress_callback):
+                    progress_callback("Loading latest glossary progress data...")
                 progress_data = _gp_load_progress_dict(progress_path) if progress_path and os.path.isfile(progress_path) else dict(gp_data or {})
                 return entries, chapters, progress_data
+
+            def _gp_footnote_markdown_to_html(markdown_text):
+                def _split_entry_line(line):
+                    content = line[2:].strip()
+                    status = ""
+                    for marker, marker_status in ((WARNING_PREFIX, "warning"), (CHECK_PREFIX, "confirmed")):
+                        marker_prefix = f"{marker} "
+                        if content.startswith(marker_prefix):
+                            status = marker_status
+                            content = content[len(marker_prefix):].strip()
+                            break
+                    label = content
+                    details = ""
+                    if content.endswith(")"):
+                        details_start = content.rfind(" (")
+                        if details_start > -1:
+                            label = content[:details_start].strip()
+                            details = content[details_start + 2:-1].strip()
+                    return status, label, details
+
+                def _entry_details_html(details):
+                    if not details:
+                        return ""
+                    parts = [part.strip() for part in details.split(";") if part.strip()]
+                    tags = []
+                    desc_parts = []
+                    if parts:
+                        tags.append(parts[0])
+                    if len(parts) > 1 and parts[1].casefold() in {"male", "female", "unknown", "nonbinary", "non-binary", "other"}:
+                        tags.append(parts[1])
+                        desc_parts = parts[2:]
+                    else:
+                        desc_parts = parts[1:]
+                    blocks = ['<div class="entry-meta">']
+                    if tags:
+                        tag_text = " Â· ".join(html_lib.escape(part) for part in tags)
+                        blocks.append(f'<div class="entry-tags">{tag_text}</div>')
+                    if desc_parts:
+                        desc_text = html_lib.escape("; ".join(desc_parts))
+                        blocks.append(f'<div class="entry-desc">{desc_text}</div>')
+                    blocks.append("</div>")
+                    return "".join(blocks)
+
+                html_parts = [
+                    "<html><head><style>",
+                    "body { background: #2d2d2d; color: #f2f2f2; font-family: Segoe UI, Arial, sans-serif; font-size: 15px; line-height: 1.35; }",
+                    "h1, h2 { margin: 0 0 12px 0; font-size: 26px; font-weight: 700; }",
+                    "h3 { margin: 18px 0 10px 0; font-size: 20px; font-weight: 700; }",
+                    "p { margin: 4px 0 10px 0; }",
+                    "ul.meta-list { margin: 0 0 14px 28px; }",
+                    "ul.entry-list { margin: 6px 0 0 28px; }",
+                    "li { margin: 5px 0; }",
+                    "li.entry { margin: 0 0 12px 0; }",
+                    ".entry-label { color: #ffffff; font-weight: 600; }",
+                    ".entry-warning { color: #ffca66; font-weight: 700; }",
+                    ".entry-confirmed { color: #8bdc81; font-weight: 700; }",
+                    ".entry-meta { margin-top: 2px; color: #c5c9d1; font-size: 13px; line-height: 1.35; }",
+                    ".entry-tags { color: #9ecbff; font-weight: 600; }",
+                    ".entry-desc { color: #c7cbd2; }",
+                    ".saved-path { color: #d8d8d8; font-family: Consolas, monospace; }",
+                    ".loading { color: #d8d8d8; font-size: 18px; font-style: italic; margin-top: 12px; }",
+                    "</style></head><body>",
+                ]
+                list_kind = None
+                in_entries = False
+
+                def close_list():
+                    nonlocal list_kind
+                    if list_kind:
+                        html_parts.append("</ul>")
+                        list_kind = None
+
+                def open_list(kind):
+                    nonlocal list_kind
+                    if list_kind == kind:
+                        return
+                    close_list()
+                    class_name = "entry-list" if kind == "entries" else "meta-list"
+                    html_parts.append(f'<ul class="{class_name}">')
+                    list_kind = kind
+
+                for raw_line in str(markdown_text or "").splitlines():
+                    line = raw_line.strip()
+                    if not line:
+                        close_list()
+                        continue
+                    if line.startswith("### "):
+                        close_list()
+                        heading = line[4:].strip()
+                        in_entries = heading.casefold() == "matched glossary entries"
+                        html_parts.append(f"<h3>{html_lib.escape(heading)}</h3>")
+                    elif line.startswith("## "):
+                        close_list()
+                        in_entries = False
+                        html_parts.append(f"<h2>{html_lib.escape(line[3:].strip())}</h2>")
+                    elif line.startswith("# "):
+                        close_list()
+                        in_entries = False
+                        html_parts.append(f"<h1>{html_lib.escape(line[2:].strip())}</h1>")
+                    elif line.startswith("- "):
+                        if in_entries:
+                            open_list("entries")
+                            status, label, details = _split_entry_line(line)
+                            marker = ""
+                            if status == "warning":
+                                marker = f'<span class="entry-warning">{html_lib.escape(WARNING_PREFIX)}</span> '
+                            elif status == "confirmed":
+                                marker = f'<span class="entry-confirmed">{html_lib.escape(CHECK_PREFIX)}</span> '
+                            html_parts.append(
+                                '<li class="entry">'
+                                f'<div class="entry-label">{marker}{html_lib.escape(label)}</div>'
+                                f"{_entry_details_html(details)}"
+                                "</li>"
+                            )
+                        else:
+                            open_list("meta")
+                            html_parts.append(f"<li>{html_lib.escape(line[2:].strip())}</li>")
+                    else:
+                        close_list()
+                        escaped = html_lib.escape(line)
+                        if os.path.isabs(line):
+                            html_parts.append(f'<p class="saved-path">{escaped}</p>')
+                        else:
+                            html_parts.append(f"<p>{escaped}</p>")
+                close_list()
+                html_parts.append("</body></html>")
+                return "".join(html_parts)
+
+            def _gp_summary_loading_html(message, detail=""):
+                detail_html = f"<p>{html_lib.escape(detail)}</p>" if detail else ""
+                return (
+                    "<html><head><style>"
+                    "body { background: #2d2d2d; color: #f2f2f2; font-family: Segoe UI, Arial, sans-serif; font-size: 15px; }"
+                    "h2 { margin: 0 0 16px 0; font-size: 24px; font-weight: 700; }"
+                    ".loading { color: #d8d8d8; font-size: 18px; font-style: italic; }"
+                    "p { color: #bfc5cf; }"
+                    "</style></head><body>"
+                    "<h2>Generating Completed Glossary Summary</h2>"
+                    f'<p class="loading">{html_lib.escape(message)}</p>'
+                    f"{detail_html}"
+                    "</body></html>"
+                )
 
             def _show_gp_footnote_dialog(text, title="Glossary Footnote"):
                 def _split_entry_line(line):
@@ -12855,10 +13015,10 @@ class RetranslationMixin:
                 layout = QVBoxLayout(footnote_dialog)
                 viewer = QTextBrowser()
                 viewer.setReadOnly(True)
-                viewer.setHtml(_footnote_markdown_to_html(text))
+                viewer.setHtml(_gp_footnote_markdown_to_html(text))
                 layout.addWidget(viewer)
                 buttons = QHBoxLayout()
-                copy_btn = QPushButton("📋 Copy")
+                copy_btn = QPushButton("Copy")
                 close_btn = QPushButton("Close")
                 copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text))
                 close_btn.clicked.connect(footnote_dialog.accept)
@@ -12868,11 +13028,7 @@ class RetranslationMixin:
                 layout.addLayout(buttons)
                 footnote_dialog.exec()
 
-            def _gp_show_footnotes(targets):
-                loaded = _gp_usage_inputs(show_errors=True)
-                if not loaded:
-                    return
-                entries, chapters, progress_data = loaded
+            def _gp_source_chapter_maps(chapters):
                 chapter_by_index = {
                     int(chapter.get("chapter_index", idx)): chapter
                     for idx, chapter in enumerate(chapters)
@@ -12885,51 +13041,236 @@ class RetranslationMixin:
                     ):
                         for key in _gp_filename_keys(filename):
                             chapter_by_filename_key.setdefault(key, chapter)
+                return chapter_by_index, chapter_by_filename_key
 
-                def _gp_source_chapter_for_row(ci):
-                    fname = (panel_state.get('chapter_map') or {}).get(ci, "")
-                    for key in _gp_filename_keys(fname):
-                        if key in chapter_by_filename_key:
-                            return chapter_by_filename_key[key]
-                    return chapter_by_index.get(ci)
+            def _gp_source_chapter_for_row(ci, chapter_by_index, chapter_by_filename_key):
+                fname = (panel_state.get('chapter_map') or {}).get(ci, "")
+                for key in _gp_filename_keys(fname):
+                    if key in chapter_by_filename_key:
+                        return chapter_by_filename_key[key]
+                return chapter_by_index.get(ci)
 
-                def _gp_output_text_for_row(ci, progress_entry_key, progress_entry, fname):
-                    progress_entry = progress_entry if isinstance(progress_entry, dict) else {}
-                    output_file = progress_entry.get('output_file') or fname
-                    display_info = {
-                        'output_file': output_file,
-                        'original_filename': progress_entry.get('original_filename') or fname,
-                        'original_basename': progress_entry.get('original_basename') or fname,
-                        'num': _gp_display_chapter_num(ci, fname),
-                        'info': progress_entry,
-                        'progress_key': progress_entry_key,
+            def _gp_output_text_for_row(ci, progress_entry_key, progress_entry, fname, progress_data):
+                progress_entry = progress_entry if isinstance(progress_entry, dict) else {}
+                output_file = progress_entry.get('output_file') or fname
+                display_info = {
+                    'output_file': output_file,
+                    'original_filename': progress_entry.get('original_filename') or fname,
+                    'original_basename': progress_entry.get('original_basename') or fname,
+                    'num': _gp_display_chapter_num(ci, fname),
+                    'info': progress_entry,
+                    'progress_key': progress_entry_key,
+                }
+                resolved_output_file = None
+                resolved_output_path = None
+                resolver_progress = progress_data if isinstance(progress_data, dict) else prog
+                try:
+                    resolved_output_file, resolved_output_path = self._resolve_existing_output_path(
+                        output_dir,
+                        output_file,
+                        display_info=display_info,
+                        prog=resolver_progress,
+                    )
+                except Exception:
+                    resolved_output_file, resolved_output_path = None, None
+                if not resolved_output_path:
+                    return None, False, resolved_output_file or output_file
+                try:
+                    return read_translated_output_text(resolved_output_path), True, resolved_output_file or output_file
+                except Exception:
+                    return None, False, resolved_output_file or output_file
+
+            def _gp_chapter_for_footnote(ci, chapter, progress_entry, resolved_output_file, fname):
+                progress_entry = progress_entry if isinstance(progress_entry, dict) else {}
+                chapter_for_footnote = dict(chapter)
+                chapter_for_footnote.update(
+                    {
+                        "chapter_index": ci,
+                        "progress_entry": progress_entry,
+                        "progress_chapter_num": _gp_display_chapter_num(ci, fname),
+                        "spine_number": (panel_state.get('spine_index_map') or {}).get(ci, chapter.get("spine_number", ci + 1)),
+                        "output_file": resolved_output_file or progress_entry.get('output_file') or fname,
                     }
-                    resolved_output_file = None
-                    resolved_output_path = None
-                    try:
-                        resolved_output_file, resolved_output_path = self._resolve_existing_output_path(
-                            output_dir,
-                            output_file,
-                            display_info=display_info,
-                            prog=prog,
+                )
+                return chapter_for_footnote
+
+            skip_unmatched_config_key = "glossary_progress_skip_unmatched_entries"
+
+            def _gp_skip_unmatched_entries():
+                try:
+                    return bool((getattr(self, "config", {}) or {}).get(skip_unmatched_config_key, True))
+                except Exception:
+                    return True
+
+            def _gp_set_skip_unmatched_entries(enabled):
+                try:
+                    self.config[skip_unmatched_config_key] = bool(enabled)
+                    if hasattr(self, "save_config"):
+                        self.save_config(show_message=False)
+                except Exception:
+                    pass
+
+            def _gp_write_completed_summary(entries, chapters, progress_data, progress_callback=None, skip_unmatched_entries=None):
+                progress_data = progress_data if isinstance(progress_data, dict) else {}
+                if skip_unmatched_entries is None:
+                    skip_unmatched_entries = _gp_skip_unmatched_entries()
+                chapter_by_index, chapter_by_filename_key = _gp_source_chapter_maps(chapters)
+                progress_entries = _gp_chapter_entry_map(progress_data)
+                completed, failed, merged = _gp_sets(progress_data)
+                summary_indices = sorted((completed | merged) - failed)
+                title = progress_data.get("book_title") or os.path.splitext(os.path.basename(fp))[0] or "Glossary Footnotes"
+                lines = [
+                    f"# {title} - Completed Glossary Footnotes",
+                    "",
+                    f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    "",
+                ]
+                missing_chapters = []
+                missing_output = []
+                total_sections = len(summary_indices)
+                if not summary_indices:
+                    lines.append("No completed or merged glossary-progress chapters were found.")
+                section_results = []
+
+                def _build_summary_section(section_idx, ci):
+                    chapter = _gp_source_chapter_for_row(ci, chapter_by_index, chapter_by_filename_key)
+                    if not chapter:
+                        return {
+                            "section_idx": section_idx,
+                            "chapter_index": ci,
+                            "chapter_num": _gp_display_chapter_num(ci, (panel_state.get('chapter_map') or {}).get(ci, '')),
+                            "text": "",
+                            "missing_chapter": ci,
+                            "missing_output": None,
+                        }
+                    fname = (panel_state.get('chapter_map') or {}).get(ci, chapter.get("filename", ""))
+                    progress_entry_key, progress_entry = progress_entries.get(ci, (None, {}))
+                    output_text, output_available, resolved_output_file = _gp_output_text_for_row(
+                        ci,
+                        progress_entry_key,
+                        progress_entry,
+                        fname,
+                        progress_data,
+                    )
+                    missing_output_value = None
+                    if not output_available:
+                        missing_output_value = (
+                            ci,
+                            resolved_output_file
+                            or (progress_entry.get('output_file') if isinstance(progress_entry, dict) else "")
+                            or fname,
                         )
-                    except Exception:
-                        resolved_output_file, resolved_output_path = None, None
-                    if not resolved_output_path:
-                        return None, False, resolved_output_file or output_file
-                    try:
-                        return read_translated_output_text(resolved_output_path), True, resolved_output_file or output_file
-                    except Exception:
-                        return None, False, resolved_output_file or output_file
+                    section_text = build_chapter_footnote(
+                        entries,
+                        _gp_chapter_for_footnote(ci, chapter, progress_entry, resolved_output_file, fname),
+                        progress_data,
+                        output_text=output_text,
+                        output_available=output_available,
+                        skip_unmatched_entries=skip_unmatched_entries,
+                    ).rstrip()
+                    return {
+                        "section_idx": section_idx,
+                        "chapter_index": ci,
+                        "chapter_num": _gp_display_chapter_num(ci, fname),
+                        "text": section_text,
+                        "missing_chapter": None,
+                        "missing_output": missing_output_value,
+                    }
+
+                if summary_indices:
+                    from concurrent.futures import as_completed
+
+                    worker_count = min(total_sections, max(2, min(8, os.cpu_count() or 4)))
+                    if callable(progress_callback):
+                        progress_callback(
+                            {
+                                "current": 0,
+                                "total": total_sections,
+                                "chapter_num": "",
+                                "status": f"starting {worker_count} threads",
+                            }
+                        )
+                    completed_sections = 0
+                    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="GlossarySummary") as executor:
+                        futures = [
+                            executor.submit(_build_summary_section, section_idx, ci)
+                            for section_idx, ci in enumerate(summary_indices, start=1)
+                        ]
+                        for future in as_completed(futures):
+                            result = future.result()
+                            section_results.append(result)
+                            completed_sections += 1
+                            if callable(progress_callback):
+                                progress_callback(
+                                    {
+                                        "current": completed_sections,
+                                        "total": total_sections,
+                                        "chapter_num": result.get("chapter_num", ""),
+                                        "status": "generated",
+                                    }
+                                )
+
+                for result in sorted(section_results, key=lambda item: item.get("section_idx", 0)):
+                    if result.get("missing_chapter") is not None:
+                        missing_chapters.append(result["missing_chapter"])
+                        continue
+                    if result.get("missing_output"):
+                        missing_output.append(result["missing_output"])
+                    lines.append(result.get("text", ""))
+                    lines.append("")
+                if missing_chapters:
+                    lines.extend(
+                        [
+                            "## Summary warnings",
+                            "",
+                            "Completed or merged chapters that could not be mapped back to source text:",
+                        ]
+                    )
+                    lines.extend(
+                        f"- Ch.{_gp_display_chapter_num(ci, (panel_state.get('chapter_map') or {}).get(ci, ''))}"
+                        for ci in missing_chapters
+                    )
+                    lines.append("")
+                if missing_output:
+                    lines.extend(
+                        [
+                            "## Output-file warnings",
+                            "",
+                            "Completed or merged chapters whose translated output file could not be resolved:",
+                        ]
+                    )
+                    lines.extend(
+                        f"- Ch.{_gp_display_chapter_num(ci, (panel_state.get('chapter_map') or {}).get(ci, ''))}: {path}"
+                        for ci, path in missing_output
+                    )
+                    lines.append("")
+                content = "\n".join(lines).rstrip() + "\n"
+                book_base = os.path.splitext(os.path.basename(fp))[0]
+                safe_base = re.sub(r'[<>:"/\\\\|?*]+', "_", str(book_base or "book")).strip(" ._") or "book"
+                summary_dir = os.path.join(output_dir or os.getcwd(), "glossary_footnotes")
+                os.makedirs(summary_dir, exist_ok=True)
+                summary_path = os.path.join(summary_dir, f"{safe_base}_completed_glossary_footnotes.md")
+                with open(summary_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(content)
+                return summary_path, content
+
+            def _gp_show_footnotes(targets):
+                loaded = _gp_usage_inputs(show_errors=True)
+                if not loaded:
+                    return
+                entries, chapters, progress_data = loaded
+                skip_unmatched_entries = _gp_skip_unmatched_entries()
+                chapter_by_index, chapter_by_filename_key = _gp_source_chapter_maps(chapters)
 
                 parts = []
                 missing = []
+                missing_output = []
                 for _item, (_kind, value) in targets:
                     try:
                         ci = int(value)
                     except (TypeError, ValueError):
                         continue
-                    chapter = _gp_source_chapter_for_row(ci)
+                    chapter = _gp_source_chapter_for_row(ci, chapter_by_index, chapter_by_filename_key)
                     if not chapter:
                         missing.append(ci)
                         continue
@@ -12940,47 +13281,164 @@ class RetranslationMixin:
                         progress_entry_key,
                         progress_entry,
                         fname,
+                        progress_data,
                     )
-                    chapter_for_footnote = dict(chapter)
-                    chapter_for_footnote.update(
-                        {
-                            "chapter_index": ci,
-                            "progress_entry": progress_entry if isinstance(progress_entry, dict) else {},
-                            "progress_chapter_num": _gp_display_chapter_num(ci, fname),
-                            "spine_number": (panel_state.get('spine_index_map') or {}).get(ci, chapter.get("spine_number", ci + 1)),
-                            "output_file": resolved_output_file or (progress_entry.get('output_file') if isinstance(progress_entry, dict) else "") or fname,
-                        }
-                    )
+                    if not output_available:
+                        missing_output.append((ci, resolved_output_file or (progress_entry.get('output_file') if isinstance(progress_entry, dict) else "") or fname))
+                        continue
                     parts.append(
                         build_chapter_footnote(
                             entries,
-                            chapter_for_footnote,
+                            _gp_chapter_for_footnote(ci, chapter, progress_entry, resolved_output_file, fname),
                             progress_data,
                             output_text=output_text,
                             output_available=output_available,
+                            skip_unmatched_entries=skip_unmatched_entries,
                         ).rstrip()
                     )
                 if not parts:
-                    detail = f" Missing chapter indices: {missing}" if missing else ""
-                    QMessageBox.information(gp_listbox, "Glossary Footnote", f"No selected chapters could be mapped to source text.{detail}")
+                    if missing_output:
+                        QMessageBox.information(
+                            gp_listbox,
+                            "Glossary Footnote",
+                            "Could not resolve translated output file for:\n"
+                            + "\n".join(
+                                f"- Ch.{_gp_display_chapter_num(ci, (panel_state.get('chapter_map') or {}).get(ci, ''))}: {path}"
+                                for ci, path in missing_output
+                            ),
+                        )
+                    else:
+                        detail = f" Missing chapter indices: {missing}" if missing else ""
+                        QMessageBox.information(gp_listbox, "Glossary Footnote", f"No selected chapters could be mapped to source text.{detail}")
                     return
+                if missing_output:
+                    QMessageBox.warning(
+                        gp_listbox,
+                        "Glossary Footnote",
+                        "Skipped rows with unresolved translated output files:\n"
+                        + "\n".join(
+                            f"- Ch.{_gp_display_chapter_num(ci, (panel_state.get('chapter_map') or {}).get(ci, ''))}: {path}"
+                            for ci, path in missing_output
+                        ),
+                    )
                 _show_gp_footnote_dialog("\n\n".join(parts) + "\n", "Glossary Footnote")
 
             def _gp_generate_completed_summary():
-                loaded = _gp_usage_inputs(show_errors=True)
-                if not loaded:
-                    return
-                entries, chapters, progress_data = loaded
-                book_base = os.path.splitext(os.path.basename(fp))[0]
-                try:
-                    summary_path, content = write_completed_summary(entries, chapters, progress_data, output_dir, book_base)
-                except Exception as exc:
-                    QMessageBox.critical(gp_listbox, "Glossary Footnote Summary", f"Could not write completed summary:\n{exc}")
-                    return
-                _show_gp_footnote_dialog(
-                    f"Saved to:\n{summary_path}\n\n{content}",
-                    "Completed Glossary Footnote Summary",
+                summary_dialog = QDialog(gp_listbox)
+                summary_dialog.setWindowTitle("Completed Glossary Footnote Summary")
+                summary_dialog.resize(760, 560)
+                layout = QVBoxLayout(summary_dialog)
+                viewer = QTextBrowser()
+                viewer.setReadOnly(True)
+                viewer.setHtml(_gp_summary_loading_html("Starting background summary worker..."))
+                layout.addWidget(viewer)
+
+                text_holder = {"text": ""}
+                buttons = QHBoxLayout()
+                copy_btn = QPushButton("Copy")
+                close_btn = QPushButton("Close")
+                copy_btn.setEnabled(False)
+                copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text_holder.get("text", "")))
+                close_btn.clicked.connect(summary_dialog.accept)
+                buttons.addStretch()
+                buttons.addWidget(copy_btn)
+                buttons.addWidget(close_btn)
+                layout.addLayout(buttons)
+
+                def _on_summary_progress(payload):
+                    payload = payload if isinstance(payload, dict) else {"message": str(payload)}
+                    stage = str(payload.get("stage") or "")
+                    if stage == "generating":
+                        current = int(payload.get("current") or 0)
+                        total = int(payload.get("total") or 0)
+                        chapter_num = payload.get("chapter_num", "")
+                        status = str(payload.get("status") or "working")
+                        detail = f"Chapter {chapter_num} - {status}" if chapter_num not in ("", None) else status
+                        viewer.setHtml(
+                            _gp_summary_loading_html(
+                                f"Generating summary entries: {current}/{total}",
+                                detail,
+                            )
+                        )
+                    else:
+                        viewer.setHtml(_gp_summary_loading_html(str(payload.get("message") or "Preparing summary...")))
+
+                def _on_summary_finished(payload):
+                    summary_path = payload.get("summary_path", "")
+                    content = payload.get("content", "")
+                    text = f"Saved to:\n{summary_path}\n\n{content}"
+                    text_holder["text"] = text
+                    copy_btn.setEnabled(True)
+                    viewer.setHtml(_gp_footnote_markdown_to_html(text))
+
+                def _on_summary_failed(message):
+                    text_holder["text"] = f"Could not write completed summary:\n{message}"
+                    copy_btn.setEnabled(True)
+                    viewer.setHtml(
+                        _gp_summary_loading_html(
+                            "Could not write completed summary.",
+                            str(message),
+                        )
+                    )
+
+                summary_bridge = _GlossaryProgressAsyncBridge(
+                    on_finished=_on_summary_finished,
+                    on_failed=_on_summary_failed,
+                    on_progress=_on_summary_progress,
+                    parent=summary_dialog,
                 )
+
+                def _emit_summary_progress(payload):
+                    try:
+                        summary_bridge.progress.emit(payload)
+                    except RuntimeError:
+                        pass
+
+                def _summary_worker():
+                    try:
+                        _emit_summary_progress({"stage": "loading", "message": "Loading glossary and source chapters..."})
+                        loaded = _gp_usage_inputs(
+                            show_errors=False,
+                            progress_callback=lambda message: _emit_summary_progress(
+                                {"stage": "loading", "message": str(message)}
+                            ),
+                        )
+                        if not loaded:
+                            raise RuntimeError("Could not load glossary entries, source chapters, or progress data.")
+                        entries, chapters, progress_data = loaded
+                        _emit_summary_progress(
+                            {
+                                "stage": "loading",
+                                "message": f"Preparing {len(entries)} glossary entries for completed and merged chapters...",
+                            }
+                        )
+
+                        def _progress_callback(payload):
+                            payload = dict(payload or {})
+                            payload["stage"] = "generating"
+                            _emit_summary_progress(payload)
+
+                        summary_path, content = _gp_write_completed_summary(
+                            entries,
+                            chapters,
+                            progress_data,
+                            progress_callback=_progress_callback,
+                            skip_unmatched_entries=_gp_skip_unmatched_entries(),
+                        )
+                        try:
+                            summary_bridge.finished.emit({"summary_path": summary_path, "content": content})
+                        except RuntimeError:
+                            pass
+                    except Exception as exc:
+                        try:
+                            summary_bridge.failed.emit(str(exc))
+                        except RuntimeError:
+                            pass
+
+                summary_dialog.show()
+                QApplication.processEvents(QEventLoop.AllEvents, 50)
+                threading.Thread(target=_summary_worker, name="GlossaryCompletedSummary", daemon=True).start()
+                summary_dialog.exec()
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -13028,12 +13486,19 @@ class RetranslationMixin:
 
                 footnote_action = None
                 summary_action = None
+                skip_unmatched_action = None
                 if footnote_targets:
                     if mark_action is not None:
                         menu.addSeparator()
                     label = "📝 Show Glossary Footnote" if len(footnote_targets) == 1 else f"📝 Show Glossary Footnotes ({len(footnote_targets)})"
                     footnote_action = menu.addAction(label)
                     summary_action = menu.addAction("📄 Generate completed summary")
+
+                    skip_unmatched_action = menu.addAction(
+                        "✅ Skip unmatched entries"
+                        if _gp_skip_unmatched_entries()
+                        else "❌ Skip unmatched entries"
+                    )
 
                 remove_action = None
                 if removable_targets:
@@ -13056,6 +13521,9 @@ class RetranslationMixin:
                     return
                 if summary_action is not None and chosen == summary_action:
                     _gp_generate_completed_summary()
+                    return
+                if skip_unmatched_action is not None and chosen == skip_unmatched_action:
+                    _gp_set_skip_unmatched_entries(not _gp_skip_unmatched_entries())
                     return
                 if remove_action is None or chosen != remove_action:
                     return

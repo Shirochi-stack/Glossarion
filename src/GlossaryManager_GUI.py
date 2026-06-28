@@ -17,7 +17,11 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QComboBox, QMenu, QInputDialog)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
-from glossary_usage import build_translated_usage_index, html_to_text
+from glossary_usage import (
+    entry_matches_prepared_translated_output,
+    html_to_text,
+    prepare_translated_output_text,
+)
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -6120,8 +6124,14 @@ Do not stop after the glossary."""
         class _EditorLoadBridge(QObject):
             loaded = Signal(object)
 
+        class _HideUnusedFilterBridge(QObject):
+            progress = Signal(object)
+            finished = Signal(object)
+
         self._editor_load_bridge = _EditorLoadBridge(parent)
         self._editor_load_token = None
+        self._hide_unused_filter_bridge = _HideUnusedFilterBridge(parent)
+        self._hide_unused_filter_token = None
 
         # Undo / redo history stacks (each entry is a deep copy of current_glossary_data)
         self._undo_stack = []
@@ -6144,7 +6154,7 @@ Do not stop after the glossary."""
                 return None
             if self.current_glossary_format in ['list', 'token_csv']:
                 try:
-                    idx = int(item.text(0)) - 1
+                    idx = int(item.data(0, Qt.UserRole))
                 except Exception:
                     return None
                 return self._original_translated_map.get(idx, '')
@@ -6158,6 +6168,85 @@ Do not stop after the glossary."""
             if baseline is None:
                 return
             mark_row_updated(item, new_val != baseline)
+
+        def _editor_data_row_specs():
+            specs = []
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            if self.current_glossary_format in ['list', 'token_csv']:
+                for source_idx, entry in enumerate(self.current_glossary_data or []):
+                    entry_dict = dict(entry) if isinstance(entry, dict) else {}
+                    specs.append((source_idx, source_idx, entry_dict))
+            elif self.current_glossary_format == 'dict':
+                data = self.current_glossary_data or {}
+                entries = data.get('entries', data) if isinstance(data, dict) else {}
+                if isinstance(entries, dict):
+                    for source_idx, (key, value) in enumerate(entries.items()):
+                        if isinstance(value, dict):
+                            entry_dict = dict(value)
+                            entry_dict.setdefault('original', key)
+                            entry_dict.setdefault('raw_name', key)
+                        else:
+                            entry_dict = {'original': key, 'translated': value}
+                        specs.append((source_idx, key, entry_dict))
+            return fields, specs
+
+        def _configure_editor_tree_columns(column_fields):
+            self.glossary_column_fields = list(column_fields)
+            self.glossary_tree.setColumnCount(len(column_fields) + 1)
+            headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
+            self.glossary_tree.setHeaderLabels(headers)
+            self.glossary_tree.setColumnWidth(0, 80)
+            for idx, field in enumerate(column_fields, start=1):
+                if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
+                    width = 150
+                elif field in ['traits', 'locations', 'how_they_refer_to_others']:
+                    width = 200
+                else:
+                    width = 100
+                self.glossary_tree.setColumnWidth(idx, width)
+            if '_section' in column_fields:
+                self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
+
+        def _make_editor_tree_item(display_idx, source_ref, entry, column_fields):
+            values = [str(display_idx)]
+            for field in column_fields:
+                value = entry.get(field, '') if isinstance(entry, dict) else ''
+                if isinstance(value, list):
+                    value = ', '.join(str(v) for v in value)
+                elif isinstance(value, dict):
+                    value = ', '.join(f"{k}: {v}" for k, v in value.items())
+                elif value is None:
+                    value = ''
+                values.append(str(value))
+            item = QTreeWidgetItem(values)
+            item.setData(0, Qt.UserRole, source_ref)
+            return item
+
+        def _populate_editor_tree_from_data(visible_source_indices=None):
+            column_fields, specs = _editor_data_row_specs()
+            visible_set = None if visible_source_indices is None else set(visible_source_indices)
+            self.glossary_tree.setUpdatesEnabled(False)
+            try:
+                self.glossary_tree.clear()
+                _configure_editor_tree_columns(column_fields)
+                items = []
+                display_idx = 1
+                for source_idx, source_ref, entry in specs:
+                    if visible_set is not None and source_idx not in visible_set:
+                        continue
+                    item = _make_editor_tree_item(display_idx, source_ref, entry, column_fields)
+                    for col_idx, field in enumerate(column_fields, start=1):
+                        if field in ['translated_name', 'translated']:
+                            update_row_highlight(item, field, item.text(col_idx))
+                    items.append(item)
+                    display_idx += 1
+                self.glossary_tree.addTopLevelItems(items)
+            finally:
+                self.glossary_tree.setUpdatesEnabled(True)
+            try:
+                self.glossary_tree.viewport().update()
+            except Exception:
+                pass
 
         def _loaded_glossary_stats_text(entries):
             stats = [f"Total entries: {len(entries)}"]
@@ -6203,53 +6292,8 @@ Do not stop after the glossary."""
             self.current_glossary_data = payload.get('current_data')
             self.current_glossary_format = payload.get('current_format')
             self.current_glossary_sections = payload.get('sections', [])
-
-            self.glossary_tree.setUpdatesEnabled(False)
-            try:
-                self.glossary_tree.clear()
-                self.glossary_column_fields = list(column_fields)
-                self.glossary_tree.setColumnCount(len(column_fields) + 1)
-
-                headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
-                self.glossary_tree.setHeaderLabels(headers)
-                self.glossary_tree.setColumnWidth(0, 80)
-
-                for idx, field in enumerate(column_fields, start=1):
-                    if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
-                        width = 150
-                    elif field in ['traits', 'locations', 'how_they_refer_to_others']:
-                        width = 200
-                    else:
-                        width = 100
-                    self.glossary_tree.setColumnWidth(idx, width)
-
-                # Hide the Section column from view (data is kept for round-trip on save)
-                if '_section' in column_fields:
-                    self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
-
-                items = []
-                for idx, entry in enumerate(entries):
-                    values = [str(idx + 1)]
-                    for field in column_fields:
-                        value = entry.get(field, '') if isinstance(entry, dict) else ''
-                        if isinstance(value, list):
-                            value = ', '.join(str(v) for v in value)
-                        elif isinstance(value, dict):
-                            value = ', '.join(f"{k}: {v}" for k, v in value.items())
-                        elif value is None:
-                            value = ''
-                        values.append(str(value))
-
-                    item = QTreeWidgetItem(values)
-                    if self.current_glossary_format == 'dict':
-                        item.setData(0, Qt.UserRole, entry.get('original', '') if isinstance(entry, dict) else '')
-                    else:
-                        item.setData(0, Qt.UserRole, idx)
-                    items.append(item)
-
-                self.glossary_tree.addTopLevelItems(items)
-            finally:
-                self.glossary_tree.setUpdatesEnabled(True)
+            self.glossary_column_fields = list(column_fields)
+            _populate_editor_tree_from_data()
 
             self.stats_label.setText(payload.get('stats_text', f"Total entries: {len(entries)}"))
             self._glossary_editor_base_stats_text = self.stats_label.text()
@@ -6722,47 +6766,8 @@ Do not stop after the glossary."""
                    custom_fields = sorted(all_fields - set(standard_fields))
                    column_fields.extend(custom_fields)
                
-               self.glossary_tree.clear()
                self.glossary_column_fields = list(column_fields)
-               self.glossary_tree.setColumnCount(len(column_fields) + 1)  # +1 for index column
-               
-               headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
-               self.glossary_tree.setHeaderLabels(headers)
-               
-               self.glossary_tree.setColumnWidth(0, 80)
-               
-               for idx, field in enumerate(column_fields, start=1):
-                   if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
-                       width = 150
-                   elif field in ['traits', 'locations', 'how_they_refer_to_others']:
-                       width = 200
-                   else:
-                       width = 100
-                   
-                   self.glossary_tree.setColumnWidth(idx, width)
-
-               # Hide the Section column from view (data is kept for round-trip on save)
-               if '_section' in column_fields:
-                   self.glossary_tree.setColumnHidden(column_fields.index('_section') + 1, True)
-
-               for idx, entry in enumerate(entries):
-                   values = [str(idx + 1)]
-                   for field in column_fields:
-                       value = entry.get(field, '')
-                       if isinstance(value, list):
-                           value = ', '.join(str(v) for v in value)
-                       elif isinstance(value, dict):
-                           value = ', '.join(f"{k}: {v}" for k, v in value.items())
-                       elif value is None:
-                           value = ''
-                       values.append(str(value))
-                   
-                   item = QTreeWidgetItem(values)
-                   if self.current_glossary_format == 'dict':
-                       item.setData(0, Qt.UserRole, entry.get('original', ''))
-                   else:
-                       item.setData(0, Qt.UserRole, idx)
-                   self.glossary_tree.addTopLevelItem(item)
+               _populate_editor_tree_from_data()
                
                # Update stats
                stats = []
@@ -7022,9 +7027,17 @@ Do not stop after the glossary."""
                     self._push_undo_snapshot()
                     
                 indices_to_delete = []
+                keys_to_delete = []
                 for item in selected:
-                   idx = int(item.text(0)) - 1  # First column is index
-                   indices_to_delete.append(idx)
+                   if self.current_glossary_format in ['list', 'token_csv']:
+                       try:
+                           indices_to_delete.append(int(item.data(0, Qt.UserRole)))
+                       except (TypeError, ValueError):
+                           pass
+                   elif self.current_glossary_format == 'dict':
+                       key = item.data(0, Qt.UserRole)
+                       if key is not None:
+                           keys_to_delete.append(key)
 
                 indices_to_delete.sort(reverse=True)
 
@@ -7034,15 +7047,12 @@ Do not stop after the glossary."""
                            del self.current_glossary_data[idx]
 
                 elif self.current_glossary_format == 'dict':
-                   entries_list = list(self.current_glossary_data.get('entries', {}).items())
-                   for idx in indices_to_delete:
-                       if 0 <= idx < len(entries_list):
-                           key = entries_list[idx][0]
-                           self.current_glossary_data['entries'].pop(key, None)
+                   for key in keys_to_delete:
+                       self.current_glossary_data.get('entries', {}).pop(key, None)
 
                 if save_current_glossary():
                    load_glossary_for_editing()
-                   QMessageBox.information(parent, "Success", f"Deleted {len(indices_to_delete)} entries")
+                   QMessageBox.information(parent, "Success", f"Deleted {len(indices_to_delete) + len(keys_to_delete)} entries")
                 
         def remove_duplicates():
             if not self.current_glossary_data:
@@ -7719,10 +7729,13 @@ Do not stop after the glossary."""
                return
            
            try:
-               if self.current_glossary_format == 'list':
+               if self.current_glossary_format in ['list', 'token_csv']:
                    exported = []
                    for item in selected:
-                       idx = int(item.text(0)) - 1
+                       try:
+                           idx = int(item.data(0, Qt.UserRole))
+                       except (TypeError, ValueError):
+                           continue
                        if 0 <= idx < len(self.current_glossary_data):
                            exported.append(self.current_glossary_data[idx])
                    
@@ -7754,11 +7767,10 @@ Do not stop after the glossary."""
                
                else:
                    exported = {}
-                   entries_list = list(self.current_glossary_data.get('entries', {}).items())
                    for item in selected:
-                       idx = int(item.text(0)) - 1
-                       if 0 <= idx < len(entries_list):
-                           key, value = entries_list[idx]
+                       key = item.data(0, Qt.UserRole)
+                       if key in self.current_glossary_data.get('entries', {}):
+                           value = self.current_glossary_data['entries'][key]
                            exported[key] = value
                    
                    with open(path, 'w', encoding='utf-8') as f:
@@ -8204,6 +8216,12 @@ Do not stop after the glossary."""
                    self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
                for i in range(self.glossary_tree.topLevelItemCount()):
                    mark_row_updated(self.glossary_tree.topLevelItem(i), False)
+               if (
+                   getattr(self, 'hide_unused_entries_checkbox', None) is not None
+                   and self.hide_unused_entries_checkbox.isChecked()
+                   and hasattr(self, '_apply_hide_unused_entries_filter')
+               ):
+                   self._apply_hide_unused_entries_filter()
                _ok_msg = QMessageBox(QMessageBox.Information, "Success", "Glossary saved successfully", QMessageBox.Ok, self.dialog)
                _ok_msg.layout().setAlignment(Qt.AlignCenter)
                _ok_msg.exec()
@@ -8840,14 +8858,18 @@ Do not stop after the glossary."""
 
         def _editor_tree_usage_entries():
             entries = []
-            fields = list(getattr(self, 'glossary_column_fields', []) or [])
-            for row in range(self.glossary_tree.topLevelItemCount()):
-                item = self.glossary_tree.topLevelItem(row)
-                if item is None:
-                    continue
-                entry = {'source_index': row}
-                for field_idx, field in enumerate(fields, start=1):
-                    entry[field] = item.text(field_idx)
+            fields, specs = _editor_data_row_specs()
+            for source_idx, _source_ref, source_entry in specs:
+                entry = {'source_index': source_idx}
+                for field in fields:
+                    value = source_entry.get(field, '') if isinstance(source_entry, dict) else ''
+                    if isinstance(value, list):
+                        value = ', '.join(str(v) for v in value)
+                    elif isinstance(value, dict):
+                        value = ', '.join(f"{k}: {v}" for k, v in value.items())
+                    elif value is None:
+                        value = ''
+                    entry[field] = str(value)
                 if not entry.get('raw_name'):
                     for fallback in ('original_name', 'original'):
                         if entry.get(fallback):
@@ -8864,6 +8886,14 @@ Do not stop after the glossary."""
         def _editor_output_dir_from_epub(epub_path):
             if not epub_path:
                 return None
+            try:
+                resolver = getattr(self, '_resolve_open_output_folder_for_file', None)
+                if callable(resolver):
+                    resolved = resolver(epub_path)
+                    if resolved and os.path.isdir(resolved):
+                        return resolved
+            except Exception:
+                pass
             file_base = os.path.splitext(os.path.basename(epub_path))[0]
             candidates = []
             override_dir = None
@@ -8881,6 +8911,12 @@ Do not stop after the glossary."""
                 override_dir = None
             if override_dir:
                 candidates.append(os.path.join(os.path.abspath(override_dir), file_base))
+            try:
+                base_dir_getter = getattr(self, '_get_output_base_dir', None)
+                if callable(base_dir_getter):
+                    candidates.append(os.path.join(base_dir_getter(epub_path), file_base))
+            except Exception:
+                pass
             candidates.append(os.path.join(os.path.dirname(os.path.abspath(epub_path)), file_base))
             candidates.append(os.path.abspath(file_base))
             for candidate in candidates:
@@ -8891,6 +8927,15 @@ Do not stop after the glossary."""
         def _editor_output_dir_from_glossary(glossary_path):
             if not glossary_path or not os.path.exists(glossary_path):
                 return None
+            try:
+                mapped = getattr(self, '_editor_glossary_epub_map', {}) or {}
+                epub_path = mapped.get(glossary_path)
+                if epub_path:
+                    resolved = _editor_output_dir_from_epub(epub_path)
+                    if resolved:
+                        return resolved
+            except Exception:
+                pass
             glossary_dir = os.path.dirname(os.path.abspath(glossary_path))
             glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]
             parent_of_glossary_dir = os.path.dirname(glossary_dir)
@@ -8952,9 +8997,12 @@ Do not stop after the glossary."""
                 paths.append(path)
             return paths
 
-        def _read_translated_output_texts(paths):
+        def _read_translated_output_texts(paths, progress_callback=None):
             texts = []
-            for path in paths:
+            errors = []
+            total_files = len(paths or [])
+            last_progress_emit = 0.0
+            for file_idx, path in enumerate(paths, start=1):
                 try:
                     with open(path, 'rb') as f:
                         raw_bytes = f.read()
@@ -8966,18 +9014,76 @@ Do not stop after the glossary."""
                         content = html_to_text(content)
                     texts.append(content)
                 except Exception as exc:
-                    self.append_log(f"Failed to read translated output file for hide-unused: {path}: {exc}")
-            return texts
+                    errors.append(f"Failed to read translated output file for hide-unused: {path}: {exc}")
+                if callable(progress_callback):
+                    now = time.monotonic()
+                    if file_idx == total_files or now - last_progress_emit >= 0.5:
+                        progress_callback(file_idx, total_files, os.path.basename(path))
+                        last_progress_emit = now
+            return texts, errors
 
         def _set_all_editor_rows_visible():
-            for row in range(self.glossary_tree.topLevelItemCount()):
-                item = self.glossary_tree.topLevelItem(row)
-                if item is not None:
-                    item.setHidden(False)
+            _populate_editor_tree_from_data()
+
+        def _apply_hide_unused_entries_progress(payload):
+            if payload.get('token') is not getattr(self, '_hide_unused_filter_token', None):
+                return
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            if checkbox is None or not checkbox.isChecked():
+                return
+            stage = payload.get('stage')
+            if stage == 'reading':
+                current = int(payload.get('current') or 0)
+                total_files = int(payload.get('total_files') or 0)
+                self.stats_label.setText(f"Reading translated output files: {current}/{total_files}")
+            elif stage == 'matching':
+                checked = int(payload.get('checked') or 0)
+                total_entries = int(payload.get('total') or 0)
+                used = int(payload.get('used') or 0)
+                self.stats_label.setText(f"Matching glossary entries: {checked}/{total_entries} checked, {used} used")
+            elif stage == 'starting':
+                total_entries = int(payload.get('total') or 0)
+                total_files = int(payload.get('total_files') or 0)
+                self.stats_label.setText(f"Matching glossary entries: 0/{total_entries} checked, 0 used ({total_files} files)")
+
+        def _apply_hide_unused_entries_result(payload):
+            if payload.get('token') is not getattr(self, '_hide_unused_filter_token', None):
+                return
+            checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
+            if checkbox is None or not checkbox.isChecked():
+                return
+            self._hide_unused_filter_token = None
+            total = int(payload.get('total') or 0)
+            if not payload.get('ok'):
+                _set_all_editor_rows_visible()
+                self.stats_label.setText(f"Hide unused failed: {payload.get('error', 'Unknown error')}")
+                return
+
+            for line in payload.get('errors', []) or []:
+                try:
+                    self.append_log(line)
+                except Exception:
+                    pass
+
+            output_dir = payload.get('output_dir') or ''
+            if payload.get('no_files'):
+                _set_all_editor_rows_visible()
+                self.stats_label.setText(f"No translated output files found in: {output_dir}")
+                return
+
+            used_rows = set(payload.get('used_rows', []))
+            _populate_editor_tree_from_data(used_rows)
+            used_count = self.glossary_tree.topLevelItemCount()
+            self.stats_label.setText(f"Showing {used_count}/{total} used entries in translated output")
+
+        self._hide_unused_filter_bridge.progress.connect(_apply_hide_unused_entries_progress)
+        self._hide_unused_filter_bridge.finished.connect(_apply_hide_unused_entries_result)
 
         def _apply_hide_unused_entries_filter():
             checkbox = getattr(self, 'hide_unused_entries_checkbox', None)
-            total = self.glossary_tree.topLevelItemCount()
+            _column_fields, all_specs = _editor_data_row_specs()
+            total = len(all_specs)
+            self._hide_unused_filter_token = None
             if checkbox is None or not checkbox.isChecked():
                 _set_all_editor_rows_visible()
                 base_stats = getattr(self, '_glossary_editor_base_stats_text', None)
@@ -8993,30 +9099,120 @@ Do not stop after the glossary."""
                 _set_all_editor_rows_visible()
                 self.stats_label.setText("Hide unused entries needs a translated output folder")
                 return
-            try:
-                self.stats_label.setText("Scanning translated output for glossary usage...")
-                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-                output_files = _editor_translated_output_files(output_dir)
-                if not output_files:
-                    _set_all_editor_rows_visible()
-                    self.stats_label.setText("No translated output files found for hide unused entries")
-                    return
-                output_texts = _read_translated_output_texts(output_files)
-                entries = _editor_tree_usage_entries()
-                usage = build_translated_usage_index(entries, output_texts)
-                used_count = 0
-                for row in range(total):
-                    item = self.glossary_tree.topLevelItem(row)
-                    if item is None:
-                        continue
-                    is_used = bool(usage.get(row))
-                    item.setHidden(not is_used)
-                    if is_used:
-                        used_count += 1
-                self.stats_label.setText(f"Showing {used_count}/{total} used entries in translated output")
-            except Exception as exc:
-                _set_all_editor_rows_visible()
-                self.stats_label.setText(f"Hide unused failed: {exc}")
+            token = object()
+            self._hide_unused_filter_token = token
+            entries = _editor_tree_usage_entries()
+            self.stats_label.setText("Scanning translated output for glossary usage...")
+
+            def worker():
+                def emit_progress(payload):
+                    payload = dict(payload or {})
+                    payload['token'] = token
+                    try:
+                        self._hide_unused_filter_bridge.progress.emit(payload)
+                    except RuntimeError:
+                        pass
+
+                try:
+                    output_files = _editor_translated_output_files(output_dir)
+                    if not output_files:
+                        result = {
+                            'ok': True,
+                            'token': token,
+                            'output_dir': output_dir,
+                            'no_files': True,
+                            'total': total,
+                        }
+                    else:
+                        output_texts, errors = _read_translated_output_texts(
+                            output_files,
+                            progress_callback=lambda current, total_files, _name: emit_progress(
+                                {
+                                    'stage': 'reading',
+                                    'current': current,
+                                    'total_files': total_files,
+                                }
+                            ),
+                        )
+                        emit_progress({'stage': 'starting', 'total': total, 'total_files': len(output_texts)})
+                        prepared_outputs = [prepare_translated_output_text(text) for text in output_texts]
+                        used_rows = []
+
+                        def _source_idx_for_entry(entry, fallback_idx):
+                            source_idx = entry.get('source_index', fallback_idx)
+                            try:
+                                return int(source_idx)
+                            except (TypeError, ValueError):
+                                return fallback_idx
+
+                        def _match_entry_chunk(chunk):
+                            chunk_used = []
+                            for fallback_idx, entry in chunk:
+                                source_idx = _source_idx_for_entry(entry, fallback_idx)
+                                if entry_matches_prepared_translated_output(entry, prepared_outputs):
+                                    chunk_used.append(source_idx)
+                            return chunk_used, len(chunk)
+
+                        if entries and prepared_outputs:
+                            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                            worker_count = min(max(1, total), max(2, min(8, os.cpu_count() or 4)))
+                            chunk_size = max(8, min(64, (total + worker_count - 1) // worker_count))
+                            indexed_entries = list(enumerate(entries))
+                            chunks = [
+                                indexed_entries[start:start + chunk_size]
+                                for start in range(0, len(indexed_entries), chunk_size)
+                            ]
+                            checked = 0
+                            last_emit = 0.0
+                            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="GlossaryHideUnused") as executor:
+                                futures = [executor.submit(_match_entry_chunk, chunk) for chunk in chunks]
+                                for future in as_completed(futures):
+                                    chunk_used, chunk_checked = future.result()
+                                    used_rows.extend(chunk_used)
+                                    checked += chunk_checked
+                                    now = time.monotonic()
+                                    if checked == total or now - last_emit >= 0.5:
+                                        emit_progress(
+                                            {
+                                                'stage': 'matching',
+                                                'checked': checked,
+                                                'total': total,
+                                                'used': len(used_rows),
+                                            }
+                                        )
+                                        last_emit = now
+                        else:
+                            emit_progress(
+                                {
+                                    'stage': 'matching',
+                                    'checked': total,
+                                    'total': total,
+                                    'used': 0,
+                                }
+                            )
+                        result = {
+                            'ok': True,
+                            'token': token,
+                            'output_dir': output_dir,
+                            'used_rows': sorted(set(used_rows)),
+                            'errors': errors,
+                            'total': total,
+                        }
+                except Exception as exc:
+                    result = {
+                        'ok': False,
+                        'token': token,
+                        'output_dir': output_dir,
+                        'error': str(exc),
+                        'total': total,
+                    }
+                try:
+                    self._hide_unused_filter_bridge.finished.emit(result)
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, name="GlossaryEditorHideUnused", daemon=True).start()
 
         self._apply_hide_unused_entries_filter = _apply_hide_unused_entries_filter
         self.hide_unused_entries_checkbox.toggled.connect(lambda _checked: _apply_hide_unused_entries_filter())
@@ -9088,7 +9284,7 @@ Do not stop after the glossary."""
 
                     if self.current_glossary_format in ['list', 'token_csv']:
                         try:
-                            row_idx = int(item.text(0)) - 1
+                            row_idx = int(item.data(0, Qt.UserRole))
                         except Exception:
                             row_idx = -1
                         if 0 <= row_idx < len(self.current_glossary_data) and col_key:
@@ -9782,7 +9978,10 @@ Do not stop after the glossary."""
            if hasattr(self, '_push_undo_snapshot'):
                self._push_undo_snapshot()
            
-           row_idx = int(item.text(0)) - 1
+           try:
+               row_idx = int(item.data(0, Qt.UserRole))
+           except Exception:
+               row_idx = -1
            
            if self.current_glossary_format in ['list', 'token_csv']:
                if 0 <= row_idx < len(self.current_glossary_data):
