@@ -28,18 +28,9 @@ _TAG_ENTITY_RE = re.compile(
     r'(&lt;|&LT;|&#0*60;|&#x0*3[cC];)(.*?)(&gt;|&GT;|&#0*62;|&#x0*3[eE];)',
     re.DOTALL,
 )
-_GT_ENTITY = r'(?:&gt;|&GT;|&#0*62;|&#x0*3[eE];|>)'
-_STRAY_P_GT_TEXT = rf'(?<![\w])/?p\s*{_GT_ENTITY}'
-_STRAY_P_GT_AT_P_START_RE = re.compile(
-    rf'(<p\b[^>]*>\s*){_STRAY_P_GT_TEXT}\s*',
-    re.IGNORECASE,
-)
-_STRAY_P_GT_AT_P_END_RE = re.compile(
-    rf'\s*{_STRAY_P_GT_TEXT}(\s*</p>)',
-    re.IGNORECASE,
-)
-_STRAY_P_GT_BETWEEN_P_RE = re.compile(
-    rf'(</p>)\s*{_STRAY_P_GT_TEXT}\s*(?=<p\b)',
+_STRAY_P_GT_USER_RE = re.compile(
+    r"([.,#!$%\^&\*;:{}=\-_`~()?\"'\u2019\u201c\u201d\u00bb\u00ab\]]|<p>)"
+    r"[\u200b\s]*p(?:&gt;|>)[\r\n]*",
     re.IGNORECASE,
 )
 
@@ -75,7 +66,4 @@ def fix_stray_p_gt_artifacts(text: str) -> str:
     if 'p' not in lowered or ('&gt;' not in lowered and '&#' not in lowered and '>' not in text):
         return text
 
-    text = _STRAY_P_GT_BETWEEN_P_RE.sub(r'\1', text)
-    text = _STRAY_P_GT_AT_P_START_RE.sub(r'\1', text)
-    text = _STRAY_P_GT_AT_P_END_RE.sub(r'\1', text)
-    return text
+    return _STRAY_P_GT_USER_RE.sub(r'\1', text)

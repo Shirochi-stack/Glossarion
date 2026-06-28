@@ -8843,7 +8843,7 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(empty_attr_extract_desc)
 
     # Fix stray p&gt; text artifacts (EPUB)
-    stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix")
+    stray_p_gt_epub_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (EPUB) - Gemma Token Fix by TK")
     try:
         if not hasattr(self, 'fix_stray_p_gt_epub_var'):
             self.fix_stray_p_gt_epub_var = self.config.get('fix_stray_p_gt_epub', False)
@@ -9356,7 +9356,7 @@ def _create_processing_options_section(self, parent):
     bs_opts_v.setContentsMargins(20, 5, 0, 0)
     
     # Fix stray p&gt; text artifacts (BeautifulSoup)
-    stray_p_gt_bs_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (BeautifulSoup) - Gemma Token Fix")
+    stray_p_gt_bs_cb = self._create_styled_checkbox("Fix Stray p&gt; Text (BeautifulSoup) - Gemma Token Fix by TK")
     try:
         if not hasattr(self, 'fix_stray_p_gt_bs_var'):
             self.fix_stray_p_gt_bs_var = self.config.get('fix_stray_p_gt_bs', False)
