@@ -5693,7 +5693,7 @@ Recent translations to summarize:
 
         # Show/hide Antigravity proxy controls
         if hasattr(self, 'antigravity_login_btn'):
-            needs_antigravity = (model or '').strip().lower().startswith('antigravity/')
+            needs_antigravity = (model or '').strip().lower().startswith('antigravity')
             if not needs_antigravity:
                 needs_antigravity = self._has_antigravity_in_key_pools()
 
@@ -5861,7 +5861,7 @@ Recent translations to summarize:
         """Check if any enabled key pool contains an enabled Antigravity model."""
         try:
             for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
-                if str(model or '').strip().lower().startswith('antigravity/'):
+                if str(model or '').strip().lower().startswith('antigravity'):
                     return True
         except Exception:
             pass
@@ -6923,35 +6923,43 @@ Recent translations to summarize:
     # ==================================================================
 
     def _update_antigravity_login_status(self):
-        """Update Antigravity proxy button text without exposing token data."""
+        """Update Antigravity button text from cached status only.
+
+        Never call the local proxy here. This method runs from UI paths like
+        model-change, so blocking HTTP here freezes the entire Qt window.
+        """
         try:
-            from antigravity_proxy import get_account_summary
-            summary = get_account_summary()
-            accounts = summary.get("accounts") or []
-            if summary.get("healthy") and accounts:
-                self.antigravity_login_btn.setText(f"✅ Antigravity ({len(accounts)})")
-                self.antigravity_login_btn.setToolTip(
-                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-                    f"{len(accounts)} Google account(s) linked in the local Antigravity proxy.<br>"
-                    "Click to add another Google account.</p></qt>"
-                )
-                self.antigravity_login_btn.setStyleSheet(
-                    "background-color: #28a745; color: white; font-weight: bold; "
-                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
-                )
-            else:
-                self.antigravity_login_btn.setText("🔐 Antigravity Login")
-                self.antigravity_login_btn.setToolTip(
-                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-                    "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
-                    "This stores accounts in the local proxy, not in Glossarion.</p></qt>"
-                )
-                self.antigravity_login_btn.setStyleSheet(
-                    "background-color: #0f766e; color: white; font-weight: bold; "
-                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
-                )
+            summary = getattr(self, '_antigravity_status_data', {}) or {}
+            accounts = summary.get("accounts") or [] if summary.get("healthy") else []
+            if not accounts:
+                # Cheap local-file check only. Do not query the proxy from this UI path.
+                from antigravity_proxy import get_stored_account_summary
+                stored_summary = get_stored_account_summary()
+                stored_accounts = stored_summary.get("accounts") or []
+                if stored_accounts:
+                    self._antigravity_status_data = stored_summary
+                    accounts = stored_accounts
         except Exception:
+            accounts = []
+
+        if accounts:
+            self.antigravity_login_btn.setText(f"✅ Antigravity ({len(accounts)})")
+            self.antigravity_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                f"{len(accounts)} Google account(s) linked in the local Antigravity proxy.<br>"
+                "Click to add another Google account.</p></qt>"
+            )
+            self.antigravity_login_btn.setStyleSheet(
+                "background-color: #28a745; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
+        else:
             self.antigravity_login_btn.setText("🔐 Antigravity Login")
+            self.antigravity_login_btn.setToolTip(
+                "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
+                "This stores accounts in the local proxy, not in Glossarion.</p></qt>"
+            )
             self.antigravity_login_btn.setStyleSheet(
                 "background-color: #0f766e; color: white; font-weight: bold; "
                 "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -7689,7 +7697,7 @@ Recent translations to summarize:
         model_btn_layout.addWidget(self.authgem_project_combo)
         self._authgem_combo_in_own_row = False  # track current placement
 
-        # Antigravity proxy controls (visible only for antigravity/ models)
+        # Antigravity proxy controls (visible only for antigravity* models)
         self.antigravity_login_btn = QPushButton("🔐 Antigravity Login")
         self.antigravity_login_btn.setStyleSheet(
             "background-color: #0f766e; color: white; font-weight: bold; "

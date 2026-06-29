@@ -78,6 +78,10 @@ def test_normalize_model_name_prefixes_gemini_ids_for_upstream_proxy():
         antigravity_proxy._normalize_model_name("antigravity/gemini-2.5-pro")
         == "antigravity-gemini-2.5-pro"
     )
+    assert (
+        antigravity_proxy._normalize_model_name("antigravity2/gemini-3.5-flash-medium")
+        == "antigravity-gemini-3.5-flash-medium"
+    )
 
 
 def test_normalize_model_name_prefixes_sandbox_ids_for_upstream_proxy():
@@ -211,11 +215,42 @@ def test_antigravity_token_limit_log_reports_clamp():
     ]
 
 
-def test_min_accounts_for_auth_retry_requires_new_account_on_quota(monkeypatch):
-    monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
+def test_min_accounts_for_auth_retry_follows_numbered_prefix_slots():
+    assert antigravity_proxy._min_accounts_for_auth_retry("Quota Exhausted: All accounts failed") == 1
+    assert antigravity_proxy._min_accounts_for_auth_retry("No accounts configured", account_id=2) == 2
 
-    assert antigravity_proxy._min_accounts_for_auth_retry("Quota Exhausted: All accounts failed") == 2
-    assert antigravity_proxy._min_accounts_for_auth_retry("No accounts configured") == 1
+
+def test_numbered_antigravity_prefix_forces_account_header(monkeypatch):
+    fake_summary = {
+        "healthy": True,
+        "accounts": [
+            {"email": "first@example.test"},
+            {"email": "second@example.test"},
+        ],
+    }
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "get_account_summary",
+        lambda: fake_summary,
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "get_stored_account_summary",
+        lambda: fake_summary,
+    )
+
+    assert antigravity_proxy._extract_antigravity_account_id("antigravity/gemini-2.5-flash") == 1
+    assert antigravity_proxy._extract_antigravity_account_id("antigravity1/gemini-2.5-flash") == 2
+    assert antigravity_proxy._extract_antigravity_account_id("antigravity12/gemini-2.5-flash") == 13
+
+    headers = antigravity_proxy._build_headers(account_id=2)
+
+    assert headers["X-Antigravity-Account"] == "second@example.test"
+    assert headers["X-Client-Id"] == "glossarion-antigravity2"
+    assert (
+        antigravity_proxy._account_slot_log_message(2, headers)
+        == "🧭 Antigravity: using account slot #2 (second@example.test)"
+    )
 
 
 def test_stream_chat_with_httpx_disables_compression(monkeypatch):
@@ -312,35 +347,32 @@ def test_utf8_html_output_helper_adds_charset_to_fragments_and_documents():
     assert document.index("<head>") < document.index("<body>")
 
 
-def test_model_options_include_current_antigravity_catalog_entries():
-    options = set(get_model_options())
-
-    expected = {
-        "antigravity/claude-sonnet-4-6",
-        "antigravity/claude-sonnet-4-6-thinking-low",
-        "antigravity/claude-sonnet-4-6-thinking-medium",
-        "antigravity/claude-sonnet-4-6-thinking-high",
-        "antigravity/claude-sonnet-4-5",
-        "antigravity/claude-sonnet-4-5-thinking-low",
-        "antigravity/claude-sonnet-4-5-thinking-medium",
-        "antigravity/claude-sonnet-4-5-thinking-high",
-        "antigravity/claude-opus-4-6-thinking-low",
-        "antigravity/claude-opus-4-6-thinking-medium",
-        "antigravity/claude-opus-4-6-thinking-high",
-        "antigravity/gemini-3.5-flash",
-        "antigravity/gemini-3.5-flash-medium",
-        "antigravity/gemini-3.5-flash-high",
-        "antigravity/gemini-3.5-flash-low",
-        "antigravity/gemini-3.1-pro-low",
-        "antigravity/gemini-3.1-pro-high",
-        "antigravity/gemini-3-pro-low",
-        "antigravity/gemini-3-pro-high",
-        "antigravity/gemini-3-flash",
-        "antigravity/gemini-2.5-flash",
-        "antigravity/gemini-2.5-pro",
+def test_model_options_match_current_antigravity_dashboard_catalog():
+    antigravity_options = {
+        option for option in get_model_options()
+        if str(option).startswith("antigravity/")
     }
 
-    assert expected.issubset(options)
+    expected = {
+        "antigravity/gemini-3-flash",
+        "antigravity/gemini-3-flash-agent",
+        "antigravity/gemini-3.1-flash-image",
+        "antigravity/gemini-3.1-flash-lite",
+        "antigravity/gemini-3.5-flash-extra-low",
+        "antigravity/gemini-3.5-flash-low",
+        "antigravity/gemini-3.1-pro-high",
+        "antigravity/gemini-3.1-pro-low",
+        "antigravity/gemini-pro-agent",
+        "antigravity/gemini-2.5-flash",
+        "antigravity/gemini-2.5-flash-lite",
+        "antigravity/gemini-2.5-flash-thinking",
+        "antigravity/gemini-2.5-pro",
+        "antigravity/claude-opus-4-6-thinking",
+        "antigravity/claude-sonnet-4-6",
+        "antigravity/gpt-oss-120b-medium",
+    }
+
+    assert antigravity_options == expected
 
 
 def test_latest_proxy_version_prefers_newer_github_tag_without_git(monkeypatch):
@@ -455,6 +487,39 @@ def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):
     assert "account.capabilities = {};" in manager_file.read_text(encoding="utf-8")
 
 
+def test_patch_runtime_forced_account_support(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    manager_file = tmp_path / "src" / "auth" / "manager.ts"
+    server_file.parent.mkdir(parents=True)
+    manager_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        'import { initManager, getBestAccount, updateAccountUsage, addAccount, getAccounts, removeAccount } from "./auth/manager";\n'
+        '      const clientId = req.headers.get("x-client-id") || url.searchParams.get("client_id") || "unknown";\n'
+        '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);\n'
+        '            if (!account && !isSandboxOnlyModel && !isCliOnlyModel) {\n'
+        '            }\n'
+        '            if (!account) {\n'
+        '                account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, false);\n'
+        '            }\n',
+        encoding="utf-8",
+    )
+    manager_file.write_text(
+        "export function getAccounts() { return accounts; }\n"
+        "async function ensureAccountReady(account: AntigravityAccount): Promise<AntigravityAccount | null> { return account; }\n",
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_forced_account_support(str(tmp_path))
+
+    server = server_file.read_text(encoding="utf-8")
+    manager = manager_file.read_text(encoding="utf-8")
+    assert "getAccountByEmail" in server
+    assert "forcedAccountEmail" in server
+    assert "X-Antigravity-Account" in server
+    assert "!account && !forcedAccountEmail" in server
+    assert "export async function getAccountByEmail" in manager
+
+
 def test_account_summary_strips_tokens_and_reports_unsupported_models():
     summary = antigravity_proxy._safe_account_summary(
         {
@@ -474,6 +539,37 @@ def test_account_summary_strips_tokens_and_reports_unsupported_models():
     assert summary["email"] == "user@example.test"
     assert summary["quota"][0]["name"] == "Gemini"
     assert summary["unsupported_models"] == ["antigravity-gemini-3.5-flash-high"]
+
+
+def test_stored_account_summary_detects_login_without_proxy_and_strips_tokens(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "antigravity-accounts.json"
+    accounts_file.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "email": "stored@example.test",
+                        "accessToken": "secret-access-token",
+                        "refreshToken": "secret-refresh-token",
+                        "projectId": "project-id",
+                        "healthScore": 88,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTIGRAVITY_ACCOUNTS_FILE", str(accounts_file))
+    monkeypatch.delenv("ACCOUNTS_FILE", raising=False)
+
+    summary = antigravity_proxy.get_stored_account_summary()
+
+    assert summary["healthy"] is True
+    assert summary["stored"] is True
+    assert summary["accounts"][0]["email"] == "stored@example.test"
+    assert "accessToken" not in summary["accounts"][0]
+    assert "refreshToken" not in summary["accounts"][0]
+    assert antigravity_proxy._account_email_for_id(1) == "stored@example.test"
 
 
 def test_find_proxy_launch_command_uses_npx_bun_for_downloaded_runtime(tmp_path, monkeypatch):

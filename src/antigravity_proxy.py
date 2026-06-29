@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-tiers-reset-capabilities"
+RUNTIME_PATCH_VERSION = "2026-06-29-numbered-antigravity-accounts"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -412,6 +412,92 @@ def _patch_runtime_account_reset_support(runtime_dir: str) -> bool:
     return ok
 
 
+def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
+    """Allow Glossarion to route antigravityN/ prefixes to proxy account slots."""
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    manager_path = os.path.join(runtime_dir, "src", "auth", "manager.ts")
+    if not os.path.exists(server_path) or not os.path.exists(manager_path):
+        return False
+
+    with open(manager_path, "r", encoding="utf-8") as f:
+        manager = f.read()
+
+    manager_marker = "export async function getAccountByEmail"
+    if manager_marker not in manager:
+        needle = "export function getAccounts() { return accounts; }\n"
+        replacement = (
+            needle
+            + "\n"
+            + "export async function getAccountByEmail(email: string): Promise<AntigravityAccount | null> {\n"
+            + "  const normalized = (email || \"\").trim().toLowerCase();\n"
+            + "  if (!normalized) return null;\n"
+            + "  const account = accounts.find(a => a.email.toLowerCase() === normalized);\n"
+            + "  if (!account || !account.refreshToken || account.challenge) return null;\n"
+            + "  return await ensureAccountReady(account);\n"
+            + "}\n"
+        )
+        if needle not in manager:
+            return False
+        manager = manager.replace(needle, replacement, 1)
+        with open(manager_path, "w", encoding="utf-8") as f:
+            f.write(manager)
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+
+    if "getAccountByEmail" not in server:
+        server = server.replace(
+            "getAccounts, removeAccount",
+            "getAccounts, getAccountByEmail, removeAccount",
+            1,
+        )
+
+    if "forcedAccountEmail" not in server:
+        needle = '      const clientId = req.headers.get("x-client-id") || url.searchParams.get("client_id") || "unknown";'
+        replacement = (
+            needle
+            + '\n      const forcedAccountEmail = (req.headers.get("x-antigravity-account") '
+            + '|| url.searchParams.get("antigravity_account") || "").trim().toLowerCase();'
+        )
+        if needle not in server:
+            return False
+        server = server.replace(needle, replacement, 1)
+
+    old_select = '            let account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);'
+    new_select = (
+        '            let account = forcedAccountEmail\n'
+        '                ? await getAccountByEmail(forcedAccountEmail)\n'
+        '                : await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, true);\n'
+        '            if (forcedAccountEmail && account) {\n'
+        '                console.log(`[Account] Forced account ${account.email} via X-Antigravity-Account`);\n'
+        '            }'
+    )
+    if old_select in server and "Forced account" not in server:
+        server = server.replace(old_select, new_select, 1)
+
+    server = server.replace(
+        "if (!account && !isSandboxOnlyModel && !isCliOnlyModel) {",
+        "if (!account && !forcedAccountEmail && !isSandboxOnlyModel && !isCliOnlyModel) {",
+        1,
+    )
+    server = server.replace(
+        "if (!account) {\n                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", openaiBody.model, clientId, triedEmails, false);\n            }",
+        "if (!account && !forcedAccountEmail) {\n                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", openaiBody.model, clientId, triedEmails, false);\n            }",
+        1,
+    )
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+
+    return (
+        manager_marker in manager
+        and "getAccountByEmail" in server
+        and "forcedAccountEmail" in server
+        and "Forced account" in server
+        and "!account && !forcedAccountEmail" in server
+    )
+
+
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
         os.path.join(runtime_dir, "package.json")
@@ -499,6 +585,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
         if not _patch_runtime_account_reset_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
+        if not _patch_runtime_forced_account_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for forced account routing")
         _write_runtime_metadata(archive_root, release, client_version)
 
         _copy_runtime_tree(archive_root, runtime_dir)
@@ -543,6 +631,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_gemini35_flash_support(runtime_dir):
             return False
         if not _patch_runtime_account_reset_support(runtime_dir):
+            return False
+        if not _patch_runtime_forced_account_support(runtime_dir):
             return False
         _write_runtime_metadata(runtime_dir, release, client_version)
         (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
@@ -610,14 +700,82 @@ def _get_proxy_port() -> int:
     return 3000
 
 
-def _build_headers() -> Dict[str, str]:
+def _extract_antigravity_account_id(model: str) -> Optional[int]:
+    """Return the 1-based saved-account slot for Antigravity prefixes.
+
+    ``antigravity/`` forces the first linked proxy account. Numbered prefixes
+    are additional slots, so ``antigravity1/`` forces account #2,
+    ``antigravity2/`` forces account #3, and so on.
+    """
+    clean = (model or "").strip()
+    numbered = re.match(r"^antigravity(\d{1,4})(?:/|$)", clean, re.IGNORECASE)
+    if numbered:
+        return int(numbered.group(1)) + 1
+    if re.match(r"^antigravity(?:/|-|$)", clean, re.IGNORECASE):
+        return 1
+    return None
+
+
+def _strip_antigravity_provider_prefix(model: str) -> str:
+    clean = (model or "").strip()
+    match = re.match(r"^antigravity\d{0,4}/(.*)", clean, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    if re.match(r"^antigravity\d{0,4}$", clean, re.IGNORECASE):
+        return ""
+    return clean
+
+
+def _account_email_for_id(account_id: Optional[int]) -> Optional[str]:
+    if not account_id:
+        return None
+    try:
+        account_index = int(account_id) - 1
+    except Exception:
+        return None
+    if account_index < 0:
+        return None
+
+    summary = get_stored_account_summary()
+    accounts = summary.get("accounts") if isinstance(summary, dict) else None
+    if not isinstance(accounts, list) or account_index >= len(accounts):
+        summary = get_account_summary()
+        accounts = summary.get("accounts") if isinstance(summary, dict) else None
+    if not isinstance(accounts, list) or account_index >= len(accounts):
+        return None
+
+    account = accounts[account_index]
+    if not isinstance(account, dict):
+        return None
+    email = str(account.get("email") or "").strip()
+    return email or None
+
+
+def _build_headers(account_id: Optional[int] = None) -> Dict[str, str]:
     """Build HTTP headers for the OpenAI-compatible proxy."""
-    return {
+    headers = {
         "Content-Type": "application/json",
         # The upstream server currently does not validate this, but including an
         # OpenAI-shaped Authorization header keeps generic middleware happy.
         "Authorization": "Bearer sk-antigravity",
     }
+    if account_id:
+        email = _account_email_for_id(account_id)
+        if not email:
+            raise RuntimeError(
+                f"Antigravity account slot #{account_id} is not linked. "
+                f"Open {get_proxy_url()}{OAUTH_START_ENDPOINT} and add that Google account."
+            )
+        headers["X-Antigravity-Account"] = email
+        headers["X-Client-Id"] = f"glossarion-antigravity{account_id}"
+    return headers
+
+
+def _account_slot_log_message(account_id: int, headers: Dict[str, str]) -> str:
+    email = str(headers.get("X-Antigravity-Account") or "").strip()
+    if email:
+        return f"🧭 Antigravity: using account slot #{account_id} ({email})"
+    return f"🧭 Antigravity: using account slot #{account_id}"
 
 
 def invalidate_api_key_cache() -> None:
@@ -681,12 +839,8 @@ def _normalize_model_name(model: str) -> str:
     namespace so requests stay on the upstream sandbox/agent route instead of
     accidentally falling into the CLI-pool Gemini route.
     """
-    clean = (model or "").strip()
+    clean = _strip_antigravity_provider_prefix(model)
     lower = clean.lower()
-
-    if lower.startswith("antigravity/"):
-        clean = clean.split("/", 1)[1].lstrip("/")
-        lower = clean.lower()
 
     if lower.startswith("antigravity-"):
         return clean
@@ -856,11 +1010,9 @@ def _error_text_suggests_more_accounts(error_text: str) -> bool:
     )
 
 
-def _min_accounts_for_auth_retry(error_text: str = "") -> int:
-    current = _proxy_account_count()
-    if _error_text_suggests_more_accounts(error_text):
-        return current + 1
-    return max(1, current)
+def _min_accounts_for_auth_retry(error_text: str = "", account_id: Optional[int] = None) -> int:
+    del error_text  # Account-slot prefixes, not quota text, decide how many accounts are needed.
+    return max(1, int(account_id or 1))
 
 
 def _should_wait_for_auth(resp: requests.Response) -> bool:
@@ -969,6 +1121,43 @@ def _wait_for_auth(
         _log(f"Still waiting for Antigravity account linking... ({elapsed}s / {max_wait}s)")
 
     return None
+
+
+def _ensure_account_slot_available(
+    account_id: Optional[int],
+    proxy_url: str,
+    log_fn=None,
+    max_wait: float = 180,
+    poll_interval: float = 2,
+) -> None:
+    """Open OAuth and wait until the requested antigravityN/ account slot exists."""
+    if not account_id:
+        return
+    account_id = int(account_id)
+    stored_accounts = get_stored_account_summary().get("accounts") or []
+    if isinstance(stored_accounts, list) and len(stored_accounts) >= account_id:
+        return
+    if _proxy_account_count() >= account_id:
+        return
+
+    _log = log_fn or _log_noop
+    _open_auth_browser_once(proxy_url, log_fn)
+    _log(f"🔐 Antigravity: waiting for account slot #{account_id} to be linked...")
+
+    elapsed = 0.0
+    while elapsed < max_wait:
+        if _cancel_event.is_set():
+            raise RuntimeError("Antigravity: account linking cancelled by user")
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        if _proxy_account_count() >= account_id:
+            _log(f"✅ Antigravity: account slot #{account_id} detected.")
+            return
+
+    raise RuntimeError(
+        f"Antigravity account slot #{account_id} is not linked yet.\n"
+        f"Open {proxy_url}{OAUTH_START_ENDPOINT}, add the Google account, then retry."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1500,59 @@ def _safe_account_summary(account: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _accounts_file_path() -> str:
+    return (
+        os.environ.get("ANTIGRAVITY_ACCOUNTS_FILE", "").strip()
+        or os.environ.get("ACCOUNTS_FILE", "").strip()
+        or os.path.join(_get_proxy_data_dir(), "antigravity-accounts.json")
+    )
+
+
+def _load_stored_accounts() -> List[Dict[str, Any]]:
+    path = _accounts_file_path()
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        raw_accounts = data
+    elif isinstance(data, dict):
+        raw_accounts = data.get("accounts") or []
+    else:
+        raw_accounts = []
+
+    return [
+        account for account in raw_accounts
+        if isinstance(account, dict) and account.get("refreshToken")
+    ]
+
+
+def get_stored_account_summary() -> Dict[str, Any]:
+    """Return sanitized account data from the local proxy accounts file.
+
+    This performs no network I/O and intentionally strips OAuth tokens.
+    """
+    try:
+        accounts = [_safe_account_summary(account) for account in _load_stored_accounts()]
+    except Exception as exc:
+        return {
+            "healthy": False,
+            "stored": True,
+            "error": f"Could not read stored Antigravity accounts: {exc}",
+            "accounts": [],
+        }
+
+    return {
+        "healthy": bool(accounts),
+        "stored": True,
+        "version": "stored",
+        "strategy": "stored",
+        "accounts": accounts,
+        "error": "" if accounts else "No stored Antigravity accounts.",
+    }
+
+
 def get_account_summary() -> Dict[str, Any]:
     """Return sanitized proxy status for GUI logging.
 
@@ -1352,11 +1594,16 @@ def reset_account_rankings(log_fn=None) -> Dict[str, Any]:
 # Send request helpers
 # ---------------------------------------------------------------------------
 
-def _post_chat(payload: Dict[str, Any], timeout: float, stream: bool) -> requests.Response:
+def _post_chat(
+    payload: Dict[str, Any],
+    timeout: float,
+    stream: bool,
+    headers: Optional[Dict[str, str]] = None,
+) -> requests.Response:
     return requests.post(
         f"{get_proxy_url()}{CHAT_COMPLETIONS_ENDPOINT}",
         json=payload,
-        headers=_build_headers(),
+        headers=headers or _build_headers(),
         timeout=timeout,
         stream=stream,
     )
@@ -1408,18 +1655,24 @@ def send_message(
     max_tokens: int = 8192,
     timeout: float = 300,
     log_fn=None,
+    account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a non-streaming message to frieser/antigravity-proxy."""
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
+    account_id = account_id or _extract_antigravity_account_id(model) or 1
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
     _log = log_fn or _log_noop
+    _ensure_account_slot_available(account_id, proxy_url, _log)
+    headers = _build_headers(account_id)
     _log(f"🚀 Antigravity: sending to {proxy_url} (model={payload['model']})")
+    if account_id:
+        _log(_account_slot_log_message(account_id, headers))
     _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
-        resp = _post_chat(payload, timeout=timeout, stream=False)
+        resp = _post_chat(payload, timeout=timeout, stream=False, headers=headers)
     except requests.ConnectionError:
         _raise_connection_refused()
     except requests.Timeout:
@@ -1433,12 +1686,12 @@ def send_message(
         auth_resp = _wait_for_auth(
             url,
             payload,
-            _build_headers(),
+            headers,
             proxy_url,
             log_fn,
             stream=False,
             request_timeout=timeout,
-            min_account_count=_min_accounts_for_auth_retry(error_text),
+            min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
         )
         if auth_resp is not None:
             resp = auth_resp
@@ -1615,18 +1868,24 @@ def send_message_stream(
     timeout: float = 300,
     log_fn=None,
     log_stream: bool = True,
+    account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a streaming message to frieser/antigravity-proxy."""
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
+    account_id = account_id or _extract_antigravity_account_id(model) or 1
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
     _log = log_fn or _log_noop
+    _ensure_account_slot_available(account_id, proxy_url, _log)
+    headers = _build_headers(account_id)
     _log(f"🌊 Antigravity: streaming from {proxy_url} (model={payload['model']})")
+    if account_id:
+        _log(_account_slot_log_message(account_id, headers))
     _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
-        with _stream_chat_with_httpx(url, payload, _build_headers(), timeout) as resp:
+        with _stream_chat_with_httpx(url, payload, headers, timeout) as resp:
             if resp.status_code != 200:
                 try:
                     error_text = resp.read().decode("utf-8", errors="replace")[:1000]
@@ -1637,13 +1896,13 @@ def send_message_stream(
                     auth_resp = _wait_for_auth(
                         url,
                         payload,
-                        _build_headers(),
+                        headers,
                         proxy_url,
                         log_fn,
                         stream=True,
                         request_timeout=timeout,
                         prefer_httpx_stream=True,
-                        min_account_count=_min_accounts_for_auth_retry(error_text),
+                        min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
                     )
                     if auth_resp is not None:
                         return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
@@ -1662,13 +1921,13 @@ def send_message_stream(
                     auth_resp = _wait_for_auth(
                         url,
                         payload,
-                        _build_headers(),
+                        headers,
                         proxy_url,
                         log_fn,
                         stream=True,
                         request_timeout=timeout,
                         prefer_httpx_stream=True,
-                        min_account_count=_min_accounts_for_auth_retry(error_text),
+                        min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
                     )
                     if auth_resp is not None:
                         return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
@@ -1688,7 +1947,7 @@ def send_message_stream(
         raise
 
     try:
-        resp = _post_chat(payload, timeout=timeout, stream=True)
+        resp = _post_chat(payload, timeout=timeout, stream=True, headers=headers)
     except requests.ConnectionError:
         _raise_connection_refused()
     except requests.Timeout:
@@ -1703,12 +1962,12 @@ def send_message_stream(
         auth_resp = _wait_for_auth(
             url,
             payload,
-            _build_headers(),
+            headers,
             proxy_url,
             log_fn,
             stream=True,
             request_timeout=timeout,
-            min_account_count=_min_accounts_for_auth_retry(error_text),
+            min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
         )
         if auth_resp is not None:
             resp = auth_resp
@@ -1737,12 +1996,12 @@ def send_message_stream(
             auth_resp = _wait_for_auth(
                 url,
                 payload,
-                _build_headers(),
+                headers,
                 proxy_url,
                 log_fn,
                 stream=True,
                 request_timeout=timeout,
-                min_account_count=_min_accounts_for_auth_retry(error_text),
+                min_account_count=_min_accounts_for_auth_retry(error_text, account_id),
             )
             if auth_resp is not None:
                 return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)

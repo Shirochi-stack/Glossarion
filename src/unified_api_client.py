@@ -1999,13 +1999,30 @@ class UnifiedClient:
     def _strip_antigravity_model_prefix(model: str) -> str:
         model_clean = (model or '').strip()
         model_lower = model_clean.lower()
-        if model_lower.startswith('antigravity/'):
-            return model_clean.split('/', 1)[1].lstrip('/')
+        m = re.match(r'^antigravity\d{0,4}/(.*)', model_clean, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
         if model_lower.startswith('antigravity-'):
             return model_clean[len('antigravity-'):]
+        if re.match(r'^antigravity\d{0,4}$', model_clean, re.IGNORECASE):
+            return ''
         if model_lower.startswith('antigravity'):
             return model_clean[len('antigravity'):].lstrip('/-')
         return model_clean
+
+    @staticmethod
+    def _extract_antigravity_account_id(model: str) -> Optional[int]:
+        """Extract the 1-based saved-account slot from Antigravity prefixes.
+
+        ``antigravity/`` is account #1; ``antigravity1/`` is account #2.
+        """
+        clean = (model or '').strip()
+        numbered = re.match(r'^antigravity(\d{1,4})(?:/|$)', clean, re.IGNORECASE)
+        if numbered:
+            return int(numbered.group(1)) + 1
+        if re.match(r'^antigravity(?:/|-|$)', clean, re.IGNORECASE):
+            return 1
+        return None
 
     def _is_antigravity_model(self) -> bool:
         model_lower = (getattr(self, 'model', '') or '').strip().lower()
@@ -24823,8 +24840,10 @@ class UnifiedClient:
 
         Uses frieser/antigravity-proxy (localhost:3000) which proxies to
         Google Cloud Code through an OpenAI-compatible API. Models are prefixed
-        with 'antigravity/' (e.g. antigravity/claude-sonnet-4-6,
-        antigravity/gemini-3-flash).
+        with 'antigravity/' or 'antigravityN/' (e.g.
+        antigravity/claude-sonnet-4-6, antigravity1/gemini-3-flash).
+        The unnumbered prefix forces account #1; numbered variants force
+        subsequent account slots.
         """
         if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
             raise UnifiedClientError(
@@ -24843,12 +24862,8 @@ class UnifiedClient:
                     error_type="config_error"
                 )
 
-        # Strip the antigravity/ prefix to get the actual model name
-        actual_model = self.model
-        for prefix in ('antigravity/', 'antigravity'):
-            if actual_model.startswith(prefix):
-                actual_model = actual_model[len(prefix):].lstrip('/')
-                break
+        account_id = self._extract_antigravity_account_id(self.model) or 1
+        actual_model = self._strip_antigravity_model_prefix(self.model)
         if not actual_model:
             actual_model = 'claude-sonnet-4-6'  # sensible default
         requested_max_tokens = max_tokens
@@ -24864,7 +24879,6 @@ class UnifiedClient:
                 f"🎚️ Antigravity: max_tokens clamped {requested_int:,} -> {clamped_int:,} "
                 f"for model {actual_model}"
             )
-
         max_retries = self._get_max_retries()
         last_error = None
 
@@ -24899,6 +24913,7 @@ class UnifiedClient:
                     timeout=self.request_timeout,
                     log_fn=print,
                     log_stream=log_stream,
+                    account_id=account_id,
                 )
 
                 content = result.get("content", "")
