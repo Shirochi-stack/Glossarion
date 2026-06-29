@@ -3275,6 +3275,13 @@ def parse_api_response(response_text: str) -> List[Dict]:
     # Get enabled types from custom configuration
     custom_types = get_custom_entry_types()
     enabled_types = [t for t, cfg in custom_types.items() if cfg.get('enabled', True)]
+
+    def _looks_like_gender_value(value) -> bool:
+        normalized = _normalize_gender_value(value)
+        return normalized in {
+            'male', 'female', 'unknown', 'nonbinary', 'non-binary',
+            'ambiguous', 'mixed', 'various', 'n/a', 'na', 'none', '-'
+        }
     
     # First try JSON parsing
     try:
@@ -3476,29 +3483,54 @@ def parse_api_response(response_text: str) -> List[Dict]:
             parts = row
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
+                normalized_entry_type = _normalize_entry_type(entry_type, enabled_types)
 
                 # Check if type is enabled
                 if not _is_entry_type_accepted(entry_type, enabled_types):
                     continue
 
                 entry = {
-                    'type': _normalize_entry_type(entry_type, enabled_types),
+                    'type': normalized_entry_type,
                     'raw_name': parts[1],
                     'translated_name': parts[2]
                 }
 
                 # Add gender if type supports it and it's provided
-                type_config = custom_types.get(entry_type, {})
-                if type_config.get('has_gender', False) and len(parts) > 3 and parts[3]:
-                    entry['gender'] = parts[3]
-                elif type_config.get('has_gender', False):
-                    entry['gender'] = 'Unknown'
-
-                # Add any custom fields
+                type_config = custom_types.get(normalized_entry_type, custom_types.get(entry_type, {}))
+                has_gender_field = bool(type_config.get('has_gender', False))
                 custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                 try:
                     custom_fields = json.loads(custom_fields_json)
-                    start_idx = 4 if type_config.get('has_gender', False) else 3
+                except Exception:
+                    custom_fields = []
+                description_active = _find_description_field_casing(custom_fields) is not None
+                start_idx = 4 if has_gender_field else 3
+
+                if has_gender_field and len(parts) > 3:
+                    possible_gender = str(parts[3] or '').strip()
+                    if possible_gender and not (
+                        description_active
+                        and len(parts) == 4
+                        and not _looks_like_gender_value(possible_gender)
+                    ):
+                        entry['gender'] = possible_gender
+                    else:
+                        entry['gender'] = 'Unknown'
+                        if possible_gender:
+                            # Gender-enabled type omitted the gender column and
+                            # placed description in the fourth position.
+                            start_idx = 3
+                elif has_gender_field:
+                    entry['gender'] = 'Unknown'
+                elif len(parts) > 4 and not str(parts[3] or '').strip():
+                    # Some no-header responses still follow the universal
+                    # type,raw,translated,gender,description layout. For
+                    # non-gender types that fourth column is just a blank
+                    # placeholder, so custom fields begin after it.
+                    start_idx = 4
+
+                # Add any custom fields
+                try:
                     for i, field in enumerate(custom_fields):
                         if len(parts) > start_idx + i:
                             field_value = parts[start_idx + i]

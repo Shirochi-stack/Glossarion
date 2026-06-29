@@ -100,6 +100,7 @@ tests/**
 !tests/test_google_free_translate.py
 !tests/test_gemini_free_budget.py
 !tests/test_glossary_dedup_logging.py
+!tests/test_extract_glossary_parser.py
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_antigravity_proxy.py
 junktests/

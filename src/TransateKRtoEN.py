@@ -29,7 +29,10 @@ from unified_api_client import (
     UnifiedClientError,
     defer_batch_log,
     extend_deferred_batch_logs,
+    get_current_thread_actual_request_key_identifier,
+    get_current_thread_actual_request_model,
     pop_deferred_batch_logs,
+    set_current_thread_actual_request_model,
 )
 
 # Translation thread submission throttling (batch) to align queued logs with actual delay
@@ -37,6 +40,58 @@ _translation_thread_submit_lock = threading.Lock()
 _translation_last_thread_submit = 0.0
 _single_pass_glossary_lock = threading.Lock()
 _single_pass_glossary_active_indices = set()
+
+
+def _clean_actual_request_metadata_value(value):
+    text = str(value or "").strip()
+    return text or None
+
+
+def _capture_thread_actual_request_metadata():
+    try:
+        model = _clean_actual_request_metadata_value(get_current_thread_actual_request_model())
+    except Exception:
+        model = None
+    try:
+        key_identifier = _clean_actual_request_metadata_value(get_current_thread_actual_request_key_identifier())
+    except Exception:
+        key_identifier = None
+    return model, key_identifier
+
+
+def _install_actual_request_metadata(model=None, key_identifier=None):
+    try:
+        set_current_thread_actual_request_model(model, key_identifier)
+    except Exception:
+        pass
+
+
+def _aggregate_actual_request_metadata(metadata_items):
+    def _unique(values):
+        result = []
+        seen = set()
+        for value in values:
+            cleaned = _clean_actual_request_metadata_value(value)
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            result.append(cleaned)
+        return result
+
+    pairs = [item for item in (metadata_items or []) if isinstance(item, (tuple, list))]
+    models = _unique((item[0] if len(item) > 0 else None) for item in pairs)
+    keys = _unique((item[1] if len(item) > 1 else None) for item in pairs)
+
+    def _compact(values):
+        if not values:
+            return None
+        if len(values) == 1:
+            return values[0]
+        shown = values[:3]
+        suffix = f", +{len(values) - 3} more" if len(values) > 3 else ""
+        return "mixed: " + ", ".join(shown) + suffix
+
+    return _compact(models), _compact(keys)
 import hashlib
 import tempfile
 import unicodedata
@@ -2522,25 +2577,31 @@ class ProgressManager:
         model_name = str(value or "").strip()
         return model_name or None
 
-    def _current_model_name(self, existing_info=None, *, prefer_thread=False):
+    @staticmethod
+    def _clean_key_identifier(value):
+        key_identifier = str(value or "").strip()
+        return key_identifier or None
+
+    def _current_request_metadata(self, existing_info=None, *, prefer_thread=False):
         if isinstance(existing_info, dict):
             existing_model = self._clean_model_name(existing_info.get("model_name") or existing_info.get("model"))
+            existing_key = self._clean_key_identifier(existing_info.get("key_identifier"))
         else:
             existing_model = None
-        thread_model = None
-        try:
-            from unified_api_client import get_current_thread_actual_request_model
-            thread_model = self._clean_model_name(get_current_thread_actual_request_model())
-        except Exception:
-            thread_model = None
+            existing_key = None
+        thread_model, thread_key = _capture_thread_actual_request_metadata()
+        thread_model = self._clean_model_name(thread_model)
+        thread_key = self._clean_key_identifier(thread_key)
         if prefer_thread and thread_model:
-            return thread_model
-        return existing_model
+            return thread_model, thread_key
+        return existing_model, existing_key
 
     def _apply_model_info(self, chapter_info, existing_info=None, *, prefer_thread=False):
-        model_name = self._current_model_name(existing_info, prefer_thread=prefer_thread)
+        model_name, key_identifier = self._current_request_metadata(existing_info, prefer_thread=prefer_thread)
         if model_name:
             chapter_info["model_name"] = model_name
+        if key_identifier:
+            chapter_info["key_identifier"] = key_identifier
         return chapter_info
 
     def _dedup_by_output(self):
@@ -6572,6 +6633,7 @@ class BatchTranslationProcessor:
             
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
+            chunk_request_metadata = [None] * total_chunks
             chunks_lock = threading.Lock()
             chapter_truncated_event = threading.Event()
 
@@ -6581,6 +6643,21 @@ class BatchTranslationProcessor:
             def process_chunk(chunk_data):
                 """Process a single chunk in parallel"""
                 chunk_html, chunk_idx, chunk_total = chunk_data
+                chunk_actual_model = None
+                chunk_actual_key = None
+
+                def _chunk_result(result_value, raw_obj_value, is_truncated_value, finish_reason_value,
+                                  actual_model=None, actual_key=None):
+                    return (
+                        result_value,
+                        chunk_idx,
+                        raw_obj_value,
+                        is_truncated_value,
+                        finish_reason_value,
+                        actual_model,
+                        actual_key,
+                    )
+
                 try:
                     previous_chunk_html = chunk_source_by_idx.get(int(chunk_idx) - 1, "")
                 except Exception:
@@ -6591,8 +6668,7 @@ class BatchTranslationProcessor:
                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                     wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
                     if not (graceful_stop_active and wait_for_chunks and chunk_total > 1):
-                        # Return 5 values to match expected signature
-                        return None, chunk_idx, None, False, "cancelled"
+                        return _chunk_result(None, None, False, "cancelled")
                     # If wait_for_chunks is enabled, continue processing
                 
                 # Apply emergency glossary compliance pre-edit
@@ -6735,7 +6811,7 @@ class BatchTranslationProcessor:
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
                     print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
-                    return None, chunk_idx, None, False, "chapter_abort"
+                    return _chunk_result(None, None, False, "chapter_abort")
                 
                 # Log combined prompt token count, including assistant/memory tokens when present
                 total_tokens = 0
@@ -6841,6 +6917,7 @@ class BatchTranslationProcessor:
                             before_send_callback=_mark_batch_chunk_progress_on_send,
                             local_cancel_only_check=chunk_abort_event.is_set,
                         )
+                        chunk_actual_model, chunk_actual_key = _capture_thread_actual_request_metadata()
                         if _single_pass_glossary_mode() and isinstance(result, str):
                             result, glossary_block = _split_single_pass_glossary_response(result)
                             _persist_single_pass_glossary(
@@ -6856,7 +6933,7 @@ class BatchTranslationProcessor:
 
                         if chunk_abort_event.is_set():
                             print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
-                            return None, chunk_idx, None, False, "chapter_abort"
+                            return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         
                         # Treat cancelled errors (from client being closed) as timeout
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
@@ -6868,13 +6945,13 @@ class BatchTranslationProcessor:
                                     chapter_num=actual_num,
                                     chapter_file=chapter_ref.get("chapter_file"),
                                 )
-                                return None, chunk_idx, None, False, "cancelled"
+                                return _chunk_result(None, None, False, "cancelled", chunk_actual_model, chunk_actual_key)
                             
                             # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
                                 print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped (graceful stop)")
-                                return None, chunk_idx, None, False, "graceful_stop"
+                                return _chunk_result(None, None, False, "graceful_stop", chunk_actual_model, chunk_actual_key)
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -6907,7 +6984,7 @@ class BatchTranslationProcessor:
                             else:
                                 # Max retries reached, return timeout to trigger chapter abort
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
-                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                         
                         # Check for timeout errors
                         elif "timed out" in error_msg:
@@ -6919,13 +6996,13 @@ class BatchTranslationProcessor:
                                     chapter_num=actual_num,
                                     chapter_file=chapter_ref.get("chapter_file"),
                                 )
-                                return None, chunk_idx, None, False, "cancelled"
+                                return _chunk_result(None, None, False, "cancelled", chunk_actual_model, chunk_actual_key)
                             
                             # During graceful stop, don't retry - skip this chunk
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active:
                                 print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timed out during graceful stop - skipping retry")
-                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                             
                             if timeout_retry_count < max_timeout_retries:
                                 timeout_retry_count += 1
@@ -6941,14 +7018,14 @@ class BatchTranslationProcessor:
                             else:
                                 # Max retries reached, return timeout to trigger chapter abort
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Max timeout retries ({max_timeout_retries}) reached")
-                                return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
                         else:
                             # Not a timeout error, re-raise
                             raise
                     except Exception:
                         if chunk_abort_event.is_set():
                             print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
-                            return None, chunk_idx, None, False, "chapter_abort"
+                            return _chunk_result(None, None, False, "chapter_abort", chunk_actual_model, chunk_actual_key)
                         raise
                 
                 # Use the raw object directly from send_with_interrupt
@@ -7073,6 +7150,7 @@ class BatchTranslationProcessor:
                                     before_send_callback=_mark_batch_chunk_progress_on_send,
                                     local_cancel_only_check=chunk_abort_event.is_set,
                                 )
+                                retry_actual_model, retry_actual_key = _capture_thread_actual_request_metadata()
                                 if _single_pass_glossary_mode() and isinstance(result_retry, str):
                                     result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
                                     _persist_single_pass_glossary(
@@ -7094,19 +7172,19 @@ class BatchTranslationProcessor:
                                             chapter_num=actual_num,
                                             chapter_file=chapter_ref.get("chapter_file"),
                                         )
-                                        return None, chunk_idx, None, False, "cancelled"
+                                        return _chunk_result(None, None, False, "cancelled", chunk_actual_model, chunk_actual_key)
 
                                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                                     if graceful_stop_active:
                                         print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Skipped char-ratio retry (graceful stop)")
-                                        return None, chunk_idx, None, False, "graceful_stop"
+                                        return _chunk_result(None, None, False, "graceful_stop", chunk_actual_model, chunk_actual_key)
 
                                     print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry failed due to API cancellation")
-                                    return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                    return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
 
                                 if "timed out" in error_msg:
                                     print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry timed out after {chunk_timeout} seconds")
-                                    return "[TIMEOUT]", chunk_idx, None, False, "timeout"
+                                    return _chunk_result("[TIMEOUT]", None, False, "timeout", chunk_actual_model, chunk_actual_key)
 
                                 print(f"⚠️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Char-ratio retry error: {e}. Accepting current output.")
                                 break
@@ -7126,6 +7204,8 @@ class BatchTranslationProcessor:
                                 result = result_retry
                                 finish_reason = finish_reason_retry
                                 raw_obj = raw_obj_retry
+                                chunk_actual_model = retry_actual_model or chunk_actual_model
+                                chunk_actual_key = retry_actual_key or chunk_actual_key
                                 # Re-check ratio / decide on further retries
                                 continue
 
@@ -7186,7 +7266,7 @@ class BatchTranslationProcessor:
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    return result, chunk_idx, raw_obj, is_truncated, finish_reason
+                    return _chunk_result(result, raw_obj, is_truncated, finish_reason, chunk_actual_model, chunk_actual_key)
                 else:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks} (finish_reason={finish_reason!r})")
             
@@ -7404,7 +7484,14 @@ class BatchTranslationProcessor:
                     # FIRST: Get the result (future already completed, so this is instant)
                     # With graceful stop ON, we should save completed work before stopping
                     try:
-                        result, chunk_idx, raw_obj, is_truncated, finish_reason = future.result()
+                        chunk_result = future.result()
+                        if isinstance(chunk_result, tuple) and len(chunk_result) >= 7:
+                            result, chunk_idx, raw_obj, is_truncated, finish_reason, chunk_actual_model, chunk_actual_key = chunk_result[:7]
+                        else:
+                            result, chunk_idx, raw_obj, is_truncated, finish_reason = chunk_result
+                            chunk_actual_model, chunk_actual_key = None, None
+                        if chunk_actual_model:
+                            _install_actual_request_metadata(chunk_actual_model, chunk_actual_key)
 
                         # Handle graceful-stop skipped chunks
                         if finish_reason == "graceful_stop":
@@ -7538,6 +7625,8 @@ class BatchTranslationProcessor:
                             # Store result at correct index to maintain order
                             with chunks_lock:
                                 translated_chunks[chunk_idx - 1] = result  # chunk_idx is 1-based
+                                if chunk_actual_model:
+                                    chunk_request_metadata[chunk_idx - 1] = (chunk_actual_model, chunk_actual_key)
                                 self.chunks_completed += 1
                                 completed_chunks += 1
                                 # Store the raw object if it's the last chunk (or the only chunk)
@@ -7603,6 +7692,10 @@ class BatchTranslationProcessor:
             else:
                 result = translated_chunks[0] if translated_chunks else None
             
+            final_actual_model, final_actual_key = _aggregate_actual_request_metadata(chunk_request_metadata)
+            if final_actual_model:
+                _install_actual_request_metadata(final_actual_model, final_actual_key)
+
             if not result:
                 raise Exception("No translation result produced")
 

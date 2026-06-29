@@ -10572,6 +10572,7 @@ class UnifiedClient:
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"{log_prefix} ✅ SUCCESS! Got content of length: {len(content)}, finish_reason={finish_reason}")
                             self._save_response(content, response_name)
+                            self._used_fallback_key = True
                             self._remember_actual_request_model(fallback_model, f"{label} ({fallback_model})")
                             # Release in-use claim (last_used already stamped before use)
                             if _api_call_delay > 0:

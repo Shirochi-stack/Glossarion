@@ -10573,33 +10573,39 @@ class RetranslationMixin:
             
             # Check various ways to find the translation progress info
             matched_info = None
+            matched_key = None
+
+            def _set_matched_progress(chapter_key, chapter_info):
+                nonlocal matched_info, matched_key
+                matched_info = chapter_info
+                matched_key = chapter_key
             
             # Method 1: Check by original basename (ignoring response_ prefix)
             basename_key = _normalize_opf_match_name(filename)
             if basename_key in basename_to_progress:
                 entries = basename_to_progress[basename_key]
                 if entries:
-                    _, chapter_info = entries[0]
+                    chapter_key, chapter_info = entries[0]
                     # For in_progress/failed/qa_failed/pending, also verify actual_num matches
                     status = chapter_info.get('status', '')
                     if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
+                            _set_matched_progress(chapter_key, chapter_info)
                     else:
-                        matched_info = chapter_info
+                        _set_matched_progress(chapter_key, chapter_info)
             
             # Method 2: Check by response file (with corrected extension)
             if not matched_info and expected_response in response_file_to_progress:
                 entries = response_file_to_progress[expected_response]
                 if entries:
-                    _, chapter_info = entries[0]
+                    chapter_key, chapter_info = entries[0]
                     # For in_progress/failed/qa_failed/pending, also verify actual_num matches
                     status = chapter_info.get('status', '')
                     if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
+                            _set_matched_progress(chapter_key, chapter_info)
                     else:
-                        matched_info = chapter_info
+                        _set_matched_progress(chapter_key, chapter_info)
             
             # Method 3: Search through all progress entries for matching output file
             if not matched_info:
@@ -10610,10 +10616,10 @@ class RetranslationMixin:
                         status = chapter_info.get('status', '')
                         if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                             if chapter_info.get('actual_num') == chapter_num:
-                                matched_info = chapter_info
+                                _set_matched_progress(chapter_key, chapter_info)
                                 break
                         else:
-                            matched_info = chapter_info
+                            _set_matched_progress(chapter_key, chapter_info)
                             break
             
             # Method 4: CRUCIAL - Match by chapter number (actual_num vs file_chapter_num)
@@ -10645,21 +10651,21 @@ class RetranslationMixin:
                             if parent_key in prog.get("chapters", {}):
                                 # Just verify parent exists, don't enforce 'completed' status
                                 # This ensures we show 'merged' even if parent is completed_empty or other states
-                                matched_info = chapter_info
+                                _set_matched_progress(simple_key, chapter_info)
                     # In-progress/failed/pending chapters: require BOTH actual_num AND output_file
                     # to match to avoid cross-matching files.
                     elif status in ['in_progress', 'failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num and (
                             out_file == expected_response or _opf_names_equal(out_file, expected_response)
                         ):
-                            matched_info = chapter_info
+                            _set_matched_progress(simple_key, chapter_info)
                     # qa_failed chapters: match by chapter number only so they are always visible
                     elif status == 'qa_failed':
                         if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
+                            _set_matched_progress(simple_key, chapter_info)
                     # Normal match: output file matches expected (ignoring response_ prefix)
                     elif out_file == expected_response or _opf_names_equal(out_file, expected_response):
-                        matched_info = chapter_info
+                        _set_matched_progress(simple_key, chapter_info)
                 
                 # If not found, check for composite key (chapter_num + filename)
                 if not matched_info and is_special:
@@ -10671,7 +10677,7 @@ class RetranslationMixin:
                     composite_key = f"{chapter_num}_{base_name}"
                     
                     if composite_key in prog.get("chapters", {}):
-                        matched_info = prog["chapters"][composite_key]
+                        _set_matched_progress(composite_key, prog["chapters"][composite_key])
                 
                 # Fallback: iterate through all entries matching chapter number,
                 # but only accept when it clearly refers to the same source file.
@@ -10708,7 +10714,7 @@ class RetranslationMixin:
                                     parent_key = str(parent_num)
                                     if parent_key in prog.get("chapters", {}):
                                         # Just verify parent exists, don't enforce 'completed' status
-                                        matched_info = chapter_info
+                                        _set_matched_progress(chapter_key, chapter_info)
                                         break
                             
                             # In-progress/failed/pending chapters: require BOTH actual_num AND output_file
@@ -10717,13 +10723,13 @@ class RetranslationMixin:
                                 if actual_num == chapter_num and (
                                     out_file == expected_response or _opf_names_equal(out_file, expected_response)
                                 ):
-                                    matched_info = chapter_info
+                                    _set_matched_progress(chapter_key, chapter_info)
                                     break
                             # qa_failed chapters: match by chapter number only so they are always visible,
                             # even when filenames don't line up perfectly.
                             elif status == 'qa_failed':
                                 if actual_num == chapter_num:
-                                    matched_info = chapter_info
+                                    _set_matched_progress(chapter_key, chapter_info)
                                     break
                             
                             # Only treat as a match for other statuses if the original basename matches
@@ -10737,7 +10743,7 @@ class RetranslationMixin:
                                         out_file == expected_response or _opf_names_equal(out_file, expected_response)
                                     )
                                 ):
-                                    matched_info = chapter_info
+                                    _set_matched_progress(chapter_key, chapter_info)
                                     break
             
             # Determine if translation file exists
@@ -10747,7 +10753,7 @@ class RetranslationMixin:
             if matched_info:
                 # We found progress tracking info - use its status
                 status = matched_info.get('status', 'unknown')
-                spine_ch['progress_key'] = matched_info.get('_key')
+                spine_ch['progress_key'] = matched_key
                 
                 # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
                 # Never let file existence override these statuses
@@ -10929,7 +10935,8 @@ class RetranslationMixin:
                     'entries': [],
                     'opf_position': spine_ch['position'],
                     'original_filename': spine_ch['filename'],
-                    'is_special': spine_ch.get('is_special', False)
+                    'is_special': spine_ch.get('is_special', False),
+                    'progress_key': spine_ch.get('progress_key')
                 }
                 chapter_display_info.append(display_info)
         else:
@@ -16815,25 +16822,26 @@ class RetranslationMixin:
         composite_to_progress = {}
 
         chapters_dict = prog.get("chapters", {})
-        for ch in chapters_dict.values():
+        for chapter_key, ch in chapters_dict.items():
+            progress_ref = (chapter_key, ch)
             orig = ch.get("original_basename", "")
             out = ch.get("output_file", "")
             actual_num = ch.get("actual_num")
 
             if orig:
-                basename_to_progress.setdefault(_normalize_opf_match_name(orig), []).append(ch)
+                basename_to_progress.setdefault(_normalize_opf_match_name(orig), []).append(progress_ref)
             if out:
-                response_to_progress.setdefault(out, []).append(ch)
+                response_to_progress.setdefault(out, []).append(progress_ref)
                 norm_out = _normalize_opf_match_name(out)
                 if norm_out != out:
-                    response_to_progress.setdefault(norm_out, []).append(ch)
+                    response_to_progress.setdefault(norm_out, []).append(progress_ref)
             if actual_num is not None:
-                actualnum_to_progress.setdefault(actual_num, []).append(ch)
+                actualnum_to_progress.setdefault(actual_num, []).append(progress_ref)
 
             fname_for_comp = orig or out
             if fname_for_comp and actual_num is not None:
                 filename_noext = os.path.splitext(_normalize_opf_match_name(fname_for_comp))[0]
-                composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
+                composite_to_progress[f"{actual_num}_{filename_noext}"] = progress_ref
 
         # Cache directory listing to avoid thousands of exists calls.
         # Prefer the snapshot prefetched off-thread by the silent auto-refresh;
@@ -16870,19 +16878,25 @@ class RetranslationMixin:
                 expected_response = filename if retain else filename
 
             matched_info = None
+            matched_key = None
             basename_key = _normalize_opf_match_name(filename)
+
+            def _set_matched_progress(chapter_key, chapter_info):
+                nonlocal matched_info, matched_key
+                matched_info = chapter_info
+                matched_key = chapter_key
 
             # 1) original basename map
             lst = basename_to_progress.get(basename_key)
             if lst:
-                for ch in lst:
+                for chapter_key, ch in lst:
                     status = ch.get('status', '')
                     if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if ch.get('actual_num') == chapter_num:
-                            matched_info = ch
+                            _set_matched_progress(chapter_key, ch)
                             break
                     else:
-                        matched_info = ch
+                        _set_matched_progress(chapter_key, ch)
                         break
 
             # 2) response map (choose highest severity, prefer matching chapter_num)
@@ -16899,22 +16913,24 @@ class RetranslationMixin:
                         lst = response_to_progress[k]
                         break
                 if lst:
-                    has_qa = any(ch.get('status') == 'qa_failed' for ch in lst)
+                    has_qa = any(ch.get('status') == 'qa_failed' for _, ch in lst)
                     if has_qa:
-                        lst = [ch for ch in lst if ch.get('status') != 'pending']
+                        lst = [(chapter_key, ch) for chapter_key, ch in lst if ch.get('status') != 'pending']
                     severity = {'qa_failed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1, 'completed': 0}
+                    best_key = None
                     best = None
                     best_score = -1
-                    for ch in lst:
+                    for chapter_key, ch in lst:
                         status = ch.get('status', '')
                         score = severity.get(status, -1)
                         matches_num = ch.get('actual_num') == chapter_num
                         if score > best_score or (score == best_score and matches_num):
+                            best_key = chapter_key
                             best = ch
                             best_score = score
                             # If exact chapter match and highest severity, keep going in case of even higher severity
                     if best:
-                        matched_info = best
+                        _set_matched_progress(best_key, best)
 
             # 3) composite key
             if not matched_info:
@@ -16922,11 +16938,13 @@ class RetranslationMixin:
                 if filename_noext.startswith("response_"):
                     filename_noext = filename_noext[len("response_"):]
                 comp_key = f"{chapter_num}_{filename_noext}"
-                matched_info = composite_to_progress.get(comp_key)
+                comp_ref = composite_to_progress.get(comp_key)
+                if comp_ref:
+                    _set_matched_progress(comp_ref[0], comp_ref[1])
 
             # 4) actual_num map fallback (avoid mis-matching special files)
             if not matched_info and chapter_num in actualnum_to_progress:
-                for ch in actualnum_to_progress[chapter_num]:
+                for chapter_key, ch in actualnum_to_progress[chapter_num]:
                     status = ch.get('status', '')
                     out_file = ch.get('output_file')
                     orig_base = os.path.basename(ch.get('original_basename', '') or '')
@@ -16942,21 +16960,22 @@ class RetranslationMixin:
 
                     if status == 'merged':
                         if _opf_names_equal(orig_base, filename) or not orig_base:
-                            matched_info = ch
+                            _set_matched_progress(chapter_key, ch)
                             break
                     elif status in ['in_progress', 'failed', 'pending', 'qa_failed']:
                         if out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response):
-                            matched_info = ch
+                            _set_matched_progress(chapter_key, ch)
                             break
                     else:
                         if (orig_base and _opf_names_equal(orig_base, filename)) or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response)):
-                            matched_info = ch
+                            _set_matched_progress(chapter_key, ch)
                             break
 
             file_exists = file_exists_fast(expected_response)
 
             if matched_info:
                 status = matched_info.get('status', 'unknown')
+                spine_ch['progress_key'] = matched_key
 
                 if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
                     spine_ch['status'] = status
@@ -17700,25 +17719,35 @@ class RetranslationMixin:
             
             # Find matching progress entry
             matched_info = None
+            matched_key = None
+            chapters = data['prog'].get("chapters", {})
+
+            progress_key = info.get('progress_key')
+            if progress_key and isinstance(chapters.get(progress_key), dict):
+                matched_key = progress_key
+                matched_info = chapters[progress_key]
             
             # PRIORITY 1: Match by BOTH actual_num AND output_file
             # This prevents cross-matching between files with same chapter number but different filenames
-            for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
-                actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
-                ch_output = chapter_info.get('output_file')
-                
-                # BOTH must match - no fallback
-                if actual_num is not None and actual_num == info['num'] and ch_output == output_file:
-                    matched_info = chapter_info
-                    break
+            if not matched_info:
+                for chapter_key, chapter_info in chapters.items():
+                    actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
+                    ch_output = chapter_info.get('output_file')
+                    
+                    # BOTH must match - no fallback
+                    if actual_num is not None and actual_num == info['num'] and ch_output == output_file:
+                        matched_key = chapter_key
+                        matched_info = chapter_info
+                        break
             
             # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
                 # Prefer completed over failed/pending/in_progress; keep qa_failed highest
                 severity = {'qa_failed': 5, 'completed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1}
+                best_key = None
                 best = None
                 best_score = -1
-                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
+                for chapter_key, chapter_info in chapters.items():
                     if chapter_info.get('output_file') == output_file:
                         status = chapter_info.get('status', 'unknown')
                         score = severity.get(status, -1)
@@ -17726,8 +17755,10 @@ class RetranslationMixin:
                         matches_num = (chapter_info.get('actual_num') or chapter_info.get('chapter_num')) == info['num']
                         if score > best_score or (score == best_score and matches_num):
                             best_score = score
+                            best_key = chapter_key
                             best = chapter_info
                 if best:
+                    matched_key = best_key
                     matched_info = best
             
             # Update status based on current state from progress file
@@ -17744,32 +17775,37 @@ class RetranslationMixin:
                     info['output_file'] = resolved_output_file
                 info['status'] = new_status
                 info['info'] = matched_info
+                info['progress_key'] = matched_key
             elif os.path.exists(output_path):
                 # Before marking as completed based on file existence, check if this chapter
                 # is actually marked as merged in the progress file (by actual_num lookup)
                 # This handles the case where old output files exist from before merging was enabled
                 is_merged_chapter = False
-                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
+                for chapter_key, chapter_info in chapters.items():
                     actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
                     if actual_num is not None and actual_num == info['num']:
                         if chapter_info.get('status') == 'merged':
                             is_merged_chapter = True
                             info['status'] = 'merged'
                             info['info'] = chapter_info
+                            info['progress_key'] = chapter_key
                             break
                 
                 if not is_merged_chapter:
                     info['status'] = 'completed'
                     info.pop('info', None)
                     info.pop('progress_entry', None)
+                    info.pop('progress_key', None)
             else:
                 info['status'] = 'not_translated'
                 info.pop('info', None)
                 info.pop('progress_entry', None)
+                info.pop('progress_key', None)
 
     def _progress_entry_model_name(self, info, data=None):
         """Return the model name attached to a progress row, with old-file fallbacks."""
         candidates = []
+        previous_candidates = []
         if isinstance(info, dict):
             candidates.append(info)
             for key in ('info', 'progress_entry'):
@@ -17778,7 +17814,7 @@ class RetranslationMixin:
                     candidates.append(value)
                     previous = value.get('previous_progress_entry')
                     if isinstance(previous, dict):
-                        candidates.append(previous)
+                        previous_candidates.append(previous)
         if isinstance(data, dict):
             prog = data.get('prog')
             if isinstance(prog, dict):
@@ -17786,6 +17822,11 @@ class RetranslationMixin:
                 chapters = prog.get('chapters', {})
                 if progress_key and isinstance(chapters, dict) and isinstance(chapters.get(progress_key), dict):
                     candidates.append(chapters[progress_key])
+                    previous = chapters[progress_key].get('previous_progress_entry')
+                    if isinstance(previous, dict):
+                        previous_candidates.append(previous)
+
+        candidates.extend(previous_candidates)
 
         for candidate in candidates:
             model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
