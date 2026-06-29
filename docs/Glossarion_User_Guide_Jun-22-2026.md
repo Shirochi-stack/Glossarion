@@ -27,8 +27,9 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 15. [Refinement & output modes (new stuff in 9.3.3)](#15-refinement--output-modes)
 16. [Translation editing & review (.sdlxliff and formats)](#16-translation-editing--review-sdlxliff-and-supported-formats)
 17. [How to translate for free](#17-how-to-translate-for-free)
-18. [When things go wrong (troubleshooting)](#18-when-things-go-wrong-troubleshooting)
-19. [One-page cheat sheet](#19-one-page-cheat-sheet)
+18. [Antigravity proxy setup for compiled `.exe` builds](#18-antigravity-proxy-setup-for-compiled-exe-builds)
+19. [When things go wrong (troubleshooting)](#19-when-things-go-wrong-troubleshooting)
+20. [One-page cheat sheet](#20-one-page-cheat-sheet)
 
 ---
 
@@ -129,6 +130,7 @@ The top of the window is the control strip you'll use every time.
   - **🔐 ChatGPT Login** — "Log in with your ChatGPT Plus/Pro subscription via browser. No API key needed."
   - **🔐 Claude Login** — "Log in with your Claude Pro/Max subscription via browser. No API key needed."
   - **🔐 Gemini Login** — "Log in with your Google account via browser. No API key needed – uses your Google Cloud project."
+  - **🔐 Antigravity Login** — "Log in with your Google account for `antigravity/...` models." See [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds) for the extra `.exe` requirements.
   - Each has an account-slot dropdown so you can keep several accounts.
 - **Profile:** The instruction set (language + rules). Use the dropdown to switch.
   - **+ New Profile** — make a blank one.
@@ -138,6 +140,7 @@ The top of the window is the control strip you'll use every time.
   - **Name tags:** putting **`_beautifulsoup`** or **`_html2text`** in a profile's name forces that extraction mode (see [Section 7](#7-other-settings-the-️-other-setting-button)).
 - **API Key:** Your secret password for the chosen provider. **Show** reveals it; **Hide** masks it again.
 - **Target Language:** The language you want to read (e.g., `English`). This fills in the `{target_lang}` blank inside the AI's instructions.
+- **Asst. Prompt:** Opens the **Assistant Prompt (Optional)** window. This adds a short *assistant-role* prefill message before each chunk you translate. Most users should leave it empty; use it only when you want to gently prime the model's response style or format.
 - **Run Translation:** Start. While running it changes to **Stop Translation**.
 - **Open Output Folder 📁:** Jump straight to your translated files.
 - **📚 Library:** Opens the EPUB Library browser to read/manage your translated files.
@@ -173,12 +176,13 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `eh/...` | ElectronHub (one key, many providers) |
 | `or/...` | OpenRouter |
 | `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
+| `antigravity/...` | Local Antigravity proxy — needs a Google login plus Node/npm or Bun in compiled `.exe` builds |
 
 > Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
 
 ### Option 2 — Log in with a subscription (no key)
 
-If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. A browser window opens, you log in once, and Glossarion uses that. Pick the matching `authgpt/...`, `authcd/...`, or `authgem/...` model.
+If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. A browser window opens, you log in once, and Glossarion uses that. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, or `antigravity/...` model. For Antigravity specifically, also read [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds).
 
 ### Which model should a beginner pick?
 
@@ -203,6 +207,7 @@ These are the everyday knobs. **The defaults are sensible — you can ignore mos
   - **Enable Input Token Limit** (green) sets a safe cap (e.g., `200000`). **Recommended.**
   - **Disable Input Token Limit** (red) removes the cap — risky for giant chapters.
 - **Output Token limit** — "Maximum tokens the model may generate in responses." If the AI keeps cutting off mid-sentence, raise this.
+- **Assistant Prompt (Optional)** — opened with the **Asst. Prompt** button. This is sent as an `assistant` message before your chapter text. It can help prime the model to continue in a certain style or output shape, but it is **not** the main place for translation rules. Put rules in the **Profile/System Prompt** instead. **Leave it empty to disable it** (the default), and keep it short because it is sent with every request.
 - **Context Mode** — how much the AI "remembers" from earlier chapters (huge for consistency):
   - **Off** — translate each request with no memory of previous chapters (cheapest, least consistent).
   - **Contextual History** — include recent translated chapters as conversation history (good consistency).
@@ -650,7 +655,87 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 
 ---
 
-## 18. When things go wrong (troubleshooting)
+## 18. Antigravity proxy setup for compiled `.exe` builds
+
+Antigravity models use a **local helper server** called the **Antigravity proxy**. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
+
+### What the user must install
+
+If you are running a ready-made compiled `.exe`, you do **not** need:
+
+- Python
+- Git
+- the Glossarion source code
+- a manual checkout of the Antigravity proxy repository
+
+You **do** need **one** JavaScript runtime path:
+
+| Install this | What Glossarion uses it for | Recommended? |
+|--------------|-----------------------------|--------------|
+| **Node.js LTS** | Provides `npm` / `npx`. Glossarion can run `npx --yes --package bun@latest bun run ...` to fetch Bun and start the proxy. | **Yes — easiest for most Windows users.** |
+| **Bun** | Lets Glossarion start the proxy directly with `bun run ...`. | Good if you already use Bun. |
+
+> **✅ Simplest answer for normal users:** install **Node.js LTS** from the official Node.js website, restart Glossarion, then use the **🔐 Antigravity Login** button.
+
+### What happens automatically
+
+Glossarion handles the rest:
+
+1. It downloads the supported `frieser/antigravity-proxy` runtime into your user config folder.
+2. It updates that local runtime when the cached copy is too old or needs a Glossarion patch.
+3. It starts the proxy locally, usually with a command like:
+   ```text
+   npx --yes --package bun@latest bun run C:\Users\<you>\.config\antigravity-proxy\runtime\...\src\server.ts
+   ```
+4. It opens the Google login flow when an Antigravity account is not linked yet.
+5. It stores the proxy cache and account data under:
+   ```text
+   C:\Users\<you>\.config\antigravity-proxy
+   ```
+
+### Other requirements
+
+- **Internet access** is needed on first setup to download/update the proxy runtime and, if using Node.js, to fetch `bun@latest` through `npx`.
+- **Internet access** is also needed every time you actually use Antigravity models, because the proxy talks to Google/Antigravity services.
+- **A normal web browser** must be available for the Google login redirect.
+- **Port `3000` must be free** on your computer. If another app is already using `localhost:3000`, close it or restart the computer before trying again.
+- **Windows Firewall / antivirus** may ask about the proxy. Allow local/private network access if prompted.
+- The Windows user account must be able to write to:
+  ```text
+  C:\Users\<you>\.config\antigravity-proxy
+  ```
+
+### Account slots and model prefixes
+
+Antigravity account routing is based on the model prefix:
+
+| Model prefix | Account used |
+|--------------|--------------|
+| `antigravity/...` | account #1 |
+| `antigravity1/...` | account #2 |
+| `antigravity2/...` | account #3 |
+
+So if you have two Google accounts linked in the Antigravity proxy, type `antigravity/...` for the first one and `antigravity1/...` for the second one.
+
+The log will show the account actually being used, for example:
+
+```text
+🚀 Auto-launching Antigravity proxy with: ...
+🟢 Antigravity proxy process started (PID 12345).
+✅ Antigravity proxy is now running.
+🧭 Antigravity: using account slot #2 (your-email@gmail.com)
+```
+
+### Quick fixes
+
+- **"Could not find Bun or npx"** — install **Node.js LTS** or **Bun**, then restart Glossarion.
+- **Login opens but account is not detected** — finish the Google login in the browser, then click the Antigravity status/refresh button or restart Glossarion.
+- **Proxy says unsupported version** — Glossarion should auto-update the cached proxy runtime. If it keeps happening, close Glossarion, delete `C:\Users\<you>\.config\antigravity-proxy\runtime`, then start Glossarion again so it can download a fresh copy.
+- **Port 3000 error** — another local server is using the Antigravity proxy port. Close that program or restart Windows.
+
+---
+
+## 19. When things go wrong (troubleshooting)
 
 | Symptom | Most likely cause | Fix |
 |---------|------------------|-----|
@@ -661,6 +746,7 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 | **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.4). |
 | **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
 | **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
+| **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds). |
 | **Local model isn't used** | Endpoint not enabled, or wrong precedence | Check the right method in Section 9; remember per-key endpoints need **Multi-Key Mode**. |
 | **The window seems frozen during a big job** | It's just working hard | Watch the bottom log — if lines are still appearing, it's fine. **GUI Yield** (Other Settings) reduces freezing. |
 | **Settings reset after restart** | Didn't save | Click **Save Config** (Section 4). |
@@ -671,7 +757,7 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 
 ---
 
-## 19. One-page cheat sheet
+## 20. One-page cheat sheet
 
 **To translate a book, every time:**
 
@@ -703,4 +789,3 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 ---
 
 *Made with 🌸 for the translation community. This guide reflects Glossarion v9.3.3 as of June 22, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
-
