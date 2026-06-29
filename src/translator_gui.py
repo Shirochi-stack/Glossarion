@@ -6443,7 +6443,6 @@ Recent translations to summarize:
                 if name:
                     tip_parts.append(f"Name: {name}")
                 tip_parts.append("Click to log out")
-                tip_parts.append("Right-click to verify account")
                 self.authgem_login_btn.setToolTip(
                     "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
                     "<br>".join(tip_parts) + "</p></qt>"
@@ -6469,8 +6468,7 @@ Recent translations to summarize:
                 self.authgem_login_btn.setToolTip(
                     "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                     "Log in with your Google account via browser. "
-                    "No API key needed.<br>"
-                    "Right-click for verification options.</p></qt>"
+                    "No API key needed.</p></qt>"
                 )
                 self.authgem_login_btn.setStyleSheet(
                     "background-color: #4385f4; color: white; font-weight: bold; "
@@ -6759,96 +6757,6 @@ Recent translations to summarize:
 
         t = threading.Thread(target=_do_login, daemon=True)
         t.start()
-
-    def _show_authgem_login_context_menu(self, pos):
-        """Show right-click actions for the Gemini login button."""
-        menu = QMenu(self.authgem_login_btn)
-        verify_action = QAction("Verify", menu)
-        verify_action.triggered.connect(self._authgem_verify_clicked)
-        menu.addAction(verify_action)
-        menu.exec(self.authgem_login_btn.mapToGlobal(pos))
-
-    def _authgem_verify_clicked(self):
-        """Open Gemini account verification from the login button context menu."""
-        try:
-            store = self._get_authgem_store_for_current_model()
-        except ImportError:
-            self.append_log("❌ AuthGem module is not installed.")
-            return
-
-        if not store.has_tokens:
-            self.append_log("⚠️ Gemini: log in before verifying your account.")
-            return
-
-        if getattr(self, '_authgem_verify_in_progress', False):
-            self.append_log("⏳ Gemini verification check is already running…")
-            return
-
-        account_id = self._get_authgem_account_id()
-        acct_suffix = f" #{account_id}" if account_id else ""
-        self._authgem_verify_in_progress = True
-        self.append_log(f"🔎 Gemini{acct_suffix}: Checking verification link…")
-
-        def _worker():
-            try:
-                token = store.get_valid_access_token(auto_login=False)
-                from authgem_auth import check_account_status
-                self._authgem_verify_status_data = check_account_status(token, account_id)
-                QMetaObject.invokeMethod(
-                    self, "_authgem_verify_result",
-                    Qt.QueuedConnection,
-                )
-            except Exception as exc:
-                self._authgem_verify_error_msg = str(exc)
-                QMetaObject.invokeMethod(
-                    self, "_authgem_verify_error",
-                    Qt.QueuedConnection,
-                )
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    @Slot()
-    def _authgem_verify_result(self):
-        """Open the AuthGem verification page discovered by status check."""
-        self._authgem_verify_in_progress = False
-        status = getattr(self, '_authgem_verify_status_data', {})
-        account_id = self._get_authgem_account_id()
-        acct_suffix = f" #{account_id}" if account_id else ""
-
-        if status.get("error"):
-            self.append_log(f"❌ Gemini{acct_suffix} verification check failed: {status['error']}")
-            return
-
-        v_url = status.get("verification_url", "")
-        if v_url:
-            v_msg = status.get("verification_message", "Account verification required")
-            self.append_log(f"⚠️ Gemini{acct_suffix}: {v_msg}")
-        else:
-            try:
-                from authgem_auth import CODE_ASSIST_VERIFICATION_URL
-            except Exception:
-                CODE_ASSIST_VERIFICATION_URL = (
-                    "https://accounts.google.com/signin/continue"
-                    "?sarp=1&scc=1"
-                    "&continue=https%3A%2F%2Fdevelopers.google.com%2Fgemini-code-assist%2Fauth%2Fauth_success_gemini"
-                    "&flowName=GlifWebSignIn"
-                )
-            v_url = CODE_ASSIST_VERIFICATION_URL
-            self.append_log(
-                f"🔎 Gemini{acct_suffix}: no dedicated verification link returned; opening fallback verification page."
-            )
-
-        self.append_log("🔗 Opening verification page…")
-        import webbrowser
-        webbrowser.open(v_url)
-        self.append_log("💡 Complete verification/onboarding in the browser, then retry the AuthGem request.")
-
-    @Slot()
-    def _authgem_verify_error(self):
-        """Display right-click verification errors."""
-        self._authgem_verify_in_progress = False
-        err = getattr(self, '_authgem_verify_error_msg', 'Unknown error')
-        self.append_log(f"❌ Gemini verification check failed: {err}")
 
     @Slot()
     def _authgem_login_status_changed(self):
@@ -7496,8 +7404,6 @@ Recent translations to summarize:
             "No API key needed – uses your Google Cloud project.</p></qt>"
         )
         self.authgem_login_btn.clicked.connect(self._authgem_login_clicked)
-        self.authgem_login_btn.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.authgem_login_btn.customContextMenuRequested.connect(self._show_authgem_login_context_menu)
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
         
