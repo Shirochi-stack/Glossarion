@@ -483,7 +483,6 @@ export const MODEL_OPTIONS = [
   "antigravity/gemini-3.1-flash-lite",
   "antigravity/gemini-3.5-flash-extra-low",
   "antigravity/gemini-3.5-flash-low",
-  "antigravity/gemini-3.1-pro-high",
   "antigravity/gemini-3.1-pro-low",
   "antigravity/gemini-pro-agent",
   "antigravity/gemini-2.5-flash",

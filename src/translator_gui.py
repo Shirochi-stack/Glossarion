@@ -7255,7 +7255,6 @@ Recent translations to summarize:
         <ul>
             <li><b>antigravity/gemini-3-flash</b> - Gemini 3 Flash (fastest)</li>
             <li><b>antigravity/gemini-3.1-pro-low</b> - Gemini 3.1 Pro (low quota)</li>
-            <li><b>antigravity/gemini-3.1-pro-high</b> - Gemini 3.1 Pro (high quota)</li>
         </ul>
         <p style="color: #d9534f; padding: 4px; font-size: 11px;">
             <b>⚠️ Warning:</b> This feature uses a proxy to access Google Cloud Code.
