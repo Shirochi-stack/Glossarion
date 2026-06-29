@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import antigravity_proxy
 from html_output_utils import ensure_utf8_html_document
 from model_options import get_model_options
@@ -151,6 +153,27 @@ def test_consume_openai_stream_supports_httpx_iter_lines():
     assert response.closed is True
 
 
+def test_consume_openai_stream_raises_on_error_event():
+    response = FakeStreamResponse(
+        [
+            _sse_event(
+                {
+                    "error": {
+                        "message": "Quota Exhausted: All accounts failed or are exhausted for this model.",
+                        "code": "insufficient_quota",
+                    }
+                }
+            ),
+            "data: [DONE]",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="Quota Exhausted"):
+        antigravity_proxy._consume_openai_stream(response, log_fn=lambda _: None, log_stream=False)
+
+    assert response.closed is True
+
+
 def test_consume_openai_stream_forces_utf8_for_unicode_content():
     response = EncodingAwareStreamResponse(
         {"choices": [{"delta": {"content": "I’m telling you."}, "finish_reason": "stop"}]}
@@ -186,6 +209,13 @@ def test_antigravity_token_limit_log_reports_clamp():
     assert messages == [
         "🎚️ Antigravity: max_tokens clamped 65,536 -> 64,000 (model=antigravity-gemini-2.5-flash)"
     ]
+
+
+def test_min_accounts_for_auth_retry_requires_new_account_on_quota(monkeypatch):
+    monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
+
+    assert antigravity_proxy._min_accounts_for_auth_retry("Quota Exhausted: All accounts failed") == 2
+    assert antigravity_proxy._min_accounts_for_auth_retry("No accounts configured") == 1
 
 
 def test_stream_chat_with_httpx_disables_compression(monkeypatch):
@@ -241,6 +271,7 @@ def test_wait_for_auth_keeps_httpx_stream_open_until_consumer_closes(monkeypatch
     monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(antigravity_proxy, "_open_auth_browser_once", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(antigravity_proxy, "_proxy_has_accounts", lambda: True)
+    monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
     monkeypatch.setattr(
         antigravity_proxy,
         "_stream_chat_with_httpx",
@@ -397,6 +428,52 @@ def test_patch_runtime_gemini35_flash_support(tmp_path):
     assert '"gemini-3.5-flash",' in content
     assert 'googleModel = "gemini-3.5-flash-low";' not in content
     assert '`gemini-3.5-flash-${extractedTier || "medium"}`' in content
+
+
+def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    manager_file = tmp_path / "src" / "auth" / "manager.ts"
+    server_file.parent.mkdir(parents=True)
+    manager_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        "for (const acc of accounts) {\n"
+        "            acc.modelScores = {};\n"
+        "            acc.history = [];\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    manager_file.write_text(
+        "resetAccount(account) {\n"
+        "        account.modelScores = {};\n"
+        "        account.history = [];\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_account_reset_support(str(tmp_path))
+    assert "acc.capabilities = {};" in server_file.read_text(encoding="utf-8")
+    assert "account.capabilities = {};" in manager_file.read_text(encoding="utf-8")
+
+
+def test_account_summary_strips_tokens_and_reports_unsupported_models():
+    summary = antigravity_proxy._safe_account_summary(
+        {
+            "email": "user@example.test",
+            "accessToken": "secret-access-token",
+            "refreshToken": "secret-refresh-token",
+            "projectId": "project-id",
+            "healthScore": 42,
+            "quota": [{"groupName": "Gemini", "quotaLeft": "100%", "resetIn": "1h"}],
+            "modelScores": {"antigravity-gemini-3.5-flash-medium|sandbox": 90},
+            "capabilities": {"antigravity-gemini-3.5-flash-high": False},
+        }
+    )
+
+    assert "accessToken" not in summary
+    assert "refreshToken" not in summary
+    assert summary["email"] == "user@example.test"
+    assert summary["quota"][0]["name"] == "Gemini"
+    assert summary["unsupported_models"] == ["antigravity-gemini-3.5-flash-high"]
 
 
 def test_find_proxy_launch_command_uses_npx_bun_for_downloaded_runtime(tmp_path, monkeypatch):

@@ -5690,6 +5690,28 @@ Recent translations to summarize:
                     self.authgem_status_btn.hide()
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
+
+        # Show/hide Antigravity proxy controls
+        if hasattr(self, 'antigravity_login_btn'):
+            needs_antigravity = (model or '').strip().lower().startswith('antigravity/')
+            if not needs_antigravity:
+                needs_antigravity = self._has_antigravity_in_key_pools()
+
+            antigravity_widgets = (
+                'antigravity_login_btn',
+                'antigravity_status_btn',
+                'antigravity_reset_btn',
+                'antigravity_dashboard_btn',
+            )
+            if needs_antigravity:
+                for widget_name in antigravity_widgets:
+                    if hasattr(self, widget_name):
+                        getattr(self, widget_name).show()
+                self._update_antigravity_login_status()
+            else:
+                for widget_name in antigravity_widgets:
+                    if hasattr(self, widget_name):
+                        getattr(self, widget_name).hide()
         
         # Reposition project dropdown (may need its own row if authgpt also visible)
         self._reposition_authgem_project_combo()
@@ -5831,6 +5853,16 @@ Recent translations to summarize:
                         import re as _re
                         if _re.match(r'^authgem-vertex\d{0,4}/', m):
                             return True
+        except Exception:
+            pass
+        return False
+
+    def _has_antigravity_in_key_pools(self):
+        """Check if any enabled key pool contains an enabled Antigravity model."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                if str(model or '').strip().lower().startswith('antigravity/'):
+                    return True
         except Exception:
             pass
         return False
@@ -6886,6 +6918,213 @@ Recent translations to summarize:
         err = getattr(self, '_authgem_status_error_msg', 'Unknown error')
         self.append_log(f"❌ Gemini status check failed: {err}")
 
+    # ==================================================================
+    # Antigravity proxy account controls
+    # ==================================================================
+
+    def _update_antigravity_login_status(self):
+        """Update Antigravity proxy button text without exposing token data."""
+        try:
+            from antigravity_proxy import get_account_summary
+            summary = get_account_summary()
+            accounts = summary.get("accounts") or []
+            if summary.get("healthy") and accounts:
+                self.antigravity_login_btn.setText(f"✅ Antigravity ({len(accounts)})")
+                self.antigravity_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    f"{len(accounts)} Google account(s) linked in the local Antigravity proxy.<br>"
+                    "Click to add another Google account.</p></qt>"
+                )
+                self.antigravity_login_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+            else:
+                self.antigravity_login_btn.setText("🔐 Antigravity Login")
+                self.antigravity_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
+                    "This stores accounts in the local proxy, not in Glossarion.</p></qt>"
+                )
+                self.antigravity_login_btn.setStyleSheet(
+                    "background-color: #0f766e; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+        except Exception:
+            self.antigravity_login_btn.setText("🔐 Antigravity Login")
+            self.antigravity_login_btn.setStyleSheet(
+                "background-color: #0f766e; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+            )
+
+    def _antigravity_login_clicked(self):
+        """Open the local Antigravity proxy Google login route."""
+        self.antigravity_login_btn.setText("⏳ Opening…")
+        self.antigravity_login_btn.setEnabled(False)
+        self.append_log("🔐 Antigravity: starting local proxy and opening Google login…")
+
+        def _worker():
+            try:
+                from antigravity_proxy import open_login
+                self._antigravity_login_url = open_login()
+                QMetaObject.invokeMethod(self, "_antigravity_login_finished", Qt.QueuedConnection)
+            except Exception as exc:
+                self._antigravity_login_error = str(exc)
+                QMetaObject.invokeMethod(self, "_antigravity_login_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _antigravity_login_finished(self):
+        self.antigravity_login_btn.setEnabled(True)
+        self._update_antigravity_login_status()
+        url = getattr(self, '_antigravity_login_url', '')
+        self.append_log(f"🔗 Antigravity login opened: {url}")
+        self.append_log("💡 Finish Google login in the browser, then click 📊 to refresh account status.")
+
+    @Slot()
+    def _antigravity_login_failed(self):
+        self.antigravity_login_btn.setEnabled(True)
+        self._update_antigravity_login_status()
+        err = getattr(self, '_antigravity_login_error', 'Unknown error')
+        self.append_log(f"❌ Antigravity login failed: {err}")
+        QMessageBox.warning(self, "Antigravity Login Failed", f"Antigravity login failed:\n{err}")
+
+    def _antigravity_status_clicked(self):
+        """Log sanitized proxy account, quota, and ranking status."""
+        self.antigravity_status_btn.setEnabled(False)
+        self.antigravity_status_btn.setText("⏳")
+        self.append_log("📊 Antigravity: checking account pools and rankings…")
+
+        def _worker():
+            try:
+                from antigravity_proxy import ensure_proxy_running, get_account_summary
+                status = ensure_proxy_running()
+                if not status.get("running"):
+                    raise RuntimeError(status.get("error") or "Antigravity proxy is not running.")
+                self._antigravity_status_data = get_account_summary()
+                QMetaObject.invokeMethod(self, "_antigravity_status_result", Qt.QueuedConnection)
+            except Exception as exc:
+                self._antigravity_status_error_msg = str(exc)
+                QMetaObject.invokeMethod(self, "_antigravity_status_error", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _antigravity_status_result(self):
+        self.antigravity_status_btn.setEnabled(True)
+        self.antigravity_status_btn.setText("📊")
+        self._update_antigravity_login_status()
+
+        summary = getattr(self, '_antigravity_status_data', {}) or {}
+        if not summary.get("healthy"):
+            self.append_log(f"❌ Antigravity: {summary.get('error', 'proxy not healthy')}")
+            return
+
+        accounts = summary.get("accounts") or []
+        version = summary.get("version") or "?"
+        strategy = summary.get("strategy") or "?"
+        self.append_log(f"🛸 Antigravity proxy v{version} | strategy={strategy} | accounts={len(accounts)}")
+        if not accounts:
+            self.append_log("⚠️ Antigravity has no linked Google accounts. Click 🔐 Antigravity Login.")
+            return
+
+        for account in accounts:
+            email = account.get("email", "unknown")
+            project = account.get("project_id") or "no project"
+            health = account.get("health_score")
+            self.append_log(f"👤 {email} | project={project} | health={health}")
+
+            unsupported = account.get("unsupported_models") or []
+            if unsupported:
+                shown = ", ".join(unsupported[:6])
+                suffix = "…" if len(unsupported) > 6 else ""
+                self.append_log(f"   🚫 Unsupported flags: {shown}{suffix}")
+
+            scores = account.get("model_scores") or {}
+            if scores:
+                ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+                shown_scores = ", ".join(f"{model}={score}" for model, score in ranked[:6])
+                self.append_log(f"   🏆 Rankings: {shown_scores}")
+
+            quotas = account.get("quota") or []
+            if quotas:
+                for quota in quotas[:8]:
+                    name = quota.get("name", "Unknown")
+                    left = quota.get("left") or "?"
+                    reset_in = quota.get("reset_in") or "?"
+                    self.append_log(f"   📈 {name}: {left}, reset {reset_in}")
+
+    @Slot()
+    def _antigravity_status_error(self):
+        self.antigravity_status_btn.setEnabled(True)
+        self.antigravity_status_btn.setText("📊")
+        err = getattr(self, '_antigravity_status_error_msg', 'Unknown error')
+        self.append_log(f"❌ Antigravity status failed: {err}")
+
+    def _antigravity_reset_clicked(self):
+        reply = QMessageBox.question(
+            self,
+            "Reset Antigravity Rankings",
+            "Reset Antigravity account health, cooldowns, quota cache, model rankings, and stale unsupported-model flags?\n\n"
+            "This is useful after a bad config, token-limit error, or model-not-found false negative.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.antigravity_reset_btn.setEnabled(False)
+        self.antigravity_reset_btn.setText("⏳")
+        self.append_log("♻️ Antigravity: resetting account rankings and stale capability flags…")
+
+        def _worker():
+            try:
+                from antigravity_proxy import reset_account_rankings
+                self._antigravity_status_data = reset_account_rankings()
+                QMetaObject.invokeMethod(self, "_antigravity_reset_finished", Qt.QueuedConnection)
+            except Exception as exc:
+                self._antigravity_reset_error_msg = str(exc)
+                QMetaObject.invokeMethod(self, "_antigravity_reset_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _antigravity_reset_finished(self):
+        self.antigravity_reset_btn.setEnabled(True)
+        self.antigravity_reset_btn.setText("♻️")
+        self.append_log("✅ Antigravity rankings/cooldowns/capability flags reset.")
+        self._antigravity_status_result()
+
+    @Slot()
+    def _antigravity_reset_failed(self):
+        self.antigravity_reset_btn.setEnabled(True)
+        self.antigravity_reset_btn.setText("♻️")
+        err = getattr(self, '_antigravity_reset_error_msg', 'Unknown error')
+        self.append_log(f"❌ Antigravity reset failed: {err}")
+
+    def _antigravity_dashboard_clicked(self):
+        self.append_log("🛸 Antigravity: opening local proxy dashboard…")
+
+        def _worker():
+            try:
+                from antigravity_proxy import open_dashboard
+                self._antigravity_dashboard_url = open_dashboard()
+                QMetaObject.invokeMethod(self, "_antigravity_dashboard_opened", Qt.QueuedConnection)
+            except Exception as exc:
+                self._antigravity_dashboard_error = str(exc)
+                QMetaObject.invokeMethod(self, "_antigravity_dashboard_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _antigravity_dashboard_opened(self):
+        self.append_log(f"🛸 Antigravity dashboard opened: {getattr(self, '_antigravity_dashboard_url', '')}")
+
+    @Slot()
+    def _antigravity_dashboard_failed(self):
+        err = getattr(self, '_antigravity_dashboard_error', 'Unknown error')
+        self.append_log(f"❌ Antigravity dashboard failed: {err}")
+
 
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
@@ -7449,6 +7688,66 @@ Recent translations to summarize:
         # Start in the button row; _reposition will move it if needed
         model_btn_layout.addWidget(self.authgem_project_combo)
         self._authgem_combo_in_own_row = False  # track current placement
+
+        # Antigravity proxy controls (visible only for antigravity/ models)
+        self.antigravity_login_btn = QPushButton("🔐 Antigravity Login")
+        self.antigravity_login_btn.setStyleSheet(
+            "background-color: #0f766e; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.antigravity_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Start the local frieser/antigravity-proxy and open Google's login flow.<br>"
+            "No Git checkout is required; Glossarion manages the proxy runtime.</p></qt>"
+        )
+        self.antigravity_login_btn.clicked.connect(self._antigravity_login_clicked)
+        self.antigravity_login_btn.hide()
+        model_btn_layout.addWidget(self.antigravity_login_btn)
+
+        self.antigravity_status_btn = QPushButton("📊")
+        self.antigravity_status_btn.setFixedWidth(36)
+        self.antigravity_status_btn.setStyleSheet(
+            "background-color: #123b3d; color: white; font-weight: bold; "
+            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
+            "border: 1px solid #0f766e;"
+        )
+        self.antigravity_status_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Show Antigravity account pools, quota rows, model rankings, and stale unsupported flags.</p></qt>"
+        )
+        self.antigravity_status_btn.clicked.connect(self._antigravity_status_clicked)
+        self.antigravity_status_btn.hide()
+        model_btn_layout.addWidget(self.antigravity_status_btn)
+
+        self.antigravity_reset_btn = QPushButton("♻️")
+        self.antigravity_reset_btn.setFixedWidth(36)
+        self.antigravity_reset_btn.setStyleSheet(
+            "background-color: #164e63; color: white; font-weight: bold; "
+            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
+            "border: 1px solid #22d3ee;"
+        )
+        self.antigravity_reset_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Reset Antigravity account health, cooldowns, rankings, quota cache, and stale unsupported-model flags.</p></qt>"
+        )
+        self.antigravity_reset_btn.clicked.connect(self._antigravity_reset_clicked)
+        self.antigravity_reset_btn.hide()
+        model_btn_layout.addWidget(self.antigravity_reset_btn)
+
+        self.antigravity_dashboard_btn = QPushButton("🛸")
+        self.antigravity_dashboard_btn.setFixedWidth(36)
+        self.antigravity_dashboard_btn.setStyleSheet(
+            "background-color: #27272a; color: white; font-weight: bold; "
+            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
+            "border: 1px solid #71717a;"
+        )
+        self.antigravity_dashboard_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Open the local Antigravity proxy dashboard.</p></qt>"
+        )
+        self.antigravity_dashboard_btn.clicked.connect(self._antigravity_dashboard_clicked)
+        self.antigravity_dashboard_btn.hide()
+        model_btn_layout.addWidget(self.antigravity_dashboard_btn)
         
         # Restore saved project selection on startup
         saved_project = self.config.get('authgem_project', '')

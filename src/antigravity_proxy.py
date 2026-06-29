@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-tiers"
+RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-tiers-reset-capabilities"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -379,6 +379,39 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
     )
 
 
+def _patch_runtime_account_reset_support(runtime_dir: str) -> bool:
+    """Ensure proxy reset endpoints clear stale unsupported-model flags."""
+    patches = [
+        (
+            os.path.join(runtime_dir, "src", "server.ts"),
+            "acc.modelScores = {};\n            acc.history = [];",
+            "acc.modelScores = {};\n            acc.capabilities = {};\n            acc.history = [];",
+            "acc.capabilities = {};",
+        ),
+        (
+            os.path.join(runtime_dir, "src", "auth", "manager.ts"),
+            "account.modelScores = {};\n        account.history = [];",
+            "account.modelScores = {};\n        account.capabilities = {};\n        account.history = [];",
+            "account.capabilities = {};",
+        ),
+    ]
+
+    ok = True
+    for path, needle, replacement, marker in patches:
+        if not os.path.exists(path):
+            ok = False
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        updated = content
+        if marker not in updated and needle in updated:
+            updated = updated.replace(needle, replacement, 1)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(updated)
+        ok = ok and marker in updated
+    return ok
+
+
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
         os.path.join(runtime_dir, "package.json")
@@ -464,6 +497,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive did not contain ANTIGRAVITY_VERSION")
         if not _patch_runtime_gemini35_flash_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
+        if not _patch_runtime_account_reset_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         _write_runtime_metadata(archive_root, release, client_version)
 
         _copy_runtime_tree(archive_root, runtime_dir)
@@ -506,6 +541,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
             return False
         if not _patch_runtime_gemini35_flash_support(runtime_dir):
+            return False
+        if not _patch_runtime_account_reset_support(runtime_dir):
             return False
         _write_runtime_metadata(runtime_dir, release, client_version)
         (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
@@ -776,24 +813,67 @@ def _health_details_have_accounts(details: Any) -> bool:
     return isinstance(accounts, list) and len(accounts) > 0
 
 
-def _proxy_has_accounts() -> bool:
+def _proxy_account_count() -> int:
     health = check_proxy_health()
-    return bool(health.get("healthy") and _health_details_have_accounts(health.get("details")))
+    if not health.get("healthy"):
+        return 0
+    details = health.get("details")
+    if not isinstance(details, dict):
+        return 0
+    accounts = details.get("accounts")
+    return len(accounts) if isinstance(accounts, list) else 0
+
+
+def _proxy_has_accounts() -> bool:
+    return _proxy_account_count() > 0
+
+
+def _error_text_suggests_account_setup(error_text: str) -> bool:
+    lowered = (error_text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "no account",
+            "add account",
+            "exhausted all accounts",
+            "all accounts failed",
+            "quota exhausted",
+            "insufficient_quota",
+        )
+    )
+
+
+def _error_text_suggests_more_accounts(error_text: str) -> bool:
+    lowered = (error_text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "exhausted all accounts",
+            "all accounts failed",
+            "quota exhausted",
+            "insufficient_quota",
+        )
+    )
+
+
+def _min_accounts_for_auth_retry(error_text: str = "") -> int:
+    current = _proxy_account_count()
+    if _error_text_suggests_more_accounts(error_text):
+        return current + 1
+    return max(1, current)
 
 
 def _should_wait_for_auth(resp: requests.Response) -> bool:
     """Return True when the request likely failed because no account is linked."""
+    error_text = _extract_error_message(resp)
+
     if resp.status_code in (401, 403):
-        return not _proxy_has_accounts()
+        return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
     if resp.status_code == 429:
-        # Upstream returns a generic quota-exhausted 429 when there are no
-        # accounts at all. Only treat that as auth setup when status confirms
-        # an empty account list.
-        return not _proxy_has_accounts()
+        return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
-    error_text = _extract_error_message(resp).lower()
-    if "no account" in error_text or "add account" in error_text:
+    if _error_text_suggests_account_setup(error_text):
         return True
 
     return False
@@ -801,13 +881,12 @@ def _should_wait_for_auth(resp: requests.Response) -> bool:
 
 def _should_wait_for_auth_status_error(status_code: int, error_text: str = "") -> bool:
     if status_code in (401, 403):
-        return not _proxy_has_accounts()
+        return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
     if status_code == 429:
-        return not _proxy_has_accounts()
+        return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
-    lowered = (error_text or "").lower()
-    return "no account" in lowered or "add account" in lowered
+    return _error_text_suggests_account_setup(error_text)
 
 
 class _HttpxStreamResponseAdapter:
@@ -842,6 +921,7 @@ def _wait_for_auth(
     stream: bool = False,
     request_timeout: float = 300,
     prefer_httpx_stream: bool = False,
+    min_account_count: int = 1,
 ):
     """Open OAuth and poll until an account is linked or timeout is reached."""
     _open_auth_browser_once(proxy_url, log_fn)
@@ -860,7 +940,7 @@ def _wait_for_auth(
         time.sleep(poll_interval)
         elapsed += poll_interval
 
-        if _proxy_has_accounts():
+        if _proxy_account_count() >= max(1, int(min_account_count or 1)):
             _log("Antigravity: account detected, retrying request...")
             retry_resp = None
             try:
@@ -1178,6 +1258,96 @@ def restart_proxy(log_fn=None) -> Dict[str, Any]:
     return ensure_proxy_running(log_fn=log_fn)
 
 
+def open_login(log_fn=None) -> str:
+    """Ensure the proxy is running and open its Google OAuth add-account route."""
+    status = ensure_proxy_running(log_fn=log_fn)
+    if not status.get("running"):
+        raise RuntimeError(status.get("error") or "Antigravity proxy is not running.")
+
+    reset_auth_browser()
+    proxy_url = get_proxy_url()
+    auth_url = f"{proxy_url}{OAUTH_START_ENDPOINT}"
+    (log_fn or _log_noop)(f"🔐 Antigravity: opening Google login at {auth_url}")
+    webbrowser.open(auth_url)
+    return auth_url
+
+
+def open_dashboard(log_fn=None) -> str:
+    """Ensure the proxy is running and open its local account dashboard."""
+    status = ensure_proxy_running(log_fn=log_fn)
+    if not status.get("running"):
+        raise RuntimeError(status.get("error") or "Antigravity proxy is not running.")
+
+    proxy_url = get_proxy_url()
+    (log_fn or _log_noop)(f"🛸 Antigravity: opening proxy dashboard at {proxy_url}")
+    webbrowser.open(proxy_url)
+    return proxy_url
+
+
+def _safe_account_summary(account: Dict[str, Any]) -> Dict[str, Any]:
+    quota_rows = []
+    for row in account.get("quota") or []:
+        if not isinstance(row, dict):
+            continue
+        quota_rows.append(
+            {
+                "name": row.get("groupName") or row.get("limitName") or "Unknown",
+                "left": row.get("quotaLeft") or "",
+                "reset_in": row.get("resetIn") or "",
+            }
+        )
+
+    model_scores = account.get("modelScores") if isinstance(account.get("modelScores"), dict) else {}
+    capabilities = account.get("capabilities") if isinstance(account.get("capabilities"), dict) else {}
+    unsupported = sorted(str(model) for model, allowed in capabilities.items() if allowed is False)
+
+    return {
+        "email": account.get("email") or "unknown",
+        "project_id": account.get("projectId") or account.get("managedProjectId") or "",
+        "health_score": account.get("healthScore"),
+        "quota": quota_rows,
+        "model_scores": dict(sorted(model_scores.items(), key=lambda item: str(item[0]))),
+        "unsupported_models": unsupported,
+    }
+
+
+def get_account_summary() -> Dict[str, Any]:
+    """Return sanitized proxy status for GUI logging.
+
+    The raw proxy status includes OAuth tokens. This intentionally strips them.
+    """
+    health = check_proxy_health()
+    if not health.get("healthy"):
+        return {
+            "healthy": False,
+            "error": health.get("error") or "Antigravity proxy is not running.",
+            "accounts": [],
+        }
+
+    details = health.get("details") if isinstance(health.get("details"), dict) else {}
+    raw_accounts = details.get("accounts") if isinstance(details.get("accounts"), list) else []
+    return {
+        "healthy": True,
+        "version": details.get("version") or "",
+        "strategy": details.get("strategy") or "",
+        "supported_models": details.get("supportedModels") or [],
+        "accounts": [_safe_account_summary(acc) for acc in raw_accounts if isinstance(acc, dict)],
+    }
+
+
+def reset_account_rankings(log_fn=None) -> Dict[str, Any]:
+    """Reset proxy account health, cooldowns, model scores, and unsupported flags."""
+    status = ensure_proxy_running(log_fn=log_fn)
+    if not status.get("running"):
+        raise RuntimeError(status.get("error") or "Antigravity proxy is not running.")
+
+    resp = requests.post(f"{get_proxy_url()}/api/accounts/reset-all", timeout=15)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Antigravity reset failed: HTTP {resp.status_code} - {(resp.text or '')[:500]}")
+    (log_fn or _log_noop)("♻️ Antigravity: reset account rankings, cooldowns, quotas, and capability flags.")
+    return get_account_summary()
+
+
 # ---------------------------------------------------------------------------
 # Send request helpers
 # ---------------------------------------------------------------------------
@@ -1259,6 +1429,7 @@ def send_message(
         )
 
     if _should_wait_for_auth(resp):
+        error_text = _extract_error_message(resp)
         auth_resp = _wait_for_auth(
             url,
             payload,
@@ -1267,6 +1438,7 @@ def send_message(
             log_fn,
             stream=False,
             request_timeout=timeout,
+            min_account_count=_min_accounts_for_auth_retry(error_text),
         )
         if auth_resp is not None:
             resp = auth_resp
@@ -1318,6 +1490,19 @@ def _iter_stream_lines(resp: Any) -> Iterable[Any]:
         yield from resp.iter_lines()
 
 
+def _stream_error_message(event: Dict[str, Any]) -> str:
+    error = event.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("code") or error.get("type") or error
+        try:
+            return json.dumps(error, ensure_ascii=False)
+        except Exception:
+            return str(message)
+    if error:
+        return str(error)
+    return ""
+
+
 def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
@@ -1361,6 +1546,10 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
                 event = json.loads(data_str)
             except json.JSONDecodeError:
                 continue
+
+            error_message = _stream_error_message(event)
+            if error_message:
+                raise RuntimeError(f"Antigravity: stream error - {error_message}")
 
             if not got_first_data:
                 got_first_data = True
@@ -1454,6 +1643,7 @@ def send_message_stream(
                         stream=True,
                         request_timeout=timeout,
                         prefer_httpx_stream=True,
+                        min_account_count=_min_accounts_for_auth_retry(error_text),
                     )
                     if auth_resp is not None:
                         return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
@@ -1464,7 +1654,29 @@ def send_message_stream(
 
                 raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
 
-            return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+            try:
+                return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+            except RuntimeError as stream_exc:
+                error_text = str(stream_exc)
+                if _error_text_suggests_account_setup(error_text):
+                    auth_resp = _wait_for_auth(
+                        url,
+                        payload,
+                        _build_headers(),
+                        proxy_url,
+                        log_fn,
+                        stream=True,
+                        request_timeout=timeout,
+                        prefer_httpx_stream=True,
+                        min_account_count=_min_accounts_for_auth_retry(error_text),
+                    )
+                    if auth_resp is not None:
+                        return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+                    raise RuntimeError(
+                        f"Antigravity: authentication timed out.\n"
+                        f"Open {proxy_url} and add your Google account, then try again."
+                    )
+                raise
 
     except ImportError:
         _log("Antigravity: httpx is not installed, falling back to requests streaming.")
@@ -1483,6 +1695,7 @@ def send_message_stream(
         raise RuntimeError(f"Antigravity proxy streaming request timed out after {timeout}s.")
 
     if _should_wait_for_auth(resp):
+        error_text = _extract_error_message(resp)
         try:
             resp.close()
         except Exception:
@@ -1495,6 +1708,7 @@ def send_message_stream(
             log_fn,
             stream=True,
             request_timeout=timeout,
+            min_account_count=_min_accounts_for_auth_retry(error_text),
         )
         if auth_resp is not None:
             resp = auth_resp
@@ -1515,4 +1729,25 @@ def send_message_stream(
             pass
         raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
 
-    return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+    try:
+        return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+    except RuntimeError as stream_exc:
+        error_text = str(stream_exc)
+        if _error_text_suggests_account_setup(error_text):
+            auth_resp = _wait_for_auth(
+                url,
+                payload,
+                _build_headers(),
+                proxy_url,
+                log_fn,
+                stream=True,
+                request_timeout=timeout,
+                min_account_count=_min_accounts_for_auth_retry(error_text),
+            )
+            if auth_resp is not None:
+                return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+            raise RuntimeError(
+                f"Antigravity: authentication timed out.\n"
+                f"Open {proxy_url} and add your Google account, then try again."
+            )
+        raise
