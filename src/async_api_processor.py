@@ -45,6 +45,36 @@ from pathlib import Path
 from html_output_utils import ensure_utf8_html_document
 
 try:
+    from antigravity_proxy import clamp_output_tokens_for_model as _clamp_antigravity_output_tokens
+except Exception:
+    def _clamp_antigravity_output_tokens(model, max_tokens, default=8192):
+        try:
+            requested = int(max_tokens)
+        except Exception:
+            requested = int(default)
+        if requested <= 0:
+            return requested
+        model_lower = str(model or "").lower()
+        if "claude" in model_lower:
+            return min(requested, 64000)
+        if "gemini" in model_lower:
+            return min(requested, 64000)
+        return requested
+
+
+def _is_antigravity_model_name(model) -> bool:
+    return str(model or "").strip().lower().startswith("antigravity")
+
+
+def _clamp_output_tokens_for_selected_model(model, max_tokens, default=65536):
+    if _is_antigravity_model_name(model):
+        return _clamp_antigravity_output_tokens(model, max_tokens, default=default)
+    try:
+        return int(max_tokens)
+    except Exception:
+        return int(default)
+
+try:
     import tiktoken
 except ImportError:
     tiktoken = None
@@ -3182,7 +3212,20 @@ class AsyncProcessingDialog:
         else:
             env_vars['CONTEXTUAL'] = '1' if self.gui.contextual_var else '0'
             
-        env_vars['MAX_OUTPUT_TOKENS'] = str(self.gui.max_output_tokens)
+        raw_max_output_tokens = getattr(self.gui, 'max_output_tokens', 65536)
+        clamped_max_output_tokens = _clamp_output_tokens_for_selected_model(
+            env_vars.get('MODEL', ''),
+            raw_max_output_tokens,
+            default=65536,
+        )
+        env_vars['MAX_OUTPUT_TOKENS'] = str(clamped_max_output_tokens)
+        if str(raw_max_output_tokens) != str(clamped_max_output_tokens):
+            logger.info(
+                "[ASYNC] Clamped MAX_OUTPUT_TOKENS for %s: %s -> %s",
+                env_vars.get('MODEL', ''),
+                raw_max_output_tokens,
+                clamped_max_output_tokens,
+            )
         
         # Resolve target language for prompt substitution
         target_lang = self.gui.config.get('output_language') or ''
@@ -3359,6 +3402,11 @@ class AsyncProcessingDialog:
                 _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
         except Exception:
             _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
+        _resolved_retry_tokens = _clamp_output_tokens_for_selected_model(
+            env_vars.get('MODEL', ''),
+            _resolved_retry_tokens,
+            default=65536,
+        )
         env_vars['MAX_RETRY_TOKENS'] = str(_resolved_retry_tokens)
 
         # Truncation and silent-truncation retries

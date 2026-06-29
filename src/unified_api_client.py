@@ -1180,6 +1180,8 @@ try:
     from antigravity_proxy import reset_cancel as _antigravity_reset_cancel
     from antigravity_proxy import check_proxy_health as _antigravity_health_check
     from antigravity_proxy import ensure_proxy_running as _antigravity_ensure_running
+    from antigravity_proxy import CLAUDE_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS
+    from antigravity_proxy import GEMINI_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS
     ANTIGRAVITY_AVAILABLE = True
 except ImportError:
     _antigravity_send = None
@@ -1188,6 +1190,8 @@ except ImportError:
     _antigravity_reset_cancel = None
     _antigravity_health_check = None
     _antigravity_ensure_running = None
+    _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS = 64000
+    _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS = 64000
     ANTIGRAVITY_AVAILABLE = False
 
 # AuthZA - Z.AI (Zhipu AI) via pseudo-OAuth key capture (optional)
@@ -1991,6 +1995,38 @@ class UnifiedClient:
             per_key_limit = None
         return per_key_limit
 
+    @staticmethod
+    def _strip_antigravity_model_prefix(model: str) -> str:
+        model_clean = (model or '').strip()
+        model_lower = model_clean.lower()
+        if model_lower.startswith('antigravity/'):
+            return model_clean.split('/', 1)[1].lstrip('/')
+        if model_lower.startswith('antigravity-'):
+            return model_clean[len('antigravity-'):]
+        if model_lower.startswith('antigravity'):
+            return model_clean[len('antigravity'):].lstrip('/-')
+        return model_clean
+
+    def _is_antigravity_model(self) -> bool:
+        model_lower = (getattr(self, 'model', '') or '').strip().lower()
+        return model_lower.startswith('antigravity') or getattr(self, 'client_type', None) == 'antigravity'
+
+    def _clamp_antigravity_max_tokens(self, max_tokens: Optional[int]) -> Optional[int]:
+        if max_tokens is None:
+            return None
+
+        try:
+            requested = int(max_tokens)
+        except Exception:
+            requested = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
+
+        model_name = self._strip_antigravity_model_prefix(getattr(self, 'model', '')).lower()
+        if 'claude' in model_name:
+            return min(requested, _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS)
+        if 'gemini' in model_name:
+            return min(requested, _ANTIGRAVITY_GEMINI_MAX_OUTPUT_TOKENS)
+        return requested
+
     def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
         """Normalize token parameters and apply the active key's output token override."""
         per_key_limit = self._active_per_key_output_token_limit()
@@ -2004,6 +2040,8 @@ class UnifiedClient:
             mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 mt = per_key_limit
+            if self._is_antigravity_model():
+                mt = self._clamp_antigravity_max_tokens(mt)
             return mt, None
 
     def _set_idempotency_context(self, request_id: str, attempt: int) -> None:
@@ -7976,7 +8014,7 @@ class UnifiedClient:
                 raise ImportError(
                     "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
                 )
-            logger.info("Antigravity will use local proxy (frieser/antigravity-proxy)")
+            logger.info("🛸 Antigravity will use local proxy (frieser/antigravity-proxy)")
 
         elif self.client_type == 'authza':
             # AuthZA uses Z.AI API via pseudo-OAuth key capture – no persistent SDK client
@@ -24813,6 +24851,19 @@ class UnifiedClient:
                 break
         if not actual_model:
             actual_model = 'claude-sonnet-4-6'  # sensible default
+        requested_max_tokens = max_tokens
+        max_tokens = self._clamp_antigravity_max_tokens(max_tokens)
+        try:
+            requested_int = int(requested_max_tokens)
+            clamped_int = int(max_tokens)
+        except Exception:
+            requested_int = None
+            clamped_int = None
+        if requested_int is not None and clamped_int is not None and requested_int != clamped_int:
+            print(
+                f"🎚️ Antigravity: max_tokens clamped {requested_int:,} -> {clamped_int:,} "
+                f"for model {actual_model}"
+            )
 
         max_retries = self._get_max_retries()
         last_error = None

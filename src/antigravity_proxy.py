@@ -38,8 +38,13 @@ import threading
 import time
 import webbrowser
 import zipfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - fallback path for stripped builds
+    httpx = None
 
 import requests
 
@@ -58,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash"
+RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-low-only"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -68,7 +73,9 @@ MODELS_ENDPOINT = "/v1/models"
 STATUS_ENDPOINT = "/api/status"
 OAUTH_START_ENDPOINT = "/oauth/start"
 CLAUDE_MAX_OUTPUT_TOKENS = 64000
-GEMINI_MAX_OUTPUT_TOKENS = 65536
+# Antigravity's Cloud Code route rejects 65,536 even when the public Gemini model
+# advertises that limit. Keep Gemini on the same 64k ceiling to avoid 400s.
+GEMINI_MAX_OUTPUT_TOKENS = 64000
 
 PROXY_REPO_URL = "https://github.com/frieser/antigravity-proxy"
 
@@ -295,7 +302,7 @@ def _patch_runtime_antigravity_client_version(runtime_dir: str, version: str) ->
 
 
 def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
-    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash tiers."""
+    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash low tier."""
     transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
     if not os.path.exists(transform_path):
         return False
@@ -306,15 +313,26 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
     updated = content
     changed = False
 
-    if "gemini-3.5-flash-high" not in updated:
+    updated, count = re.subn(
+        r'\n\s*"gemini-3\.5-flash(?:-high|-medium)?",',
+        "",
+        updated,
+    )
+    changed = changed or count > 0
+
+    updated, count = re.subn(
+        r'googleModel = `gemini-3\.5-flash-\$\{extractedTier \|\| "medium"\}`;',
+        'googleModel = "gemini-3.5-flash-low";',
+        updated,
+    )
+    changed = changed or count > 0
+
+    if '"gemini-3.5-flash-low"' not in updated:
         def add_supported_models(match: re.Match) -> str:
             indent = match.group("indent")
             return (
                 f'{indent}"gemini-3.1-pro-preview",\n'
-                f'{indent}"gemini-3.5-flash-high",\n'
-                f'{indent}"gemini-3.5-flash-medium",\n'
                 f'{indent}"gemini-3.5-flash-low",\n'
-                f'{indent}"gemini-3.5-flash",\n'
             )
 
         updated, count = re.subn(
@@ -325,7 +343,7 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
         )
         changed = changed or count > 0
 
-    mapping_marker = '`gemini-3.5-flash-${extractedTier || "medium"}`'
+    mapping_marker = 'googleModel = "gemini-3.5-flash-low";'
     if mapping_marker not in updated:
         def add_flash_mapping(match: re.Match) -> str:
             if_indent = match.group("if_indent")
@@ -333,7 +351,7 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
             original = match.group(0)
             return (
                 f'{if_indent}if (baseModel.includes("gemini-3.5-flash")) {{\n'
-                f'{body_indent}googleModel = `gemini-3.5-flash-${{extractedTier || "medium"}}`;\n'
+                f'{body_indent}googleModel = "gemini-3.5-flash-low";\n'
                 f'{if_indent}}} else {original.lstrip()}'
             )
 
@@ -350,7 +368,7 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
         with open(transform_path, "w", encoding="utf-8") as f:
             f.write(updated)
 
-    return "gemini-3.5-flash-high" in updated and mapping_marker in updated
+    return '"gemini-3.5-flash-low"' in updated and mapping_marker in updated
 
 
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
@@ -620,18 +638,59 @@ def _payload_for_openai_chat(
     }
 
 
-def _clamp_max_tokens_for_model(model: str, max_tokens: int) -> int:
+def clamp_output_tokens_for_model(model: str, max_tokens: Any, default: int = 8192) -> int:
     try:
         requested = int(max_tokens)
     except Exception:
-        requested = 8192
+        requested = int(default)
 
-    model_lower = (model or "").lower()
+    if requested <= 0:
+        return requested
+
+    model_lower = _normalize_model_name(model).lower()
     if "claude" in model_lower:
         return min(requested, CLAUDE_MAX_OUTPUT_TOKENS)
     if "gemini" in model_lower:
         return min(requested, GEMINI_MAX_OUTPUT_TOKENS)
     return requested
+
+
+def _clamp_max_tokens_for_model(model: str, max_tokens: int) -> int:
+    return clamp_output_tokens_for_model(model, max_tokens)
+
+
+def _format_token_count(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return str(value)
+
+
+def _token_count_or_none(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _log_payload_token_limit(log_fn, requested_max_tokens: Any, payload: Dict[str, Any]) -> None:
+    if log_fn is None:
+        return
+
+    sent_max_tokens = payload.get("max_tokens")
+    requested = _token_count_or_none(requested_max_tokens)
+    sent = _token_count_or_none(sent_max_tokens)
+    model = payload.get("model", "")
+
+    if requested is not None and sent is not None and requested != sent:
+        log_fn(
+            "🎚️ Antigravity: max_tokens clamped "
+            f"{_format_token_count(requested)} -> {_format_token_count(sent)} "
+            f"(model={model})"
+        )
+        return
+
+    log_fn(f"🎚️ Antigravity: max_tokens={_format_token_count(sent_max_tokens)} (model={model})")
 
 
 def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -695,6 +754,38 @@ def _should_wait_for_auth(resp: requests.Response) -> bool:
     return False
 
 
+def _should_wait_for_auth_status_error(status_code: int, error_text: str = "") -> bool:
+    if status_code in (401, 403):
+        return not _proxy_has_accounts()
+
+    if status_code == 429:
+        return not _proxy_has_accounts()
+
+    lowered = (error_text or "").lower()
+    return "no account" in lowered or "add account" in lowered
+
+
+class _HttpxStreamResponseAdapter:
+    """Keep an httpx.stream() context alive while exposing a response-like API."""
+
+    def __init__(self, context_manager: Any):
+        self._context_manager = context_manager
+        self._response = context_manager.__enter__()
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._response.close()
+        finally:
+            self._context_manager.__exit__(None, None, None)
+
+
 def _wait_for_auth(
     url: str,
     payload: Dict[str, Any],
@@ -705,6 +796,7 @@ def _wait_for_auth(
     poll_interval: int = 5,
     stream: bool = False,
     request_timeout: float = 300,
+    prefer_httpx_stream: bool = False,
 ):
     """Open OAuth and poll until an account is linked or timeout is reached."""
     _open_auth_browser_once(proxy_url, log_fn)
@@ -725,18 +817,29 @@ def _wait_for_auth(
 
         if _proxy_has_accounts():
             _log("Antigravity: account detected, retrying request...")
+            retry_resp = None
             try:
-                retry_resp = requests.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=request_timeout,
-                    stream=stream,
-                )
+                if stream and prefer_httpx_stream and httpx is not None:
+                    retry_resp = _HttpxStreamResponseAdapter(
+                        _stream_chat_with_httpx(url, payload, headers, request_timeout)
+                    )
+                else:
+                    retry_resp = requests.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=request_timeout,
+                        stream=stream,
+                    )
                 if retry_resp.status_code < 400:
                     return retry_resp
             except Exception:
                 pass
+            if retry_resp is not None:
+                try:
+                    retry_resp.close()
+                except Exception:
+                    pass
 
         _log(f"Still waiting for Antigravity account linking... ({elapsed}s / {max_wait}s)")
 
@@ -1032,6 +1135,32 @@ def _post_chat(payload: Dict[str, Any], timeout: float, stream: bool) -> request
     )
 
 
+def _stream_chat_with_httpx(
+    url: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: float,
+):
+    if httpx is None:
+        raise ImportError("httpx is not installed")
+
+    stream_headers = {
+        **headers,
+        "Accept": "text/event-stream",
+        # Disable gzip so SSE events are yielded as the proxy flushes them.
+        "Accept-Encoding": "identity",
+    }
+    connect_timeout = min(30.0, float(timeout)) if timeout else 30.0
+    timeout_config = httpx.Timeout(timeout, connect=connect_timeout)
+    return httpx.stream(
+        "POST",
+        url,
+        json=payload,
+        headers=stream_headers,
+        timeout=timeout_config,
+    )
+
+
 def _raise_connection_refused() -> None:
     raise RuntimeError(
         "Antigravity proxy connection refused. "
@@ -1059,7 +1188,8 @@ def send_message(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
     _log = log_fn or _log_noop
-    _log(f"Antigravity: sending to {proxy_url} (model={payload['model']})")
+    _log(f"🚀 Antigravity: sending to {proxy_url} (model={payload['model']})")
+    _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
         resp = _post_chat(payload, timeout=timeout, stream=False)
@@ -1124,7 +1254,14 @@ def _log_text_stream(text: str, log_buf: List[str], log_fn) -> None:
             log_buf.clear()
 
 
-def _consume_openai_stream(resp: requests.Response, log_fn=None, log_stream: bool = True) -> Dict[str, Any]:
+def _iter_stream_lines(resp: Any) -> Iterable[Any]:
+    try:
+        yield from resp.iter_lines(decode_unicode=True, chunk_size=1)
+    except TypeError:
+        yield from resp.iter_lines()
+
+
+def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> Dict[str, Any]:
     _log = log_fn or _log_noop
     collected_content: List[str] = []
     finish_reason = "stop"
@@ -1147,7 +1284,7 @@ def _consume_openai_stream(resp: requests.Response, log_fn=None, log_stream: boo
         except Exception:
             pass
 
-        for line in resp.iter_lines(decode_unicode=True, chunk_size=1):
+        for line in _iter_stream_lines(resp):
             if _cancel_event.is_set():
                 resp.close()
                 raise RuntimeError("Antigravity: stream cancelled by user")
@@ -1239,7 +1376,47 @@ def send_message_stream(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
     _log = log_fn or _log_noop
-    _log(f"Antigravity: streaming from {proxy_url} (model={payload['model']})")
+    _log(f"🌊 Antigravity: streaming from {proxy_url} (model={payload['model']})")
+    _log_payload_token_limit(_log, max_tokens, payload)
+
+    try:
+        with _stream_chat_with_httpx(url, payload, _build_headers(), timeout) as resp:
+            if resp.status_code != 200:
+                try:
+                    error_text = resp.read().decode("utf-8", errors="replace")[:1000]
+                except Exception:
+                    error_text = ""
+
+                if _should_wait_for_auth_status_error(resp.status_code, error_text):
+                    auth_resp = _wait_for_auth(
+                        url,
+                        payload,
+                        _build_headers(),
+                        proxy_url,
+                        log_fn,
+                        stream=True,
+                        request_timeout=timeout,
+                        prefer_httpx_stream=True,
+                    )
+                    if auth_resp is not None:
+                        return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+                    raise RuntimeError(
+                        f"Antigravity: authentication timed out.\n"
+                        f"Open {proxy_url} and add your Google account, then try again."
+                    )
+
+                raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
+
+            return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
+
+    except ImportError:
+        _log("Antigravity: httpx is not installed, falling back to requests streaming.")
+    except Exception as exc:
+        if httpx is not None and isinstance(exc, httpx.ConnectError):
+            _raise_connection_refused()
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            raise RuntimeError(f"Antigravity proxy streaming request timed out after {timeout}s.")
+        raise
 
     try:
         resp = _post_chat(payload, timeout=timeout, stream=True)

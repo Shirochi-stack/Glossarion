@@ -101,5 +101,6 @@ tests/**
 !tests/test_gemini_free_budget.py
 !tests/test_glossary_dedup_logging.py
 !tests/test_shutdown_utils_cleanup.py
+!tests/test_antigravity_proxy.py
 junktests/
 warp.md

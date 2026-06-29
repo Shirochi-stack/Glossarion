@@ -126,7 +126,7 @@
 | **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
-| **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking, antigravity/gemini-3.1-pro |
+| **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-high |
 | **AuthND** | `authnd/*` | authnd/z-ai/glm-5.1 |
 | **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
@@ -153,7 +153,7 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 1. **Direct Providers** — use API keys from OpenAI, Google, Anthropic, etc.
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
-4. **Antigravity** — local Cloud Code proxy on `localhost:8080` (no API key needed)
+4. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
 5. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 
 ### Manga Translation Setup

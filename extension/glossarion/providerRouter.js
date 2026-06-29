@@ -173,7 +173,7 @@ const PROVIDER_DEFINITIONS = {
   authgem_key: { endpointType: "authgem_key", baseUrl: "https://generativelanguage.googleapis.com", apiKey: true },
   authgem_vertex: { endpointType: "authgem_vertex", baseUrl: "https://cloud.google.com/vertex-ai", apiKey: false },
   authza: { endpointType: "authza", baseUrl: "https://chat.z.ai", apiKey: false },
-  antigravity: { endpointType: "antigravity", baseUrl: "http://localhost:8080", apiKey: false },
+  antigravity: { endpointType: "antigravity", baseUrl: "http://localhost:3000", apiKey: false },
   azure: { endpointType: "azure_openai", baseUrl: "", apiKey: true },
   vertex_model_garden: { endpointType: "vertex_model_garden", baseUrl: "https://aiplatform.googleapis.com", apiKey: false },
   poe: { endpointType: "poe", baseUrl: "https://api.poe.com", apiKey: true },
@@ -364,7 +364,7 @@ export function buildThinkingRequestFields(route, settings = {}) {
 }
 
 export function buildOpenAICompatiblePayload(route, messages, settings = {}) {
-  const tokenLimit = Number(settings.maxTokens ?? 16384);
+  const tokenLimit = clampProviderMaxTokens(route, Number(settings.maxTokens ?? 16384));
   const payload = {
     model: route.model,
     messages
@@ -382,6 +382,22 @@ export function buildOpenAICompatiblePayload(route, messages, settings = {}) {
 
   Object.assign(payload, buildThinkingRequestFields(route, settings));
   return payload;
+}
+
+function clampProviderMaxTokens(route, tokenLimit) {
+  const requested = Number.isFinite(tokenLimit) ? tokenLimit : 16384;
+  if (route?.provider !== "antigravity") {
+    return requested;
+  }
+
+  const model = String(route.model || "").toLowerCase();
+  if (model.includes("claude")) {
+    return Math.min(requested, 64000);
+  }
+  if (model.includes("gemini")) {
+    return Math.min(requested, 65536);
+  }
+  return requested;
 }
 
 export function buildResponsesPayload(route, messages, settings = {}) {

@@ -65,6 +65,59 @@ from refinement_prompts import (
 import csv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
+try:
+    from antigravity_proxy import clamp_output_tokens_for_model as _clamp_antigravity_output_tokens
+except Exception:
+    def _clamp_antigravity_output_tokens(model, max_tokens, default=8192):
+        try:
+            requested = int(max_tokens)
+        except Exception:
+            requested = int(default)
+        if requested <= 0:
+            return requested
+        model_lower = str(model or "").lower()
+        if "claude" in model_lower:
+            return min(requested, 64000)
+        if "gemini" in model_lower:
+            return min(requested, 64000)
+        return requested
+
+
+def _is_antigravity_model_name(model) -> bool:
+    return str(model or "").strip().lower().startswith("antigravity")
+
+
+def _clamp_output_tokens_for_selected_model(model, max_tokens, default=8192):
+    if _is_antigravity_model_name(model):
+        return _clamp_antigravity_output_tokens(model, max_tokens, default=default)
+    try:
+        return int(max_tokens)
+    except Exception:
+        return int(default)
+
+
+def _format_token_count_for_log(value):
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return str(value)
+
+
+def _log_antigravity_token_clamp(model, name, requested, clamped):
+    if not _is_antigravity_model_name(model):
+        return
+    try:
+        requested_int = int(requested)
+        clamped_int = int(clamped)
+    except Exception:
+        return
+    if requested_int != clamped_int:
+        print(
+            f"🎚️ Antigravity: {name} clamped "
+            f"{_format_token_count_for_log(requested_int)} -> {_format_token_count_for_log(clamped_int)} "
+            f"for model {model}"
+        )
+
 MULTIPASS_REFINEMENT_MODES = ("full", "failed", "partial", "partial.b", "partial.b2")
 SDLXLIFF_PLACEHOLDER_RE = re.compile(r"\[\[XLIFF_TAG_\d{6}_\d{4}\]\]")
 
@@ -890,7 +943,13 @@ class TranslationConfig:
         self.REMOVE_AI_ARTIFACTS = _raw_artifacts if _raw_artifacts in ("off", "low", "medium", "high") else "off"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
         self.HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
-        self.MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        raw_max_output_tokens = os.getenv("MAX_OUTPUT_TOKENS", "8192")
+        self.MAX_OUTPUT_TOKENS = _clamp_output_tokens_for_selected_model(
+            self.MODEL,
+            raw_max_output_tokens,
+            default=8192,
+        )
+        _log_antigravity_token_clamp(self.MODEL, "MAX_OUTPUT_TOKENS", raw_max_output_tokens, self.MAX_OUTPUT_TOKENS)
         self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
         self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
@@ -941,7 +1000,13 @@ class TranslationConfig:
         self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
         self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "1800"))
         self.DISABLE_MERGE_FALLBACK = os.getenv("DISABLE_MERGE_FALLBACK", "0") == "1"
-        self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+        raw_max_retry_tokens = os.getenv("MAX_RETRY_TOKENS", "16384")
+        self.MAX_RETRY_TOKENS = _clamp_output_tokens_for_selected_model(
+            self.MODEL,
+            raw_max_retry_tokens,
+            default=16384,
+        )
+        _log_antigravity_token_clamp(self.MODEL, "MAX_RETRY_TOKENS", raw_max_retry_tokens, self.MAX_RETRY_TOKENS)
         self.DUPLICATE_LOOKBACK_CHAPTERS = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
         self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
         self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
@@ -1007,7 +1072,11 @@ class TranslationConfig:
         - If the active translation key pool has per-key limits, use the safe pool limit:
           configured per-key limits override global, while unset keys keep global.
         """
-        effective = self.MAX_OUTPUT_TOKENS
+        effective = _clamp_output_tokens_for_selected_model(
+            self.MODEL,
+            self.MAX_OUTPUT_TOKENS,
+            default=8192,
+        )
         
         # Check if we've discovered a model limit via auto-adjustment
         try:
@@ -1057,7 +1126,11 @@ class TranslationConfig:
         if pool_limit is not None:
             effective = pool_limit
 
-        return effective
+        return _clamp_output_tokens_for_selected_model(
+            self.MODEL,
+            effective,
+            default=8192,
+        )
 
     def get_effective_compression_factor(self) -> float:
         """Return a non-zero compression factor for token-budget math.
@@ -6971,7 +7044,11 @@ class BatchTranslationProcessor:
                                 retry_cap = base_max_tokens
                             if retry_cap <= 0:
                                 retry_cap = base_max_tokens
-                            retry_max_tokens = max(base_max_tokens, retry_cap)
+                            retry_max_tokens = _clamp_output_tokens_for_selected_model(
+                                self.config.MODEL,
+                                max(base_max_tokens, retry_cap),
+                                default=base_max_tokens,
+                            )
 
                             # Prevent nested truncation retries within the unified client during our char-ratio retries
                             try:
@@ -8343,7 +8420,11 @@ class BatchTranslationProcessor:
                                 retry_cap = base_max_tokens
                             if retry_cap <= 0:
                                 retry_cap = base_max_tokens
-                            retry_max_tokens = max(base_max_tokens, retry_cap)
+                            retry_max_tokens = _clamp_output_tokens_for_selected_model(
+                                self.config.MODEL,
+                                max(base_max_tokens, retry_cap),
+                                default=base_max_tokens,
+                            )
 
                             # Prevent nested truncation retries within the unified client during our char-ratio retries
                             try:
@@ -23332,7 +23413,11 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 original_max = config.MAX_OUTPUT_TOKENS
                                 target_tokens = config.MAX_RETRY_TOKENS if config.MAX_RETRY_TOKENS > 0 else original_max
-                                config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
+                                config.MAX_OUTPUT_TOKENS = _clamp_output_tokens_for_selected_model(
+                                    config.MODEL,
+                                    max(original_max, target_tokens),
+                                    default=original_max,
+                                )
                                 
                                 result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
                                     msgs, chunk_html, c, chunk_idx, total_chunks,
