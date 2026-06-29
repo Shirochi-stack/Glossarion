@@ -1,197 +1,245 @@
-# antigravity_proxy.py - Antigravity Cloud Code proxy integration
-# Routes requests through the antigravity-claude-proxy (github.com/badrisnarayanan/antigravity-claude-proxy)
-# which exposes an Anthropic Messages API backed by Google Cloud Code.
+# antigravity_proxy.py - Antigravity Proxy integration
+# Routes requests through frieser/antigravity-proxy:
+# https://github.com/frieser/antigravity-proxy
 #
-import webbrowser
-# Usage: prefix models with 'antigravity/' (e.g., antigravity/claude-sonnet-4-5, antigravity/gemini-3-flash)
-"""
-Antigravity Proxy adapter for Glossarion.
+# Glossarion keeps using model names prefixed with "antigravity/".
+# This module translates them to the OpenAI-compatible model ids expected by
+# frieser/antigravity-proxy and exposes the same Python API as the previous
+# Antigravity adapter.
 
-The antigravity-claude-proxy runs as a local Node.js server (default: http://localhost:8080)
-and exposes an Anthropic-compatible Messages API backed by Google Cloud Code.
+"""Antigravity Proxy adapter for Glossarion.
 
-Supported models (via the proxy):
-  - Claude:  claude-sonnet-4-5, claude-sonnet-4-5-thinking, claude-opus-4-6-thinking
-  - Gemini:  gemini-3-flash, gemini-3.1-pro-high, gemini-3.1-pro-low
+The current upstream proxy is an OpenAI-compatible local server. By default it
+listens on http://localhost:3000 and exposes:
+
+  - GET  /api/status
+  - GET  /v1/models
+  - POST /v1/chat/completions
+  - GET  /oauth/start
 
 Prerequisites:
-  1. Install the proxy:  npm install -g antigravity-claude-proxy
-  2. Start the proxy:   antigravity-claude-proxy start   (or: npx antigravity-claude-proxy@latest start)
-  3. Link account:      Open http://localhost:8080 and add your Google account
+  1. Install Bun from https://bun.sh/
+  2. Start the proxy with: bunx antigravity-proxy@latest
+  3. Open http://localhost:3000 and add a Google account
+
+Glossarion can auto-launch the proxy when Bun/Bunx is on PATH. A Node/npx
+fallback is attempted for environments where the package can bootstrap Bun.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import json
-import time
 import logging
+import os
+import re
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
-from typing import Optional, Dict, Any, List
+import time
+import webbrowser
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_PROXY_URL = "http://localhost:8080"
-MESSAGES_ENDPOINT = "/v1/messages"
-HEALTH_ENDPOINT = "/health"
-CONFIG_ENDPOINT = "/api/config"
+DEFAULT_PROXY_URL = "http://localhost:3000"
+PROXY_PACKAGE_NAME = "antigravity-proxy"
+PROXY_PACKAGE = os.environ.get("ANTIGRAVITY_PROXY_PACKAGE", f"{PROXY_PACKAGE_NAME}@latest")
+PROXY_GITHUB_REPO = "https://github.com/frieser/antigravity-proxy.git"
 
-# Cached API key (read from proxy config file)
-_cached_api_key: Optional[str] = None
-_api_key_lock = threading.Lock()
+CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
+MODELS_ENDPOINT = "/v1/models"
+STATUS_ENDPOINT = "/api/status"
+OAUTH_START_ENDPOINT = "/oauth/start"
 
-# Module-level cancellation flag
+PROXY_REPO_URL = "https://github.com/frieser/antigravity-proxy"
+
+# Module-level cancellation flag.
 _cancel_event = threading.Event()
 
-# Module-level proxy subprocess tracking
+# Module-level proxy subprocess tracking.
 _proxy_process: Optional[subprocess.Popen] = None
 _proxy_launch_lock = threading.Lock()
 
-# Auth browser tracking — only open the browser once per session
+# Auth browser tracking - only open the browser once per session.
 _auth_browser_opened = False
 _auth_browser_lock = threading.Lock()
 
 
-def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
-    """Open the proxy auth URL in the browser, but only once per session.
-
-    Returns True if the browser was opened (first call), False if already opened.
-    """
-    global _auth_browser_opened
-    with _auth_browser_lock:
-        if _auth_browser_opened:
-            return False
-        _auth_browser_opened = True
-    _log = log_fn or (lambda msg: None)
-    _log(f"🔐 Antigravity: Opening {proxy_url} in your browser for Google account linking...")
-    try:
-        webbrowser.open(proxy_url)
-    except Exception:
-        pass
-    return True
-
-
-def _get_proxy_api_key() -> str:
-    """Auto-fetch the proxy's API key so requests are authenticated.
-
-    Only reads from the live proxy's /api/config endpoint (most reliable).
-    We do NOT read from the config file on disk because Glossarion settings
-    are merged into the same file and can contain a stale apiKey.
-
-    Returns the key string, or empty string if no key is configured.
-    """
-    global _cached_api_key
-    with _api_key_lock:
-        if _cached_api_key is not None:
-            return _cached_api_key
-
-        key = ""
-
-        # Try live proxy endpoint (always up-to-date)
-        try:
-            proxy_url = get_proxy_url()
-            resp = requests.get(
-                f"{proxy_url}{CONFIG_ENDPOINT}", timeout=3
-            )
-            if resp.status_code == 200:
-                cfg = resp.json().get("config", {})
-                live_key = cfg.get("apiKey", "") or ""
-                if live_key:
-                    key = live_key
-                    logger.info("Antigravity: API key fetched from live proxy.")
-        except Exception:
-            pass
-
-        _cached_api_key = key
-        return key
-
-
-def invalidate_api_key_cache():
-    """Clear the cached API key so it is re-read on next request."""
-    global _cached_api_key
-    with _api_key_lock:
-        _cached_api_key = None
-
-
-def _build_headers() -> Dict[str, str]:
-    """Build the HTTP headers for a proxy request."""
-    headers: Dict[str, str] = {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-    }
-    key = _get_proxy_api_key()
-    if key:
-        headers["x-api-key"] = key
-    return headers
-
-
-def _wait_for_auth(
-    url: str,
-    payload: dict,
-    headers: dict,
-    proxy_url: str,
-    log_fn=None,
-    max_wait: int = 120,
-    poll_interval: int = 10,
-    stream: bool = False,
-):
-    """Open browser once and poll until authentication succeeds or timeout.
-
-    Returns the successful requests.Response, or None if timed out.
-    """
-    _open_auth_browser_once(proxy_url, log_fn)
-    _log = log_fn or (lambda msg: None)
-    _log(f"")
-    _log(f"╔══════════════════════════════════════════════════════════════╗")
-    _log(f"║  🔐  Antigravity: Google Account Authentication Required    ║")
-    _log(f"╠══════════════════════════════════════════════════════════════╣")
-    _log(f"║  Please complete these steps:                               ║")
-    _log(f"║  1. Open {proxy_url:<50s}║")
-    _log(f"║  2. Click 'Add Account' and sign in with Google             ║")
-    _log(f"║  3. Come back here — translation will resume automatically  ║")
-    _log(f"╚══════════════════════════════════════════════════════════════╝")
-    _log(f"")
-    _log(f"⏳ Waiting for you to complete authentication... (timeout: {max_wait}s)")
-
-    elapsed = 0
-    while elapsed < max_wait:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-        if _cancel_event.is_set():
-            return None
-        _log(f"⏳ Still waiting for authentication... ({elapsed}s / {max_wait}s)")
-        try:
-            retry_resp = requests.post(
-                url, json=payload, headers=headers, timeout=30, stream=stream
-            )
-            if retry_resp.status_code not in (401, 403):
-                _log(f"✅ Antigravity: Authentication successful!")
-                return retry_resp
-        except Exception:
-            continue
+def _log_noop(_: str) -> None:
     return None
 
 
+def _proxy_command_for_humans() -> str:
+    return f"bunx {PROXY_PACKAGE}"
 
-def cancel_stream():
+
+def _get_proxy_data_dir() -> str:
+    """Return the stable data/config directory used for auto-launched proxy."""
+    return os.environ.get(
+        "ANTIGRAVITY_PROXY_DATA_DIR",
+        os.path.join(os.path.expanduser("~"), ".config", "antigravity-proxy"),
+    )
+
+
+def _parse_semver(value: str) -> tuple:
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", value or "")
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(part) for part in match.groups())
+
+
+def _version_to_str(version: tuple) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def _run_version_probe(cmd: List[str], timeout: int = 12) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        if result.returncode == 0:
+            value = (result.stdout or "").strip().splitlines()
+            return value[-1].strip() if value else None
+    except Exception:
+        return None
+    return None
+
+
+def _latest_proxy_version() -> str:
+    """Best-effort latest upstream version for dashboard/status metadata.
+
+    npm currently publishes antigravity-proxy@0.7.0 while the GitHub repo has a
+    newer v1.7.1 tag. Prefer the highest semantic version we can discover so
+    the proxy does not render an "unsupported version" page because Glossarion
+    launched it from a data directory.
+    """
+    override = os.environ.get("ANTIGRAVITY_PROXY_VERSION", "").strip().lstrip("v")
+    if override:
+        return override
+
+    versions = []
+
+    npm = _candidate_executable("npm")
+    if npm:
+        npm_version = _run_version_probe([npm, "view", PROXY_PACKAGE_NAME, "version", "--silent"])
+        if npm_version:
+            versions.append(_parse_semver(npm_version))
+
+    git = _candidate_executable("git")
+    if git:
+        tags = _run_version_probe(
+            [git, "ls-remote", "--tags", "--sort=v:refname", PROXY_GITHUB_REPO],
+            timeout=20,
+        )
+        if tags:
+            for line in tags.splitlines():
+                if "^{}" in line:
+                    continue
+                tag = line.rsplit("/", 1)[-1].strip()
+                versions.append(_parse_semver(tag))
+
+    latest = max(versions) if versions else (0, 7, 0)
+    return _version_to_str(latest)
+
+
+def _write_proxy_runtime_package_json(data_dir: str) -> None:
+    package_json = os.path.join(data_dir, "package.json")
+    version = _latest_proxy_version()
+    try:
+        existing: Dict[str, Any] = {}
+        if os.path.exists(package_json):
+            with open(package_json, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+
+        desired = {
+            **existing,
+            "name": PROXY_PACKAGE_NAME,
+            "private": True,
+            "version": version,
+        }
+
+        if existing != desired:
+            with open(package_json, "w", encoding="utf-8") as f:
+                json.dump(desired, f, indent=2)
+    except Exception as exc:
+        logger.debug("Could not update Antigravity proxy package.json: %s", exc)
+
+
+def _ensure_proxy_config() -> str:
+    """Ensure the auto-launched proxy has a stable working/data directory.
+
+    frieser/antigravity-proxy stores config.json relative to process.cwd() and
+    stores accounts in ACCOUNTS_FILE when that env var is set. We launch from a
+    dedicated directory so Glossarion does not litter the repository root with
+    proxy state.
+    """
+    data_dir = _get_proxy_data_dir()
+    os.makedirs(data_dir, exist_ok=True)
+    _write_proxy_runtime_package_json(data_dir)
+
+    return data_dir
+
+
+def get_proxy_url() -> str:
+    """Get the Antigravity proxy URL from env or default."""
+    return os.environ.get("ANTIGRAVITY_PROXY_URL", DEFAULT_PROXY_URL).rstrip("/")
+
+
+def _get_proxy_port() -> int:
+    try:
+        parsed = urlparse(get_proxy_url())
+        if parsed.port:
+            return parsed.port
+    except Exception:
+        pass
+    return 3000
+
+
+def _build_headers() -> Dict[str, str]:
+    """Build HTTP headers for the OpenAI-compatible proxy."""
+    return {
+        "Content-Type": "application/json",
+        # The upstream server currently does not validate this, but including an
+        # OpenAI-shaped Authorization header keeps generic middleware happy.
+        "Authorization": "Bearer sk-antigravity",
+    }
+
+
+def invalidate_api_key_cache() -> None:
+    """Compatibility no-op for callers from the older adapter."""
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cancellation and auth-browser helpers
+# ---------------------------------------------------------------------------
+
+def cancel_stream() -> None:
     """Signal any active Antigravity proxy stream to abort."""
     _cancel_event.set()
 
 
-def reset_cancel():
+def reset_cancel() -> None:
     """Clear the cancellation flag before a new request."""
     _cancel_event.clear()
     reset_auth_browser()
 
 
-def reset_auth_browser():
+def reset_auth_browser() -> None:
     """Reset the auth browser flag so the browser can be re-opened."""
     global _auth_browser_opened
     with _auth_browser_lock:
@@ -202,125 +250,315 @@ def is_cancelled() -> bool:
     return _cancel_event.is_set()
 
 
+def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
+    """Open the proxy OAuth URL in the browser, but only once per session."""
+    global _auth_browser_opened
+    with _auth_browser_lock:
+        if _auth_browser_opened:
+            return False
+        _auth_browser_opened = True
+
+    _log = log_fn or _log_noop
+    auth_url = f"{proxy_url}{OAUTH_START_ENDPOINT}"
+    _log(f"Antigravity: opening {auth_url} for Google account linking...")
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+    return True
+
+
 # ---------------------------------------------------------------------------
-# Proxy URL resolution
+# Model and response conversion
 # ---------------------------------------------------------------------------
 
-def get_proxy_url() -> str:
-    """Get the Antigravity proxy URL from env or default."""
-    return os.environ.get("ANTIGRAVITY_PROXY_URL", DEFAULT_PROXY_URL).rstrip("/")
+def _normalize_model_name(model: str) -> str:
+    """Convert Glossarion's model ids to frieser/antigravity-proxy ids.
+
+    Glossarion strips the public "antigravity/" provider prefix before calling
+    this module. This adapter always uses the proxy's explicit "antigravity-"
+    namespace so requests stay on the upstream sandbox/agent route instead of
+    accidentally falling into the CLI-pool Gemini route.
+    """
+    clean = (model or "").strip()
+    lower = clean.lower()
+
+    if lower.startswith("antigravity/"):
+        clean = clean.split("/", 1)[1].lstrip("/")
+        lower = clean.lower()
+
+    if lower.startswith("antigravity-"):
+        return clean
+
+    # Claude, GPT-equivalent, Gemini, image, and thinking models should use the
+    # explicit Antigravity model namespace from this adapter.
+    if (
+        lower.startswith(("claude-", "gpt-", "gemini-"))
+        or "image" in lower
+        or lower.startswith("anthropic/")
+    ):
+        return f"antigravity-{clean}"
+
+    return clean
+
+
+def _payload_for_openai_chat(
+    messages: List[Dict],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    stream: bool,
+) -> Dict[str, Any]:
+    return {
+        "model": _normalize_model_name(model),
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": stream,
+    }
+
+
+def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize an OpenAI Chat Completions response to Glossarion's shape."""
+    choices = data.get("choices") or []
+    choice = choices[0] if choices else {}
+    message = choice.get("message") or {}
+
+    content = message.get("content") or ""
+    finish_reason = choice.get("finish_reason") or "stop"
+    usage = data.get("usage")
+
+    return {
+        "content": content,
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "raw_response": data,
+    }
+
+
+def _extract_error_message(resp: requests.Response) -> str:
+    try:
+        data = resp.json()
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error)
+        if error:
+            return str(error)
+    except Exception:
+        pass
+    return (getattr(resp, "text", "") or "")[:1000]
+
+
+def _health_details_have_accounts(details: Any) -> bool:
+    if not isinstance(details, dict):
+        return False
+    accounts = details.get("accounts")
+    return isinstance(accounts, list) and len(accounts) > 0
+
+
+def _proxy_has_accounts() -> bool:
+    health = check_proxy_health()
+    return bool(health.get("healthy") and _health_details_have_accounts(health.get("details")))
+
+
+def _should_wait_for_auth(resp: requests.Response) -> bool:
+    """Return True when the request likely failed because no account is linked."""
+    if resp.status_code in (401, 403):
+        return not _proxy_has_accounts()
+
+    if resp.status_code == 429:
+        # Upstream returns a generic quota-exhausted 429 when there are no
+        # accounts at all. Only treat that as auth setup when status confirms
+        # an empty account list.
+        return not _proxy_has_accounts()
+
+    error_text = _extract_error_message(resp).lower()
+    if "no account" in error_text or "add account" in error_text:
+        return True
+
+    return False
+
+
+def _wait_for_auth(
+    url: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    proxy_url: str,
+    log_fn=None,
+    max_wait: int = 180,
+    poll_interval: int = 5,
+    stream: bool = False,
+    request_timeout: float = 300,
+):
+    """Open OAuth and poll until an account is linked or timeout is reached."""
+    _open_auth_browser_once(proxy_url, log_fn)
+    _log = log_fn or _log_noop
+
+    _log("")
+    _log("Antigravity: Google account link required.")
+    _log(f"Open {proxy_url}, add a Google account, then keep this window open.")
+    _log(f"Waiting for account linking to complete... (timeout: {max_wait}s)")
+
+    elapsed = 0
+    while elapsed < max_wait:
+        if _cancel_event.is_set():
+            return None
+
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+        if _proxy_has_accounts():
+            _log("Antigravity: account detected, retrying request...")
+            try:
+                retry_resp = requests.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=request_timeout,
+                    stream=stream,
+                )
+                if retry_resp.status_code < 400:
+                    return retry_resp
+            except Exception:
+                pass
+
+        _log(f"Still waiting for Antigravity account linking... ({elapsed}s / {max_wait}s)")
+
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 
-def check_proxy_health() -> Dict[str, Any]:
-    """Check if the Antigravity proxy is running and healthy.
-    
-    Returns a dict with 'healthy' (bool) and optional 'details'.
-    """
+def _proxy_reports_unsupported(proxy_url: Optional[str] = None) -> bool:
+    """Detect the upstream unsupported-version interstitial."""
     try:
-        url = f"{get_proxy_url()}{HEALTH_ENDPOINT}"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(proxy_url or get_proxy_url(), timeout=5)
+        text = (resp.text or "").lower()
+        return "version of antigravity is no longer supported" in text
+    except Exception:
+        return False
+
+
+def check_proxy_health() -> Dict[str, Any]:
+    """Check if frieser/antigravity-proxy is running."""
+    proxy_url = get_proxy_url()
+
+    try:
+        resp = requests.get(f"{proxy_url}{STATUS_ENDPOINT}", timeout=5)
         if resp.status_code == 200:
             data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            if _proxy_reports_unsupported(proxy_url):
+                return {"healthy": False, "error": "Antigravity proxy version is no longer supported.", "details": data}
             return {"healthy": True, "details": data}
-        return {"healthy": False, "error": f"HTTP {resp.status_code}"}
+        status_error = f"HTTP {resp.status_code}"
     except requests.ConnectionError:
-        return {"healthy": False, "error": "Connection refused – is the antigravity-claude-proxy running?"}
+        return {"healthy": False, "error": "Connection refused - is antigravity-proxy running?"}
     except Exception as exc:
-        return {"healthy": False, "error": str(exc)}
+        status_error = str(exc)
+
+    # Fallback for future-compatible OpenAI-only deployments.
+    try:
+        resp = requests.get(f"{proxy_url}{MODELS_ENDPOINT}", headers=_build_headers(), timeout=5)
+        if resp.status_code == 200:
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            if _proxy_reports_unsupported(proxy_url):
+                return {"healthy": False, "error": "Antigravity proxy version is no longer supported.", "details": data}
+            return {"healthy": True, "details": data}
+    except Exception:
+        pass
+
+    if _proxy_reports_unsupported(proxy_url):
+        return {"healthy": False, "error": "Antigravity proxy version is no longer supported."}
+
+    return {"healthy": False, "error": status_error}
 
 
 # ---------------------------------------------------------------------------
 # Auto-launch proxy
 # ---------------------------------------------------------------------------
 
-def _find_npx() -> Optional[str]:
-    """Locate the npx executable on PATH or common install locations."""
-    # Try PATH first
-    npx = shutil.which("npx")
-    if npx:
-        return npx
+def _candidate_executable(name: str) -> Optional[str]:
+    path = shutil.which(name)
+    if path:
+        return path
 
-    # On Windows, check common Node.js install locations
     if sys.platform == "win32":
-        candidates = []
-        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA", "APPDATA"):
-            base = os.environ.get(env_var, "")
-            if base:
-                candidates.append(os.path.join(base, "nodejs", "npx.cmd"))
-                candidates.append(os.path.join(base, "fnm", "node-versions"))  # fnm
-        # nvm-windows
-        nvm_home = os.environ.get("NVM_HOME", "")
-        if nvm_home:
-            nvm_symlink = os.environ.get("NVM_SYMLINK", os.path.join(nvm_home, "..","nodejs"))
-            candidates.append(os.path.join(nvm_symlink, "npx.cmd"))
-        # Volta
-        volta_home = os.environ.get("VOLTA_HOME", "")
-        if volta_home:
-            candidates.append(os.path.join(volta_home, "bin", "npx.cmd"))
-        # Common default paths
-        candidates.extend([
-            os.path.expandvars(r"%PROGRAMFILES%\nodejs\npx.cmd"),
-            os.path.expandvars(r"%APPDATA%\npm\npx.cmd"),
-        ])
-        for path in candidates:
-            if os.path.isfile(path):
-                return path
+        candidates: List[str] = []
+        home = os.path.expanduser("~")
+        candidates.extend(
+            [
+                os.path.join(home, ".bun", "bin", f"{name}.exe"),
+                os.path.join(home, ".bun", "bin", f"{name}.cmd"),
+                os.path.join(os.environ.get("APPDATA", ""), "npm", f"{name}.cmd"),
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "bun", f"{name}.exe"),
+            ]
+        )
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return candidate
 
     return None
 
 
-def _ensure_proxy_config():
-    """Ensure the proxy config directory exists.
+def _find_proxy_launch_command() -> Optional[List[str]]:
+    """Return a launch command for the upstream proxy package."""
+    override = os.environ.get("ANTIGRAVITY_PROXY_LAUNCH_CMD", "").strip()
+    if override:
+        try:
+            return shlex.split(override, posix=(sys.platform != "win32"))
+        except Exception:
+            return override.split()
 
-    Note: We intentionally do NOT modify the apiKey in the config file.
-    The user sets their API key via the Antigravity desktop app or CLI,
-    and we read it from the config file at runtime.
-    """
-    try:
-        config_dir = os.path.join(os.path.expanduser("~"), ".config", "antigravity-proxy")
-        os.makedirs(config_dir, exist_ok=True)
-    except Exception:
-        pass  # Non-critical
+    bunx = _candidate_executable("bunx")
+    if bunx:
+        return [bunx, PROXY_PACKAGE]
+
+    bun = _candidate_executable("bun")
+    if bun:
+        return [bun, "x", PROXY_PACKAGE]
+
+    npx = _candidate_executable("npx")
+    if npx:
+        return [npx, "--yes", "--package", PROXY_PACKAGE, PROXY_PACKAGE_NAME]
+
+    return None
+
+
+def _proxy_launch_error() -> str:
+    return (
+        "Bun/Bunx is not installed or not on PATH.\n"
+        "Install Bun from https://bun.sh/ then restart Glossarion,\n"
+        f"or manually run: {_proxy_command_for_humans()}"
+    )
 
 
 def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
-    """Ensure the Antigravity proxy is running, auto-launching if needed.
-
-    1. Checks health – if already running, returns immediately.
-    2. Finds npx on PATH (or common Node.js install locations).
-    3. Launches `npx -y antigravity-claude-proxy@latest start` in background.
-    4. Waits up to 20s for the proxy to become healthy.
-
-    Returns dict with 'running' (bool), 'auto_launched' (bool), and optional 'error'.
-    """
+    """Ensure the Antigravity proxy is running, auto-launching if needed."""
     global _proxy_process
 
-    _log = log_fn or (lambda msg: None)
+    _log = log_fn or _log_noop
+    data_dir = _ensure_proxy_config()
 
-    # Ensure proxy config disables API key auth (localhost doesn't need it)
-    _ensure_proxy_config()
-
-    # Already running?
     health = check_proxy_health()
     if health.get("healthy"):
         return {"running": True, "auto_launched": False}
 
     with _proxy_launch_lock:
-        # Double-check after acquiring lock (another thread may have launched it)
         health = check_proxy_health()
         if health.get("healthy"):
             return {"running": True, "auto_launched": False}
 
-        # If we already launched a process, check if it's still alive
+        if "no longer supported" in str(health.get("error", "")).lower():
+            _log("Antigravity proxy reports an unsupported version; replacing it with the latest available package...")
+            _kill_proxy_by_port(_get_proxy_port())
+            time.sleep(2)
+
         if _proxy_process is not None:
             if _proxy_process.poll() is None:
-                # Process is still alive but not healthy yet – wait a bit
-                _log("🌀 Antigravity proxy process is running, waiting for it to become healthy...")
-                for _ in range(10):
+                _log("Antigravity proxy process is running, waiting for it to become healthy...")
+                for _ in range(15):
                     time.sleep(2)
                     health = check_proxy_health()
                     if health.get("healthy"):
@@ -328,72 +566,59 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 return {
                     "running": False,
                     "auto_launched": True,
-                    "error": "Proxy was launched but did not become healthy within 20s."
+                    "error": "Proxy was launched but did not become healthy within 30s.",
                 }
-            else:
-                # Process exited – clear it so we can try again
-                _proxy_process = None
+            _proxy_process = None
 
-        # Find npx
-        npx_path = _find_npx()
-        if not npx_path:
-            return {
-                "running": False,
-                "auto_launched": False,
-                "error": (
-                    "Node.js (npx) is not installed or not on PATH.\n"
-                    "Install Node.js from https://nodejs.org/ then restart Glossarion,\n"
-                    "or manually run: npx -y antigravity-claude-proxy@latest start"
-                )
-            }
+        cmd = _find_proxy_launch_command()
+        if not cmd:
+            return {"running": False, "auto_launched": False, "error": _proxy_launch_error()}
 
-        # Launch the proxy as a detached background process
-        _log("🚀 Auto-launching Antigravity proxy...")
+        _log(f"Auto-launching Antigravity proxy with: {' '.join(cmd)}")
+
         try:
-            # Build platform-appropriate launch args
+            env = os.environ.copy()
+            env.setdefault("BASE_URL", get_proxy_url())
+            env.setdefault(
+                "ACCOUNTS_FILE",
+                os.path.join(data_dir, "antigravity-accounts.json"),
+            )
+
             kwargs: Dict[str, Any] = {
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
                 "stdin": subprocess.DEVNULL,
+                "cwd": data_dir,
+                "env": env,
             }
 
-            # Ensure node.exe's directory is on PATH for the subprocess
-            # (npx.cmd invokes "node" and needs it resolvable)
-            npx_dir = os.path.dirname(npx_path)
-            env = os.environ.copy()
-            if npx_dir not in env.get("PATH", ""):
-                env["PATH"] = npx_dir + os.pathsep + env.get("PATH", "")
-            kwargs["env"] = env
-
             if sys.platform == "win32":
-                # CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS so it survives app close
-                CREATE_NEW_PROCESS_GROUP = 0x00000200
-                DETACHED_PROCESS = 0x00000008
+                create_new_process_group = 0x00000200
+                detached_process = 0x00000008
                 try:
                     from shutdown_utils import subprocess_no_window_kwargs
-                    kwargs.update(subprocess_no_window_kwargs(
-                        creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-                    ))
+
+                    kwargs.update(
+                        subprocess_no_window_kwargs(
+                            creationflags=create_new_process_group | detached_process
+                        )
+                    )
                 except Exception:
-                    kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+                    kwargs["creationflags"] = create_new_process_group | detached_process
             else:
                 kwargs["start_new_session"] = True
 
-            cmd = [npx_path, "-y", "antigravity-claude-proxy@latest", "start"]
             _proxy_process = subprocess.Popen(cmd, **kwargs)
-            _log(f"🌀 Proxy process started (PID {_proxy_process.pid}), waiting for it to become healthy...")
-
+            _log(f"Antigravity proxy process started (PID {_proxy_process.pid}).")
         except Exception as exc:
             return {
                 "running": False,
                 "auto_launched": False,
-                "error": f"Failed to launch proxy: {exc}"
+                "error": f"Failed to launch proxy: {exc}",
             }
 
-        # Wait for it to become healthy (up to 20s)
-        for attempt in range(20):
+        for _ in range(30):
             time.sleep(1)
-            # Check the process hasn't crashed
             if _proxy_process.poll() is not None:
                 _proxy_process = None
                 return {
@@ -401,57 +626,53 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                     "auto_launched": True,
                     "error": (
                         "Proxy process exited immediately. "
-                        "Try running manually: npx -y antigravity-claude-proxy@latest start"
-                    )
+                        f"Try running manually: {_proxy_command_for_humans()}"
+                    ),
                 }
             health = check_proxy_health()
             if health.get("healthy"):
-                _log("✅ Antigravity proxy is now running!")
+                _log("Antigravity proxy is now running.")
                 return {"running": True, "auto_launched": True}
 
         return {
             "running": False,
             "auto_launched": True,
-            "error": "Proxy launched but did not become healthy within 20s. Check the proxy logs."
+            "error": "Proxy launched but did not become healthy within 30s. Check the proxy logs.",
         }
 
 
-def _kill_proxy_by_port(port: int = 8080):
-    """Kill any process listening on the proxy port (Windows & Unix)."""
+def _kill_proxy_by_port(port: int = 3000) -> None:
+    """Kill any process listening on the proxy port."""
     try:
         if sys.platform == "win32":
             try:
                 from shutdown_utils import run_no_window
             except Exception:
                 run_no_window = subprocess.run
-            # Find PID using netstat
+
             result = run_no_window(
                 ["netstat", "-ano", "-p", "TCP"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             for line in result.stdout.splitlines():
                 if f":{port}" in line and "LISTENING" in line:
                     parts = line.split()
                     pid = int(parts[-1])
-                    run_no_window(["taskkill", "/F", "/PID", str(pid)],
-                                  capture_output=True, timeout=5)
+                    run_no_window(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5)
         else:
-            subprocess.run(["fuser", "-k", f"{port}/tcp"],
-                           capture_output=True, timeout=5)
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
     except Exception:
         pass
 
 
 def restart_proxy(log_fn=None) -> Dict[str, Any]:
-    """Kill the running proxy and relaunch it.
-    
-    Used when persistent auth failures indicate a stale API key.
-    """
+    """Kill the running proxy and relaunch it."""
     global _proxy_process
-    _log = log_fn or (lambda msg: None)
-    _log("🔄 Antigravity: Restarting proxy to refresh API key...")
+    _log = log_fn or _log_noop
+    _log("Antigravity: restarting proxy...")
 
-    # Kill tracked process
     if _proxy_process is not None:
         try:
             _proxy_process.terminate()
@@ -463,107 +684,38 @@ def restart_proxy(log_fn=None) -> Dict[str, Any]:
                 pass
         _proxy_process = None
 
-    # Also kill anything on port 8080 (the proxy might have been started
-    # outside of Glossarion, e.g. via the Antigravity desktop app)
-    proxy_url = get_proxy_url()
-    try:
-        port = int(proxy_url.rsplit(":", 1)[1].split("/")[0])
-    except Exception:
-        port = 8080
-    _kill_proxy_by_port(port)
-
-    # Clear apiKey from the proxy's own config file so it restarts
-    # without requiring API key auth (fixes stale key after OAuth refresh)
-    config_path = os.path.join(
-        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-    )
-    try:
-        if os.path.isfile(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                proxy_cfg = json.load(f)
-            if proxy_cfg.get("apiKey"):
-                _log(f"🔑 Clearing stale API key from {config_path}")
-                proxy_cfg["apiKey"] = ""
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(proxy_cfg, f, indent=2, ensure_ascii=False)
-    except Exception as exc:
-        _log(f"⚠️ Could not clear proxy API key: {exc}")
-
-    # Also clear ANTHROPIC_AUTH_TOKEN from ~/.claude/settings.json
-    # (Antigravity IDE stores its auth token here; stale values cause 401s)
-    claude_settings_path = os.path.join(
-        os.path.expanduser("~"), ".claude", "settings.json"
-    )
-    try:
-        if os.path.isfile(claude_settings_path):
-            with open(claude_settings_path, "r", encoding="utf-8") as f:
-                claude_cfg = json.load(f)
-            env_block = claude_cfg.get("env", {})
-            if env_block.get("ANTHROPIC_AUTH_TOKEN"):
-                _log(f"🔑 Clearing stale ANTHROPIC_AUTH_TOKEN from {claude_settings_path}")
-                env_block["ANTHROPIC_AUTH_TOKEN"] = ""
-                with open(claude_settings_path, "w", encoding="utf-8") as f:
-                    json.dump(claude_cfg, f, indent=2, ensure_ascii=False)
-    except Exception as exc:
-        _log(f"⚠️ Could not clear ANTHROPIC_AUTH_TOKEN: {exc}")
-
-    # Wait for port to free up
+    _kill_proxy_by_port(_get_proxy_port())
     time.sleep(2)
-
-    # Clear API key cache so we fetch a fresh one
-    invalidate_api_key_cache()
-
-    # Relaunch
     return ensure_proxy_running(log_fn=log_fn)
 
 
 # ---------------------------------------------------------------------------
-# Message format conversion
+# Send request helpers
 # ---------------------------------------------------------------------------
 
-def _convert_messages_to_anthropic(messages: List[Dict]) -> tuple:
-    """Convert OpenAI-style messages to Anthropic Messages API format.
-    
-    Returns (system_prompt, anthropic_messages).
-    """
-    system_prompt = ""
-    anthropic_messages = []
-
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-
-        if role == "system":
-            # Anthropic takes system as a top-level parameter
-            if system_prompt:
-                system_prompt += "\n\n" + content
-            else:
-                system_prompt = content
-        elif role == "assistant":
-            anthropic_messages.append({"role": "assistant", "content": content})
-        else:
-            # user, function, tool → user
-            anthropic_messages.append({"role": "user", "content": content})
-
-    # Ensure messages alternate user/assistant (Anthropic requirement)
-    # Merge consecutive same-role messages
-    merged = []
-    for msg in anthropic_messages:
-        if merged and merged[-1]["role"] == msg["role"]:
-            merged[-1]["content"] += "\n\n" + msg["content"]
-        else:
-            merged.append(msg)
-
-    # Must start with user message
-    if not merged or merged[0]["role"] != "user":
-        merged.insert(0, {"role": "user", "content": "Please continue."})
-
-    return system_prompt, merged
+def _post_chat(payload: Dict[str, Any], timeout: float, stream: bool) -> requests.Response:
+    return requests.post(
+        f"{get_proxy_url()}{CHAT_COMPLETIONS_ENDPOINT}",
+        json=payload,
+        headers=_build_headers(),
+        timeout=timeout,
+        stream=stream,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Send request (non-streaming)
-# ---------------------------------------------------------------------------
+def _raise_connection_refused() -> None:
+    raise RuntimeError(
+        "Antigravity proxy connection refused. "
+        "Make sure the proxy is running:\n"
+        f"  {_proxy_command_for_humans()}\n"
+        f"Then open {get_proxy_url()} and add your Google account."
+    )
+
+
+def _raise_for_proxy_status(resp: requests.Response) -> None:
+    error_msg = _extract_error_message(resp)
+    raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_msg}")
+
 
 def send_message(
     messages: List[Dict],
@@ -573,187 +725,171 @@ def send_message(
     timeout: float = 300,
     log_fn=None,
 ) -> Dict[str, Any]:
-    """Send a message to the Antigravity proxy (Anthropic Messages API).
-    
-    Args:
-        messages: OpenAI-format messages list
-        model: Model name (without 'antigravity/' prefix)
-        temperature: Sampling temperature
-        max_tokens: Max output tokens
-        timeout: Request timeout in seconds
-        log_fn: Optional logging function (e.g. print)
-        
-    Returns:
-        Dict with keys: content, finish_reason, usage, raw_response
-        
-    Raises:
-        RuntimeError on proxy errors
-    """
+    """Send a non-streaming message to frieser/antigravity-proxy."""
     proxy_url = get_proxy_url()
-    url = f"{proxy_url}{MESSAGES_ENDPOINT}"
+    url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
+    payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
-    system_prompt, anthropic_messages = _convert_messages_to_anthropic(messages)
+    _log = log_fn or _log_noop
+    _log(f"Antigravity: sending to {proxy_url} (model={payload['model']})")
 
-    # Google Cloud Code caps output at ~64k tokens for this model
-    if model == "claude-opus-4-6-thinking" and max_tokens > 64000:
-        if log_fn:
-            log_fn(f"⚠️ Antigravity: Capping max_tokens from {max_tokens} to 64000 (Cloud Code limit for {model})")
-        max_tokens = 64000
-
-    payload = {
-        "model": model,
-        "messages": anthropic_messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if system_prompt:
-        payload["system"] = system_prompt
-
-    headers = _build_headers()
-
-    if log_fn:
-        log_fn(f"🌀 Antigravity: Sending to proxy at {proxy_url} (model={model})")
-
-    # Brief retry on transient 401/403 (OAuth token refresh race condition)
-    resp = None
-    for _auth_attempt in range(2):  # 1 initial + 1 quick retry
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-        except requests.ConnectionError:
-            raise RuntimeError(
-                "Antigravity proxy connection refused. "
-                "Make sure the proxy is running:\n"
-                "  npx antigravity-claude-proxy@latest start\n"
-                "  Then open http://localhost:8080 and add your Google account."
-            )
-        except requests.Timeout:
-            raise RuntimeError(
-                f"Antigravity proxy request timed out after {timeout}s. "
-                "The model may need more time for long translations."
-            )
-
-        if resp.status_code not in (401, 403):
-            break
-        if _auth_attempt == 0:
-            # One quick retry with refreshed key for transient race conditions
-            if log_fn:
-                log_fn(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying once...")
-            time.sleep(2)
-            invalidate_api_key_cache()
-            headers = _build_headers()
-
-    # Handle auth failure — determine if it's an API key issue or Google account issue
-    if resp.status_code in (401, 403):
-        error_detail = ""
-        try:
-            err_json = resp.json()
-            error_detail = err_json.get("error", {}).get("message", "")
-        except Exception:
-            error_detail = resp.text[:200]
-
-        if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
-            # API key mismatch — try fresh key, then restart proxy as last resort
-            invalidate_api_key_cache()
-            fresh_key = _get_proxy_api_key()
-            if fresh_key:
-                headers["x-api-key"] = fresh_key
-                try:
-                    retry_resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-                    if retry_resp.status_code not in (401, 403):
-                        resp = retry_resp
-                    else:
-                        config_path = os.path.join(
-                            os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                        )
-                        raise RuntimeError(
-                            f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                            f"Fix: edit the apiKey in {config_path}\n"
-                            f"or open {proxy_url} → Settings and remove/change the API Key."
-                        )
-                except requests.RequestException:
-                    config_path = os.path.join(
-                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                    )
-                    raise RuntimeError(
-                        f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                        f"Fix: edit the apiKey in {config_path}\n"
-                        f"or open {proxy_url} → Settings and remove/change the API Key."
-                    )
-            else:
-                config_path = os.path.join(
-                    os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                )
-                raise RuntimeError(
-                    f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                    f"Fix: edit the apiKey in {config_path}\n"
-                    f"or open {proxy_url} → Settings and remove/change the API Key."
-                )
-        else:
-            # Google account auth issue — go straight to user-facing wait
-            auth_resp = _wait_for_auth(
-                url, payload, headers, proxy_url, log_fn, stream=False
-            )
-            if auth_resp is not None and auth_resp.status_code == 200:
-                resp = auth_resp
-            else:
-                raise RuntimeError(
-                    f"Antigravity: Authentication timed out.\n"
-                    f"Open {proxy_url} in your browser and link your Google account,\n"
-                    f"then try again."
-                )
-
-    if resp.status_code != 200:
-        error_body = resp.text
-        try:
-            error_json = resp.json()
-            error_msg = error_json.get("error", {}).get("message", error_body)
-        except Exception:
-            error_msg = error_body
+    try:
+        resp = _post_chat(payload, timeout=timeout, stream=False)
+    except requests.ConnectionError:
+        _raise_connection_refused()
+    except requests.Timeout:
         raise RuntimeError(
-            f"Antigravity: {resp.status_code} - {error_msg}"
+            f"Antigravity proxy request timed out after {timeout}s. "
+            "The model may need more time for long translations."
         )
 
-    data = resp.json()
+    if _should_wait_for_auth(resp):
+        auth_resp = _wait_for_auth(
+            url,
+            payload,
+            _build_headers(),
+            proxy_url,
+            log_fn,
+            stream=False,
+            request_timeout=timeout,
+        )
+        if auth_resp is not None:
+            resp = auth_resp
+        else:
+            raise RuntimeError(
+                f"Antigravity: authentication timed out.\n"
+                f"Open {proxy_url} and add your Google account, then try again."
+            )
 
-    # Extract content from Anthropic Messages API response
-    content = ""
-    if "content" in data and isinstance(data["content"], list):
-        text_blocks = [
-            block.get("text", "")
-            for block in data["content"]
-            if block.get("type") == "text"
-        ]
-        content = "".join(text_blocks)
-    elif "content" in data and isinstance(data["content"], str):
-        content = data["content"]
+    if resp.status_code != 200:
+        _raise_for_proxy_status(resp)
 
-    finish_reason = data.get("stop_reason", "end_turn")
-    # Normalize to OpenAI-style finish reasons
-    if finish_reason == "end_turn":
-        finish_reason = "stop"
-    elif finish_reason == "max_tokens":
-        finish_reason = "length"
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"Antigravity: invalid JSON response from proxy: {exc}")
 
+    return _parse_openai_chat_response(data)
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+def _log_text_stream(text: str, log_buf: List[str], log_fn) -> None:
+    if not text:
+        return
+
+    combined = "".join(log_buf) + text
+    for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+        combined = combined.replace(tag, tag + "\n")
+
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            log_fn(part)
+        log_buf[:] = [parts[-1]]
+    else:
+        log_buf[:] = [combined]
+        if len(combined) > 150:
+            log_fn(combined)
+            log_buf.clear()
+
+
+def _consume_openai_stream(resp: requests.Response, log_fn=None, log_stream: bool = True) -> Dict[str, Any]:
+    _log = log_fn or _log_noop
+    collected_content: List[str] = []
+    finish_reason = "stop"
     usage = None
-    if "usage" in data:
-        u = data["usage"]
-        usage = {
-            "prompt_tokens": u.get("input_tokens", 0),
-            "completion_tokens": u.get("output_tokens", 0),
-            "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
-        }
+    got_first_data = False
+    t_start = time.time()
+    log_buf: List[str] = []
+    thinking_buf: List[str] = []
+    thinking_started = False
+    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
+    try:
+        for line in resp.iter_lines(decode_unicode=True, chunk_size=1):
+            if _cancel_event.is_set():
+                resp.close()
+                raise RuntimeError("Antigravity: stream cancelled by user")
+
+            if not line:
+                continue
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", errors="replace")
+            if not line.startswith("data: "):
+                continue
+
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            if not got_first_data:
+                got_first_data = True
+                _log(f"Antigravity: first token in {time.time() - t_start:.1f}s, streaming...")
+
+            if event.get("usage"):
+                usage = event.get("usage")
+
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+
+            reasoning = delta.get("reasoning_content") or ""
+            if reasoning and log_stream and stream_thinking:
+                if not thinking_started:
+                    thinking_started = True
+                    _log("[antigravity] Thinking...")
+                _log_text_stream(reasoning, thinking_buf, _log)
+
+            text = delta.get("content") or ""
+            if text:
+                collected_content.append(text)
+                if log_stream:
+                    _log_text_stream(text, log_buf, _log)
+
+            stop = choice.get("finish_reason")
+            if stop:
+                finish_reason = stop
+
+        if log_stream and thinking_buf:
+            remainder = "".join(thinking_buf).strip()
+            if remainder:
+                _log(f"    {remainder}")
+
+        if log_stream and log_buf:
+            remainder = "".join(log_buf).strip()
+            if remainder:
+                _log(remainder)
+
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    _log(f"Antigravity: stream finished in {time.time() - t_start:.1f}s")
     return {
-        "content": content,
+        "content": "".join(collected_content),
         "finish_reason": finish_reason,
         "usage": usage,
-        "raw_response": data,
+        "raw_response": None,
     }
 
-
-# ---------------------------------------------------------------------------
-# Send request (streaming)
-# ---------------------------------------------------------------------------
 
 def send_message_stream(
     messages: List[Dict],
@@ -764,388 +900,52 @@ def send_message_stream(
     log_fn=None,
     log_stream: bool = True,
 ) -> Dict[str, Any]:
-    """Send a streaming message to the Antigravity proxy.
-    
-    Collects all streamed chunks and returns once complete.
-    Checks _cancel_event between chunks for cancellation support.
-    
-    Returns same format as send_message().
-    """
+    """Send a streaming message to frieser/antigravity-proxy."""
     proxy_url = get_proxy_url()
-    url = f"{proxy_url}{MESSAGES_ENDPOINT}"
+    url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
+    payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
-    system_prompt, anthropic_messages = _convert_messages_to_anthropic(messages)
+    _log = log_fn or _log_noop
+    _log(f"Antigravity: streaming from {proxy_url} (model={payload['model']})")
 
-    if model == "claude-opus-4-6-thinking" and max_tokens > 64000:
-        if log_fn:
-            log_fn(f"⚠️ Antigravity: Capping max_tokens from {max_tokens} to 64000 (Cloud Code limit for {model})")
-        max_tokens = 64000
-
-    payload = {
-        "model": model,
-        "messages": anthropic_messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": True,
-    }
-    if system_prompt:
-        payload["system"] = system_prompt
-
-    headers = _build_headers()
-
-    _log = log_fn or (lambda msg: None)
-    _log(f"🌀 Antigravity: Streaming from proxy at {proxy_url} (model={model})")
-    t_start = time.time()
-
-    # Try httpx first (same as authgpt — streams SSE without buffering),
-    # fall back to requests if httpx is not available.
-    _httpx = None
     try:
-        import httpx as _httpx
-    except ImportError:
-        pass
+        resp = _post_chat(payload, timeout=timeout, stream=True)
+    except requests.ConnectionError:
+        _raise_connection_refused()
+    except requests.Timeout:
+        raise RuntimeError(f"Antigravity proxy streaming request timed out after {timeout}s.")
 
-    use_httpx = _httpx is not None
-    resp = None
-    _httpx_ctx = None
-
-    # Retry on transient 401/403 (OAuth token refresh race condition)
-    for _auth_attempt in range(4):  # 1 initial + 3 retries
-        if use_httpx:
-            try:
-                _timeout = _httpx.Timeout(timeout, connect=30.0)
-                _httpx_ctx = _httpx.stream(
-                    "POST", url, json=payload, headers=headers, timeout=_timeout
-                )
-                resp = _httpx_ctx.__enter__()
-            except Exception as exc:
-                if _httpx_ctx is not None:
-                    try:
-                        _httpx_ctx.__exit__(None, None, None)
-                    except Exception:
-                        pass
-                exc_str = str(exc).lower()
-                if "connect" in exc_str or "refused" in exc_str:
-                    raise RuntimeError(
-                        "Antigravity proxy connection refused. "
-                        "Make sure the proxy is running:\n"
-                        "  npx antigravity-claude-proxy@latest start"
-                    )
-                raise RuntimeError(
-                    f"Antigravity proxy streaming error: {exc}"
-                )
-        else:
-            try:
-                resp = requests.post(
-                    url, json=payload, headers=headers, timeout=timeout, stream=True
-                )
-            except requests.ConnectionError:
-                raise RuntimeError(
-                    "Antigravity proxy connection refused. "
-                    "Make sure the proxy is running:\n"
-                    "  npx antigravity-claude-proxy@latest start"
-                )
-            except requests.Timeout:
-                raise RuntimeError(
-                    f"Antigravity proxy streaming request timed out after {timeout}s."
-                )
-
-        if resp.status_code not in (401, 403) or _auth_attempt >= 3:
-            break
-        # Transient auth failure — close stream and retry after backoff
-        if use_httpx and _httpx_ctx:
-            try:
-                _httpx_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
-            _httpx_ctx = None
-        wait = 2 * (_auth_attempt + 1)  # 2s, 4s, 6s
-        _log(f"⏳ Antigravity: Auth error (HTTP {resp.status_code}), retrying in {wait}s... ({_auth_attempt + 1}/3)")
-        time.sleep(wait)
-        invalidate_api_key_cache()
-        headers = _build_headers()  # refresh key
-        # On last retry, also try without API key (localhost may accept)
-        if _auth_attempt == 2:
-            headers.pop("x-api-key", None)
-        resp = None
-
-    # All retries failed — restart the proxy as last resort
-    if resp.status_code in (401, 403):
-        if use_httpx and _httpx_ctx:
-            try:
-                _httpx_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
-            _httpx_ctx = None
-        restart_result = restart_proxy(log_fn=log_fn)
-        if restart_result.get("running"):
-            invalidate_api_key_cache()
-            headers = _build_headers()
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=timeout, stream=True)
-                use_httpx = False  # switched to requests for restart retry
-            except Exception:
-                pass
-
-    # Handle auth failure (after all retry/restart attempts)
-    if resp.status_code in (401, 403):
-        if use_httpx and _httpx_ctx:
-            try:
-                _httpx_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
-
-        error_detail = ""
+    if _should_wait_for_auth(resp):
         try:
-            if use_httpx:
-                error_detail = resp.read().decode("utf-8", errors="replace")
-                try:
-                    error_detail = json.loads(error_detail).get("error", {}).get("message", error_detail)
-                except Exception:
-                    pass
-            else:
-                err_json = resp.json()
-                error_detail = err_json.get("error", {}).get("message", "")
+            resp.close()
         except Exception:
-            try:
-                error_detail = resp.text[:200] if not use_httpx else str(resp.read()[:200])
-            except Exception:
-                error_detail = ""
-
-        if "api key" in error_detail.lower() or "apikey" in error_detail.lower():
-            # API key mismatch — clear cache & retry once with a fresh key
-            invalidate_api_key_cache()
-            fresh_key = _get_proxy_api_key()
-            if fresh_key:
-                headers["x-api-key"] = fresh_key
-                try:
-                    retry_resp = requests.post(url, json=payload, headers=headers, timeout=timeout, stream=True)
-                    if retry_resp.status_code not in (401, 403):
-                        resp = retry_resp
-                        use_httpx = False  # switched to requests for retry
-                    else:
-                        config_path = os.path.join(
-                            os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                        )
-                        raise RuntimeError(
-                            f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                            f"Fix: edit the apiKey in {config_path}\n"
-                            f"or open {proxy_url} → Settings and remove/change the API Key."
-                        )
-                except requests.RequestException:
-                    config_path = os.path.join(
-                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                    )
-                    raise RuntimeError(
-                        f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                        f"Fix: edit the apiKey in {config_path}\n"
-                        f"or open {proxy_url} → Settings and remove/change the API Key."
-                    )
-            else:
-                config_path = os.path.join(
-                    os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                )
-                raise RuntimeError(
-                    f"Antigravity: API key rejected by proxy ({error_detail}).\n"
-                    f"Fix: edit the apiKey in {config_path}\n"
-                    f"or open {proxy_url} → Settings and remove/change the API Key."
-                )
-
+            pass
         auth_resp = _wait_for_auth(
-            url, payload, headers, proxy_url, log_fn, stream=True
+            url,
+            payload,
+            _build_headers(),
+            proxy_url,
+            log_fn,
+            stream=True,
+            request_timeout=timeout,
         )
-        if auth_resp is not None and auth_resp.status_code == 200:
+        if auth_resp is not None:
             resp = auth_resp
-            use_httpx = False  # auth fallback always returns requests response
         else:
             raise RuntimeError(
-                f"Antigravity: Authentication timed out.\n"
-                f"Open {proxy_url} in your browser and link your Google account,\n"
-                f"then try again."
+                f"Antigravity: authentication timed out.\n"
+                f"Open {proxy_url} and add your Google account, then try again."
             )
 
     if resp.status_code != 200:
-        error_text = ""
         try:
-            error_text = resp.text[:500] if not use_httpx else resp.read().decode("utf-8", errors="replace")[:500]
+            error_text = resp.text[:1000]
         except Exception:
-            pass
-        if use_httpx and _httpx_ctx:
-            try:
-                _httpx_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
-        raise RuntimeError(f"Antigravity: {resp.status_code} - {error_text}")
-
-    # Collect SSE events
-    collected_content = []
-    finish_reason = "stop"
-    usage = None
-    got_first_data = False
-    log_buf: list = []
-    # Thinking streaming state
-    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
-    ag_thinking_started = False
-    ag_thinking_buf: list = []
-    ag_thinking_chunks = 0
-    ag_thinking_start_ts = None
-    ag_current_block_type = None
-    ag_thinking_flushed = False  # True once 0.5s passed and buffer was printed
-    ag_thinking_deferred_lines: list = []  # holds lines until threshold
-    _AG_THINKING_THRESHOLD = 0.5
-
-    # httpx iter_lines() yields str directly; requests iter_lines needs chunk_size=1
-    line_iter = resp.iter_lines() if use_httpx else resp.iter_lines(decode_unicode=True, chunk_size=1)
-
-    for line in line_iter:
-        if _cancel_event.is_set():
+            error_text = ""
+        try:
             resp.close()
-            raise RuntimeError("Antigravity: stream cancelled by user")
-
-        if not line or not line.startswith("data: "):
-            continue
-
-        if not got_first_data:
-            got_first_data = True
-            ttft = time.time() - t_start
-            _log(f"📡 Antigravity: First token in {ttft:.1f}s, streaming…")
-
-        data_str = line[6:]  # Strip "data: " prefix
-        if data_str.strip() == "[DONE]":
-            break
-
-        try:
-            event = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
-
-        event_type = event.get("type", "")
-
-        # Track block types for thinking detection
-        if event_type == "content_block_start":
-            cb = event.get("content_block", {})
-            ag_current_block_type = cb.get("type", "")
-            if ag_current_block_type == "thinking" and stream_thinking:
-                if not ag_thinking_started:
-                    ag_thinking_started = True
-                    # Don't print header yet — defer until threshold
-
-        elif event_type == "content_block_stop":
-            if ag_current_block_type == "thinking" and stream_thinking and ag_thinking_started:
-                if ag_thinking_flushed:
-                    # Flush remaining thinking buffer
-                    if ag_thinking_buf:
-                        remaining = "".join(ag_thinking_buf)
-                        if remaining.strip():
-                            _log(f"    {remaining}")
-                        ag_thinking_buf = []
-                    thinking_dur = time.time() - ag_thinking_start_ts if ag_thinking_start_ts else 0
-                    _log(f"🧠 [antigravity] Thinking complete ({ag_thinking_chunks} chunks, {thinking_dur:.1f}s)")
-                    _log("─" * 50)
-                    _log("📡 Text streaming...")
-                # else: thinking was < 0.5s, discard silently
-                ag_thinking_started = False
-                ag_thinking_deferred_lines = []
-            ag_current_block_type = None
-
-        elif event_type == "content_block_delta":
-            delta = event.get("delta", {})
-            delta_type = delta.get("type", "")
-
-            if delta_type == "thinking_delta":
-                ag_thinking_chunks += 1
-                if ag_thinking_start_ts is None:
-                    ag_thinking_start_ts = time.time()
-                thinking_text = delta.get("thinking", "")
-                if thinking_text and log_stream and stream_thinking:
-                    combined = "".join(ag_thinking_buf) + thinking_text
-                    if "\n" in combined:
-                        parts = combined.split("\n")
-                        for part in parts[:-1]:
-                            if ag_thinking_flushed:
-                                _log(f"    {part}")
-                            else:
-                                ag_thinking_deferred_lines.append(part)
-                        ag_thinking_buf = [parts[-1]]
-                    else:
-                        ag_thinking_buf.append(thinking_text)
-                        if len("".join(ag_thinking_buf)) > 150:
-                            if ag_thinking_flushed:
-                                _log(f"    {''.join(ag_thinking_buf)}")
-                            else:
-                                ag_thinking_deferred_lines.append("".join(ag_thinking_buf))
-                            ag_thinking_buf = []
-                    # Check if threshold passed — flush deferred content
-                    if not ag_thinking_flushed and ag_thinking_start_ts and (time.time() - ag_thinking_start_ts) >= _AG_THINKING_THRESHOLD:
-                        ag_thinking_flushed = True
-                        _log("🧠 [antigravity] Thinking...")
-                        for dl in ag_thinking_deferred_lines:
-                            _log(f"    {dl}")
-                        ag_thinking_deferred_lines = []
-
-            elif delta_type == "text_delta":
-                text = delta.get("text", "")
-                collected_content.append(text)
-                # Real-time stream logging (HTML-tag-aware line buffering)
-                if log_stream and text:
-                    combined = "".join(log_buf) + text
-                    for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
-                        combined = combined.replace(tag, tag + '\n')
-                    if "\n" in combined:
-                        parts = combined.split("\n")
-                        for part in parts[:-1]:
-                            _log(part)
-                        log_buf = [parts[-1]]
-                    else:
-                        log_buf.append(text)
-                        if len("".join(log_buf)) > 150:
-                            _log("".join(log_buf))
-                            log_buf = []
-
-        elif event_type == "message_delta":
-            delta = event.get("delta", {})
-            stop = delta.get("stop_reason", "")
-            if stop:
-                finish_reason = "stop" if stop == "end_turn" else (
-                    "length" if stop == "max_tokens" else stop
-                )
-            if "usage" in delta:
-                u = delta["usage"]
-                usage = {
-                    "prompt_tokens": u.get("input_tokens", 0),
-                    "completion_tokens": u.get("output_tokens", 0),
-                    "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
-                }
-
-        elif event_type == "message_start":
-            msg = event.get("message", {})
-            if "usage" in msg:
-                u = msg["usage"]
-                usage = {
-                    "prompt_tokens": u.get("input_tokens", 0),
-                    "completion_tokens": u.get("output_tokens", 0),
-                    "total_tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0),
-                }
-
-    # Flush remaining log buffer
-    if log_stream and log_buf:
-        remainder = "".join(log_buf).strip()
-        if remainder:
-            _log(remainder)
-
-    # Clean up httpx context manager
-    if use_httpx and _httpx_ctx:
-        try:
-            _httpx_ctx.__exit__(None, None, None)
         except Exception:
             pass
+        raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
 
-    content = "".join(collected_content)
-    t_total = time.time() - t_start
-    _log(f"📡 Antigravity: Stream finished in {t_total:.1f}s")
-    return {
-        "content": content,
-        "finish_reason": finish_reason,
-        "usage": usage,
-        "raw_response": None,
-    }
+    return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)

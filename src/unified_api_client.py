@@ -7971,12 +7971,12 @@ class UnifiedClient:
                 print(f"🔐 AuthGem: Using account slot #{account_id}")
 
         elif self.client_type == 'antigravity':
-            # Antigravity uses local proxy (antigravity-claude-proxy) – no SDK client needed
+            # Antigravity uses frieser/antigravity-proxy – no SDK client needed
             if not ANTIGRAVITY_AVAILABLE:
                 raise ImportError(
                     "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
                 )
-            logger.info("Antigravity will use local proxy (antigravity-claude-proxy)")
+            logger.info("Antigravity will use local proxy (frieser/antigravity-proxy)")
 
         elif self.client_type == 'authza':
             # AuthZA uses Z.AI API via pseudo-OAuth key capture – no persistent SDK client
@@ -24783,14 +24783,15 @@ class UnifiedClient:
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
 
-        Uses the antigravity-claude-proxy (localhost:8080) which proxies to
-        Google Cloud Code. Models are prefixed with 'antigravity/' (e.g.
-        antigravity/claude-sonnet-4-5, antigravity/gemini-3-flash).
+        Uses frieser/antigravity-proxy (localhost:3000) which proxies to
+        Google Cloud Code through an OpenAI-compatible API. Models are prefixed
+        with 'antigravity/' (e.g. antigravity/claude-sonnet-4-6,
+        antigravity/gemini-3-flash).
         """
         if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
             raise UnifiedClientError(
                 "Antigravity proxy module is not available. Ensure antigravity_proxy.py exists in src/.\n"
-                "Also make sure the proxy is running: npx antigravity-claude-proxy@latest start",
+                "Also make sure the proxy is running: bunx antigravity-proxy@latest",
                 error_type="config_error"
             )
 
@@ -24871,24 +24872,16 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
-                # API key rejected — fatal, don't retry
-                if "api key rejected" in error_str.lower() or "api key" in error_str.lower():
-                    _config_path = os.path.join(
-                        os.path.expanduser("~"), ".config", "antigravity-proxy", "config.json"
-                    )
-                    raise UnifiedClientError(
-                        f"Antigravity: {error_str}\n"
-                        f"Fix: edit the apiKey in {_config_path}\n"
-                        f"or open http://localhost:8080 → Settings and remove/change the API Key.",
-                        error_type="config_error"
-                    )
+                # Account/auth setup errors are fatal for this attempt.
+                if "authentication timed out" in error_str.lower() or "add your google account" in error_str.lower():
+                    raise UnifiedClientError(str(exc), error_type="config_error")
 
                 # Connection refused – proxy not running
                 if "connection refused" in error_str.lower():
                     raise UnifiedClientError(
                         f"Antigravity proxy is not running. Start it with:\n"
-                        f"  npx antigravity-claude-proxy@latest start\n"
-                        f"Then open http://localhost:8080 to add your Google account.",
+                        f"  bunx antigravity-proxy@latest\n"
+                        f"Then open http://localhost:3000 to add your Google account.",
                         error_type="config_error"
                     )
 

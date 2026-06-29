@@ -293,17 +293,42 @@ def get_model_options() -> List[str]:
         "authgem-vertex/gemini-2.0-flash", "authgem-vertex/gemini-2.0-flash-lite",
         "authgem-vertex/gemini-3.1-pro-preview", "authgem-vertex/gemini-3.1-flash-lite", "authgem-vertex/gemini-3-flash-preview",
 
-        # Antigravity Cloud Code proxy (localhost:8080, no API key needed)
-        # Claude models via Cloud Code (must match Cloud Code's available model IDs exactly)
-        "antigravity/claude-opus-4-6-thinking", "antigravity/claude-sonnet-4-6",
+        # Antigravity Cloud Code proxy (frieser/antigravity-proxy on localhost:3000)
+        # Official current upstream catalog + accepted transform aliases.
+        "antigravity/claude-sonnet-4-6",
+        "antigravity/claude-sonnet-4-6-thinking-low",
+        "antigravity/claude-sonnet-4-6-thinking-medium",
+        "antigravity/claude-sonnet-4-6-thinking-high",
+        "antigravity/claude-sonnet-4-6-thinking",
+        "antigravity/claude-sonnet-4-5",
+        "antigravity/claude-sonnet-4-5-thinking-low",
+        "antigravity/claude-sonnet-4-5-thinking-medium",
+        "antigravity/claude-sonnet-4-5-thinking-high",
+        "antigravity/claude-sonnet-4-5-thinking",
+        "antigravity/claude-opus-4-6-thinking-low",
+        "antigravity/claude-opus-4-6-thinking-medium",
+        "antigravity/claude-opus-4-6-thinking-high",
+        "antigravity/claude-opus-4-6-thinking",
 
         # Gemini models via Cloud Code
-        "antigravity/gemini-2.5-flash", "antigravity/gemini-2.5-flash-lite",
-        "antigravity/gemini-2.5-flash-thinking", "antigravity/gemini-2.5-pro",
-        "antigravity/gemini-3-flash",
-        "antigravity/gemini-3-pro-high", "antigravity/gemini-3-pro-low",
+        "antigravity/gemini-3.1-pro-high",
+        "antigravity/gemini-3.1-pro-low",
+        "antigravity/gemini-3.1-pro",
+        "antigravity/gemini-3.1-pro-preview",
         "antigravity/gemini-3.1-flash-image",
-        "antigravity/gemini-3.1-pro-high", "antigravity/gemini-3.1-pro-low",
+        "antigravity/gemini-3-pro-high",
+        "antigravity/gemini-3-pro-low",
+        "antigravity/gemini-3-pro",
+        "antigravity/gemini-3-pro-preview",
+        "antigravity/gemini-3-flash",
+        "antigravity/gemini-3-flash-preview",
+        "antigravity/gemini-3-flash-thinking-low",
+        "antigravity/gemini-3-flash-thinking-medium",
+        "antigravity/gemini-3-flash-thinking-high",
+        "antigravity/gemini-2.5-flash",
+        "antigravity/gemini-2.5-flash-lite",
+        "antigravity/gemini-2.5-flash-thinking",
+        "antigravity/gemini-2.5-pro",
 
         # Google Search / Gemini browser-backed route (no API key needed)
         "search/gemini",

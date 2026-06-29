@@ -7015,8 +7015,8 @@ Recent translations to summarize:
             Using it may violate Google's Terms of Service. Use at your own risk.
         </p>
         <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:8080.
-            Glossarion will auto-launch it if Node.js is installed.
+            <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:3000.
+            Glossarion will auto-launch it if Bun/Bunx is installed.
         </p>
 
         <h4>Zhipu AI International (za/)</h4>
