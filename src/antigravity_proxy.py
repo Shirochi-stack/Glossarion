@@ -1332,7 +1332,7 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
         if not cmd:
             return {"running": False, "auto_launched": False, "error": _proxy_launch_error()}
 
-        _log(f"Auto-launching Antigravity proxy with: {' '.join(cmd)}")
+        _log(f"🚀 Auto-launching Antigravity proxy with: {' '.join(cmd)}")
 
         try:
             env = os.environ.copy()
@@ -1367,7 +1367,7 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 kwargs["start_new_session"] = True
 
             _proxy_process = subprocess.Popen(cmd, **kwargs)
-            _log(f"Antigravity proxy process started (PID {_proxy_process.pid}).")
+            _log(f"🟢 Antigravity proxy process started (PID {_proxy_process.pid}).")
         except Exception as exc:
             return {
                 "running": False,
@@ -1389,7 +1389,7 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 }
             health = check_proxy_health()
             if health.get("healthy"):
-                _log("Antigravity proxy is now running.")
+                _log("✅ Antigravity proxy is now running.")
                 return {"running": True, "auto_launched": True}
 
         return {
