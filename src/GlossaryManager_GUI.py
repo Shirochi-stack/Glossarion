@@ -9990,11 +9990,16 @@ Do not stop after the glossary."""
        
        col_key = self.glossary_column_fields[column_idx - 1]
        current_value = item.text(column_idx)
+       is_description_field = col_key == 'description'
        
        edit_dialog = QDialog(self.dialog)
        edit_dialog.setWindowTitle(f"Edit {col_key.replace('_', ' ').title()}")
-       edit_dialog.setMinimumWidth(400)
-       edit_dialog.setMinimumHeight(150)
+       if is_description_field:
+           edit_dialog.setMinimumWidth(900)
+           edit_dialog.setMinimumHeight(360)
+       else:
+           edit_dialog.setMinimumWidth(400)
+           edit_dialog.setMinimumHeight(150)
        
        dialog_layout = QVBoxLayout(edit_dialog)
        dialog_layout.setContentsMargins(20, 20, 20, 20)
@@ -10002,7 +10007,14 @@ Do not stop after the glossary."""
        label = QLabel(f"Edit {col_key.replace('_', ' ').title()}:")
        dialog_layout.addWidget(label)
        
-       entry = QLineEdit(current_value)
+       if is_description_field:
+           entry = QTextEdit()
+           entry.setPlainText(current_value)
+           entry.setAcceptRichText(False)
+           entry.setLineWrapMode(QTextEdit.WidgetWidth)
+           entry.setMinimumHeight(190)
+       else:
+           entry = QLineEdit(current_value)
        try:
            entry.setFont(self.glossary_tree.font())
            self._glossary_active_edit_entry = entry
@@ -10018,7 +10030,7 @@ Do not stop after the glossary."""
        entry.selectAll()
        
        def save_edit():
-           new_value = entry.text()
+           new_value = entry.toPlainText() if is_description_field else entry.text()
            item.setText(column_idx, new_value)
            # Snapshot before mutation for undo
            if hasattr(self, '_push_undo_snapshot'):
@@ -10085,18 +10097,22 @@ Do not stop after the glossary."""
        dialog_layout.addLayout(button_layout)
        
        save_btn = QPushButton("Save")
-       save_btn.setFixedWidth(80)
+       save_btn.setFixedWidth(140)
        save_btn.clicked.connect(save_edit)
        save_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
        button_layout.addWidget(save_btn)
        
        cancel_btn = QPushButton("Cancel")
-       cancel_btn.setFixedWidth(80)
+       cancel_btn.setFixedWidth(140)
        cancel_btn.clicked.connect(edit_dialog.reject)
        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
        button_layout.addWidget(cancel_btn)
        
-       entry.returnPressed.connect(save_edit)
+       if is_description_field:
+           QShortcut(QKeySequence("Ctrl+Return"), edit_dialog, activated=save_edit)
+           QShortcut(QKeySequence("Ctrl+Enter"), edit_dialog, activated=save_edit)
+       else:
+           entry.returnPressed.connect(save_edit)
        
        try:
            from dialog_animations import exec_dialog_with_fade
