@@ -6825,12 +6825,17 @@ Recent translations to summarize:
             self.append_log(f"⚠️ Gemini{acct_suffix}: {v_msg}")
         else:
             try:
-                from authgem_auth import CODE_ASSIST_ACCOUNT_URL
+                from authgem_auth import CODE_ASSIST_VERIFICATION_URL
             except Exception:
-                CODE_ASSIST_ACCOUNT_URL = "https://codeassist.google.com/"
-            v_url = CODE_ASSIST_ACCOUNT_URL
+                CODE_ASSIST_VERIFICATION_URL = (
+                    "https://accounts.google.com/signin/continue"
+                    "?sarp=1&scc=1"
+                    "&continue=https%3A%2F%2Fdevelopers.google.com%2Fgemini-code-assist%2Fauth%2Fauth_success_gemini"
+                    "&flowName=GlifWebSignIn"
+                )
+            v_url = CODE_ASSIST_VERIFICATION_URL
             self.append_log(
-                f"🔎 Gemini{acct_suffix}: no dedicated verification link returned; opening Code Assist account page."
+                f"🔎 Gemini{acct_suffix}: no dedicated verification link returned; opening fallback verification page."
             )
 
         self.append_log("🔗 Opening verification page…")

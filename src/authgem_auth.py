@@ -160,7 +160,12 @@ _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
 # Success/failure redirect URLs after OAuth (same as gemini-cli)
 SIGN_IN_SUCCESS_URL = "https://developers.google.com/gemini-code-assist/auth_success_gemini"
 SIGN_IN_FAILURE_URL = "https://developers.google.com/gemini-code-assist/auth_failure_gemini"
-CODE_ASSIST_ACCOUNT_URL = "https://codeassist.google.com/"
+CODE_ASSIST_VERIFICATION_URL = (
+    "https://accounts.google.com/signin/continue"
+    "?sarp=1&scc=1"
+    "&continue=https%3A%2F%2Fdevelopers.google.com%2Fgemini-code-assist%2Fauth%2Fauth_success_gemini"
+    "&flowName=GlifWebSignIn"
+)
 
 # Thinking level → budget mapping (same as grpc_gemini_client.py line 650)
 # Used by authgem-vertex/ and authgem/ to convert thinkingLevel to thinkingBudget,
@@ -1090,6 +1095,19 @@ def _handle_403_verification(error_body: str, _log, account_id: int = 0) -> None
             if v_url:
                 verification_url = v_url
                 break
+            metadata = detail.get("metadata", {})
+            if isinstance(metadata, dict):
+                v_url = metadata.get("validation_link") or metadata.get("validation_url")
+                if v_url:
+                    verification_url = v_url
+                    break
+            for link in detail.get("links", []) if isinstance(detail.get("links"), list) else []:
+                v_url = link.get("url", "")
+                if v_url and "accounts.google.com/signin/continue" in v_url:
+                    verification_url = v_url
+                    break
+            if verification_url:
+                break
         # Pattern 2: top-level or nested validationUrl
         if not verification_url:
             verification_url = err_data.get("validationUrl", "")
@@ -1143,7 +1161,7 @@ def _is_empty_project_code_assist_request(url: str, body: Dict) -> bool:
 
 
 def _handle_empty_project_500_redirect(_log) -> None:
-    """Open the Code Assist account page for empty-project 500 responses."""
+    """Open the Code Assist verification fallback for empty-project 500 responses."""
     global _verification_pending
 
     if _verification_pending:
@@ -1155,12 +1173,12 @@ def _handle_empty_project_500_redirect(_log) -> None:
     _verification_pending = True
     _log(f"⚠️ AuthGem: Code Assist returned 500 after no project was assigned.")
     _log(f"🔗 Opening verification in browser…")
-    logger.warning("AuthGem empty-project 500; opening Code Assist account URL: %s", CODE_ASSIST_ACCOUNT_URL)
+    logger.warning("AuthGem empty-project 500; opening Code Assist verification URL: %s", CODE_ASSIST_VERIFICATION_URL)
     try:
         import webbrowser
-        webbrowser.open(CODE_ASSIST_ACCOUNT_URL)
+        webbrowser.open(CODE_ASSIST_VERIFICATION_URL)
     except Exception:
-        _log(f"🔗 Could not open browser. Visit: {CODE_ASSIST_ACCOUNT_URL}")
+        _log(f"🔗 Could not open browser. Visit: {CODE_ASSIST_VERIFICATION_URL}")
     raise RuntimeError(
         "AuthGem: Account verification required. Complete it in your browser, then retry."
     )
