@@ -54,6 +54,7 @@ import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
+from html_output_utils import write_utf8_html_file
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
@@ -7666,8 +7667,10 @@ class BatchTranslationProcessor:
                     )
                     if should_save:
                         try:
-                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned if isinstance(cleaned, str) else "")
+                            write_utf8_html_file(
+                                os.path.join(self.out_dir, fname),
+                                cleaned if isinstance(cleaned, str) else "",
+                            )
                         except Exception:
                             pass
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
@@ -7737,8 +7740,7 @@ class BatchTranslationProcessor:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                             f.write(cleaned)
                     else:
-                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
+                        write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned)
                     print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname} ({len(cleaned)} chars)")
                 else:
                     print(f"⏭️ Chapter {actual_num} not saved ({qa_label}) — 'Save interrupted chapters' is OFF")
@@ -7787,8 +7789,7 @@ class BatchTranslationProcessor:
                     self.save_progress_fn()
             else:
                 # Original code for EPUB files
-                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
+                write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned)
                 _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, chapter_body, cleaned)
                 _write_html_md_txt_sidecars(self.out_dir, fname, cleaned)
             
@@ -8514,16 +8515,17 @@ class BatchTranslationProcessor:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
-                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save if isinstance(cleaned_to_save, str) else "")
+                            write_utf8_html_file(
+                                os.path.join(self.out_dir, parent_fname),
+                                cleaned_to_save if isinstance(cleaned_to_save, str) else "",
+                            )
                         except Exception:
                             pass
                     elif not block_failure_debug_save and not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
-                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
+                            write_utf8_html_file(os.path.join(self.out_dir, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
                     # Use each chapter's own expected filename so we overwrite the existing in_progress entry
@@ -8576,8 +8578,7 @@ class BatchTranslationProcessor:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
-                            with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
+                            write_utf8_html_file(os.path.join(self.out_dir, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
 
@@ -8638,8 +8639,12 @@ class BatchTranslationProcessor:
                             section_content = soup.get_text(strip=True)
                         
                         # Save the section
-                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                            f.write(section_content)
+                        section_path = os.path.join(self.out_dir, fname)
+                        if getattr(self, 'is_text_file', False):
+                            with open(section_path, 'w', encoding='utf-8') as f:
+                                f.write(section_content)
+                        else:
+                            write_utf8_html_file(section_path, section_content)
                         if not getattr(self, 'is_text_file', False) and not merged_truncated:
                             _write_html_sdlxliff_sidecar(self.out_dir, fname, chapter, content, section_content)
                             _write_html_md_txt_sidecars(self.out_dir, fname, section_content)
@@ -8706,8 +8711,7 @@ class BatchTranslationProcessor:
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(text_content)
                         else:
-                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
+                            write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned_to_save)
                         print(f"   💾 Saved merged content (truncated) to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
                     else:
                         print(f"   ⏭️ Merged content for Chapter {parent_actual_num} not saved (truncated) — 'Save interrupted chapters' is OFF")
@@ -8720,8 +8724,7 @@ class BatchTranslationProcessor:
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                             f.write(text_content)
                     else:
-                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned_to_save)
+                        write_utf8_html_file(os.path.join(self.out_dir, fname), cleaned_to_save)
                         _write_html_sdlxliff_sidecar(self.out_dir, fname, parent_chapter, merged_content, cleaned_to_save)
                         _write_html_md_txt_sidecars(self.out_dir, fname, cleaned_to_save)
                     print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
@@ -20383,8 +20386,7 @@ def main(log_callback=None, stop_callback=None):
 
             fname = FileUtilities.create_chapter_filename(c, actual_num)
             output_path = os.path.join(out, fname)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(raw_markup)
+            write_utf8_html_file(output_path, raw_markup)
 
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c.get("body", ""))
             idx = c.get("_progress_idx", c.get("num", 0))
@@ -21193,8 +21195,7 @@ def main(log_callback=None, stop_callback=None):
                     or c.get("body")
                     or ""
                 )
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
+                write_utf8_html_file(os.path.join(out, fname), original_markup)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
                 progress_manager.save()
@@ -21206,8 +21207,7 @@ def main(log_callback=None, stop_callback=None):
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                 original_markup = _original_markup_for_copy(c, out)
                 output_path = os.path.join(out, fname)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
+                write_utf8_html_file(output_path, original_markup)
                 retroactive_update_image_references(out)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
@@ -22255,8 +22255,7 @@ def main(log_callback=None, stop_callback=None):
                     or c.get("body")
                     or ""
                 )
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
+                write_utf8_html_file(os.path.join(out, fname), original_markup)
 
                 # Update progress tracking
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
@@ -22272,8 +22271,7 @@ def main(log_callback=None, stop_callback=None):
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                 original_markup = _original_markup_for_copy(c, out)
                 output_path = os.path.join(out, fname)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
+                write_utf8_html_file(output_path, original_markup)
                 retroactive_update_image_references(out)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
@@ -22317,8 +22315,10 @@ def main(log_callback=None, stop_callback=None):
                         fname = FileUtilities.create_chapter_filename(c, actual_num)
                         if _vision_should_save_partial_for_qa(vision_qa_issues, config):
                             try:
-                                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                    f.write(translated_html if isinstance(translated_html, str) else "")
+                                write_utf8_html_file(
+                                    os.path.join(out, fname),
+                                    translated_html if isinstance(translated_html, str) else "",
+                                )
                             except Exception:
                                 pass
                         progress_manager.update(
@@ -22437,8 +22437,7 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
                     break
 
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(translated_html)
+                write_utf8_html_file(os.path.join(out, fname), translated_html)
                 
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
                 progress_manager.update(idx, actual_num, content_hash, fname, status=status, chapter_obj=c)
@@ -23758,8 +23757,7 @@ def main(log_callback=None, stop_callback=None):
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
-                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
+                            write_utf8_html_file(os.path.join(out, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
                     
@@ -23813,8 +23811,7 @@ def main(log_callback=None, stop_callback=None):
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
-                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
+                            write_utf8_html_file(os.path.join(out, parent_fname), cleaned_to_save)
                         except Exception:
                             pass
 
@@ -23854,8 +23851,11 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Save the section
                         split_output_path = os.path.join(out, split_fname)
-                        with open(split_output_path, 'w', encoding='utf-8') as f:
-                            f.write(section_content)
+                        if is_text_file:
+                            with open(split_output_path, 'w', encoding='utf-8') as f:
+                                f.write(section_content)
+                        else:
+                            write_utf8_html_file(split_output_path, section_content)
                         if not is_text_file and not was_truncated:
                             _write_html_sdlxliff_sidecar(out, split_fname, g_chapter, g_chapter.get("body", ""), section_content)
                             _write_html_md_txt_sidecars(out, split_fname, section_content)
@@ -23898,8 +23898,7 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     parent_output_path = os.path.join(out, parent_fname)
-                    with open(parent_output_path, 'w', encoding='utf-8') as f:
-                        f.write(cleaned_to_save)
+                    write_utf8_html_file(parent_output_path, cleaned_to_save)
                 
                 # Verify file was actually written before marking as completed
                 if not os.path.exists(parent_output_path):
@@ -24018,8 +24017,7 @@ def main(log_callback=None, stop_callback=None):
                             f.write(text_content)
                     else:
                         fname_out = fname
-                        with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
+                        write_utf8_html_file(os.path.join(out, fname), cleaned)
                     print(f"💾 Saved Chapter {actual_num} ({qa_label}): {fname_out} ({len(cleaned)} chars)")
                 else:
                     fname_out = fname if not (is_text_file and not is_pdf_file) else fname.replace('.html', '.txt')
@@ -24090,8 +24088,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 # For EPUB files, keep original HTML behavior
                 output_path = os.path.join(out, fname)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
+                write_utf8_html_file(output_path, cleaned)
                 
                 # Verify file was actually written before marking as completed
                 if not os.path.exists(output_path):

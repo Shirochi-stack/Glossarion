@@ -67,6 +67,8 @@ CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
 STATUS_ENDPOINT = "/api/status"
 OAUTH_START_ENDPOINT = "/oauth/start"
+CLAUDE_MAX_OUTPUT_TOKENS = 64000
+GEMINI_MAX_OUTPUT_TOKENS = 65536
 
 PROXY_REPO_URL = "https://github.com/frieser/antigravity-proxy"
 
@@ -608,13 +610,28 @@ def _payload_for_openai_chat(
     max_tokens: int,
     stream: bool,
 ) -> Dict[str, Any]:
+    normalized_model = _normalize_model_name(model)
     return {
-        "model": _normalize_model_name(model),
+        "model": normalized_model,
         "messages": messages,
-        "max_tokens": max_tokens,
+        "max_tokens": _clamp_max_tokens_for_model(normalized_model, max_tokens),
         "temperature": temperature,
         "stream": stream,
     }
+
+
+def _clamp_max_tokens_for_model(model: str, max_tokens: int) -> int:
+    try:
+        requested = int(max_tokens)
+    except Exception:
+        requested = 8192
+
+    model_lower = (model or "").lower()
+    if "claude" in model_lower:
+        return min(requested, CLAUDE_MAX_OUTPUT_TOKENS)
+    if "gemini" in model_lower:
+        return min(requested, GEMINI_MAX_OUTPUT_TOKENS)
+    return requested
 
 
 def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1125,6 +1142,11 @@ def _consume_openai_stream(resp: requests.Response, log_fn=None, log_stream: boo
     )
 
     try:
+        try:
+            resp.encoding = "utf-8"
+        except Exception:
+            pass
+
         for line in resp.iter_lines(decode_unicode=True, chunk_size=1):
             if _cancel_event.is_set():
                 resp.close()

@@ -42,6 +42,7 @@ from enum import Enum
 import requests
 import uuid
 from pathlib import Path
+from html_output_utils import ensure_utf8_html_document
 
 try:
     import tiktoken
@@ -4452,7 +4453,7 @@ class AsyncProcessingDialog:
                     body = ''.join(f"<p>{line}</p>" for line in content.splitlines() if line.strip())
                     content = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{body}</body></html>"
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                    f.write(ensure_utf8_html_document(content))
                 
                 # Add realistic progress entry
                 progress_data["chapters"][content_hash] = {
