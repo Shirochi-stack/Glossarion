@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-numbered-antigravity-accounts"
+RUNTIME_PATCH_VERSION = "2026-06-29-gemini31-pro-thinkingconfig-strip"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -498,6 +498,212 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
     )
 
 
+def _patch_runtime_error_diagnostics_support(runtime_dir: str) -> bool:
+    """Preserve Google error details and log sanitized request diagnostics for 400s."""
+    errors_path = os.path.join(runtime_dir, "src", "utils", "errors.ts")
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    if not os.path.exists(errors_path) or not os.path.exists(server_path):
+        return False
+
+    with open(errors_path, "r", encoding="utf-8") as f:
+        errors = f.read()
+
+    if "rawStatus?: string" not in errors:
+        errors = errors.replace(
+            "  message?: string;\n}",
+            "  message?: string;\n  rawStatus?: string;\n  details?: any[];\n}",
+            1,
+        )
+        errors = errors.replace(
+            "  let message: string | undefined;\n",
+            "  let message: string | undefined;\n"
+            "  let rawStatus: string | undefined;\n"
+            "  let details: any[] | undefined;\n",
+            1,
+        )
+        errors = errors.replace(
+            "      message = err.message;\n",
+            "      message = err.message;\n"
+            "      rawStatus = err.status;\n"
+            "      details = err.details;\n",
+            1,
+        )
+        errors = errors.replace(
+            "  return { reason, validationUrl, isQuotaExhausted, isChallengeRequired, isModelUnsupported, status };",
+            "  return { reason, validationUrl, isQuotaExhausted, isChallengeRequired, isModelUnsupported, status, message, rawStatus, details };",
+            1,
+        )
+        with open(errors_path, "w", encoding="utf-8") as f:
+            f.write(errors)
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+
+    server = server.replace(
+        "              googleGenerationConfig: (googleBody as any).generationConfig || undefined",
+        "              googleGenerationConfig: ((googleBody as any).request || {}).generationConfig || (googleBody as any).generationConfig || undefined",
+    )
+
+    if "buildRequestDiagnostics" not in server:
+        server = server.replace(
+            "       const attemptLogs: Array<{ email: string, status: number, reason: string }> = [];",
+            "       const attemptLogs: Array<any> = [];",
+            1,
+        )
+        needle = '          console.log(`[Request] Model: ${openaiBody.model} | Account: ${account.email} | Project: ${effectiveProjectId} | Attempt: ${attempts}/${MAX_ATTEMPTS} | Pool: ${useCliPool ? \'CLI\' : \'Sandbox\'} | Endpoint: ${GOOGLE_URL.split(\'/\')[2]} | Target Model: ${googleBody.model}`);'
+        replacement = (
+            needle
+            + "\n\n"
+            + "          const buildRequestDiagnostics = () => {\n"
+            + "            const messages = Array.isArray(openaiBody.messages) ? openaiBody.messages.map((m: any, i: number) => {\n"
+            + "              const content = m?.content;\n"
+            + "              const chars = typeof content === \"string\" ? content.length : JSON.stringify(content ?? \"\").length;\n"
+            + "              return { index: i, role: m?.role || \"unknown\", chars };\n"
+            + "            }) : [];\n"
+            + "            return {\n"
+            + "              openaiModel: openaiBody.model,\n"
+            + "              targetModel: googleBody.model,\n"
+            + "              max_tokens: openaiBody.max_tokens,\n"
+            + "              temperature: openaiBody.temperature,\n"
+            + "              stream: openaiBody.stream === true,\n"
+            + "              messageCount: messages.length,\n"
+            + "              messages,\n"
+            + "              requestHasTools: !!(openaiBody.tools || openaiBody.functions),\n"
+            + "              googleBodyKeys: Object.keys(googleBody || {}).sort(),\n"
+            + "              googleGenerationConfig: ((googleBody as any).request || {}).generationConfig || (googleBody as any).generationConfig || undefined\n"
+            + "            };\n"
+            + "          };"
+        )
+        if needle not in server:
+            return False
+        server = server.replace(needle, replacement, 1)
+
+    if "[ErrorDetail]" not in server:
+        server = server.replace(
+            "                console.error(`[Error] Google API (${account.email}) returned ${status} (${parsedError.reason}):`, errText);\n\n"
+            "               emitAccountFlash(account.email, 'error');\n"
+            "               attemptLogs.push({ email: account.email, status, reason: parsedError.reason });",
+            "                console.error(`[Error] Google API (${account.email}) returned ${status} (${parsedError.reason}):`, errText);\n"
+            "                const requestDiagnostics = buildRequestDiagnostics();\n"
+            "                const errorDetailPayload = {\n"
+            "                  googleMessage: parsedError.message,\n"
+            "                  googleStatus: parsedError.rawStatus,\n"
+            "                  googleDetails: parsedError.details,\n"
+            "                  request: requestDiagnostics\n"
+            "                };\n"
+            "                if (status === 400 || parsedError.details || parsedError.message) {\n"
+            "                  console.error(`[ErrorDetail] Google API diagnostic for ${account.email}:`, JSON.stringify(errorDetailPayload, null, 2));\n"
+            "                }\n\n"
+            "               emitAccountFlash(account.email, 'error');\n"
+            "               attemptLogs.push({ email: account.email, status, reason: parsedError.reason, message: parsedError.message, googleStatus: parsedError.rawStatus, details: parsedError.details, diagnostics: status === 400 ? requestDiagnostics : undefined });",
+            1,
+        )
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+
+    return (
+        "rawStatus?: string" in errors
+        and "details?: any[]" in errors
+        and "message, rawStatus, details" in errors
+        and "buildRequestDiagnostics" in server
+        and "[ErrorDetail]" in server
+        and "attemptLogs: Array<any>" in server
+    )
+
+
+def _patch_runtime_gemini_thinking_budget_support(runtime_dir: str) -> bool:
+    """Use safe Gemini thinking config and strip it for 3.1 Pro high/low variants."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    if not os.path.exists(transform_path):
+        return False
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    old_block = (
+        '  if (isThinkingModel || googleModel.includes("gemini-3")) {\n'
+        '    googleRequest.generationConfig.thinkingConfig = {\n'
+        '      includeThoughts: true,\n'
+        '      thinkingBudget: thinkingBudget || 16000\n'
+        '    };\n'
+        '    \n'
+        '    if (googleModel.includes("gemini-3")) {\n'
+        '        googleRequest.generationConfig.thinkingConfig.thinkingLevel = extractedTier || "low";\n'
+        '    }\n'
+        '  }'
+    )
+    new_block = (
+        '  if (isThinkingModel || googleModel.includes("gemini-3")) {\n'
+        '    if (!thinkingBudget && googleModel.includes("gemini-3")) {\n'
+        '      if (extractedTier === "high") thinkingBudget = 24576;\n'
+        '      else if (extractedTier === "medium") thinkingBudget = 8192;\n'
+        '      else if (extractedTier === "low") thinkingBudget = 4096;\n'
+        '    }\n'
+        '\n'
+        '    googleRequest.generationConfig.thinkingConfig = {\n'
+        '      includeThoughts: true,\n'
+        '      thinkingBudget: thinkingBudget || 16000\n'
+        '    };\n'
+        '  }'
+    )
+
+    updated = content
+    if old_block in updated:
+        updated = updated.replace(old_block, new_block, 1)
+    elif "googleRequest.generationConfig.thinkingConfig.thinkingLevel" in updated:
+        updated = re.sub(
+            r'\n\s*if \(googleModel\.includes\("gemini-3"\)\) \{\n'
+            r'\s*googleRequest\.generationConfig\.thinkingConfig\.thinkingLevel = extractedTier \|\| "low";\n'
+            r'\s*\}',
+            "",
+            updated,
+            count=1,
+        )
+        marker = '    googleRequest.generationConfig.thinkingConfig = {\n'
+        if "thinkingBudget = 24576" not in updated and marker in updated:
+            updated = updated.replace(
+                marker,
+                '    if (!thinkingBudget && googleModel.includes("gemini-3")) {\n'
+                '      if (extractedTier === "high") thinkingBudget = 24576;\n'
+                '      else if (extractedTier === "medium") thinkingBudget = 8192;\n'
+                '      else if (extractedTier === "low") thinkingBudget = 4096;\n'
+                '    }\n'
+                '\n'
+                + marker,
+                1,
+            )
+
+    if updated != content:
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        updated = f.read()
+
+    strip_marker = 'delete googleRequest.generationConfig.thinkingConfig;'
+    if strip_marker not in updated:
+        return_marker = "  return {\n    project: projectId,"
+        strip_block = (
+            '  if (/^gemini-3\\.1-pro-(high|low)$/i.test(googleModel)) {\n'
+            '    delete googleRequest.generationConfig.thinkingConfig;\n'
+            '  }\n\n'
+        )
+        if return_marker not in updated:
+            return False
+        updated = updated.replace(return_marker, strip_block + return_marker, 1)
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    return (
+        "googleRequest.generationConfig.thinkingConfig.thinkingLevel" not in updated
+        and "thinkingBudget = 24576" in updated
+        and "thinkingBudget: thinkingBudget || 16000" in updated
+        and strip_marker in updated
+        and "gemini-3\\.1-pro-(high|low)" in updated
+    )
+
+
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
         os.path.join(runtime_dir, "package.json")
@@ -587,6 +793,10 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         if not _patch_runtime_forced_account_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for forced account routing")
+        if not _patch_runtime_error_diagnostics_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for error diagnostics")
+        if not _patch_runtime_gemini_thinking_budget_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for Gemini thinking budget")
         _write_runtime_metadata(archive_root, release, client_version)
 
         _copy_runtime_tree(archive_root, runtime_dir)
@@ -633,6 +843,10 @@ def _patch_cached_runtime(
         if not _patch_runtime_account_reset_support(runtime_dir):
             return False
         if not _patch_runtime_forced_account_support(runtime_dir):
+            return False
+        if not _patch_runtime_error_diagnostics_support(runtime_dir):
+            return False
+        if not _patch_runtime_gemini_thinking_budget_support(runtime_dir):
             return False
         _write_runtime_metadata(runtime_dir, release, client_version)
         (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
@@ -947,14 +1161,94 @@ def _parse_openai_chat_response(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _summarize_proxy_attempt(attempt: Any) -> str:
+    if not isinstance(attempt, dict):
+        return str(attempt)
+
+    parts = []
+    email = str(attempt.get("email") or "").strip()
+    if email:
+        parts.append(email)
+
+    status = attempt.get("status")
+    reason = str(attempt.get("reason") or "").strip()
+    google_status = str(attempt.get("googleStatus") or "").strip()
+    message = str(attempt.get("message") or "").strip()
+    status_bits = []
+    if status is not None:
+        status_bits.append(f"HTTP {status}")
+    if google_status:
+        status_bits.append(google_status)
+    if reason:
+        status_bits.append(reason)
+    if status_bits:
+        parts.append(" / ".join(status_bits))
+    if message:
+        parts.append(message)
+
+    diagnostics = attempt.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        request_bits = []
+        for key in ("openaiModel", "targetModel", "max_tokens", "temperature", "stream", "messageCount"):
+            value = diagnostics.get(key)
+            if value is not None:
+                request_bits.append(f"{key}={value}")
+        messages = diagnostics.get("messages")
+        if isinstance(messages, list):
+            message_shapes = []
+            for msg in messages[:6]:
+                if isinstance(msg, dict):
+                    message_shapes.append(
+                        f"{msg.get('role', 'unknown')}:{msg.get('chars', '?')} chars"
+                    )
+            if message_shapes:
+                request_bits.append("messages=[" + ", ".join(message_shapes) + "]")
+        generation_config = diagnostics.get("googleGenerationConfig")
+        if isinstance(generation_config, dict):
+            request_bits.append(f"generationConfig={generation_config}")
+        if request_bits:
+            parts.append("request: " + "; ".join(request_bits))
+
+    return " | ".join(parts) if parts else str(attempt)
+
+
+def _format_proxy_error_body(error_body: str) -> str:
+    text = (error_body or "").strip()
+    if not text:
+        return ""
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        return text[:5000]
+
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return text[:5000]
+
+    lines = [str(error.get("message") or error).strip()]
+
+    attempts = error.get("attempts")
+    if isinstance(attempts, list) and attempts:
+        lines.append("Proxy attempts:")
+        for attempt in attempts[:5]:
+            lines.append(f"- {_summarize_proxy_attempt(attempt)}")
+        if len(attempts) > 5:
+            lines.append(f"- ... {len(attempts) - 5} more attempt(s)")
+
+    details = error.get("details")
+    if details:
+        try:
+            lines.append("Details: " + json.dumps(details, ensure_ascii=False)[:2000])
+        except Exception:
+            lines.append("Details: " + str(details)[:2000])
+
+    return "\n".join(line for line in lines if line)[:5000]
+
+
 def _extract_error_message(resp: requests.Response) -> str:
     try:
-        data = resp.json()
-        error = data.get("error")
-        if isinstance(error, dict):
-            return str(error.get("message") or error)
-        if error:
-            return str(error)
+        return _format_proxy_error_body(resp.text)
     except Exception:
         pass
     return (getattr(resp, "text", "") or "")[:1000]
@@ -997,6 +1291,22 @@ def _error_text_suggests_account_setup(error_text: str) -> bool:
     )
 
 
+def _error_text_suggests_invalid_argument(error_text: str) -> bool:
+    lowered = (error_text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "invalid_argument",
+            "invalid argument",
+            "request contains an invalid argument",
+            "http 400",
+            '"status":400',
+            '"status": 400',
+            "'status': 400",
+        )
+    )
+
+
 def _error_text_suggests_more_accounts(error_text: str) -> bool:
     lowered = (error_text or "").lower()
     return any(
@@ -1018,6 +1328,8 @@ def _min_accounts_for_auth_retry(error_text: str = "", account_id: Optional[int]
 def _should_wait_for_auth(resp: requests.Response) -> bool:
     """Return True when the request likely failed because no account is linked."""
     error_text = _extract_error_message(resp)
+    if _error_text_suggests_invalid_argument(error_text):
+        return False
 
     if resp.status_code in (401, 403):
         return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
@@ -1032,6 +1344,9 @@ def _should_wait_for_auth(resp: requests.Response) -> bool:
 
 
 def _should_wait_for_auth_status_error(status_code: int, error_text: str = "") -> bool:
+    if _error_text_suggests_invalid_argument(error_text):
+        return False
+
     if status_code in (401, 403):
         return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
@@ -1888,7 +2203,8 @@ def send_message_stream(
         with _stream_chat_with_httpx(url, payload, headers, timeout) as resp:
             if resp.status_code != 200:
                 try:
-                    error_text = resp.read().decode("utf-8", errors="replace")[:1000]
+                    raw_error_text = resp.read().decode("utf-8", errors="replace")
+                    error_text = _format_proxy_error_body(raw_error_text)
                 except Exception:
                     error_text = ""
 
@@ -1979,7 +2295,7 @@ def send_message_stream(
 
     if resp.status_code != 200:
         try:
-            error_text = resp.text[:1000]
+            error_text = _format_proxy_error_body(resp.text)
         except Exception:
             error_text = ""
         try:
