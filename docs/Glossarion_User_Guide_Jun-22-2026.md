@@ -675,7 +675,7 @@ You **do** need **one** JavaScript runtime path:
 | **Node.js LTS** | Provides `npm` / `npx`. Glossarion can run `npx --yes --package bun@latest bun run ...` to fetch Bun and start the proxy. | **Yes — easiest for most Windows users.** |
 | **Bun** | Lets Glossarion start the proxy directly with `bun run ...`. | Good if you already use Bun. |
 
-> **✅ Simplest answer for normal users:** install **Node.js LTS** from the official Node.js website, restart Glossarion, then use the **🔐 Antigravity Login** button.
+> **✅ Simplest answer for normal users:** install **Node.js LTS** from the official [Node.js download page](https://nodejs.org/en/download), restart Glossarion, then use the **🔐 Antigravity Login** button.
 
 ### What happens automatically
 
