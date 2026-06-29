@@ -7014,10 +7014,10 @@ Recent translations to summarize:
             <b>⚠️ Warning:</b> This feature uses a proxy to access Google Cloud Code.
             Using it may violate Google's Terms of Service. Use at your own risk.
         </p>
-        <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
-            <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:3000.
-            Glossarion will auto-launch it if Bun/Bunx is installed.
-        </p>
+          <p style="color: #17a2b8; padding: 4px; font-size: 11px;">
+             <b>ℹ️ Tip:</b> Requires the Antigravity proxy running on localhost:3000.
+              Glossarion will auto-update and launch it when Node/npm or Bun is available.
+          </p>
 
         <h4>Zhipu AI International (za/)</h4>
         <p>Route to the GLM international endpoint (https://api.z.ai/api/paas/v4) instead of the Chinese endpoint</p>

@@ -311,6 +311,10 @@ def get_model_options() -> List[str]:
         "antigravity/claude-opus-4-6-thinking",
 
         # Gemini models via Cloud Code
+        "antigravity/gemini-3.5-flash",
+        "antigravity/gemini-3.5-flash-medium",
+        "antigravity/gemini-3.5-flash-high",
+        "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.1-pro-high",
         "antigravity/gemini-3.1-pro-low",
         "antigravity/gemini-3.1-pro",

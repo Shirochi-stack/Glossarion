@@ -24791,7 +24791,7 @@ class UnifiedClient:
         if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
             raise UnifiedClientError(
                 "Antigravity proxy module is not available. Ensure antigravity_proxy.py exists in src/.\n"
-                "Also make sure the proxy is running: bunx antigravity-proxy@latest",
+                "Glossarion auto-updates and launches frieser/antigravity-proxy when Node/npm or Bun is available.",
                 error_type="config_error"
             )
 
@@ -24876,11 +24876,10 @@ class UnifiedClient:
                 if "authentication timed out" in error_str.lower() or "add your google account" in error_str.lower():
                     raise UnifiedClientError(str(exc), error_type="config_error")
 
-                # Connection refused – proxy not running
+                # Connection refused - proxy not running
                 if "connection refused" in error_str.lower():
                     raise UnifiedClientError(
-                        f"Antigravity proxy is not running. Start it with:\n"
-                        f"  bunx antigravity-proxy@latest\n"
+                        f"Antigravity proxy is not running. Use Glossarion's Antigravity auto-launch/restart so it can update the local proxy runtime.\n"
                         f"Then open http://localhost:3000 to add your Google account.",
                         error_type="config_error"
                     )

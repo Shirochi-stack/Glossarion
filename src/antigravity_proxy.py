@@ -17,17 +17,14 @@ listens on http://localhost:3000 and exposes:
   - POST /v1/chat/completions
   - GET  /oauth/start
 
-Prerequisites:
-  1. Install Bun from https://bun.sh/
-  2. Start the proxy with: bunx antigravity-proxy@latest
-  3. Open http://localhost:3000 and add a Google account
-
-Glossarion can auto-launch the proxy when Bun/Bunx is on PATH. A Node/npx
-fallback is attempted for environments where the package can bootstrap Bun.
+Glossarion auto-downloads the current upstream proxy archive into the user's
+Antigravity proxy data directory and launches that local runtime. This avoids
+requiring users of the compiled app to install Git or manually update a checkout.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -36,9 +33,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
+import zipfile
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -53,8 +52,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROXY_URL = "http://localhost:3000"
 PROXY_PACKAGE_NAME = "antigravity-proxy"
-PROXY_PACKAGE = os.environ.get("ANTIGRAVITY_PROXY_PACKAGE", f"{PROXY_PACKAGE_NAME}@latest")
-PROXY_GITHUB_REPO = "https://github.com/frieser/antigravity-proxy.git"
+PROXY_GITHUB_API_TAGS = "https://api.github.com/repos/frieser/antigravity-proxy/tags"
+PROXY_GITHUB_ARCHIVE_URL = (
+    "https://github.com/frieser/antigravity-proxy/archive/refs/tags/{tag}.zip"
+)
+PROXY_DEFAULT_TAG = "v1.7.1"
+BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
+RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash"
+
+ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
+ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
 
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 MODELS_ENDPOINT = "/v1/models"
@@ -80,7 +87,7 @@ def _log_noop(_: str) -> None:
 
 
 def _proxy_command_for_humans() -> str:
-    return f"bunx {PROXY_PACKAGE}"
+    return "Glossarion auto-updates frieser/antigravity-proxy and launches it locally"
 
 
 def _get_proxy_data_dir() -> str:
@@ -89,6 +96,14 @@ def _get_proxy_data_dir() -> str:
         "ANTIGRAVITY_PROXY_DATA_DIR",
         os.path.join(os.path.expanduser("~"), ".config", "antigravity-proxy"),
     )
+
+
+def _get_proxy_runtime_root(data_dir: str) -> str:
+    return os.path.join(data_dir, "runtime")
+
+
+def _safe_runtime_segment(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "runtime"
 
 
 def _parse_semver(value: str) -> tuple:
@@ -102,63 +117,126 @@ def _version_to_str(version: tuple) -> str:
     return ".".join(str(part) for part in version)
 
 
-def _run_version_probe(cmd: List[str], timeout: int = 12) -> Optional[str]:
+def _github_headers() -> Dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Glossarion Antigravity Proxy Updater",
+    }
+
+
+def _latest_proxy_release() -> Dict[str, str]:
+    """Return the current frieser/antigravity-proxy tag via GitHub HTTPS APIs."""
+    override = os.environ.get("ANTIGRAVITY_PROXY_TAG", "").strip()
+    if not override:
+        version_override = os.environ.get("ANTIGRAVITY_PROXY_VERSION", "").strip()
+        if version_override:
+            override = version_override if version_override.startswith("v") else f"v{version_override}"
+
+    if override:
+        tag = override
+        return {
+            "tag": tag,
+            "version": _version_to_str(_parse_semver(tag)),
+            "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=tag),
+        }
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
-        )
-        if result.returncode == 0:
-            value = (result.stdout or "").strip().splitlines()
-            return value[-1].strip() if value else None
-    except Exception:
-        return None
-    return None
+        resp = requests.get(PROXY_GITHUB_API_TAGS, headers=_github_headers(), timeout=15)
+        resp.raise_for_status()
+        tags = resp.json()
+        candidates = []
+        if isinstance(tags, list):
+            for item in tags:
+                if not isinstance(item, dict):
+                    continue
+                tag = str(item.get("name") or "").strip()
+                if not tag:
+                    continue
+                candidates.append(
+                    (
+                        _parse_semver(tag),
+                        {
+                            "tag": tag,
+                            "version": _version_to_str(_parse_semver(tag)),
+                            "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=tag),
+                        },
+                    )
+                )
+        if candidates:
+            return max(candidates, key=lambda item: item[0])[1]
+    except Exception as exc:
+        logger.debug("Could not resolve latest Antigravity proxy tag: %s", exc)
+
+    return {
+        "tag": PROXY_DEFAULT_TAG,
+        "version": _version_to_str(_parse_semver(PROXY_DEFAULT_TAG)),
+        "archive_url": PROXY_GITHUB_ARCHIVE_URL.format(tag=PROXY_DEFAULT_TAG),
+    }
 
 
 def _latest_proxy_version() -> str:
-    """Best-effort latest upstream version for dashboard/status metadata.
+    return _latest_proxy_release()["version"]
 
-    npm currently publishes antigravity-proxy@0.7.0 while the GitHub repo has a
-    newer v1.7.1 tag. Prefer the highest semantic version we can discover so
-    the proxy does not render an "unsupported version" page because Glossarion
-    launched it from a data directory.
-    """
-    override = os.environ.get("ANTIGRAVITY_PROXY_VERSION", "").strip().lstrip("v")
-    if override:
-        return override
 
+def _absolute_url(base_url: str, value: str) -> str:
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    parsed = urlparse(base_url)
+    return f"{parsed.scheme}://{parsed.netloc}/{value.lstrip('/')}"
+
+
+def _script_urls_from_html(base_url: str, html: str) -> List[str]:
+    urls: List[str] = []
+    for match in re.finditer(r"""(?:src|href)=["']([^"']+\.js)["']""", html or "", re.IGNORECASE):
+        url = _absolute_url(base_url, match.group(1))
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _extract_antigravity_versions(text: str) -> List[str]:
     versions = []
-
-    npm = _candidate_executable("npm")
-    if npm:
-        npm_version = _run_version_probe([npm, "view", PROXY_PACKAGE_NAME, "version", "--silent"])
-        if npm_version:
-            versions.append(_parse_semver(npm_version))
-
-    git = _candidate_executable("git")
-    if git:
-        tags = _run_version_probe(
-            [git, "ls-remote", "--tags", "--sort=v:refname", PROXY_GITHUB_REPO],
-            timeout=20,
-        )
-        if tags:
-            for line in tags.splitlines():
-                if "^{}" in line:
-                    continue
-                tag = line.rsplit("/", 1)[-1].strip()
-                versions.append(_parse_semver(tag))
-
-    latest = max(versions) if versions else (0, 7, 0)
-    return _version_to_str(latest)
+    patterns = [
+        r"antigravity-hub/(\d+\.\d+\.\d+)-",
+        r"version:\s*[\"'](\d+\.\d+\.\d+)<br>",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text or "", re.IGNORECASE):
+            versions.append(match.group(1))
+    return versions
 
 
-def _write_proxy_runtime_package_json(data_dir: str) -> None:
+def _latest_antigravity_client_version() -> str:
+    """Resolve the current official Antigravity app version for request headers."""
+    override = os.environ.get("ANTIGRAVITY_CLIENT_VERSION", "").strip()
+    if override:
+        return override.lstrip("v")
+
+    try:
+        resp = requests.get(ANTIGRAVITY_SITE_URL, timeout=15)
+        resp.raise_for_status()
+        html = resp.text or ""
+        candidates = _extract_antigravity_versions(html)
+
+        for url in _script_urls_from_html(ANTIGRAVITY_SITE_URL, html)[:8]:
+            try:
+                script_resp = requests.get(url, timeout=15)
+                script_resp.raise_for_status()
+                candidates.extend(_extract_antigravity_versions(script_resp.text or ""))
+            except Exception:
+                continue
+
+        if candidates:
+            return max(candidates, key=_parse_semver)
+    except Exception as exc:
+        logger.debug("Could not resolve official Antigravity client version: %s", exc)
+
+    return ANTIGRAVITY_CLIENT_VERSION_FALLBACK
+
+
+def _write_proxy_runtime_package_json(data_dir: str, version: Optional[str] = None) -> None:
     package_json = os.path.join(data_dir, "package.json")
-    version = _latest_proxy_version()
+    version = version or _latest_proxy_version()
     try:
         existing: Dict[str, Any] = {}
         if os.path.exists(package_json):
@@ -179,18 +257,239 @@ def _write_proxy_runtime_package_json(data_dir: str) -> None:
         logger.debug("Could not update Antigravity proxy package.json: %s", exc)
 
 
+def _patch_runtime_package_json(runtime_dir: str, version: str) -> None:
+    package_json = os.path.join(runtime_dir, "package.json")
+    with open(package_json, "r", encoding="utf-8") as f:
+        package_data = json.load(f)
+
+    package_data["name"] = PROXY_PACKAGE_NAME
+    package_data["version"] = version
+
+    with open(package_json, "w", encoding="utf-8") as f:
+        json.dump(package_data, f, indent=2)
+        f.write("\n")
+
+
+def _patch_runtime_antigravity_client_version(runtime_dir: str, version: str) -> bool:
+    headers_path = os.path.join(runtime_dir, "src", "utils", "headers.ts")
+    if not os.path.exists(headers_path):
+        return False
+
+    with open(headers_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    updated, count = re.subn(
+        r'const\s+ANTIGRAVITY_VERSION\s*=\s*["\'][^"\']+["\'];',
+        f'const ANTIGRAVITY_VERSION = "{version}";',
+        content,
+        count=1,
+    )
+
+    if count:
+        with open(headers_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    return bool(count)
+
+
+def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
+    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash tiers."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    if not os.path.exists(transform_path):
+        return False
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    updated = content
+    changed = False
+
+    if "gemini-3.5-flash-high" not in updated:
+        def add_supported_models(match: re.Match) -> str:
+            indent = match.group("indent")
+            return (
+                f'{indent}"gemini-3.1-pro-preview",\n'
+                f'{indent}"gemini-3.5-flash-high",\n'
+                f'{indent}"gemini-3.5-flash-medium",\n'
+                f'{indent}"gemini-3.5-flash-low",\n'
+                f'{indent}"gemini-3.5-flash",\n'
+            )
+
+        updated, count = re.subn(
+            r'(?P<indent>\s*)"gemini-3\.1-pro-preview",\n',
+            add_supported_models,
+            updated,
+            count=1,
+        )
+        changed = changed or count > 0
+
+    mapping_marker = '`gemini-3.5-flash-${extractedTier || "medium"}`'
+    if mapping_marker not in updated:
+        def add_flash_mapping(match: re.Match) -> str:
+            if_indent = match.group("if_indent")
+            body_indent = match.group("body_indent")
+            original = match.group(0)
+            return (
+                f'{if_indent}if (baseModel.includes("gemini-3.5-flash")) {{\n'
+                f'{body_indent}googleModel = `gemini-3.5-flash-${{extractedTier || "medium"}}`;\n'
+                f'{if_indent}}} else {original.lstrip()}'
+            )
+
+        updated, count = re.subn(
+            r'(?P<if_indent>\s*)if \(baseModel\.includes\("gemini-3\.1-pro"\)\) \{\n'
+            r'(?P<body_indent>\s*)googleModel = `gemini-3\.1-pro-\$\{extractedTier \|\| "high"\}`;',
+            add_flash_mapping,
+            updated,
+            count=1,
+        )
+        changed = changed or count > 0
+
+    if changed:
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    return "gemini-3.5-flash-high" in updated and mapping_marker in updated
+
+
+def _runtime_has_entrypoint(runtime_dir: str) -> bool:
+    return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
+        os.path.join(runtime_dir, "package.json")
+    )
+
+
+def _runtime_metadata_path(runtime_dir: str) -> str:
+    return os.path.join(runtime_dir, ".glossarion-runtime.json")
+
+
+def _runtime_metadata_matches(runtime_dir: str, tag: str, client_version: str) -> bool:
+    if not _runtime_has_entrypoint(runtime_dir):
+        return False
+
+    try:
+        with open(_runtime_metadata_path(runtime_dir), "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        return (
+            metadata.get("tag") == tag
+            and metadata.get("client_version") == client_version
+            and metadata.get("patch_version") == RUNTIME_PATCH_VERSION
+        )
+    except Exception:
+        return False
+
+
+def _write_runtime_metadata(runtime_dir: str, release: Dict[str, str], client_version: str) -> None:
+    metadata = {
+        "tag": release["tag"],
+        "version": release["version"],
+        "client_version": client_version,
+        "patch_version": RUNTIME_PATCH_VERSION,
+        "source": release["archive_url"],
+        "updated_at": int(time.time()),
+    }
+    with open(_runtime_metadata_path(runtime_dir), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+        f.write("\n")
+
+
+def _find_archive_root(extract_dir: str) -> str:
+    for root, dirs, files in os.walk(extract_dir):
+        if "package.json" in files and os.path.exists(os.path.join(root, "src", "server.ts")):
+            return root
+        dirs[:] = dirs[:3]
+    raise RuntimeError("Downloaded proxy archive did not contain src/server.ts")
+
+
+def _copy_runtime_tree(source_dir: str, target_dir: str) -> None:
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir)
+
+
+def _download_proxy_runtime(
+    release: Dict[str, str],
+    client_version: str,
+    runtime_dir: str,
+    log_fn=None,
+) -> None:
+    _log = log_fn or _log_noop
+    _log(f"Antigravity: downloading {PROXY_PACKAGE_NAME} {release['tag']}...")
+
+    resp = requests.get(release["archive_url"], headers=_github_headers(), timeout=60)
+    resp.raise_for_status()
+
+    parent = os.path.dirname(runtime_dir)
+    os.makedirs(parent, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="download-", dir=parent) as tmp_dir:
+        extract_dir = os.path.join(tmp_dir, "extract")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+            archive.extractall(extract_dir)
+
+        archive_root = _find_archive_root(extract_dir)
+        _patch_runtime_package_json(archive_root, release["version"])
+        if not _patch_runtime_antigravity_client_version(archive_root, client_version):
+            raise RuntimeError("Downloaded proxy archive did not contain ANTIGRAVITY_VERSION")
+        if not _patch_runtime_gemini35_flash_support(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
+        _write_runtime_metadata(archive_root, release, client_version)
+
+        _copy_runtime_tree(archive_root, runtime_dir)
+
+
+def _latest_existing_runtime(runtime_root: str) -> Optional[str]:
+    if not os.path.isdir(runtime_root):
+        return None
+
+    candidates = []
+    for name in os.listdir(runtime_root):
+        path = os.path.join(runtime_root, name)
+        if _runtime_has_entrypoint(path):
+            candidates.append((os.path.getmtime(path), path))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False) -> str:
+    release = _latest_proxy_release()
+    client_version = _latest_antigravity_client_version()
+    _write_proxy_runtime_package_json(data_dir, release["version"])
+
+    runtime_root = _get_proxy_runtime_root(data_dir)
+    runtime_name = (
+        f"{_safe_runtime_segment(release['tag'])}-ag-{_safe_runtime_segment(client_version)}"
+    )
+    runtime_dir = os.path.join(runtime_root, runtime_name)
+
+    if not force_update and _runtime_metadata_matches(runtime_dir, release["tag"], client_version):
+        return runtime_dir
+
+    try:
+        _download_proxy_runtime(release, client_version, runtime_dir, log_fn=log_fn)
+        return runtime_dir
+    except Exception as exc:
+        logger.debug("Could not update Antigravity proxy runtime: %s", exc)
+        existing = _latest_existing_runtime(runtime_root)
+        if existing:
+            (log_fn or _log_noop)(
+                f"Antigravity: using cached proxy runtime because update failed: {exc}"
+            )
+            return existing
+        raise
+
+
 def _ensure_proxy_config() -> str:
     """Ensure the auto-launched proxy has a stable working/data directory.
 
-    frieser/antigravity-proxy stores config.json relative to process.cwd() and
-    stores accounts in ACCOUNTS_FILE when that env var is set. We launch from a
-    dedicated directory so Glossarion does not litter the repository root with
-    proxy state.
+    frieser/antigravity-proxy stores config.json and reads package.json relative
+    to process.cwd(). We launch from this dedicated directory while executing
+    the downloaded proxy script by absolute path, so config/accounts stay stable
+    across runtime updates.
     """
     data_dir = _get_proxy_data_dir()
     os.makedirs(data_dir, exist_ok=True)
-    _write_proxy_runtime_package_json(data_dir)
-
     return data_dir
 
 
@@ -502,35 +801,37 @@ def _candidate_executable(name: str) -> Optional[str]:
     return None
 
 
-def _find_proxy_launch_command() -> Optional[List[str]]:
-    """Return a launch command for the upstream proxy package."""
+def _find_proxy_launch_command(runtime_dir: str) -> Optional[List[str]]:
+    """Return a launch command for the downloaded upstream proxy runtime."""
     override = os.environ.get("ANTIGRAVITY_PROXY_LAUNCH_CMD", "").strip()
     if override:
+        override = override.format(
+            runtime_dir=runtime_dir,
+            server=os.path.join(runtime_dir, "src", "server.ts"),
+        )
         try:
             return shlex.split(override, posix=(sys.platform != "win32"))
         except Exception:
             return override.split()
 
-    bunx = _candidate_executable("bunx")
-    if bunx:
-        return [bunx, PROXY_PACKAGE]
+    server_script = os.path.join(runtime_dir, "src", "server.ts")
 
     bun = _candidate_executable("bun")
     if bun:
-        return [bun, "x", PROXY_PACKAGE]
+        return [bun, "run", server_script]
 
     npx = _candidate_executable("npx")
     if npx:
-        return [npx, "--yes", "--package", PROXY_PACKAGE, PROXY_PACKAGE_NAME]
+        return [npx, "--yes", "--package", BUN_NPM_PACKAGE, "bun", "run", server_script]
 
     return None
 
 
 def _proxy_launch_error() -> str:
     return (
-        "Bun/Bunx is not installed or not on PATH.\n"
-        "Install Bun from https://bun.sh/ then restart Glossarion,\n"
-        f"or manually run: {_proxy_command_for_humans()}"
+        "Could not find Bun or npx to launch the Antigravity proxy.\n"
+        "Install Node.js/npm or Bun, then restart Glossarion.\n"
+        "Git is not required; Glossarion downloads the proxy runtime itself."
     )
 
 
@@ -540,6 +841,7 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
 
     _log = log_fn or _log_noop
     data_dir = _ensure_proxy_config()
+    force_update = False
 
     health = check_proxy_health()
     if health.get("healthy"):
@@ -551,8 +853,9 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
             return {"running": True, "auto_launched": False}
 
         if "no longer supported" in str(health.get("error", "")).lower():
-            _log("Antigravity proxy reports an unsupported version; replacing it with the latest available package...")
+            _log("Antigravity proxy reports an unsupported version; updating the local proxy runtime...")
             _kill_proxy_by_port(_get_proxy_port())
+            force_update = True
             time.sleep(2)
 
         if _proxy_process is not None:
@@ -570,7 +873,16 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                 }
             _proxy_process = None
 
-        cmd = _find_proxy_launch_command()
+        try:
+            runtime_dir = _ensure_proxy_runtime(data_dir, log_fn=_log, force_update=force_update)
+        except Exception as exc:
+            return {
+                "running": False,
+                "auto_launched": False,
+                "error": f"Failed to update Antigravity proxy runtime: {exc}",
+            }
+
+        cmd = _find_proxy_launch_command(runtime_dir)
         if not cmd:
             return {"running": False, "auto_launched": False, "error": _proxy_launch_error()}
 
@@ -626,7 +938,7 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                     "auto_launched": True,
                     "error": (
                         "Proxy process exited immediately. "
-                        f"Try running manually: {_proxy_command_for_humans()}"
+                        "Check that Node.js/npm or Bun is installed."
                     ),
                 }
             health = check_proxy_health()
@@ -706,8 +1018,7 @@ def _post_chat(payload: Dict[str, Any], timeout: float, stream: bool) -> request
 def _raise_connection_refused() -> None:
     raise RuntimeError(
         "Antigravity proxy connection refused. "
-        "Make sure the proxy is running:\n"
-        f"  {_proxy_command_for_humans()}\n"
+        "Use Glossarion's Antigravity auto-launch/restart so it can update the proxy runtime, "
         f"Then open {get_proxy_url()} and add your Google account."
     )
 
