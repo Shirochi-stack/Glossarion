@@ -160,6 +160,7 @@ _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
 # Success/failure redirect URLs after OAuth (same as gemini-cli)
 SIGN_IN_SUCCESS_URL = "https://developers.google.com/gemini-code-assist/auth_success_gemini"
 SIGN_IN_FAILURE_URL = "https://developers.google.com/gemini-code-assist/auth_failure_gemini"
+CODE_ASSIST_ACCOUNT_URL = "https://codeassist.google.com/"
 
 # Thinking level → budget mapping (same as grpc_gemini_client.py line 650)
 # Used by authgem-vertex/ and authgem/ to convert thinkingLevel to thinkingBudget,
@@ -1129,6 +1130,41 @@ def _handle_403_verification(error_body: str, _log, account_id: int = 0) -> None
     else:
         _log(f"⚠️ AuthGem: 403 Forbidden — account may need verification or permissions are insufficient")
         logger.warning("AuthGem 403 with no verification URL detected. Body: %s", error_body[:500])
+
+
+def _is_empty_project_code_assist_request(url: str, body: Dict) -> bool:
+    """True when authgem/ is calling Code Assist with no assigned project."""
+    return (
+        "cloudcode-pa.googleapis.com" in url
+        and isinstance(body, dict)
+        and body.get("project", "") == ""
+        and isinstance(body.get("request"), dict)
+    )
+
+
+def _handle_empty_project_500_redirect(_log) -> None:
+    """Open the Code Assist account page for empty-project 500 responses."""
+    global _verification_pending
+
+    if _verification_pending:
+        _log(f"⚠️ AuthGem: verification still pending. Complete it in your browser, then retry.")
+        raise RuntimeError(
+            "AuthGem: Account verification required. Complete it in your browser, then retry."
+        )
+
+    _verification_pending = True
+    _log(f"⚠️ AuthGem: Code Assist returned 500 after no project was assigned.")
+    _log(f"🔗 Opening verification in browser…")
+    logger.warning("AuthGem empty-project 500; opening Code Assist account URL: %s", CODE_ASSIST_ACCOUNT_URL)
+    try:
+        import webbrowser
+        webbrowser.open(CODE_ASSIST_ACCOUNT_URL)
+    except Exception:
+        _log(f"🔗 Could not open browser. Visit: {CODE_ASSIST_ACCOUNT_URL}")
+    raise RuntimeError(
+        "AuthGem: Account verification required. Complete it in your browser, then retry."
+    )
+
 
 def _code_assist_setup(access_token: str, _log=None, account_id: int = 0) -> Optional[str]:
     """Onboard user with Code Assist (mirrors Gemini CLI's setupUser).
@@ -2359,6 +2395,12 @@ def _stream_with_httpx_gemini(
             if resp.status_code == 429 and "No capacity" in str(summary):
                 summary = f"Server busy — no capacity for this model right now, retrying"
             _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
+            if (
+                resp.status_code == 500
+                and "internal error" in str(summary).lower()
+                and _is_empty_project_code_assist_request(url, body)
+            ):
+                _handle_empty_project_500_redirect(_log)
             raise RuntimeError(
                 f"AuthGem: {resp.status_code} – {summary}"
             )
@@ -2415,6 +2457,12 @@ def _stream_with_requests_gemini(
         if resp.status_code == 429 and "No capacity" in str(summary):
             summary = f"Server busy — no capacity for this model right now, retrying"
         _log(f"❌ AuthGem HTTP {resp.status_code}. {summary}")
+        if (
+            resp.status_code == 500
+            and "internal error" in str(summary).lower()
+            and _is_empty_project_code_assist_request(url, body)
+        ):
+            _handle_empty_project_500_redirect(_log)
         raise RuntimeError(
             f"AuthGem: {resp.status_code} – {summary}"
         )
