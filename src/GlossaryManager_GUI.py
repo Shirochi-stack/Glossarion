@@ -6344,6 +6344,15 @@ Do not stop after the glossary."""
             self.current_glossary_format = payload.get('current_format')
             self.current_glossary_sections = payload.get('sections', [])
             self.glossary_column_fields = list(column_fields)
+            if self.current_glossary_format in ['list', 'token_csv']:
+                self._original_translated_map = {
+                    idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data or [])
+                    if isinstance(entry, dict)
+                }
+            elif self.current_glossary_format == 'dict':
+                self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
+            else:
+                self._original_translated_map = {}
             _populate_editor_tree_from_data()
 
             self.stats_label.setText(payload.get('stats_text', f"Total entries: {len(entries)}"))
@@ -6355,15 +6364,6 @@ Do not stop after the glossary."""
 
             self._last_find_text = ""
             self._last_find_pos = -1
-            if self.current_glossary_format in ['list', 'token_csv']:
-                self._original_translated_map = {
-                    idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data or [])
-                    if isinstance(entry, dict)
-                }
-            elif self.current_glossary_format == 'dict':
-                self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
-            else:
-                self._original_translated_map = {}
 
             self._undo_stack.clear()
             self._redo_stack.clear()
