@@ -3173,6 +3173,7 @@ class MultiAPIKeyDialog(QDialog):
             change_model_callback=self._change_fallback_model_for_selected,
             configure_endpoint_callback=self._configure_fallback_individual_endpoint,
             disable_endpoint_callback=lambda i: self._toggle_fallback_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_fallback_cooldown_for_selected,
             set_limit_callback=self._set_fallback_output_token_limit_for_selected,
             clear_limit_callback=self._clear_fallback_output_token_limit_for_selected,
             set_temp_callback=self._set_fallback_key_temperature_for_selected,
@@ -3958,6 +3959,27 @@ class MultiAPIKeyDialog(QDialog):
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_fallback_status)
         dialog.exec_()
+
+    def _set_fallback_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected fallback keys."""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self._fallback_config_index_for_item(item) for item in selected]
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['cooldown'] = value
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
 
     def _set_fallback_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected fallback keys"""
@@ -5066,6 +5088,19 @@ class MultiAPIKeyDialog(QDialog):
             return key_entry.get(setting, default)
         return getattr(key_entry, setting, default)
 
+    def _default_cooldown(self, key_entries):
+        """Pick a sensible cooldown default from selected keys."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'cooldown', 60)
+                if value not in (None, ""):
+                    value = int(value)
+                    if value > 0:
+                        return value
+            except Exception:
+                pass
+        return 60
+
     def _default_output_token_limit(self, key_entries, fallback=None):
         """Pick a sensible output-limit default from selected keys or the global setting."""
         for entry in key_entries or []:
@@ -5184,7 +5219,8 @@ class MultiAPIKeyDialog(QDialog):
     def _show_shared_key_context_menu(
         self, *, tree, position, total_keys, key_at_index, move_callback,
         change_model_callback, configure_endpoint_callback,
-        disable_endpoint_callback, set_limit_callback, clear_limit_callback,
+        disable_endpoint_callback, set_cooldown_callback,
+        set_limit_callback, clear_limit_callback,
         set_temp_callback, clear_temp_callback, set_delay_callback,
         clear_delay_callback, test_callback, enable_callback, disable_callback,
         remove_callback, clear_all_callback=None, index_resolver=None
@@ -5215,6 +5251,7 @@ class MultiAPIKeyDialog(QDialog):
             menu.addSeparator()
 
         menu.addAction(selected_label("📝 Change Model")).triggered.connect(change_model_callback)
+        menu.addAction(selected_label("⏳ Set Cooldown")).triggered.connect(set_cooldown_callback)
         menu.addSeparator()
 
         key_data = key_at_index(key_index) if 0 <= key_index < total_keys else None
@@ -5261,6 +5298,7 @@ class MultiAPIKeyDialog(QDialog):
             change_model_callback=self._change_model_for_selected,
             configure_endpoint_callback=self._configure_individual_endpoint,
             disable_endpoint_callback=lambda i: self._toggle_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_cooldown_for_selected,
             set_limit_callback=self._set_output_token_limit_for_selected,
             clear_limit_callback=self._clear_output_token_limit_for_selected,
             set_temp_callback=self._set_key_temperature_for_selected,
@@ -5272,6 +5310,24 @@ class MultiAPIKeyDialog(QDialog):
             disable_callback=self._disable_selected,
             remove_callback=self._remove_selected,
         )
+
+    def _set_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected multi-key entries."""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].cooldown = value
+        self._refresh_key_list()
+        self._show_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
 
     def _set_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected multi-key entries"""
@@ -6495,6 +6551,7 @@ class MultiAPIKeyDialog(QDialog):
             change_model_callback=self._change_glossary_model_for_selected,
             configure_endpoint_callback=self._configure_glossary_individual_endpoint,
             disable_endpoint_callback=lambda i: self._toggle_glossary_individual_endpoint(i, False),
+            set_cooldown_callback=self._set_glossary_cooldown_for_selected,
             set_limit_callback=self._set_glossary_output_token_limit_for_selected,
             clear_limit_callback=self._clear_glossary_output_token_limit_for_selected,
             set_temp_callback=self._set_glossary_key_temperature_for_selected,
@@ -6674,6 +6731,27 @@ class MultiAPIKeyDialog(QDialog):
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_glossary_status)
         dialog.exec_()
+
+    def _set_glossary_cooldown_for_selected(self):
+        """Set rate-limit cooldown for selected glossary keys."""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['cooldown'] = value
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Set cooldown to {value}s for {len(selected_indices)} key(s)")
 
     def _set_glossary_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected glossary keys"""
@@ -9239,6 +9317,7 @@ class MultiAPIKeyDialog(QDialog):
             change_model_callback=lambda: self._dedicated_change_model_for_selected(pool_name),
             configure_endpoint_callback=lambda i: self._dedicated_configure_endpoint(pool_name, i),
             disable_endpoint_callback=lambda i: self._dedicated_toggle_individual_endpoint(pool_name, i, False),
+            set_cooldown_callback=lambda: self._dedicated_set_cooldown_for_selected(pool_name),
             set_limit_callback=lambda: self._dedicated_set_output_token_limit_for_selected(pool_name),
             clear_limit_callback=lambda: self._dedicated_clear_output_token_limit_for_selected(pool_name),
             set_temp_callback=lambda: self._dedicated_set_temperature_for_selected(pool_name),
@@ -9345,6 +9424,23 @@ class MultiAPIKeyDialog(QDialog):
             keys[key_index]['use_individual_endpoint'] = enabled
             self._dedicated_set_keys(pool_name, keys)
             self._dedicated_load_keys(pool_name)
+
+    def _dedicated_set_cooldown_for_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_cooldown_edit_dialog(self._default_cooldown(selected_keys))
+        if not ok:
+            return
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                keys[idx]['cooldown'] = value
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Set cooldown to {value}s for {len(indices)} {spec['label']} key(s)")
 
     def _dedicated_set_output_token_limit_for_selected(self, pool_name: str):
         indices = self._dedicated_selected_indices(pool_name)
