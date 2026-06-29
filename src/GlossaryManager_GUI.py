@@ -9994,15 +9994,24 @@ Do not stop after the glossary."""
        
        edit_dialog = QDialog(self.dialog)
        edit_dialog.setWindowTitle(f"Edit {col_key.replace('_', ' ').title()}")
+       edit_dialog.setSizeGripEnabled(True)
+       edit_dialog.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
        if is_description_field:
-           edit_dialog.setMinimumWidth(900)
-           edit_dialog.setMinimumHeight(360)
+           edit_dialog.setMinimumSize(900, 150)
+           default_dialog_size = QSize(980, 300)
        else:
-           edit_dialog.setMinimumWidth(400)
-           edit_dialog.setMinimumHeight(150)
+           edit_dialog.setMinimumSize(400, 120)
+           default_dialog_size = QSize(560, 124)
+       remembered_sizes = getattr(self, '_glossary_edit_dialog_sizes', {})
+       remembered_size = remembered_sizes.get(col_key) if isinstance(remembered_sizes, dict) else None
+       if isinstance(remembered_size, QSize) and remembered_size.isValid():
+           edit_dialog.resize(remembered_size.expandedTo(edit_dialog.minimumSize()))
+       else:
+           edit_dialog.resize(default_dialog_size)
        
        dialog_layout = QVBoxLayout(edit_dialog)
-       dialog_layout.setContentsMargins(20, 20, 20, 20)
+       dialog_layout.setContentsMargins(20, 8, 20, 8)
+       dialog_layout.setSpacing(6)
        
        label = QLabel(f"Edit {col_key.replace('_', ' ').title()}:")
        dialog_layout.addWidget(label)
@@ -10012,9 +10021,15 @@ Do not stop after the glossary."""
            entry.setPlainText(current_value)
            entry.setAcceptRichText(False)
            entry.setLineWrapMode(QTextEdit.WidgetWidth)
-           entry.setMinimumHeight(190)
+           entry.setMinimumHeight(42)
+           entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
        else:
-           entry = QLineEdit(current_value)
+           entry = QTextEdit()
+           entry.setPlainText(current_value)
+           entry.setAcceptRichText(False)
+           entry.setLineWrapMode(QTextEdit.WidgetWidth)
+           entry.setMinimumHeight(28)
+           entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
        try:
            entry.setFont(self.glossary_tree.font())
            self._glossary_active_edit_entry = entry
@@ -10024,13 +10039,22 @@ Do not stop after the glossary."""
            )
        except Exception:
            pass
-       dialog_layout.addWidget(entry)
-       dialog_layout.addSpacing(5)
+       def _remember_edit_dialog_size(_result=None):
+           try:
+               sizes = getattr(self, '_glossary_edit_dialog_sizes', None)
+               if not isinstance(sizes, dict):
+                   sizes = {}
+                   self._glossary_edit_dialog_sizes = sizes
+               sizes[col_key] = QSize(edit_dialog.size())
+           except Exception:
+               pass
+       edit_dialog.finished.connect(_remember_edit_dialog_size)
+       dialog_layout.addWidget(entry, 1)
        entry.setFocus()
        entry.selectAll()
        
        def save_edit():
-           new_value = entry.toPlainText() if is_description_field else entry.text()
+           new_value = entry.toPlainText()
            item.setText(column_idx, new_value)
            # Snapshot before mutation for undo
            if hasattr(self, '_push_undo_snapshot'):
@@ -10092,9 +10116,10 @@ Do not stop after the glossary."""
 
            edit_dialog.accept()
        
-       dialog_layout.addSpacing(10)
        button_layout = QHBoxLayout()
-       dialog_layout.addLayout(button_layout)
+       button_layout.setSpacing(18)
+       button_layout.addStretch(1)
+       dialog_layout.addLayout(button_layout, 0)
        
        save_btn = QPushButton("Save")
        save_btn.setFixedWidth(140)
@@ -10107,12 +10132,23 @@ Do not stop after the glossary."""
        cancel_btn.clicked.connect(edit_dialog.reject)
        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
        button_layout.addWidget(cancel_btn)
+       button_layout.addStretch(1)
        
        if is_description_field:
            QShortcut(QKeySequence("Ctrl+Return"), edit_dialog, activated=save_edit)
            QShortcut(QKeySequence("Ctrl+Enter"), edit_dialog, activated=save_edit)
        else:
-           entry.returnPressed.connect(save_edit)
+           original_key_press = entry.keyPressEvent
+           def _text_entry_key_press(event):
+               if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                   if event.modifiers() & Qt.ShiftModifier:
+                       original_key_press(event)
+                   else:
+                       save_edit()
+                       event.accept()
+                   return
+               original_key_press(event)
+           entry.keyPressEvent = _text_entry_key_press
        
        try:
            from dialog_animations import exec_dialog_with_fade
