@@ -857,6 +857,7 @@ class SDLXLIFFReviewDialog(QDialog):
         if not self._review_autogen_has_output_html(signature):
             return None
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
+        stale_outputs = self._stale_review_sidecar_outputs(self.output_dir, signature)
         invalid_outputs = []
         initial_scan = previous_signature is None and not force and not validate
         if initial_scan:
@@ -869,9 +870,9 @@ class SDLXLIFFReviewDialog(QDialog):
             invalid_outputs = []
         else:
             invalid_outputs = self._invalid_review_sidecar_outputs(self.output_dir)
-        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
+        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs and not stale_outputs:
             return None
-        if not force and previous_signature is None and not invalid_outputs and not missing_outputs:
+        if not force and previous_signature is None and not invalid_outputs and not missing_outputs and not stale_outputs:
             return None
 
         owner = getattr(self, "_sdlxliff_autogen_owner", None)
@@ -898,9 +899,16 @@ class SDLXLIFFReviewDialog(QDialog):
 
         requested_output_files = list(getattr(self, "_sdlxliff_autogen_output_files", None) or [])
         output_files = requested_output_files or None
-        if not force:
+        if force and not output_files:
+            output_files = self._review_autogen_output_names(signature) or None
+        elif not force:
             changed_outputs = [] if previous_signature is None else self._changed_review_autogen_outputs(previous_signature, signature)
-            generated_outputs = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or [])))
+            generated_outputs = sorted(set(
+                (changed_outputs or [])
+                + (invalid_outputs or [])
+                + (missing_outputs or [])
+                + (stale_outputs or [])
+            ))
             if requested_output_files:
                 requested_names = {
                     os.path.basename(str(name).replace("\\", "/")).lower()
@@ -918,7 +926,7 @@ class SDLXLIFFReviewDialog(QDialog):
         return generator(
             self.output_dir,
             file_path=file_path,
-            progress_data=getattr(self, "_sdlxliff_autogen_progress_data", None),
+            progress_data=None,
             output_files=output_files,
             overwrite=True,
             progress_callback=self._emit_review_generation_progress,
@@ -1869,6 +1877,39 @@ class SDLXLIFFReviewDialog(QDialog):
                 existing.add(output_name.lower())
         return sorted(name for name in expected if name.lower() not in existing)
 
+    def _stale_review_sidecar_outputs(self, output_dir, autogen_signature):
+        sidecar_mtimes = {}
+        for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
+            output_name = self._sidecar_output_name(path)
+            if not output_name:
+                continue
+            try:
+                stat = os.stat(path)
+                sidecar_mtimes[output_name.lower()] = getattr(
+                    stat,
+                    "st_mtime_ns",
+                    int(stat.st_mtime * 1000000000),
+                )
+            except Exception:
+                sidecar_mtimes[output_name.lower()] = -1
+
+        stale = []
+        for entry in autogen_signature or ():
+            if not entry or entry[0] != "output_html":
+                continue
+            output_name = entry[2] if len(entry) > 2 else ""
+            if not output_name:
+                continue
+            try:
+                output_size = int(entry[10]) if len(entry) > 10 else -1
+                output_mtime = int(entry[11]) if len(entry) > 11 else -1
+            except Exception:
+                continue
+            sidecar_mtime = sidecar_mtimes.get(str(output_name).lower())
+            if output_size >= 0 and sidecar_mtime is not None and sidecar_mtime >= 0 and sidecar_mtime < output_mtime:
+                stale.append(output_name)
+        return sorted(set(stale))
+
     @staticmethod
     def _review_normalized_unit_text(text):
         return " ".join(str(text or "").split())
@@ -1924,9 +1965,10 @@ class SDLXLIFFReviewDialog(QDialog):
             signature = ()
 
         missing_outputs = self._missing_review_sidecar_outputs(self.output_dir, signature)
+        stale_outputs = self._stale_review_sidecar_outputs(self.output_dir, signature)
         if not force and previous_signature is None:
             self._last_autogen_signature = signature
-            if not missing_outputs:
+            if not missing_outputs and not stale_outputs:
                 return False
             previous_signature = signature
             invalid_outputs = []
@@ -1938,7 +1980,7 @@ class SDLXLIFFReviewDialog(QDialog):
             if not force and invalid_regen_key == getattr(self, "_last_invalid_sidecar_regen_key", None):
                 invalid_outputs = []
 
-        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs:
+        if not force and signature == previous_signature and not invalid_outputs and not missing_outputs and not stale_outputs:
             return False
         self._last_autogen_signature = signature
 
@@ -1955,9 +1997,16 @@ class SDLXLIFFReviewDialog(QDialog):
             file_path = None
 
         output_files = None
-        if not force:
+        if force:
+            output_files = self._review_autogen_output_names(signature) or None
+        else:
             changed_outputs = self._changed_review_autogen_outputs(previous_signature, signature)
-            output_files = sorted(set((changed_outputs or []) + (invalid_outputs or []) + (missing_outputs or []))) or None
+            output_files = sorted(set(
+                (changed_outputs or [])
+                + (invalid_outputs or [])
+                + (missing_outputs or [])
+                + (stale_outputs or [])
+            )) or None
 
         try:
             stats = generator(
@@ -2561,7 +2610,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     def _manual_review_refresh(self):
         self._start_refresh_button_animation()
-        self._queue_review_refresh_scan(force=False, validate=False, current_path=self.current_path, delay_ms=0)
+        self._queue_review_refresh_scan(force=True, validate=False, current_path=self.current_path, delay_ms=0)
 
     def _silent_review_refresh(self):
         try:
@@ -3637,7 +3686,10 @@ class SDLXLIFFReviewDialog(QDialog):
         restart; the ``REMOVE_DUPLICATE_H1_P`` env var the packaged app exports
         is the final fallback.
         """
-        for cfg in (getattr(getattr(self, "_context_parent", None), "config", None), self._config):
+        for cfg in (
+            getattr(getattr(self, "_context_parent", None), "config", None),
+            getattr(self, "_config", None),
+        ):
             try:
                 if isinstance(cfg, dict) and "remove_duplicate_h1_p" in cfg:
                     return bool(cfg.get("remove_duplicate_h1_p"))

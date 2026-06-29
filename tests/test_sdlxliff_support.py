@@ -1595,7 +1595,7 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
         source.index("def _silent_review_refresh", source.index("def _manual_review_refresh"))
     ]
     assert "self._queue_review_refresh_scan(" in manual_refresh_body
-    assert "force=False" in manual_refresh_body
+    assert "force=True" in manual_refresh_body
     assert "validate=False" in manual_refresh_body
     assert "self._silent_review_refresh()" not in manual_refresh_body
     flag_accuracy_body = source[
@@ -1763,7 +1763,8 @@ def test_sdlxliff_machine_translation_api_keys_are_encrypted_and_decrypted():
         source.index("def _current_review_signature", source.index("def _apply_review_refresh_scan"))
     ]
     assert 'initial_load = not bool(getattr(self, "_review_data_loaded", False) and self.pieces)' in apply_scan_body
-    assert 'changed_paths = result.get("changed_sidecar_paths") if not result.get("sidecar_path_set_changed") else None' in apply_scan_body
+    assert 'force_full_reload = bool(result.get("sidecar_path_set_changed") or result.get("settings_changed"))' in apply_scan_body
+    assert 'changed_paths = None if force_full_reload else result.get("changed_sidecar_paths")' in apply_scan_body
     assert "_queue_async_review_piece_reload(" in apply_scan_body
     assert "changed_paths=changed_paths" in apply_scan_body
     assert "defer_stop_refresh_animation" in apply_scan_body
@@ -2838,6 +2839,120 @@ def test_sdlxliff_review_autorefresh_regenerates_sidecar_from_changed_output(tmp
     assert piece["mismatch"] is True
     assert piece["rows"][-1]["target"] == "Added output entry."
     assert piece["rows"][-1]["source"] == ""
+
+
+def test_sdlxliff_review_initial_scan_regenerates_stale_sidecar_from_output(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar = sidecar_dir / "response_chapter0001.html.sdlxliff"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Refined Title</h1><p>Refined body.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output.name,
+                        "original_basename": source.name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar_dir.mkdir()
+    sidecar.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter0001.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[<h1>Source Title</h1><p>Source body.</p>]]></source>
+        <target><![CDATA[<h1>Old Title</h1><p>Old body.</p>]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    old_ns = 1_700_000_000_000_000_000
+    new_ns = old_ns + 5_000_000_000
+    os.utime(sidecar, ns=(old_ns, old_ns))
+    os.utime(output, ns=(new_ns, new_ns))
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._sdlxliff_autogen_owner = mixin
+
+    result = dialog._build_review_refresh_scan_result(
+        force=False,
+        current_path=str(sidecar),
+        last_review_signature=None,
+        last_mt_signature=None,
+        last_autogen_signature=None,
+    )
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": output.name})
+
+    assert result["error"] == ""
+    assert result["sidecars_generated"] is True
+    assert piece["rows"][0]["target"] == "Refined Title"
+    assert piece["rows"][1]["target"] == "Refined body."
+
+
+def test_sdlxliff_review_manual_refresh_regenerates_current_sidecar(tmp_path, monkeypatch):
+    source = tmp_path / "chapter0001.xhtml"
+    output = tmp_path / "response_chapter0001.html"
+    source.write_text("<h1>Source Title</h1><p>Source body.</p>", encoding="utf-8")
+    output.write_text("<h1>Target Title</h1><p>Target body.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output.name,
+                        "original_basename": source.name,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._sdlxliff_autogen_owner = mixin
+
+    assert dialog._maybe_regenerate_review_sidecars(force=True) is True
+    sidecar = tmp_path / "SDLXLIFF" / "response_chapter0001.html.sdlxliff"
+    sidecar.write_text("manual refresh must replace this current sidecar", encoding="utf-8")
+    future_ns = 1_900_000_000_000_000_000
+    os.utime(sidecar, ns=(future_ns, future_ns))
+
+    result = dialog._build_review_refresh_scan_result(
+        force=True,
+        current_path=str(sidecar),
+        last_review_signature=dialog._current_review_signature(),
+        last_mt_signature=dialog._current_machine_translation_signature(),
+        last_autogen_signature=dialog._current_review_autogen_signature(),
+    )
+    piece = dialog._build_piece(str(sidecar), 0, {"output_name": output.name})
+
+    assert result["error"] == ""
+    assert result["sidecars_generated"] is True
+    assert piece["rows"][0]["target"] == "Target Title"
+    assert piece["rows"][1]["target"] == "Target body."
 
 
 def test_sdlxliff_review_autorefresh_regenerates_deleted_sidecar_folder(tmp_path, monkeypatch):

@@ -287,6 +287,23 @@ from sdlxliff_sidecar_writer import (
     _write_html_sdlxliff_sidecar,
 )
 
+
+def _write_refined_html_sdlxliff_sidecar(out_dir, output_file, chapter, refined_html):
+    try:
+        source_html = ""
+        if isinstance(chapter, dict):
+            source_html = chapter.get("body") or chapter.get("source_html") or chapter.get("original_html") or ""
+        return _write_html_sdlxliff_sidecar(
+            out_dir,
+            output_file,
+            chapter,
+            source_html,
+            refined_html,
+        )
+    except Exception as exc:
+        print(f"WARNING: Failed to refresh SDLXLIFF sidecar after refinement for {output_file}: {exc}")
+        return None
+
 try:
     from md_txt_sidecar_writer import _write_html_md_txt_sidecars
 except Exception:  # pragma: no cover - module should always be importable
@@ -15498,6 +15515,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 backup_path = _backup_unrefined_file(output_path, backup_dir)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
+                _write_refined_html_sdlxliff_sidecar(out, output_file, chapter, refined)
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
                     progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
@@ -15910,6 +15928,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 backup_path = _backup_unrefined_file(item["output_path"], backup_dir)
                 with open(item["output_path"], "w", encoding="utf-8") as f:
                     f.write(refined)
+                _write_refined_html_sdlxliff_sidecar(out, item["output_file"], item["chapter"], refined)
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
                     progress_manager.update(
