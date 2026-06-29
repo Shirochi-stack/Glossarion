@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-low-only"
+RUNTIME_PATCH_VERSION = "2026-06-29-gemini35-flash-tiers"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -302,7 +302,7 @@ def _patch_runtime_antigravity_client_version(runtime_dir: str, version: str) ->
 
 
 def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
-    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash low tier."""
+    """Patch upstream transform support for Antigravity's Gemini 3.5 Flash tiers."""
     transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
     if not os.path.exists(transform_path):
         return False
@@ -314,36 +314,38 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
     changed = False
 
     updated, count = re.subn(
-        r'\n\s*"gemini-3\.5-flash(?:-high|-medium)?",',
+        r'\n\s*"gemini-3\.5-flash(?:-(?:high|medium|low))?",',
         "",
         updated,
     )
     changed = changed or count > 0
 
+    def add_supported_models(match: re.Match) -> str:
+        indent = match.group("indent")
+        return (
+            match.group(0)
+            + f'{indent}"gemini-3.5-flash-high",\n'
+            + f'{indent}"gemini-3.5-flash-medium",\n'
+            + f'{indent}"gemini-3.5-flash-low",\n'
+            + f'{indent}"gemini-3.5-flash",\n'
+        )
+
     updated, count = re.subn(
-        r'googleModel = `gemini-3\.5-flash-\$\{extractedTier \|\| "medium"\}`;',
-        'googleModel = "gemini-3.5-flash-low";',
+        r'(?P<indent>\s*)"gemini-3\.1-pro-preview",\n',
+        add_supported_models,
+        updated,
+        count=1,
+    )
+    changed = changed or count > 0
+
+    mapping_marker = 'googleModel = `gemini-3.5-flash-${extractedTier || "medium"}`;'
+    updated, count = re.subn(
+        r'googleModel = "gemini-3\.5-flash-low";',
+        mapping_marker,
         updated,
     )
     changed = changed or count > 0
 
-    if '"gemini-3.5-flash-low"' not in updated:
-        def add_supported_models(match: re.Match) -> str:
-            indent = match.group("indent")
-            return (
-                f'{indent}"gemini-3.1-pro-preview",\n'
-                f'{indent}"gemini-3.5-flash-low",\n'
-            )
-
-        updated, count = re.subn(
-            r'(?P<indent>\s*)"gemini-3\.1-pro-preview",\n',
-            add_supported_models,
-            updated,
-            count=1,
-        )
-        changed = changed or count > 0
-
-    mapping_marker = 'googleModel = "gemini-3.5-flash-low";'
     if mapping_marker not in updated:
         def add_flash_mapping(match: re.Match) -> str:
             if_indent = match.group("if_indent")
@@ -351,7 +353,7 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
             original = match.group(0)
             return (
                 f'{if_indent}if (baseModel.includes("gemini-3.5-flash")) {{\n'
-                f'{body_indent}googleModel = "gemini-3.5-flash-low";\n'
+                f'{body_indent}{mapping_marker}\n'
                 f'{if_indent}}} else {original.lstrip()}'
             )
 
@@ -368,7 +370,13 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
         with open(transform_path, "w", encoding="utf-8") as f:
             f.write(updated)
 
-    return '"gemini-3.5-flash-low"' in updated and mapping_marker in updated
+    return (
+        '"gemini-3.5-flash-high"' in updated
+        and '"gemini-3.5-flash-medium"' in updated
+        and '"gemini-3.5-flash-low"' in updated
+        and '"gemini-3.5-flash",' in updated
+        and mapping_marker in updated
+    )
 
 
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
@@ -381,13 +389,17 @@ def _runtime_metadata_path(runtime_dir: str) -> str:
     return os.path.join(runtime_dir, ".glossarion-runtime.json")
 
 
+def _read_runtime_metadata(runtime_dir: str) -> Dict[str, Any]:
+    with open(_runtime_metadata_path(runtime_dir), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _runtime_metadata_matches(runtime_dir: str, tag: str, client_version: str) -> bool:
     if not _runtime_has_entrypoint(runtime_dir):
         return False
 
     try:
-        with open(_runtime_metadata_path(runtime_dir), "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+        metadata = _read_runtime_metadata(runtime_dir)
         return (
             metadata.get("tag") == tag
             and metadata.get("client_version") == client_version
@@ -472,6 +484,37 @@ def _latest_existing_runtime(runtime_root: str) -> Optional[str]:
     return max(candidates, key=lambda item: item[0])[1]
 
 
+def _cached_runtime_needs_patch(data_dir: str) -> bool:
+    runtime_dir = _latest_existing_runtime(_get_proxy_runtime_root(data_dir))
+    if not runtime_dir:
+        return False
+    try:
+        metadata = _read_runtime_metadata(runtime_dir)
+    except Exception:
+        return True
+    return metadata.get("patch_version") != RUNTIME_PATCH_VERSION
+
+
+def _patch_cached_runtime(
+    runtime_dir: str,
+    release: Dict[str, str],
+    client_version: str,
+    log_fn=None,
+) -> bool:
+    try:
+        _patch_runtime_package_json(runtime_dir, release["version"])
+        if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
+            return False
+        if not _patch_runtime_gemini35_flash_support(runtime_dir):
+            return False
+        _write_runtime_metadata(runtime_dir, release, client_version)
+        (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
+        return True
+    except Exception as exc:
+        logger.debug("Could not patch cached Antigravity proxy runtime: %s", exc)
+        return False
+
+
 def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False) -> str:
     release = _latest_proxy_release()
     client_version = _latest_antigravity_client_version()
@@ -493,6 +536,8 @@ def _ensure_proxy_runtime(data_dir: str, log_fn=None, force_update: bool = False
         logger.debug("Could not update Antigravity proxy runtime: %s", exc)
         existing = _latest_existing_runtime(runtime_root)
         if existing:
+            if _patch_cached_runtime(existing, release, client_version, log_fn=log_fn):
+                return existing
             (log_fn or _log_noop)(
                 f"Antigravity: using cached proxy runtime because update failed: {exc}"
             )
@@ -965,12 +1010,24 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
 
     health = check_proxy_health()
     if health.get("healthy"):
-        return {"running": True, "auto_launched": False}
+        if _cached_runtime_needs_patch(data_dir):
+            _log("Antigravity proxy runtime patch changed; restarting with updated local runtime...")
+            _kill_proxy_by_port(_get_proxy_port())
+            force_update = True
+            time.sleep(2)
+        else:
+            return {"running": True, "auto_launched": False}
 
     with _proxy_launch_lock:
         health = check_proxy_health()
         if health.get("healthy"):
-            return {"running": True, "auto_launched": False}
+            if _cached_runtime_needs_patch(data_dir):
+                _log("Antigravity proxy runtime patch changed; restarting with updated local runtime...")
+                _kill_proxy_by_port(_get_proxy_port())
+                force_update = True
+                time.sleep(2)
+            else:
+                return {"running": True, "auto_launched": False}
 
         if "no longer supported" in str(health.get("error", "")).lower():
             _log("Antigravity proxy reports an unsupported version; updating the local proxy runtime...")

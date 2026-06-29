@@ -296,6 +296,9 @@ def test_model_options_include_current_antigravity_catalog_entries():
         "antigravity/claude-opus-4-6-thinking-low",
         "antigravity/claude-opus-4-6-thinking-medium",
         "antigravity/claude-opus-4-6-thinking-high",
+        "antigravity/gemini-3.5-flash",
+        "antigravity/gemini-3.5-flash-medium",
+        "antigravity/gemini-3.5-flash-high",
         "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.1-pro-low",
         "antigravity/gemini-3.1-pro-high",
@@ -307,9 +310,6 @@ def test_model_options_include_current_antigravity_catalog_entries():
     }
 
     assert expected.issubset(options)
-    assert "antigravity/gemini-3.5-flash" not in options
-    assert "antigravity/gemini-3.5-flash-medium" not in options
-    assert "antigravity/gemini-3.5-flash-high" not in options
 
 
 def test_latest_proxy_version_prefers_newer_github_tag_without_git(monkeypatch):
@@ -373,15 +373,12 @@ def test_patch_runtime_gemini35_flash_support(tmp_path):
     transform_file.write_text(
         '    const nativelySupported = [\n'
         '      "gemini-3.1-pro-preview",\n'
-        '      "gemini-3.5-flash-high",\n'
-        '      "gemini-3.5-flash-medium",\n'
         '      "gemini-3.5-flash-low",\n'
-        '      "gemini-3.5-flash",\n'
         '      "gemini-3-flash",\n'
         '  ];\n'
         '        if (isNative) {\n'
         '            if (baseModel.includes("gemini-3.5-flash")) {\n'
-        '                googleModel = `gemini-3.5-flash-${extractedTier || "medium"}`;\n'
+        '                googleModel = "gemini-3.5-flash-low";\n'
         '            } else if (baseModel.includes("gemini-3.1-pro")) {\n'
         '                googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;\n'
         '            } else if (baseModel.includes("gemini-3-pro")) {\n'
@@ -394,12 +391,12 @@ def test_patch_runtime_gemini35_flash_support(tmp_path):
     assert antigravity_proxy._patch_runtime_gemini35_flash_support(str(tmp_path))
 
     content = transform_file.read_text(encoding="utf-8")
+    assert '"gemini-3.5-flash-high"' in content
+    assert '"gemini-3.5-flash-medium"' in content
     assert '"gemini-3.5-flash-low"' in content
-    assert '"gemini-3.5-flash-high"' not in content
-    assert '"gemini-3.5-flash-medium"' not in content
-    assert '"gemini-3.5-flash",' not in content
-    assert 'googleModel = "gemini-3.5-flash-low";' in content
-    assert '`gemini-3.5-flash-${extractedTier || "medium"}`' not in content
+    assert '"gemini-3.5-flash",' in content
+    assert 'googleModel = "gemini-3.5-flash-low";' not in content
+    assert '`gemini-3.5-flash-${extractedTier || "medium"}`' in content
 
 
 def test_find_proxy_launch_command_uses_npx_bun_for_downloaded_runtime(tmp_path, monkeypatch):
