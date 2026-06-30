@@ -1523,7 +1523,6 @@ class XHTMLConverter:
 class FileUtils:
     """File handling utilities"""
 
-    WINDOWS_MAX_PATH = 259
     WINDOWS_MAX_FILENAME_LENGTH = 255
     WINDOWS_RESERVED_FILENAMES = {
         "CON", "PRN", "AUX", "NUL",
@@ -1601,12 +1600,11 @@ class FileUtils:
     @staticmethod
     def sanitize_filename_for_windows_path(
         filename: str,
-        directory: str,
+        directory: str = "",
         extension: str = "",
         allow_unicode: bool = False,
-        max_path: Optional[int] = None,
     ) -> str:
-        """Return a Windows-safe filename stem that fits inside *directory*."""
+        """Return a Windows-safe filename stem that fits one path component."""
         extension = str(extension or "")
         if extension and not extension.startswith('.'):
             extension = f".{extension}"
@@ -1619,23 +1617,6 @@ class FileUtils:
         )
         safe_name = safe_name.rstrip(' .') or 'file'
         safe_name = FileUtils._avoid_windows_reserved_name(safe_name, max_component_length)
-
-        max_path = FileUtils.WINDOWS_MAX_PATH if max_path is None else int(max_path)
-        abs_dir = os.path.abspath(directory or ".")
-        separator_length = 1 if abs_dir else 0
-        path_budget = max_path - len(abs_dir) - separator_length - len(extension)
-        path_budget = min(path_budget, max_component_length)
-
-        if path_budget < 1:
-            return 'file'
-
-        if len(safe_name) > path_budget:
-            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
-
-        safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
-        if len(safe_name) > path_budget:
-            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
-            safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
 
         return safe_name
     

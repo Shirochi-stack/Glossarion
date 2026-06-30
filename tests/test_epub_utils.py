@@ -35,36 +35,31 @@ def test_sanitize_filename_handles_windows_only_invalid_titles():
     assert FileUtils.sanitize_filename("CON.txt", allow_unicode=True) == "CON_.txt"
 
 
-def test_sanitize_filename_for_windows_path_shortens_long_titles(tmp_path):
-    max_path = len(os.path.abspath(tmp_path)) + 1 + 20 + len(".epub")
-
+def test_sanitize_filename_for_windows_path_caps_only_file_component(tmp_path):
     safe_title = FileUtils.sanitize_filename_for_windows_path(
-        "A" * 80,
+        "A" * 400,
         str(tmp_path),
         extension=".epub",
         allow_unicode=True,
-        max_path=max_path,
     )
 
-    assert safe_title == "A" * 20
-    assert len(os.path.join(str(tmp_path), f"{safe_title}.epub")) <= max_path
+    assert safe_title == "A" * 250
+    assert len(f"{safe_title}.epub") == FileUtils.WINDOWS_MAX_FILENAME_LENGTH
 
 
 def test_epub_writer_renames_windows_invalid_and_too_long_title(tmp_path, monkeypatch):
     compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
-    max_path = len(os.path.abspath(tmp_path)) + 1 + 18 + len(".epub")
     captured = {}
 
     def fake_write_epub(out_path, _book, _opts):
         captured["out_path"] = out_path
         Path(out_path).write_bytes(b"epub")
 
-    monkeypatch.setattr(FileUtils, "WINDOWS_MAX_PATH", max_path)
     monkeypatch.setattr(epub_converter.epub, "write_epub", fake_write_epub)
     monkeypatch.setattr(epub_converter, "_replace_organized_library_epub", lambda *_args: None)
 
     class Book:
-        title = f"{'A' * 80}."
+        title = f"{'A' * 400}."
 
     compiler._write_epub(Book(), {})
 
@@ -73,4 +68,4 @@ def test_epub_writer_renames_windows_invalid_and_too_long_title(tmp_path, monkey
     output_stem = os.path.splitext(output_name)[0]
     assert output_name.endswith(".epub")
     assert not output_stem.endswith(".")
-    assert len(output_path) <= max_path
+    assert len(output_name) == FileUtils.WINDOWS_MAX_FILENAME_LENGTH
