@@ -146,10 +146,15 @@ def run_pdf_generation(config_path):
     try:
         from epub_converter import FileUtils
         book_title = metadata.get('title', os.path.basename(output_dir))
-        safe_title = FileUtils.sanitize_filename(book_title, allow_unicode=True)
+        safe_title = FileUtils.sanitize_filename_for_windows_path(
+            book_title,
+            output_dir,
+            extension=".pdf",
+            allow_unicode=True,
+        )
     except Exception:
         book_title = metadata.get('title', os.path.basename(output_dir))
-        safe_title = re.sub(r'[<>:"/\\|?*]', '_', book_title)
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', str(book_title or "")).strip().rstrip(' .') or 'file'
     pdf_path = os.path.join(output_dir, f"{safe_title}.pdf")
 
     log(f"  PDF output: {pdf_path}")

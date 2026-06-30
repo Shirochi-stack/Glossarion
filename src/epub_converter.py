@@ -1522,20 +1522,41 @@ class XHTMLConverter:
 
 class FileUtils:
     """File handling utilities"""
+
+    WINDOWS_MAX_PATH = 259
+    WINDOWS_MAX_FILENAME_LENGTH = 255
+    WINDOWS_RESERVED_FILENAMES = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CONIN$", "CONOUT$",
+    }
+
+    @staticmethod
+    def _avoid_windows_reserved_name(name: str, max_length: Optional[int] = None) -> str:
+        """Avoid Windows device names such as CON, AUX, COM1, and LPT1."""
+        if name.upper() not in FileUtils.WINDOWS_RESERVED_FILENAMES:
+            return name
+
+        if max_length is not None and max_length <= len(name):
+            return f"{name[:max(1, max_length - 1)]}_"
+        return f"{name}_"
     
     @staticmethod
-    def sanitize_filename(filename: str, allow_unicode: bool = False) -> str:
-        """Sanitize filename for safety"""
+    def sanitize_filename(filename: str, allow_unicode: bool = False, max_length: int = 100) -> str:
+        """Sanitize filename for Windows-safe saves."""
+        filename = str(filename or "")
+
         if allow_unicode:
             filename = unicodedata.normalize('NFC', filename)
             replacements = {
                 '/': '_', '\\': '_', ':': '_', '*': '_',
                 '?': '_', '"': '_', '<': '_', '>': '_',
-                '|': '_', '\0': '_',
+                '|': '_',
             }
             for old, new in replacements.items():
                 filename = filename.replace(old, new)
-            filename = ''.join(char for char in filename if ord(char) >= 32 or ord(char) == 9)
+            filename = ''.join(char if ord(char) >= 32 else '_' for char in filename)
         else:
             filename = unicodedata.normalize('NFKD', filename)
             try:
@@ -1556,15 +1577,67 @@ class FileUtils:
             filename = re.sub(r'_+', '_', filename)
             filename = filename.strip('_')
         
-        # Limit length
+        filename = filename.strip()
         name, ext = os.path.splitext(filename)
-        if len(name) > 100:
-            name = name[:100]
+
+        name = name.rstrip(' .')
+        ext = ext.rstrip(' .')
         
+        max_length = max(1, min(int(max_length or 100), FileUtils.WINDOWS_MAX_FILENAME_LENGTH))
+        if len(ext) >= max_length:
+            ext = ext[:max(0, max_length - 1)].rstrip(' .')
+
+        max_name_length = max(1, max_length - len(ext))
+        if len(name) > max_name_length:
+            name = name[:max_name_length].rstrip(' ._')
+
         if not name or name == '_':
             name = 'file'
+
+        name = FileUtils._avoid_windows_reserved_name(name, max_name_length)
         
         return name + ext
+
+    @staticmethod
+    def sanitize_filename_for_windows_path(
+        filename: str,
+        directory: str,
+        extension: str = "",
+        allow_unicode: bool = False,
+        max_path: Optional[int] = None,
+    ) -> str:
+        """Return a Windows-safe filename stem that fits inside *directory*."""
+        extension = str(extension or "")
+        if extension and not extension.startswith('.'):
+            extension = f".{extension}"
+
+        max_component_length = max(1, FileUtils.WINDOWS_MAX_FILENAME_LENGTH - len(extension))
+        safe_name = FileUtils.sanitize_filename(
+            filename,
+            allow_unicode=allow_unicode,
+            max_length=max_component_length,
+        )
+        safe_name = safe_name.rstrip(' .') or 'file'
+        safe_name = FileUtils._avoid_windows_reserved_name(safe_name, max_component_length)
+
+        max_path = FileUtils.WINDOWS_MAX_PATH if max_path is None else int(max_path)
+        abs_dir = os.path.abspath(directory or ".")
+        separator_length = 1 if abs_dir else 0
+        path_budget = max_path - len(abs_dir) - separator_length - len(extension)
+        path_budget = min(path_budget, max_component_length)
+
+        if path_budget < 1:
+            return 'file'
+
+        if len(safe_name) > path_budget:
+            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
+
+        safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
+        if len(safe_name) > path_budget:
+            safe_name = safe_name[:path_budget].rstrip(' ._') or 'file'
+            safe_name = FileUtils._avoid_windows_reserved_name(safe_name, path_budget)
+
+        return safe_name
     
     @staticmethod
     def ensure_bytes(content) -> bytes:
@@ -6882,11 +6955,28 @@ img {
         # Determine output filename
         book_title = book.title
         if book_title and book_title != os.path.basename(self.output_dir):
-            safe_filename = FileUtils.sanitize_filename(book_title, allow_unicode=True)
+            safe_filename = FileUtils.sanitize_filename_for_windows_path(
+                book_title,
+                self.output_dir,
+                extension=".epub",
+                allow_unicode=True,
+            )
+            original_filename = str(book_title or "").strip()
+            if safe_filename != original_filename:
+                preview = original_filename if len(original_filename) <= 120 else f"{original_filename[:117]}..."
+                self.log(f"[INFO] Adjusted EPUB filename for Windows compatibility: {preview!r} -> {safe_filename!r}")
             out_path = os.path.join(self.output_dir, f"{safe_filename}.epub")
         else:
             base_name = os.path.basename(self.output_dir)
-            out_path = os.path.join(self.output_dir, f"{base_name}.epub")
+            safe_filename = FileUtils.sanitize_filename_for_windows_path(
+                base_name,
+                self.output_dir,
+                extension=".epub",
+                allow_unicode=True,
+            )
+            if safe_filename != str(base_name or "").strip():
+                self.log(f"[INFO] Adjusted EPUB filename for Windows compatibility: {base_name!r} -> {safe_filename!r}")
+            out_path = os.path.join(self.output_dir, f"{safe_filename}.epub")
         
         # Check stop flag before starting the write operation
         if self.is_stopped():
@@ -7340,7 +7430,12 @@ img {
         
         # Determine PDF output path
         book_title = metadata.get('title', os.path.basename(self.output_dir))
-        safe_title = FileUtils.sanitize_filename(book_title, allow_unicode=True)
+        safe_title = FileUtils.sanitize_filename_for_windows_path(
+            book_title,
+            self.output_dir,
+            extension=".pdf",
+            allow_unicode=True,
+        )
         pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
         
         self.log(f"  PDF output: {pdf_path}")
