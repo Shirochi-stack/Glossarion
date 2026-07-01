@@ -3360,8 +3360,9 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 
                 return []
                 
-    except (json.JSONDecodeError, AttributeError) as e:
-        print(f"[Debug] JSON parsing failed: {e}")
+    except (json.JSONDecodeError, AttributeError):
+        # CSV output is expected for the default glossary prompt; fall through
+        # to the CSV parser without logging a scary-but-harmless JSON miss.
         pass
     
     # CSV-like format parsing
