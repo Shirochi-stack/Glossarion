@@ -7515,6 +7515,8 @@ Do not stop after the glossary."""
             filter_dialog = QDialog(self.dialog)
             filter_dialog.setWindowTitle("Filter Entries")
             filter_dialog.setMinimumWidth(600)
+            filter_dialog.setMinimumHeight(800)
+            filter_dialog.resize(620, 1000)
             
             main_layout = QVBoxLayout(filter_dialog)
             
@@ -7563,21 +7565,49 @@ Do not stop after the glossary."""
             
             # Type filter for new format
             type_checks = {}
+            type_limits = {}
             if is_new_format:
                 type_group = QGroupBox("Entry Type")
                 type_layout = QVBoxLayout(type_group)
                 conditions_layout.addWidget(type_group)
                 conditions_layout.addSpacing(10)
                 
-                char_check = self._create_styled_checkbox("Keep characters")
-                char_check.setChecked(True)
-                type_checks['character'] = char_check
-                type_layout.addWidget(char_check)
-                
-                term_check = self._create_styled_checkbox("Keep terms/locations")
-                term_check.setChecked(True)
-                type_checks['term'] = term_check
-                type_layout.addWidget(term_check)
+                # Build type list from configured custom entry types (enabled only)
+                _custom_types_cfg = self.config.get('custom_entry_types', {
+                    'character': {'enabled': True, 'has_gender': True},
+                    'terms': {'enabled': True, 'has_gender': False},
+                    'surnames': {'enabled': True, 'has_gender': False},
+                    'titles': {'enabled': True, 'has_gender': True},
+                    'locations': {'enabled': True, 'has_gender': False},
+                    'nicknames': {'enabled': True, 'has_gender': True}
+                })
+                filter_types = [t for t, cfg in _custom_types_cfg.items() if cfg.get('enabled', True)]
+
+                # Also include any types actually present in the glossary data
+                for _entry in self.current_glossary_data:
+                    _t = _entry.get('type')
+                    if _t and _t not in filter_types:
+                        filter_types.append(_t)
+
+                limit_hint = QLabel("Optional: keep only the first N entries of each type (blank = keep all)")
+                limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
+                type_layout.addWidget(limit_hint)
+
+                for _type_name in filter_types:
+                    _row = QHBoxLayout()
+                    _check = self._create_styled_checkbox(f"Keep {_type_name}")
+                    _check.setChecked(True)
+                    type_checks[_type_name] = _check
+                    _row.addWidget(_check)
+                    _row.addStretch()
+
+                    _row.addWidget(QLabel("First N:"))
+                    _limit_edit = QLineEdit()
+                    _limit_edit.setFixedWidth(70)
+                    _limit_edit.setPlaceholderText("All")
+                    type_limits[_type_name] = _limit_edit
+                    _row.addWidget(_limit_edit)
+                    type_layout.addLayout(_row)
             
             # Text content filter
             text_filter_group = QGroupBox("Text Content Filter")
@@ -7644,7 +7674,20 @@ Do not stop after the glossary."""
             preview_label.setStyleSheet("color: gray; font-size: 10pt;")
             preview_layout.addWidget(preview_label)
             
-            def check_entry_matches(entry):
+            def get_type_limit(type_name):
+                """Parse the 'first N' limit for a type. None = no limit."""
+                edit = type_limits.get(type_name)
+                if edit is None:
+                    return None
+                text = edit.text().strip()
+                if not text:
+                    return None
+                try:
+                    return max(0, int(text))
+                except ValueError:
+                    return None
+
+            def check_entry_matches(entry, type_counts=None):
                 """Check if an entry matches the filter conditions"""
                 # Type filter
                 if is_new_format and entry.get('type'):
@@ -7674,7 +7717,15 @@ Do not stop after the glossary."""
                     entry_cfg = _custom_types.get(entry.get('type', ''), {})
                     if entry_cfg.get('has_gender', False) and entry.get('gender') != gender_value:
                         return False
-                
+
+                # Per-type "first N" limit (applied only to entries that passed all other filters)
+                if is_new_format and type_counts is not None and entry.get('type'):
+                    _t = entry['type']
+                    limit = get_type_limit(_t)
+                    if limit is not None and type_counts.get(_t, 0) >= limit:
+                        return False
+                    type_counts[_t] = type_counts.get(_t, 0) + 1
+
                 return True
             
             def preview_filter():
@@ -7687,14 +7738,15 @@ Do not stop after the glossary."""
                         break
                 
                 matching = 0
-                
+                type_counts = {}
+
                 if self.current_glossary_format in ['list', 'token_csv']:
                     for entry in self.current_glossary_data:
-                        if check_entry_matches(entry):
+                        if check_entry_matches(entry, type_counts):
                             matching += 1
                 else:
                     for key, entry in self.current_glossary_data.get('entries', {}).items():
-                        if check_entry_matches(entry):
+                        if check_entry_matches(entry, type_counts):
                             matching += 1
                 
                 removed = entry_count - matching
@@ -7722,8 +7774,9 @@ Do not stop after the glossary."""
                 
                 if self.current_glossary_format in ['list', 'token_csv']:
                     filtered = []
+                    type_counts = {}
                     for entry in self.current_glossary_data:
-                        if check_entry_matches(entry):
+                        if check_entry_matches(entry, type_counts):
                             filtered.append(entry)
                     
                     removed = len(self.current_glossary_data) - len(filtered)
