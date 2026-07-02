@@ -7593,8 +7593,55 @@ Do not stop after the glossary."""
                 limit_hint.setStyleSheet("color: gray; font-size: 9pt;")
                 type_layout.addWidget(limit_hint)
 
+                _row_style = """
+                    QFrame#typeRow {
+                        border: 1px solid transparent;
+                        border-radius: 4px;
+                        background-color: transparent;
+                    }
+                    QFrame#typeRow:hover {
+                        border: 1px solid #4a6b8a;
+                        background-color: rgba(93, 173, 226, 0.08);
+                    }
+                    QFrame#typeRow[selected="true"] {
+                        border: 1px solid #5a9fd4;
+                        background-color: rgba(93, 173, 226, 0.15);
+                    }
+                """
+
+                from PySide6.QtCore import QEvent
+
+                class _RowHighlighter(QObject):
+                    """Highlights a row frame when it's clicked or a child gets focus."""
+                    def __init__(self, rows, parent=None):
+                        super().__init__(parent)
+                        self.rows = rows  # widget -> row frame
+
+                    def set_selected(self, frame):
+                        for f in set(self.rows.values()):
+                            sel = "true" if f is frame else "false"
+                            if f.property("selected") != sel:
+                                f.setProperty("selected", sel)
+                                f.style().unpolish(f)
+                                f.style().polish(f)
+
+                    def eventFilter(self, obj, event):
+                        if event.type() in (QEvent.MouseButtonPress, QEvent.FocusIn):
+                            frame = self.rows.get(obj)
+                            if frame is not None:
+                                self.set_selected(frame)
+                        return False
+
+                _row_highlighter = _RowHighlighter({}, filter_dialog)
+
                 for _type_name in filter_types:
-                    _row = QHBoxLayout()
+                    _row_frame = QFrame()
+                    _row_frame.setObjectName("typeRow")
+                    _row_frame.setStyleSheet(_row_style)
+                    _row_frame.setProperty("selected", "false")
+                    _row = QHBoxLayout(_row_frame)
+                    _row.setContentsMargins(6, 4, 6, 4)
+
                     _check = self._create_styled_checkbox(f"Keep {_type_name}")
                     _check.setChecked(True)
                     type_checks[_type_name] = _check
@@ -7607,7 +7654,12 @@ Do not stop after the glossary."""
                     _limit_edit.setPlaceholderText("All")
                     type_limits[_type_name] = _limit_edit
                     _row.addWidget(_limit_edit)
-                    type_layout.addLayout(_row)
+                    type_layout.addWidget(_row_frame)
+
+                    # Register row widgets for click/focus highlighting
+                    for _w in (_row_frame, _check, _limit_edit):
+                        _row_highlighter.rows[_w] = _row_frame
+                        _w.installEventFilter(_row_highlighter)
             
             # Text content filter
             text_filter_group = QGroupBox("Text Content Filter")
