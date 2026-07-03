@@ -603,6 +603,135 @@ def _terminate_psutil_children(timeout: float = 1.5) -> int:
         return 0
 
 
+def _current_meipass_dir() -> str:
+    try:
+        meipass = getattr(sys, "_MEIPASS", "") or ""
+        if not meipass:
+            return ""
+        return os.path.abspath(str(meipass))
+    except Exception:
+        return ""
+
+
+def _path_points_under_meipass(value, meipass: str) -> bool:
+    if not value or not meipass:
+        return False
+    try:
+        path = os.path.normcase(os.path.abspath(str(value).strip().strip('"')))
+        root = os.path.normcase(os.path.abspath(str(meipass)))
+        return os.path.commonpath([path, root]) == root
+    except Exception:
+        return False
+
+
+def _text_mentions_meipass(value, meipass: str) -> bool:
+    if not value or not meipass:
+        return False
+    try:
+        if isinstance(value, (list, tuple)):
+            value = " ".join(str(part) for part in value)
+        text = os.path.normcase(str(value).replace("/", "\\"))
+        needle = os.path.normcase(str(meipass).replace("/", "\\"))
+        return bool(needle and needle in text)
+    except Exception:
+        return False
+
+
+def _process_info_points_to_meipass(info: dict, meipass: str) -> bool:
+    if not isinstance(info, dict) or not meipass:
+        return False
+    for key in ("exe", "cwd"):
+        if _path_points_under_meipass(info.get(key), meipass):
+            return True
+    return _text_mentions_meipass(info.get("cmdline"), meipass)
+
+
+def _process_handles_meipass(proc, meipass: str, *, include_expensive: bool = True) -> bool:
+    if not proc or not meipass:
+        return False
+    try:
+        if _process_info_points_to_meipass(getattr(proc, "info", {}) or {}, meipass):
+            return True
+    except Exception:
+        pass
+    if not include_expensive:
+        return False
+
+    for attr_name in ("open_files", "memory_maps"):
+        try:
+            entries = getattr(proc, attr_name)()
+        except Exception:
+            continue
+        for entry in entries or []:
+            try:
+                path = getattr(entry, "path", None)
+                if path is None and isinstance(entry, (tuple, list)) and entry:
+                    path = entry[0]
+                if _path_points_under_meipass(path, meipass):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _terminate_psutil_meipass_lock_holders(timeout: float = 1.5) -> int:
+    """Terminate non-current processes that still point at PyInstaller _MEIPASS."""
+    meipass = _current_meipass_dir()
+    if not meipass:
+        return 0
+
+    try:
+        import psutil
+        own_pid = os.getpid()
+        matches = []
+        deadline = time.monotonic() + max(0.3, float(timeout or 0.3))
+        for proc in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline", "cwd"]):
+            try:
+                pid = int(getattr(proc, "pid", 0) or (getattr(proc, "info", {}) or {}).get("pid", 0) or 0)
+            except Exception:
+                pid = 0
+            if pid <= 0 or pid == own_pid:
+                continue
+            include_expensive = time.monotonic() < deadline
+            if not _process_handles_meipass(proc, meipass, include_expensive=include_expensive):
+                continue
+            matches.append(proc)
+    except Exception:
+        return 0
+
+    if not matches:
+        return 0
+
+    for proc in matches:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        _gone, alive = psutil.wait_procs(matches, timeout=max(0.2, float(timeout or 0.2)))
+    except Exception:
+        alive = matches
+    for proc in alive:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            _taskkill_pid_tree(proc.pid, force=True, timeout=min(1.0, max(0.2, timeout)))
+        except Exception:
+            pass
+    try:
+        if alive:
+            psutil.wait_procs(alive, timeout=min(0.8, max(0.2, timeout)))
+    except Exception:
+        pass
+    try:
+        print(f"[CLOSE] Terminated {len(matches)} process(es) using _MEIPASS")
+    except Exception:
+        pass
+    return len(matches)
+
+
 def _parse_pid_lines(output) -> list[int]:
     pids = []
     try:
@@ -702,6 +831,65 @@ def _windows_direct_child_pids(parent_pid: int, timeout: float = 0.8) -> list[in
         return []
 
 
+def _windows_meipass_lock_holder_pids(meipass: str, timeout: float = 1.0) -> list[int]:
+    if os.name != "nt" or not meipass:
+        return []
+
+    safe_meipass = str(meipass).replace("'", "''")
+    own_pid = os.getpid()
+    command = (
+        f"$mei = '{safe_meipass}'; "
+        f"$own = {int(own_pid)}; "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { "
+        "$_.ProcessId -ne $own -and $_.ProcessId -ne $PID -and "
+        "(("
+        "$_.ExecutablePath -and $_.ExecutablePath.StartsWith($mei, [StringComparison]::OrdinalIgnoreCase)"
+        ") -or ("
+        "$_.CommandLine -and $_.CommandLine.IndexOf($mei, [StringComparison]::OrdinalIgnoreCase) -ge 0"
+        "))"
+        "} | ForEach-Object { $_.ProcessId }"
+    )
+    try:
+        stdout, query_pid = _run_pid_query_command(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            timeout=timeout,
+        )
+        return [
+            pid for pid in _parse_pid_lines(stdout)
+            if pid not in (own_pid, query_pid)
+        ]
+    except Exception:
+        return []
+
+
+def _terminate_windows_meipass_lock_holders(timeout: float = 1.5) -> int:
+    meipass = _current_meipass_dir()
+    if os.name != "nt" or not meipass:
+        return 0
+    pids = _windows_meipass_lock_holder_pids(meipass, timeout=min(1.0, max(0.2, timeout)))
+    if not pids:
+        return 0
+    for pid in pids:
+        try:
+            _taskkill_pid_tree(pid, force=True, timeout=min(1.0, max(0.2, timeout)))
+        except Exception:
+            pass
+    try:
+        print(f"[CLOSE] Terminated {len(pids)} Windows process(es) referencing _MEIPASS")
+    except Exception:
+        pass
+    return len(pids)
+
+
 def _terminate_windows_descendants(timeout: float = 1.5) -> int:
     """Native Windows descendant sweep used when psutil is unavailable/misses."""
     if os.name != "nt":
@@ -757,6 +945,18 @@ def _terminate_all_children_for_shutdown(timeout: float = 1.5) -> int:
         pass
     try:
         count = max(count, _terminate_windows_descendants(timeout=timeout))
+    except Exception:
+        pass
+    try:
+        count = max(count, _terminate_psutil_meipass_lock_holders(timeout=timeout))
+    except Exception:
+        pass
+    try:
+        count = max(count, _terminate_windows_meipass_lock_holders(timeout=timeout))
+    except Exception:
+        pass
+    try:
+        count = max(count, _terminate_windows_descendants(timeout=min(0.8, max(0.2, timeout))))
     except Exception:
         pass
     return count
