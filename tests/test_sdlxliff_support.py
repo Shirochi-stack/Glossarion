@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar
-from TransateKRtoEN import _write_html_sdlxliff_sidecar
+from TransateKRtoEN import should_skip_configured_special_file_for_translation, _write_html_sdlxliff_sidecar
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
@@ -56,6 +56,36 @@ def test_html_sdlxliff_writer_is_packaged_in_app_specs():
         spec_source = (SRC / spec_name).read_text(encoding="utf-8")
         assert "('sdlxliff_sidecar_writer.py', '.')" in spec_source
         assert "'sdlxliff_sidecar_writer'" in spec_source
+
+
+def test_numbered_special_html_skip_predicate_keeps_refinement_scope(monkeypatch):
+    monkeypatch.setenv("TRANSLATE_SPECIAL_FILES", "0")
+    monkeypatch.setenv("TRANSLATE_ALL_NUMBERED_HTML", "1")
+    monkeypatch.setenv("SPECIAL_FILE_KEYWORDS", "notice, info")
+
+    assert should_skip_configured_special_file_for_translation("chapter_notice0004.xhtml") is False
+    assert should_skip_configured_special_file_for_translation("response_chapter_notice0004.html") is False
+    assert should_skip_configured_special_file_for_translation("info.xhtml") is True
+    assert should_skip_configured_special_file_for_translation("chapter0004.xhtml") is False
+
+    assert should_skip_configured_special_file_for_translation(
+        "chapter_notice0004.xhtml",
+        translate_all_numbered=False,
+    ) is True
+    assert should_skip_configured_special_file_for_translation(
+        "chapter_notice0004.xhtml",
+        translate_special=True,
+    ) is False
+
+
+def test_multipass_refinement_filter_uses_numbered_special_skip_predicate():
+    transate_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
+    block_start = transate_source.index("multipass_chapters = []")
+    block_end = transate_source.index("_process_refinement_or_tts_mode(", block_start)
+    multipass_filter = transate_source[block_start:block_end]
+
+    assert "_should_skip_configured_special_file_for_translation(_name)" in multipass_filter
+    assert "if _is_configured_special_file(_name):" not in multipass_filter
 
 
 SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>

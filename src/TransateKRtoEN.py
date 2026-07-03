@@ -9997,6 +9997,24 @@ def is_configured_special_filename(filename):
     return stem in special_exact or any(keyword in stem for keyword in special_keywords)
 
 
+def _filename_stem_has_digit(filename):
+    stem = os.path.splitext(os.path.basename(str(filename or '')))[0]
+    return bool(re.search(r'\d', stem))
+
+
+def should_skip_configured_special_file_for_translation(filename, *, translate_special=None, translate_all_numbered=None):
+    """Return True when a configured special file should be excluded from translation/refinement."""
+    if translate_special is None:
+        translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    if translate_special:
+        return False
+    if not is_configured_special_filename(filename):
+        return False
+    if translate_all_numbered is None:
+        translate_all_numbered = os.getenv('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
+    return not (translate_all_numbered and _filename_stem_has_digit(filename))
+
+
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename.
 
@@ -20148,10 +20166,12 @@ def main(log_callback=None, stop_callback=None):
             return False
         return name_noext in _special_exact or any(kw in name_noext for kw in _special_keywords)
 
-    def _has_number_in_filename(fname):
-        """Return True if the filename (without extension) contains a digit."""
-        name_noext = os.path.splitext(os.path.basename(str(fname or '')))[0]
-        return bool(re.search(r'\d', name_noext))
+    def _should_skip_configured_special_file_for_translation(fname):
+        return should_skip_configured_special_file_for_translation(
+            fname,
+            translate_special=translate_special,
+            translate_all_numbered=_translate_all_numbered,
+        )
 
     def _is_non_special_zero_number_file(chapter, actual_num):
         try:
@@ -20332,16 +20352,15 @@ def main(log_callback=None, stop_callback=None):
         # in their filename bypass the skip (translation context only).
         if not translate_special and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-            if _is_configured_special_file(name):
-                if not (_translate_all_numbered and _has_number_in_filename(name)):
-                    if start is not None and c.get('_range_allowed_for_translation', True):
-                        range_special_skipped_chapters.append(range_display_value if range_display_value is not None else actual_num)
-                    # Track skipped special files
-                    if not hasattr(config, '_skipped_special_files'):
-                        config._skipped_special_files = []
-                    config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
-                    chunks_per_chapter[idx] = 0
-                    continue
+            if _should_skip_configured_special_file_for_translation(name):
+                if start is not None and c.get('_range_allowed_for_translation', True):
+                    range_special_skipped_chapters.append(range_display_value if range_display_value is not None else actual_num)
+                # Track skipped special files
+                if not hasattr(config, '_skipped_special_files'):
+                    config._skipped_special_files = []
+                config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
+                chunks_per_chapter[idx] = 0
+                continue
 
         if start is not None:
             range_match = c.get('_range_allowed_for_translation', True)
@@ -20484,7 +20503,11 @@ def main(log_callback=None, stop_callback=None):
             _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
             if not translate_special and not is_text_file:
                 _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
-                if _is_configured_special_file(_name):
+                if config.OUTPUT_MODE == "refinement":
+                    _skip_special = _should_skip_configured_special_file_for_translation(_name)
+                else:
+                    _skip_special = _is_configured_special_file(_name)
+                if _skip_special:
                     continue
             post_mode_chapters.append(_chapter)
         post_out = _resolve_postprocess_output_dir(input_path, file_base, out, post_mode_chapters)
@@ -21288,9 +21311,8 @@ def main(log_callback=None, stop_callback=None):
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                if _is_configured_special_file(name):
-                    if not (_translate_all_numbered and _has_number_in_filename(name)):
-                        continue
+                if _should_skip_configured_special_file_for_translation(name):
+                    continue
             
             # Skip chapters outside the range
             if start is not None:
@@ -22223,9 +22245,8 @@ def main(log_callback=None, stop_callback=None):
                 raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
                 if not translate_special and not is_text_file:
                     name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                    if _is_configured_special_file(name):
-                        if not (_translate_all_numbered and _has_number_in_filename(name)):
-                            continue
+                    if _should_skip_configured_special_file_for_translation(name):
+                        continue
                 
                 if start is not None:
                     if not _range_allows_chapter(c, actual_num, idx):
@@ -22363,9 +22384,8 @@ def main(log_callback=None, stop_callback=None):
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                if _is_configured_special_file(name):
-                    if not (_translate_all_numbered and _has_number_in_filename(name)):
-                        continue
+                if _should_skip_configured_special_file_for_translation(name):
+                    continue
             
             if start is not None:
                 if not _range_allows_chapter(c, actual_num, idx):
@@ -24498,7 +24518,7 @@ def main(log_callback=None, stop_callback=None):
             for _chapter in chapters:
                 if not translate_special and not is_text_file:
                     _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
-                    if _is_configured_special_file(_name):
+                    if _should_skip_configured_special_file_for_translation(_name):
                         skipped_special_refinement += 1
                         continue
                 multipass_chapters.append(_chapter)
