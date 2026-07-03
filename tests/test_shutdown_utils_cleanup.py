@@ -249,6 +249,7 @@ def test_psutil_meipass_sweep_kills_only_lock_holders(monkeypatch, tmp_path):
     meipass.mkdir()
     monkeypatch.setattr(shutdown_utils.sys, "_MEIPASS", str(meipass), raising=False)
     monkeypatch.setattr(shutdown_utils.os, "getpid", lambda: 100)
+    monkeypatch.delenv("GLOSSARION_SHUTDOWN_EXPENSIVE_MEIPASS_SCAN", raising=False)
     killed_by_taskkill = []
     monkeypatch.setattr(
         shutdown_utils,
@@ -266,10 +267,10 @@ def test_psutil_meipass_sweep_kills_only_lock_holders(monkeypatch, tmp_path):
             self._running = True
 
         def open_files(self):
-            return []
+            raise AssertionError("shutdown should not call open_files by default")
 
         def memory_maps(self):
-            return self._maps
+            raise AssertionError("shutdown should not call memory_maps by default")
 
         def terminate(self):
             self.terminated = True
@@ -302,10 +303,72 @@ def test_psutil_meipass_sweep_kills_only_lock_holders(monkeypatch, tmp_path):
 
     count = shutdown_utils._terminate_psutil_meipass_lock_holders(timeout=0.2)
 
-    assert count == 3
+    assert count == 2
     assert not own_proc.terminated
     assert not unrelated.terminated
-    for proc in (exe_holder, cmdline_holder, map_holder):
+    assert not map_holder.terminated
+    for proc in (exe_holder, cmdline_holder):
         assert proc.terminated
         assert proc.killed
-    assert killed_by_taskkill == [102, 103, 104]
+    assert killed_by_taskkill == [102, 103]
+
+
+def test_psutil_meipass_expensive_scan_is_opt_in(monkeypatch, tmp_path):
+    meipass = tmp_path / "_MEI426002"
+    meipass.mkdir()
+    monkeypatch.setattr(shutdown_utils.sys, "_MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr(shutdown_utils.os, "getpid", lambda: 100)
+    monkeypatch.setenv("GLOSSARION_SHUTDOWN_EXPENSIVE_MEIPASS_SCAN", "1")
+    killed_by_taskkill = []
+    monkeypatch.setattr(
+        shutdown_utils,
+        "_taskkill_pid_tree",
+        lambda pid, **_kwargs: killed_by_taskkill.append(pid) or True,
+    )
+
+    class FakeProc:
+        def __init__(self, pid, info, maps=()):
+            self.pid = pid
+            self.info = {"pid": pid, **info}
+            self._maps = list(maps)
+            self.terminated = False
+            self.killed = False
+            self._running = True
+
+        def open_files(self):
+            return []
+
+        def memory_maps(self):
+            return self._maps
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+            self._running = False
+
+        def is_running(self):
+            return self._running
+
+    map_holder = FakeProc(
+        104,
+        {"exe": str(tmp_path / "native-helper.exe"), "cmdline": ["native-helper"]},
+        maps=[types.SimpleNamespace(path=str(meipass / "Qt6Gui.dll"))],
+    )
+
+    fake_psutil = types.SimpleNamespace(
+        process_iter=lambda attrs=None: [map_holder],
+        wait_procs=lambda procs, timeout=None: (
+            [proc for proc in procs if not proc.is_running()],
+            [proc for proc in procs if proc.is_running()],
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    count = shutdown_utils._terminate_psutil_meipass_lock_holders(timeout=0.2)
+
+    assert count == 1
+    assert map_holder.terminated
+    assert map_holder.killed
+    assert killed_by_taskkill == [104]

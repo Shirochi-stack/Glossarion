@@ -646,7 +646,7 @@ def _process_info_points_to_meipass(info: dict, meipass: str) -> bool:
     return _text_mentions_meipass(info.get("cmdline"), meipass)
 
 
-def _process_handles_meipass(proc, meipass: str, *, include_expensive: bool = True) -> bool:
+def _process_handles_meipass(proc, meipass: str, *, include_expensive: bool = False) -> bool:
     if not proc or not meipass:
         return False
     try:
@@ -657,6 +657,10 @@ def _process_handles_meipass(proc, meipass: str, *, include_expensive: bool = Tr
     if not include_expensive:
         return False
 
+    # Keep these checks opt-in only. On Windows, psutil.open_files() and
+    # memory_maps() can block inside native process/file enumeration during
+    # PyInstaller one-file teardown, which is exactly when force_shutdown()
+    # needs to be quick and boring.
     for attr_name in ("open_files", "memory_maps"):
         try:
             entries = getattr(proc, attr_name)()
@@ -684,6 +688,10 @@ def _terminate_psutil_meipass_lock_holders(timeout: float = 1.5) -> int:
         import psutil
         own_pid = os.getpid()
         matches = []
+        allow_expensive_scan = os.environ.get(
+            "GLOSSARION_SHUTDOWN_EXPENSIVE_MEIPASS_SCAN",
+            "",
+        ).strip().lower() in ("1", "true", "yes", "on")
         deadline = time.monotonic() + max(0.3, float(timeout or 0.3))
         for proc in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline", "cwd"]):
             try:
@@ -692,7 +700,7 @@ def _terminate_psutil_meipass_lock_holders(timeout: float = 1.5) -> int:
                 pid = 0
             if pid <= 0 or pid == own_pid:
                 continue
-            include_expensive = time.monotonic() < deadline
+            include_expensive = allow_expensive_scan and time.monotonic() < deadline
             if not _process_handles_meipass(proc, meipass, include_expensive=include_expensive):
                 continue
             matches.append(proc)
