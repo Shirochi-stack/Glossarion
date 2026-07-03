@@ -312,6 +312,8 @@ class SDLXLIFFReviewDialog(QDialog):
     MACHINE_TRANSLATION_INACCURACY_THRESHOLD = 150.0
     MACHINE_TRANSLATION_SHORT_TEXT_MAX_TOKENS = 1
     MACHINE_TRANSLATION_SHORT_TEXT_MAX_CHARS = 24
+    MANUAL_GREEN_OVERRIDES_FILE = "review_status_overrides.json"
+    MANUAL_GREEN_STATUSES = frozenset({"red", "yellow"})
     MACHINE_TRANSLATION_CONTENT_STOPWORDS = frozenset("""
         a an and are as at be been being but by for from had has have he her hers him his i if in into is it
         its me my of on or our ours she so some that the their theirs them then there they this to was were
@@ -1675,6 +1677,9 @@ class SDLXLIFFReviewDialog(QDialog):
             pass
         return [path for path in paths if path in visible_paths]
 
+    def _manual_green_overrides_path_for_output_dir(self, output_dir):
+        return os.path.join(output_dir or "", "SDLXLIFF", self.MANUAL_GREEN_OVERRIDES_FILE)
+
     def _current_review_signature(self):
         signature = []
         # Fold the "remove duplicate H1-H6+P pairs" toggle into the signature so
@@ -1682,6 +1687,8 @@ class SDLXLIFFReviewDialog(QDialog):
         # the rows with the new setting instead of needing a program restart.
         signature.append(("review_settings", "remove_dup_h1p", 1 if self._review_remove_duplicate_h1_p_enabled() else 0, 0))
         for output_dir in self._review_output_dirs():
+            override_path = self._manual_green_overrides_path_for_output_dir(output_dir)
+            signature.append(("review_settings", "manual_green_overrides") + self._review_file_signature(override_path))
             for path in self._sdlxliff_sidecar_paths_for_output_dir(output_dir):
                 try:
                     stat = os.stat(path)
@@ -1742,6 +1749,214 @@ class SDLXLIFFReviewDialog(QDialog):
             return (norm, stat.st_size, mtime)
         except Exception:
             return (norm, -1, -1)
+
+    def _manual_green_overrides_path_for_piece(self, piece):
+        try:
+            sidecar_path = str((piece or {}).get("path") or "")
+            if sidecar_path:
+                return os.path.join(os.path.dirname(os.path.abspath(sidecar_path)), self.MANUAL_GREEN_OVERRIDES_FILE)
+        except Exception:
+            pass
+        return self._manual_green_overrides_path_for_output_dir(getattr(self, "output_dir", "") or "")
+
+    @staticmethod
+    def _manual_green_override_key(piece):
+        try:
+            name = os.path.basename(str((piece or {}).get("path") or ""))
+            if not name:
+                name = os.path.basename(str((piece or {}).get("name") or ""))
+            if not name:
+                name = os.path.basename(str((piece or {}).get("output_name") or ""))
+            return name.lower()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _manual_green_piece_content_hash(piece):
+        rows_payload = []
+        try:
+            for row in (piece or {}).get("rows") or []:
+                rows_payload.append({
+                    "source_tag": str(row.get("source_tag", "") or ""),
+                    "source": str(row.get("source", "") or ""),
+                    "target_tag": str(row.get("target_tag", "") or ""),
+                    "target": str(row.get("target", "") or ""),
+                })
+        except Exception:
+            rows_payload = []
+        raw = json.dumps(rows_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+
+    @staticmethod
+    def _manual_green_empty_override_data():
+        return {"version": 1, "entries": {}}
+
+    def _read_manual_green_override_data(self, path):
+        if not path or not os.path.isfile(path):
+            return self._manual_green_empty_override_data()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                return self._manual_green_empty_override_data()
+            entries = loaded.get("entries")
+            if not isinstance(entries, dict):
+                entries = loaded.get("manual_green")
+            if not isinstance(entries, dict):
+                entries = loaded.get("overrides")
+            if not isinstance(entries, dict):
+                entries = {}
+            return {"version": int(loaded.get("version") or 1), "entries": entries}
+        except Exception:
+            return self._manual_green_empty_override_data()
+
+    def _write_manual_green_override_data(self, path, data):
+        if not path:
+            return False
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            entries = data.get("entries") if isinstance(data, dict) else {}
+            if not isinstance(entries, dict):
+                entries = {}
+            payload = {
+                "version": 1,
+                "entries": entries,
+            }
+            tmp_path = f"{path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            return True
+        except Exception:
+            try:
+                if "tmp_path" in locals() and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+
+    def _manual_green_override_entry_for_piece(self, piece):
+        path = self._manual_green_overrides_path_for_piece(piece)
+        key = self._manual_green_override_key(piece)
+        if not path or not key:
+            return None
+        data = self._read_manual_green_override_data(path)
+        entries = data.get("entries") if isinstance(data, dict) else {}
+        entry = entries.get(key) if isinstance(entries, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        content_hash = str(entry.get("content_hash") or "")
+        if not content_hash or content_hash != self._manual_green_piece_content_hash(piece):
+            return None
+        return entry
+
+    def _persist_piece_manual_green_override(self, piece):
+        path = self._manual_green_overrides_path_for_piece(piece)
+        key = self._manual_green_override_key(piece)
+        if not path or not key:
+            return False
+        data = self._read_manual_green_override_data(path)
+        entries = data.get("entries") if isinstance(data, dict) else {}
+        if not isinstance(entries, dict):
+            entries = {}
+        entries[key] = {
+            "status": "green",
+            "reason": str(piece.get("manual_green_reason") or "manually marked green"),
+            "content_hash": self._manual_green_piece_content_hash(piece),
+            "sidecar": os.path.basename(str(piece.get("path") or piece.get("name") or key)),
+            "output_name": self._output_name_for_piece(piece),
+            "updated_at": time.time(),
+        }
+        data["entries"] = entries
+        saved = self._write_manual_green_override_data(path, data)
+        if saved:
+            try:
+                self._last_review_signature = self._current_review_signature()
+            except Exception:
+                pass
+        return saved
+
+    def _remove_piece_manual_green_override(self, piece):
+        path = self._manual_green_overrides_path_for_piece(piece)
+        key = self._manual_green_override_key(piece)
+        if not path or not key:
+            return False
+        data = self._read_manual_green_override_data(path)
+        entries = data.get("entries") if isinstance(data, dict) else {}
+        if not isinstance(entries, dict) or key not in entries:
+            return False
+        entries.pop(key, None)
+        data["entries"] = entries
+        saved = self._write_manual_green_override_data(path, data)
+        if saved:
+            try:
+                self._last_review_signature = self._current_review_signature()
+            except Exception:
+                pass
+        return saved
+
+    def _piece_needs_manual_green_override(self, piece):
+        if not isinstance(piece, dict) or piece.get("manual_green_override"):
+            return False
+        if piece.get("mismatch") or int(piece.get("yellow_count") or 0) > 0:
+            return True
+        try:
+            return any((row.get("status") in self.MANUAL_GREEN_STATUSES) for row in (piece.get("rows") or []))
+        except Exception:
+            return False
+
+    def _recompute_piece_row_statuses(self, piece):
+        rows = (piece or {}).get("rows") or []
+        for row_data in rows:
+            try:
+                row_data.pop("_top_skew_promoted", None)
+                row_data.pop("_machine_accuracy_promoted", None)
+                row_data.pop("_machine_accuracy_previous_status", None)
+                row_data.pop("_machine_accuracy_previous_reason", None)
+                source_missing = not row_data.get("source_tag")
+                target_missing = not row_data.get("target_tag")
+                status, reason = self._row_status(
+                    row_data.get("source", ""),
+                    row_data.get("target", ""),
+                    source_missing=source_missing,
+                    target_missing=target_missing,
+                )
+                if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
+                    status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
+                row_data["status"] = status
+                row_data["reason"] = reason
+            except Exception:
+                continue
+
+    def _apply_manual_green_override_to_piece(self, piece, reason=None, content_hash=None):
+        if not isinstance(piece, dict):
+            return False
+        piece["manual_green_override"] = True
+        piece["manual_green_reason"] = str(reason or "manually marked green")
+        piece["manual_green_content_hash"] = str(content_hash or self._manual_green_piece_content_hash(piece))
+        self._refresh_piece_summary(piece)
+        return True
+
+    def _apply_persisted_manual_green_override(self, piece):
+        entry = self._manual_green_override_entry_for_piece(piece)
+        if not isinstance(entry, dict):
+            return False
+        return self._apply_manual_green_override_to_piece(
+            piece,
+            reason=entry.get("reason") or "manually marked green",
+            content_hash=entry.get("content_hash"),
+        )
+
+    def _clear_piece_manual_green_override(self, piece, persist=False):
+        if not isinstance(piece, dict):
+            return False
+        had_override = bool(piece.get("manual_green_override"))
+        piece.pop("manual_green_override", None)
+        piece.pop("manual_green_reason", None)
+        piece.pop("manual_green_content_hash", None)
+        if persist:
+            self._remove_piece_manual_green_override(piece)
+        return had_override
 
     def _current_review_autogen_signature(self):
         output_dir = self.output_dir or ""
@@ -4310,13 +4525,21 @@ class SDLXLIFFReviewDialog(QDialog):
         rows = piece.get("rows") or []
         source_count = self._review_piece_non_empty_count(rows, "source")
         target_count = self._review_piece_non_empty_count(rows, "target")
+        manual_green_override = bool(piece.get("manual_green_override"))
         self._clear_top_skew_promotions(rows)
         manual_accuracy_active = (
             bool(piece.get("_machine_accuracy_review_active"))
             or any(row.get("_machine_accuracy_promoted") for row in rows)
         )
-        if not manual_accuracy_active:
+        if not manual_accuracy_active and not manual_green_override:
             self._promote_top_skewed_row_for_count_mismatch(rows, source_count, target_count)
+        if manual_green_override:
+            reason = str(piece.get("manual_green_reason") or "manually marked green")
+            for row in rows:
+                if row.get("status") in self.MANUAL_GREEN_STATUSES:
+                    row["status"] = "green"
+                    row["reason"] = reason
+                    row.pop("_top_skew_promoted", None)
         red_count = sum(1 for row in rows if row.get("status") == "red")
         yellow_count = sum(1 for row in rows if row.get("status") == "yellow")
         purple_count = sum(1 for row in rows if row.get("status") == "purple")
@@ -4326,7 +4549,7 @@ class SDLXLIFFReviewDialog(QDialog):
         piece["yellow_count"] = yellow_count
         piece["purple_count"] = purple_count
         piece["count_ratio"] = (target_count / source_count) if source_count else (1.0 if not target_count else 0.0)
-        piece["mismatch"] = source_count != target_count or red_count > 0
+        piece["mismatch"] = False if manual_green_override else (source_count != target_count or red_count > 0)
         return piece
 
     @staticmethod
@@ -4788,6 +5011,7 @@ class SDLXLIFFReviewDialog(QDialog):
             }
             self._load_machine_translation_file_for_piece(piece)
             self._refresh_piece_summary(piece)
+            self._apply_persisted_manual_green_override(piece)
             self._trace_review_perf(
                 "build_piece",
                 trace_started,
@@ -7163,10 +7387,132 @@ class SDLXLIFFReviewDialog(QDialog):
             translate_action.triggered.connect(
                 lambda _checked=False, selected_rows=list(rows): self._translate_piece_rows_tooltips(selected_rows)
             )
+            eligible_rows = [
+                row for row in rows
+                if 0 <= row < len(self.pieces) and self._piece_needs_manual_green_override(self.pieces[row])
+            ]
+            undo_rows = [
+                row for row in rows
+                if 0 <= row < len(self.pieces) and self.pieces[row].get("manual_green_override")
+            ]
+            menu.addSeparator()
+            green_text = (
+                f"\u2705  Mark Red/Yellow Sidecars as Green ({len(eligible_rows)} entries)"
+                if len(rows) != 1
+                else "\u2705  Mark Red/Yellow Sidecar as Green"
+            )
+            green_action = menu.addAction(green_text)
+            green_action.setEnabled(bool(eligible_rows))
+            green_action.triggered.connect(
+                lambda _checked=False, selected_rows=list(rows): self._mark_review_sidecars_green(selected_rows)
+            )
+            undo_text = (
+                f"\u21a9\ufe0f  Undo Green Mark ({len(undo_rows)} entries)"
+                if len(rows) != 1
+                else "\u21a9\ufe0f  Undo Green Mark"
+            )
+            undo_action = menu.addAction(undo_text)
+            undo_action.setEnabled(bool(undo_rows))
+            undo_action.triggered.connect(
+                lambda _checked=False, selected_rows=list(rows): self._undo_review_sidecars_green(selected_rows)
+            )
             self._piece_list_context_menu = menu
             self._set_review_context_menu_open(True)
             menu.aboutToHide.connect(lambda m=menu: self._clear_piece_list_context_menu(m))
             menu.popup(self.piece_list.viewport().mapToGlobal(pos))
+        except Exception:
+            pass
+
+    def _mark_review_sidecars_green(self, piece_rows):
+        rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
+        if not rows:
+            return
+        marked = 0
+        saved = 0
+        current_row = self._displayed_piece_row()
+        for piece_index in rows:
+            try:
+                piece = self.pieces[piece_index]
+            except Exception:
+                continue
+            if not self._piece_needs_manual_green_override(piece):
+                continue
+            before = [
+                (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+                for row_data in (piece.get("rows") or [])
+            ]
+            self._apply_manual_green_override_to_piece(piece)
+            if self._persist_piece_manual_green_override(piece):
+                saved += 1
+            marked += 1
+
+            changed_rows = [
+                row_index for row_index, row_data in enumerate(piece.get("rows") or [])
+                if row_index >= len(before)
+                or before[row_index] != (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+            ]
+            self._invalidate_piece_render_model(piece, restart_preload=False)
+            self._refresh_piece_list_item(piece_index)
+            if piece_index == current_row:
+                self._refresh_piece_header(piece_index)
+                for row_index in changed_rows:
+                    self._refresh_visible_review_row_status(piece_index, row_index)
+            else:
+                self._invalidate_piece_page_for_refresh(piece_index)
+
+        try:
+            if marked <= 0:
+                self.save_status_label.setText("No red/yellow SDLXLIFF sidecars selected")
+            elif saved == marked:
+                self.save_status_label.setText(f"Marked {marked} SDLXLIFF sidecar{'s' if marked != 1 else ''} green")
+            else:
+                failed = marked - saved
+                self.save_status_label.setText(f"Marked {marked} sidecar{'s' if marked != 1 else ''} green; {failed} not saved")
+        except Exception:
+            pass
+
+    def _undo_review_sidecars_green(self, piece_rows):
+        rows = sorted({row for row in (piece_rows or []) if 0 <= row < len(self.pieces)})
+        if not rows:
+            return
+        undone = 0
+        current_row = self._displayed_piece_row()
+        for piece_index in rows:
+            try:
+                piece = self.pieces[piece_index]
+            except Exception:
+                continue
+            if not piece.get("manual_green_override"):
+                continue
+            before = [
+                (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+                for row_data in (piece.get("rows") or [])
+            ]
+            if not self._clear_piece_manual_green_override(piece, persist=True):
+                continue
+            self._recompute_piece_row_statuses(piece)
+            self._refresh_piece_summary(piece)
+            undone += 1
+
+            changed_rows = [
+                row_index for row_index, row_data in enumerate(piece.get("rows") or [])
+                if row_index >= len(before)
+                or before[row_index] != (str(row_data.get("status") or ""), str(row_data.get("reason") or ""))
+            ]
+            self._invalidate_piece_render_model(piece, restart_preload=False)
+            self._refresh_piece_list_item(piece_index)
+            if piece_index == current_row:
+                self._refresh_piece_header(piece_index)
+                for row_index in changed_rows:
+                    self._refresh_visible_review_row_status(piece_index, row_index)
+            else:
+                self._invalidate_piece_page_for_refresh(piece_index)
+
+        try:
+            if undone <= 0:
+                self.save_status_label.setText("No manually green SDLXLIFF sidecars selected")
+            else:
+                self.save_status_label.setText(f"Undid green mark for {undone} SDLXLIFF sidecar{'s' if undone != 1 else ''}")
         except Exception:
             pass
 
@@ -7824,20 +8170,36 @@ class SDLXLIFFReviewDialog(QDialog):
             return False
         row_data = rows[row_index]
         row_data["row_index"] = row_index
+        before = [
+            (str(existing.get("status") or ""), str(existing.get("reason") or ""))
+            for existing in rows
+        ]
         target_html = self._target_html_with_edit(piece, row_data, text)
         self._write_piece_target_html(piece, target_html)
         piece["target_html"] = target_html
         row_data["target"] = str(text or "")
-        status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
-        if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
-            status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
-        row_data["status"] = status
-        row_data["reason"] = reason
+        manual_cleared = self._clear_piece_manual_green_override(piece, persist=True)
+        if manual_cleared:
+            self._recompute_piece_row_statuses(piece)
+        else:
+            status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
+            if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
+                status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
+            row_data["status"] = status
+            row_data["reason"] = reason
         self._invalidate_piece_render_model(piece, restart_preload=False)
         self._refresh_piece_summary(piece)
         self._refresh_piece_list_item(piece_index)
         self._refresh_piece_header(piece_index)
-        self._refresh_visible_review_row_status(piece_index, row_index)
+        changed_rows = [
+            idx for idx, existing in enumerate(rows)
+            if idx >= len(before)
+            or before[idx] != (str(existing.get("status") or ""), str(existing.get("reason") or ""))
+        ]
+        if row_index not in changed_rows:
+            changed_rows.append(row_index)
+        for changed_row in changed_rows:
+            self._refresh_visible_review_row_status(piece_index, changed_row)
         return True
 
     def closeEvent(self, event):
