@@ -93,6 +93,70 @@ def _get_progress_manager_nonblocking():
 # -----------------------------------------------------------------------------
 
 
+def _progress_entry_refined_for_display(entry):
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
+
+
+def _progress_entry_model_for_display(entry):
+    if not isinstance(entry, dict):
+        return ''
+    model_name = str(entry.get('model_name') or entry.get('model') or '').strip()
+    if model_name:
+        return model_name
+    previous = entry.get('previous_progress_entry')
+    if isinstance(previous, dict):
+        return str(previous.get('model_name') or previous.get('model') or '').strip()
+    return ''
+
+
+def _select_progress_entry_for_display(entries, display_status=None):
+    """Pick the single progress entry that should drive a visible row."""
+    candidates = [entry for entry in (entries or []) if isinstance(entry, dict)]
+    if not candidates:
+        return {}
+
+    desired = str(display_status or '').lower().strip()
+    completed_statuses = ('completed', 'completed_empty', 'completed_image_only')
+
+    def _score(entry):
+        status = str(entry.get('status') or '').lower().strip()
+        score = 0
+        if desired == 'in_progress':
+            if status == 'in_progress':
+                score += 100
+            elif status in completed_statuses:
+                score += 20
+        elif desired == 'completed':
+            if status in completed_statuses:
+                score += 100
+            if _progress_entry_refined_for_display(entry):
+                score += 50
+        elif desired in ('failed', 'qa_failed'):
+            if status == desired:
+                score += 100
+            elif status in ('failed', 'qa_failed', 'error'):
+                score += 80
+        elif desired == 'merged' and status == 'merged':
+            score += 100
+        elif desired and status == desired:
+            score += 100
+
+        if str(entry.get('model_name') or entry.get('model') or '').strip():
+            score += 10
+        elif _progress_entry_model_for_display(entry):
+            score += 3
+
+        try:
+            score += min(float(entry.get('last_updated') or 0), 9999999999) / 9999999999
+        except Exception:
+            pass
+        return score
+
+    return max(candidates, key=_score)
+
+
 class _GlossaryProgressAsyncBridge(QObject):
     progress = Signal(object)
     finished = Signal(object)
@@ -12335,38 +12399,36 @@ class RetranslationMixin:
                     return 'in_progress', []
                 return 'not_completed', []
 
-            def _gp_model_for(ci, _d):
+            def _gp_entries_for(ci, _d):
                 if not isinstance(_d, dict):
-                    _d = {}
+                    return []
                 chapters = _d.get('chapters', {})
+                entries = []
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
                         if _gp_index_for_entry(info, key, _d) != ci:
                             continue
-                        model_name = str(info.get('model_name') or info.get('model') or '').strip()
-                        if model_name:
-                            return model_name
-                return '(model unknown)'
+                        entries.append(info)
+                return entries
 
-            def _gp_entry_for(ci, _d):
-                if not isinstance(_d, dict):
-                    return {}
-                chapters = _d.get('chapters', {})
-                if isinstance(chapters, dict):
-                    for key, info in chapters.items():
-                        if not isinstance(info, dict):
-                            continue
-                        if _gp_index_for_entry(info, key, _d) == ci:
-                            return info
-                return {}
+            def _gp_entry_for(ci, _d, status=None):
+                return _select_progress_entry_for_display(_gp_entries_for(ci, _d), status)
+
+            def _gp_model_for(ci, _d, status=None, entry=None):
+                selected = entry if isinstance(entry, dict) and entry else _gp_entry_for(ci, _d, status)
+                model_name = _progress_entry_model_for_display(selected)
+                if model_name:
+                    return model_name
+                return '(model unknown)'
 
             def _gp_display_for(ci, fname, _d, cache=None):
                 opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
                 ch_num = _gp_display_chapter_num(ci, fname)
                 status, issues = _gp_status_for(ci, _d, cache)
-                model_name = _gp_model_for(ci, _d)
+                entry = _gp_entry_for(ci, _d, status)
+                model_name = _gp_model_for(ci, _d, status, entry)
                 icons = {
                     'completed': '\u2705',
                     'failed': '\u274c',
@@ -12377,8 +12439,7 @@ class RetranslationMixin:
                 }
                 icon = icons.get(status) or '\u2b1c'
                 status_label = status.replace('_', ' ').title()
-                entry = _gp_entry_for(ci, _d)
-                if status == 'completed' and str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed'):
+                if status == 'completed' and _progress_entry_refined_for_display(entry):
                     status_label = f"{status_label} ⭐"
                 display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
                 if issues:

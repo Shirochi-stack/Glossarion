@@ -98,6 +98,7 @@ tests/**
 !tests/test_sdlxliff_support.py
 !tests/test_sdlxliff_json_batch.py
 !tests/test_google_free_translate.py
+!tests/test_progress_model_metadata.py
 !tests/test_gemini_free_budget.py
 !tests/test_glossary_dedup_logging.py
 !tests/test_extract_glossary_parser.py

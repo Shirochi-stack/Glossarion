@@ -3149,7 +3149,7 @@ class ProgressManager:
                     self.prog["chapters"][key] = failed
         self._progress_file_delete_invalidated = True
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None, *, prefer_thread_model=None):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -3202,10 +3202,12 @@ class ProgressManager:
             "status": status,
             "last_updated": time.time()
         }
+        if prefer_thread_model is None:
+            prefer_thread_model = status in ("in_progress", "completed", "failed", "qa_failed", "error")
         self._apply_model_info(
             chapter_info,
             existing_info,
-            prefer_thread=status in ("in_progress", "completed", "failed", "qa_failed", "error"),
+            prefer_thread=bool(prefer_thread_model),
         )
         if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
             chapter_info["ocr_progress"] = existing_info["ocr_progress"]
@@ -15241,7 +15243,15 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         # In multipass refinement, keep active QA scan failures as qa_failed until refinement succeeds.
         with progress_lock:
             if not preserve_multipass_qa_status:
-                progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
+                progress_manager.update(
+                    idx,
+                    actual_num,
+                    content_hash,
+                    output_file,
+                    status="completed",
+                    chapter_obj=chapter,
+                    prefer_thread_model=False,
+                )
 
             chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
             entry = dict(progress_manager.prog.get("chapters", {}).get(chapter_key, {}))

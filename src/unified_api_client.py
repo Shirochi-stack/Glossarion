@@ -10357,6 +10357,59 @@ class UnifiedClient:
             pass
         return "", "error"
 
+    def _copy_retry_request_context_to_temp_client(self, temp_client, context=None, request_id=None):
+        """Carry request-local metadata onto a temporary retry/fallback client."""
+        source_chapter_context = None
+        source_request_label = None
+        source_request_context = None
+        source_pre_send_callback = None
+        try:
+            source_tls = self._get_thread_local_client()
+            source_chapter_context = getattr(source_tls, 'chapter_context', None)
+            source_request_label = getattr(source_tls, 'current_request_label', None)
+            source_request_context = getattr(source_tls, 'current_request_context', None)
+            source_pre_send_callback = getattr(source_tls, 'pre_api_call_callback', None)
+            if not callable(source_pre_send_callback):
+                previous_callback = getattr(source_tls, 'last_pre_api_call_callback', None)
+                previous_request_id = getattr(source_tls, 'last_pre_api_call_callback_request_id', None)
+                source_request_id = getattr(source_tls, 'current_request_id', None)
+                if callable(previous_callback) and previous_request_id and previous_request_id in (request_id, source_request_id):
+                    source_pre_send_callback = previous_callback
+        except Exception:
+            pass
+
+        try:
+            temp_client.context = context or source_request_context or getattr(temp_client, 'context', None)
+        except Exception:
+            pass
+
+        if isinstance(source_chapter_context, dict):
+            try:
+                temp_client.set_chapter_context(
+                    chapter=source_chapter_context.get('chapter'),
+                    chunk=source_chapter_context.get('chunk'),
+                    total_chunks=source_chapter_context.get('total_chunks'),
+                    merged_chapters=source_chapter_context.get('merged_chapters'),
+                )
+            except Exception:
+                try:
+                    temp_tls = temp_client._get_thread_local_client()
+                    temp_tls.chapter_context = dict(source_chapter_context)
+                except Exception:
+                    pass
+
+        try:
+            temp_tls = temp_client._get_thread_local_client()
+            if request_id:
+                temp_tls.current_request_id = request_id
+            if source_request_label:
+                temp_tls.current_request_label = source_request_label
+            temp_tls.current_request_context = context or source_request_context or getattr(temp_client, 'context', None)
+            if callable(source_pre_send_callback):
+                temp_tls.pre_api_call_callback = source_pre_send_callback
+        except Exception:
+            pass
+
     def _retry_with_main_key(self, messages, temperature, max_tokens,
                             max_completion_tokens=None, context=None,
                             request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
@@ -10643,19 +10696,11 @@ class UnifiedClient:
                     temp_client.current_session_context = self.current_session_context
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
-
-                    # Copy chapter context so the temp client logs the correct chapter label
-                    try:
-                        src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
-                        if src_ctx:
-                            temp_client.set_chapter_context(
-                                chapter=src_ctx.get('chapter'),
-                                chunk=src_ctx.get('chunk'),
-                                total_chunks=src_ctx.get('total_chunks'),
-                                merged_chapters=src_ctx.get('merged_chapters'),
-                            )
-                    except Exception:
-                        pass
+                    self._copy_retry_request_context_to_temp_client(
+                        temp_client,
+                        context=context,
+                        request_id=request_id,
+                    )
 
                     print(f"{log_prefix} Created temp client with model: {temp_client.model}")
                     print(f"{log_prefix} Multi-key mode: {temp_client._multi_key_mode}")
@@ -11015,19 +11060,11 @@ class UnifiedClient:
                     temp_client.current_session_context = self.current_session_context
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
-
-                    # Copy chapter context so the temp client logs the correct chapter label
-                    try:
-                        src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
-                        if src_ctx:
-                            temp_client.set_chapter_context(
-                                chapter=src_ctx.get('chapter'),
-                                chunk=src_ctx.get('chunk'),
-                                total_chunks=src_ctx.get('total_chunks'),
-                                merged_chapters=src_ctx.get('merged_chapters'),
-                            )
-                    except Exception:
-                        pass
+                    self._copy_retry_request_context_to_temp_client(
+                        temp_client,
+                        context=context,
+                        request_id=request_id,
+                    )
 
                     print(f"[FALLBACK DIRECT {idx+1}] Sending request...")
                     
@@ -17144,6 +17181,8 @@ class UnifiedClient:
             self._remember_actual_request_model()
             cb = getattr(tls, 'pre_api_call_callback', None)
             if callable(cb):
+                tls.last_pre_api_call_callback = cb
+                tls.last_pre_api_call_callback_request_id = getattr(tls, 'current_request_id', None) or request_id
                 cb()
             if hasattr(tls, 'pre_api_call_callback'):
                 tls.pre_api_call_callback = None
