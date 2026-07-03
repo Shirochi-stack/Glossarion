@@ -7375,6 +7375,8 @@ class SDLXLIFFReviewDialog(QDialog):
             menu.setStyleSheet(
                 "QMenu { padding: 4px 6px 4px 4px; }"
                 "QMenu::item { padding: 6px 18px 6px 12px; }"
+                "QMenu::item:disabled { color: #6f7782; background: transparent; }"
+                "QMenu::item:selected:disabled { color: #6f7782; background: transparent; }"
             )
             entry_count = len(rows)
             action_text = (

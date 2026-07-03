@@ -14432,6 +14432,13 @@ def on_profile_select(self, event=None):
     """Load the selected profile's prompt into the text area."""
     # Get the current profile name from the combobox
     name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
+
+    try:
+        update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+        if callable(update_profile_action):
+            update_profile_action(name)
+    except Exception:
+        pass
     
     # Skip if the name is empty or whitespace only
     if not name or not name.strip():
@@ -14533,6 +14540,13 @@ def save_profile(self):
     
     # Ensure the current selection is set to the saved profile
     self.profile_menu.setCurrentText(name)
+
+    try:
+        update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+        if callable(update_profile_action):
+            update_profile_action(name)
+    except Exception:
+        pass
     
     # Log the save
     if hasattr(self, 'append_log'):
@@ -14699,6 +14713,12 @@ def delete_profile(self):
             self.prompt_text.clear()
 
         self.save_profiles()
+        try:
+            update_profile_action = getattr(self, '_update_profile_delete_button_label', None)
+            if callable(update_profile_action):
+                update_profile_action()
+        except Exception:
+            pass
 
 def save_profiles(self):
     """Persist only the prompt profiles and active profile."""

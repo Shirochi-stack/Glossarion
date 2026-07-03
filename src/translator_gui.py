@@ -1534,6 +1534,29 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except Exception:
             return False
 
+    def _is_protected_prompt_profile(self, name=None):
+        """Return whether a prompt profile is built in and should be reset, not deleted."""
+        try:
+            if name is None:
+                name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else getattr(self, 'profile_var', '')
+            name = str(name).strip()
+            return name in set(self._get_protected_prompt_profiles())
+        except Exception:
+            return False
+
+    def _update_profile_delete_button_label(self, name=None):
+        """Match the profile action button label to the selected profile type."""
+        btn = getattr(self, '_delete_profile_btn', None)
+        if btn is None:
+            return
+
+        if self._is_protected_prompt_profile(name):
+            btn.setText("Reset Profile")
+            btn.setToolTip("Reset this built-in profile to the latest default prompt")
+        else:
+            btn.setText("Delete Profile")
+            btn.setToolTip("Delete this custom profile")
+
     def __init__(self, parent=None):
         # Initialize QMainWindow
         super().__init__(parent)
@@ -7975,11 +7998,13 @@ Recent translations to summarize:
         # Store reference for save animation
         self._save_profile_btn = save_profile_btn
         
-        # Delete Profile button
+        # Delete/Reset Profile button
         delete_profile_btn = QPushButton("Delete Profile")
         delete_profile_btn.clicked.connect(self.delete_profile)
         delete_profile_btn.setFixedWidth(95)
         profile_buttons_layout.addWidget(delete_profile_btn)
+        self._delete_profile_btn = delete_profile_btn
+        self._update_profile_delete_button_label()
         
         profile_buttons_layout.addStretch()
         self._profile_buttons_layout = profile_buttons_layout  # saved for project combo reposition
@@ -8069,6 +8094,7 @@ Recent translations to summarize:
         
         if hasattr(self, 'append_log'):
             self.append_log(f"✅ Created new profile: '{name}'")
+        self._update_profile_delete_button_label(name)
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
