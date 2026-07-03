@@ -1926,6 +1926,149 @@ class UnifiedClient:
             return "", 'length'
         return fallback, ('content_filter' if is_safety else 'error')
 
+    def _retry_empty_truncated_response(
+        self,
+        messages,
+        temperature,
+        max_tokens,
+        max_completion_tokens,
+        context,
+        retry_reason,
+        request_id,
+        image_data,
+        finish_reason,
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        """Retry explicit truncation even when the provider returned no text."""
+        if not self._is_truncation_finish_reason(finish_reason):
+            return None
+        if os.getenv("RETRY_TRUNCATED", "0") != "1":
+            print("  RETRY_TRUNCATED disabled - accepting empty truncated response")
+            return None
+
+        tls = self._get_thread_local_client()
+        already_in_retry = (
+            getattr(tls, "_in_truncation_retry", False)
+            or bool(retry_reason and "truncation_retry" in str(retry_reason))
+        )
+        if already_in_retry:
+            return None
+        if self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+        try:
+            retry_attempts = max(1, int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1")))
+        except Exception:
+            retry_attempts = 1
+        try:
+            configured_retry_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+        except Exception:
+            configured_retry_tokens = 16384
+        try:
+            current_max_tokens = int(max_tokens) if max_tokens not in (None, "") else 8192
+        except Exception:
+            current_max_tokens = 8192
+
+        target_tokens = configured_retry_tokens if configured_retry_tokens > 0 else current_max_tokens
+        retry_tokens = max(current_max_tokens, target_tokens)
+        print(
+            f"  RETRY_TRUNCATED enabled - retrying empty truncated response "
+            f"({retry_attempts} attempt(s), max_tokens={retry_tokens})"
+        )
+
+        best_truncated_content = ""
+        best_truncated_finish_reason = "length"
+
+        for attempt_idx in range(retry_attempts):
+            if self._is_stop_requested():
+                print("  Truncation retry cancelled by user")
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+            pool_state = None
+            prev_override = getattr(tls, "max_retries_override", None)
+            tls.max_retries_override = 1
+            tls._in_truncation_retry = True
+            try:
+                pool_state, _ = self._apply_truncation_retry_key_pool_override()
+                try:
+                    per_key_limit = (
+                        getattr(tls, "output_token_limit", None)
+                        or getattr(tls, "per_key_max_output_tokens", None)
+                        or getattr(self, "current_key_output_token_limit", None)
+                    )
+                    per_key_limit = int(per_key_limit) if per_key_limit not in (None, "") else None
+                    if per_key_limit and per_key_limit > retry_tokens:
+                        print(f"  Truncation retry key output limit override: {retry_tokens} -> {per_key_limit}")
+                        retry_tokens = per_key_limit
+                except Exception:
+                    pass
+
+                _api_watchdog_record_retry(
+                    request_id,
+                    attempt_idx + 1,
+                    reason="truncation_retry_keypool" if pool_state else "truncation_retry_empty",
+                )
+                retry_content, retry_finish_reason = self._send_internal(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=retry_tokens,
+                    max_completion_tokens=max_completion_tokens,
+                    context=context,
+                    retry_reason=f"truncation_retry_empty_{attempt_idx + 1}",
+                    request_id=request_id,
+                    image_data=image_data,
+                )
+                retry_finish_reason = self._normalize_finish_reason(retry_finish_reason) or retry_finish_reason
+
+                if (
+                    retry_content
+                    and self._is_truncation_finish_reason(retry_finish_reason)
+                    and len(retry_content) > len(best_truncated_content)
+                ):
+                    best_truncated_content = retry_content
+                    best_truncated_finish_reason = retry_finish_reason
+
+                if (
+                    retry_content
+                    and not self._is_truncation_finish_reason(retry_finish_reason)
+                    and retry_finish_reason not in ("error", "content_filter", "prohibited_content")
+                ):
+                    print(
+                        f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} succeeded: "
+                        f"{len(retry_content)} chars"
+                    )
+                    return retry_content, retry_finish_reason
+
+                if self._is_truncation_finish_reason(retry_finish_reason):
+                    print(f"  Retry #{attempt_idx + 1}/{retry_attempts} was also truncated")
+                else:
+                    print(f"  Retry #{attempt_idx + 1}/{retry_attempts} returned no usable text")
+            except UnifiedClientError as retry_error:
+                if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
+                    print(f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} cancelled")
+                    raise
+                print(f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} failed: {retry_error}")
+            except Exception as retry_error:
+                print(f"  Truncation retry #{attempt_idx + 1}/{retry_attempts} failed: {retry_error}")
+            finally:
+                self._restore_dedicated_key_pool_override(pool_state)
+                tls._in_truncation_retry = False
+                tls.max_retries_override = prev_override
+
+        print(f"  All truncation retries ({retry_attempts}) exhausted for empty truncated response")
+        self._truncation_retries_exhausted = True
+        try:
+            tls._truncation_retries_exhausted = True
+        except Exception:
+            pass
+        if best_truncated_content:
+            try:
+                tls._last_truncated_content = best_truncated_content
+                tls._last_truncated_finish_reason = best_truncated_finish_reason
+            except Exception:
+                pass
+            return best_truncated_content, best_truncated_finish_reason
+        return None
+
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         s = str(exc).lower()
         if hasattr(exc, 'error_type') and getattr(exc, 'error_type') == 'rate_limit':
@@ -9298,6 +9441,21 @@ class UnifiedClient:
                             else:
                                 print("[FALLBACK DIRECT] Fallback keys disabled; skipping safety-filter retry")
                     
+                    if self._is_truncation_finish_reason(finish_reason):
+                        retry_res = self._retry_empty_truncated_response(
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            max_completion_tokens=max_completion_tokens,
+                            context=context,
+                            retry_reason=retry_reason,
+                            request_id=request_id,
+                            image_data=image_data,
+                            finish_reason=finish_reason,
+                        )
+                        if retry_res:
+                            return retry_res
+
                     # Retry transient empty responses (finish_reason='error') before giving up.
                     # Safety-filter empties go straight to finalize — retrying won't help.
                     if finish_reason == 'error' and not is_likely_safety_filter and attempt < internal_retries - 1:
