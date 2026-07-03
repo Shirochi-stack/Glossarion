@@ -225,3 +225,87 @@ def test_gemini_free_profile_uses_per_request_child_root(monkeypatch, tmp_path):
     assert profile_root.is_dir()
     assert profile.storage_path == str(profile_root)
     assert profile.cache_path == str(profile_root / "cache")
+
+
+def test_meipass_matching_detects_paths_and_command_lines(tmp_path):
+    meipass = tmp_path / "_MEI426002"
+    dll_path = meipass / "PySide6" / "Qt6" / "bin" / "Qt6Core.dll"
+    outside = tmp_path / "outside" / "helper.exe"
+
+    assert shutdown_utils._path_points_under_meipass(str(dll_path), str(meipass))
+    assert not shutdown_utils._path_points_under_meipass(str(outside), str(meipass))
+    assert shutdown_utils._text_mentions_meipass(
+        f'"{outside}" --library "{dll_path}"',
+        str(meipass),
+    )
+    assert shutdown_utils._process_info_points_to_meipass(
+        {"exe": str(outside), "cmdline": [str(outside), "--root", str(meipass)]},
+        str(meipass),
+    )
+
+
+def test_psutil_meipass_sweep_kills_only_lock_holders(monkeypatch, tmp_path):
+    meipass = tmp_path / "_MEI426002"
+    meipass.mkdir()
+    monkeypatch.setattr(shutdown_utils.sys, "_MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr(shutdown_utils.os, "getpid", lambda: 100)
+    killed_by_taskkill = []
+    monkeypatch.setattr(
+        shutdown_utils,
+        "_taskkill_pid_tree",
+        lambda pid, **_kwargs: killed_by_taskkill.append(pid) or True,
+    )
+
+    class FakeProc:
+        def __init__(self, pid, info, maps=()):
+            self.pid = pid
+            self.info = {"pid": pid, **info}
+            self._maps = list(maps)
+            self.terminated = False
+            self.killed = False
+            self._running = True
+
+        def open_files(self):
+            return []
+
+        def memory_maps(self):
+            return self._maps
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+            self._running = False
+
+        def is_running(self):
+            return self._running
+
+    own_proc = FakeProc(100, {"exe": str(meipass / "Glossarion.exe")})
+    unrelated = FakeProc(101, {"exe": str(tmp_path / "other.exe"), "cmdline": ["other"]})
+    exe_holder = FakeProc(102, {"exe": str(meipass / "QtWebEngineProcess.exe")})
+    cmdline_holder = FakeProc(103, {"exe": str(tmp_path / "helper.exe"), "cmdline": ["helper", str(meipass)]})
+    map_holder = FakeProc(
+        104,
+        {"exe": str(tmp_path / "native-helper.exe"), "cmdline": ["native-helper"]},
+        maps=[types.SimpleNamespace(path=str(meipass / "Qt6Gui.dll"))],
+    )
+
+    fake_psutil = types.SimpleNamespace(
+        process_iter=lambda attrs=None: [own_proc, unrelated, exe_holder, cmdline_holder, map_holder],
+        wait_procs=lambda procs, timeout=None: (
+            [proc for proc in procs if not proc.is_running()],
+            [proc for proc in procs if proc.is_running()],
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    count = shutdown_utils._terminate_psutil_meipass_lock_holders(timeout=0.2)
+
+    assert count == 3
+    assert not own_proc.terminated
+    assert not unrelated.terminated
+    for proc in (exe_holder, cmdline_holder, map_holder):
+        assert proc.terminated
+        assert proc.killed
+    assert killed_by_taskkill == [102, 103, 104]
