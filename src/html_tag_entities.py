@@ -33,6 +33,45 @@ _STRAY_P_GT_USER_RE = re.compile(
     r"[\u200b\s]*p(?:&gt;|>)[\r\n]*",
     re.IGNORECASE,
 )
+_START_NAME_RE = re.compile(r'^([A-Za-z][A-Za-z0-9:_\-.]*)')
+_ATTR_ASSIGN_RE = re.compile(
+    r'''(?:^|\s)[A-Za-z_:][A-Za-z0-9_.:-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)'''
+)
+
+
+def looks_like_valid_html_tag(inner: str) -> bool:
+    """Return True only for real HTML-like tag syntax, not prose in angle brackets."""
+    if not isinstance(inner, str):
+        return False
+    stripped = inner.strip()
+    if not stripped or stripped.startswith(('!', '?')):
+        return False
+
+    closing = stripped.startswith('/')
+    if closing:
+        tag_bits = stripped[1:].strip()
+        match = _START_NAME_RE.match(tag_bits)
+        if not match:
+            return False
+        tag_name = match.group(1).lower()
+        remainder = tag_bits[match.end():].strip()
+        return tag_name in VALID_ENTITY_TAGS and not remainder
+
+    self_closing = stripped.endswith('/')
+    tag_bits = stripped[:-1].rstrip() if self_closing else stripped
+    match = _START_NAME_RE.match(tag_bits)
+    if not match:
+        return False
+    tag_name = match.group(1).lower()
+    if tag_name.endswith('/'):
+        tag_name = tag_name[:-1]
+    if tag_name not in VALID_ENTITY_TAGS:
+        return False
+
+    remainder = tag_bits[match.end():].strip()
+    if not remainder:
+        return True
+    return bool(_ATTR_ASSIGN_RE.search(remainder))
 
 
 def unescape_valid_html_tag_entities(text: str) -> str:
@@ -45,13 +84,7 @@ def unescape_valid_html_tag_entities(text: str) -> str:
         stripped = inner.strip()
         if not stripped:
             return match.group(0)
-        tag_bits = stripped[1:].lstrip() if stripped.startswith('/') else stripped
-        if tag_bits.startswith(('!', '?')):
-            return match.group(0)
-        tag_name = re.split(r'[\s/>]', tag_bits, 1)[0].lower()
-        if tag_name.endswith('/'):
-            tag_name = tag_name[:-1]
-        if tag_name in VALID_ENTITY_TAGS:
+        if looks_like_valid_html_tag(stripped):
             return f'<{inner}>'
         return match.group(0)
 

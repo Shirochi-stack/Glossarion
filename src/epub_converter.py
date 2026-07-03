@@ -23,6 +23,7 @@ from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import (
     VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
     fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts,
+    looks_like_valid_html_tag as _looks_like_valid_html_tag,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
 )
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -864,23 +865,6 @@ class XHTMLConverter:
                 remove_duplicate_heading_paragraph_pairs(soup)
                 html_content = str(soup)
             
-            # Now process the content normally
-            # Fix broken attributes with ="" pattern
-            def fix_broken_attributes_only(match):
-                tag_content = match.group(0)
-                
-                if '=""' in tag_content and tag_content.count('=""') > 2:
-                    tag_match = re.match(r'<(\w+)', tag_content)
-                    if tag_match:
-                        tag_name = tag_match.group(1)
-                        words = re.findall(r'(\w+)=""', tag_content)
-                        if words:
-                            content = ' '.join(words)
-                            return f'<{tag_name}>{content}</{tag_name}>'
-                    return ''
-                
-                return tag_content
-            
             # Fix <p"Text... -> <p>"Text... and orphaned < inside <p>
             def _fix_malformed_p_tags(text: str) -> str:
                 # Part 1: Fix <p"Text... -> <p>"Text...
@@ -972,7 +956,7 @@ class XHTMLConverter:
 
             html_content = _fix_malformed_p_tags(html_content)
 
-            html_content = re.sub(r'<[^>]*?=\"\"[^>]*?>', fix_broken_attributes_only, html_content)
+            fix_empty_attr_tags_epub_enabled = os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1'
 
             # Sanitize attributes that contain a colon (:) but are NOT valid namespaces.
             # Example: <status effects:="" high="" temperature="" unconscious=""></status>
@@ -1020,7 +1004,7 @@ class XHTMLConverter:
             # Delegates to the shared ``_empty_attr_fix`` helper so the
             # BeautifulSoup post-process, html2text pre-process, and this
             # EPUB-converter pass all use the same regex.
-            if os.getenv('FIX_EMPTY_ATTR_TAGS_EPUB', '0') == '1':
+            if fix_empty_attr_tags_epub_enabled:
                 html_content = fix_empty_attr_tags(html_content)
 
             if os.getenv('FIX_STRAY_P_GT_EPUB', '0') == '1':
@@ -1074,47 +1058,13 @@ class XHTMLConverter:
             html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, html_content)
 
             # PREVENT malformed "fake tags" like <You are a farmer.> from being parsed as tags
-            # We only target angle-bracketed text that has spaces and NO '=' (so it's not real attributes)
-            # and ends with either '>' or the entity '&gt;'.
+            # We only keep real HTML-like tag syntax; prose in angle brackets must
+            # remain visible text instead of being parsed as empty attributes.
             def _escape_plaintext_angle_brackets(txt: str) -> str:
                 def repl(m):
                     inner = m.group(1)
-                    # If looks like a real tag (has '=' or '/') keep it
-                    # Check for start chars /!? or if it has attributes (=)
-                    if '=' in inner or inner.strip().startswith(('/', '!', '?')):
+                    if _looks_like_valid_html_tag(inner):
                         return m.group(0)
-
-                    # If the first token is a known HTML tag name, keep it
-                    tokens = inner.strip().split()
-                    if not tokens:
-                        return m.group(0)
-
-                    first = tokens[0].lower()
-
-                    # Handle self-closing tags like <br/> by removing trailing slash
-                    if first.endswith('/'):
-                        first = first[:-1]
-
-                    known = {
-                        'html','head','body','title','meta','link','style','script','noscript',
-                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-                        'ul','ol','li','dl','dt','dd',
-                        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-                        'table','thead','tbody','tr','td','th','caption','col','colgroup',
-                        'blockquote','q','cite',
-                        'section','article','header','footer','nav','main','aside','details','summary',
-                        'figure','figcaption',
-                        'form','input','button','select','option','textarea','label','fieldset','legend',
-                        'iframe','canvas','svg','math',
-                        'video','audio','source','track','embed','object','param',
-                        'map','area',
-                        'ruby','rt','rp','rb','rtc',
-                        'center', 'font', 'base'
-                    }
-                    if first in known:
-                        return m.group(0)
-
-                    # Otherwise, treat as narrative text in angle brackets and escape
                     return f'&lt;{inner}&gt;'
 
                 # Match <...> where content matches non-brackets.
@@ -1128,31 +1078,7 @@ class XHTMLConverter:
                 # because it will convert the *start tag* into literal text (&lt;a ...), breaking TOC links.
                 def repl_gt(m):
                     inner = m.group(1)
-                    if '=' in inner or inner.strip().startswith(('/', '!', '?')):
-                        return m.group(0)
-                    tokens = inner.strip().split()
-                    if not tokens:
-                        return m.group(0)
-                    first = tokens[0].lower()
-                    if first.endswith('/'):
-                        first = first[:-1]
-                    known = {
-                        'html','head','body','title','meta','link','style','script','noscript',
-                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
-                        'ul','ol','li','dl','dt','dd',
-                        'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
-                        'table','thead','tbody','tr','td','th','caption','col','colgroup',
-                        'blockquote','q','cite',
-                        'section','article','header','footer','nav','main','aside','details','summary',
-                        'figure','figcaption',
-                        'form','input','button','select','option','textarea','label','fieldset','legend',
-                        'iframe','canvas','svg','math',
-                        'video','audio','source','track','embed','object','param',
-                        'map','area',
-                        'ruby','rt','rp','rb','rtc',
-                        'center', 'font', 'base'
-                    }
-                    if first in known:
+                    if _looks_like_valid_html_tag(inner):
                         return m.group(0)
                     return f'&lt;{inner}&gt;'
 

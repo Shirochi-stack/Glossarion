@@ -4,6 +4,7 @@ from pathlib import Path
 
 import epub_converter
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
+from html_tag_entities import unescape_valid_html_tag_entities
 
 
 def test_html_entity_decoder_basic_entities():
@@ -11,6 +12,73 @@ def test_html_entity_decoder_basic_entities():
     decoded = HTMLEntityDecoder.decode(text)
     # Expect: <Hello> & "World" '!'
     assert decoded == "<Hello> & \"World\" '!'"
+
+
+def test_valid_html_tag_entities_preserve_angle_bracket_prose():
+    prose = "&lt;A talent possessing both a clean character and noble integrity. Who exactly is Riyan?&gt;"
+
+    assert unescape_valid_html_tag_entities(prose) == prose
+
+
+def test_valid_html_tag_entities_rehydrate_real_markup():
+    html = (
+        "&lt;p&gt;text&lt;/p&gt;"
+        '&lt;a href="chapter.xhtml"&gt;link&lt;/a&gt;'
+        '&lt;img src="cover.jpg" /&gt;'
+    )
+
+    assert unescape_valid_html_tag_entities(html) == (
+        "<p>text</p>"
+        '<a href="chapter.xhtml">link</a>'
+        '<img src="cover.jpg" />'
+    )
+
+
+def test_xhtml_converter_keeps_escaped_angle_bracket_prose():
+    sample = (
+        "<p>&lt;A talent possessing both a clean character and noble integrity. "
+        "Who exactly is Riyan, the new professor of the Imperial Academy?&gt;</p>"
+    )
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(sample, "Chapter 15")
+
+    assert "&lt;A talent possessing both a clean character and noble integrity." in converted
+    assert "Imperial Academy?&gt;" in converted
+    assert "<a talent=" not in converted.lower()
+
+
+def test_xhtml_converter_escapes_raw_angle_bracket_prose():
+    sample = (
+        "<p><A talent possessing both a clean character and noble integrity. "
+        "Who exactly is Riyan, the new professor of the Imperial Academy?></p>"
+    )
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(sample, "Chapter 15")
+
+    assert "&lt;A talent possessing both a clean character and noble integrity." in converted
+    assert "Imperial Academy?&gt;" in converted
+    assert "<a talent=" not in converted.lower()
+
+
+def test_xhtml_converter_empty_attr_fix_respects_epub_toggle_off(monkeypatch):
+    monkeypatch.setenv("FIX_EMPTY_ATTR_TAGS_EPUB", "0")
+    sample = '<p><a talent="" possessing="" both="" /></p>'
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(sample, "Empty Attr Off")
+
+    assert 'talent=""' in converted
+    assert 'possessing=""' in converted
+    assert "&lt;a talent possessing both" not in converted
+
+
+def test_xhtml_converter_empty_attr_fix_respects_epub_toggle_on(monkeypatch):
+    monkeypatch.setenv("FIX_EMPTY_ATTR_TAGS_EPUB", "1")
+    sample = '<p><a talent="" possessing="" both="" /></p>'
+
+    converted = epub_converter.XHTMLConverter.ensure_compliance(sample, "Empty Attr On")
+
+    assert "&lt;a talent possessing both/&gt;" in converted
+    assert 'talent=""' not in converted
 
 
 def test_html_entity_decoder_encoding_fixes_no_crash():
