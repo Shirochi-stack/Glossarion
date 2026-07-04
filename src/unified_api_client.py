@@ -2631,6 +2631,17 @@ class UnifiedClient:
             pass
         return getattr(self, 'api_key', '') or ''
 
+    def _get_active_request_key_identifier(self) -> str:
+        """Return the current thread's key identifier when available."""
+        try:
+            tls = self._get_thread_local_client()
+            tls_key_id = getattr(tls, 'key_identifier', None)
+            if getattr(tls, 'initialized', False) and tls_key_id:
+                return tls_key_id
+        except Exception:
+            pass
+        return getattr(self, 'key_identifier', '') or ''
+
     @staticmethod
     def _strip_custom_route_prefix(model: str, route: Optional[Dict[str, str]]) -> str:
         """Strip only the GUI route prefix from a model id."""
@@ -8450,8 +8461,8 @@ class UnifiedClient:
 
     def _remember_actual_request_model(self, model=None, key_identifier=None):
         """Record the concrete model selected for the current request."""
-        model_name = str(model or getattr(self, "model", "") or "").strip()
-        key_id = str(key_identifier or getattr(self, "key_identifier", "") or "").strip()
+        model_name = str(model or self._get_active_request_model() or "").strip()
+        key_id = str(key_identifier or self._get_active_request_key_identifier() or "").strip()
         if not model_name:
             return None
         try:
@@ -15303,7 +15314,7 @@ class UnifiedClient:
         Returns an empty string when nothing should be displayed.
         """
         try:
-            model_lower = (getattr(self, 'model', '') or '').lower()
+            model_lower = (self._get_active_request_model() or '').lower()
         except Exception:
             return ""
         if not model_lower:
@@ -17214,7 +17225,7 @@ class UnifiedClient:
                 if not rid:
                     tls = self._get_thread_local_client()
                     rid = getattr(tls, 'current_request_id', None)
-                _api_watchdog_mark_in_flight(rid, getattr(self, 'model', None))
+                _api_watchdog_mark_in_flight(rid, self._get_active_request_model())
             except Exception:
                 pass
 
@@ -24267,7 +24278,8 @@ class UnifiedClient:
             )
 
         # Strip the authgpt/ or authgptN/ prefix to get the actual model name
-        actual_model = self.model
+        request_model = self._get_active_request_model()
+        actual_model = request_model
         import re as _re
         _m = _re.match(r'^authgpt\d{0,4}/', actual_model)
         if _m:
@@ -24278,7 +24290,9 @@ class UnifiedClient:
             actual_model = 'gpt-5.2'  # sensible default
 
         # Extract account ID from prefix
-        account_id = getattr(self, '_authgpt_account_id', None) or self._extract_authgpt_account_id(self.model)
+        account_id = self._extract_authgpt_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authgpt_account_id', None)
 
         # Obtain a valid OAuth access token (auto-refreshes or triggers browser login)
         try:
@@ -24481,7 +24495,8 @@ class UnifiedClient:
             )
 
         # Strip the authcd/ or authcdN/ prefix to get the actual model name
-        actual_model = self.model
+        request_model = self._get_active_request_model()
+        actual_model = request_model
         import re as _re
         _m = _re.match(r'^authcd\d{0,4}/', actual_model)
         if _m:
@@ -24492,7 +24507,9 @@ class UnifiedClient:
             actual_model = 'claude-sonnet-4-6'
 
         # Extract account ID from prefix
-        account_id = getattr(self, '_authcd_account_id', None) or self._extract_authcd_account_id(self.model)
+        account_id = self._extract_authcd_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authcd_account_id', None)
 
         # Obtain a valid OAuth access token
         try:
@@ -24667,13 +24684,15 @@ class UnifiedClient:
     def _strip_authgem_prefix(self, model: str) -> str:
         """Strip any authgem* prefix (including numbered variants) and return the bare model name."""
         import re
+        model = str(model or '')
         # Numbered variants first: authgem-vertex123/model or authgem42/model
         m = re.match(r'^authgem(?:-vertex|-key)?\d{0,4}/(.*)', model, re.IGNORECASE)
         if m:
             return m.group(1).strip() or 'gemini-2.5-flash'
         # Static prefixes (no number, no slash — treat entire string as prefix)
+        model_lower = model.lower()
         for prefix in self._AUTHGEM_PREFIXES:
-            if model.startswith(prefix):
+            if model_lower.startswith(prefix):
                 return model[len(prefix):].lstrip('/') or 'gemini-2.5-flash'
         return model or 'gemini-2.5-flash'
 
@@ -24869,8 +24888,11 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        actual_model = self._strip_authgem_prefix(self.model)
-        account_id = getattr(self, '_authgem_account_id', None) or self._extract_authgem_account_id(self.model)
+        request_model = self._get_active_request_model()
+        actual_model = self._strip_authgem_prefix(request_model)
+        account_id = self._extract_authgem_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authgem_account_id', None)
 
         try:
             if _authgem_get_store_by_id is not None and account_id:
@@ -24932,10 +24954,11 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        actual_model = self._strip_authgem_prefix(self.model)
+        request_model = self._get_active_request_model()
+        actual_model = self._strip_authgem_prefix(request_model)
 
         # Use the API key supplied by the user (GUI api_key field)
-        api_key = self.api_key
+        api_key = self._get_active_request_api_key()
         if not api_key:
             raise UnifiedClientError(
                 "AuthGem-Key: No API key provided.\n"
@@ -24986,8 +25009,11 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        actual_model = self._strip_authgem_prefix(self.model)
-        account_id = getattr(self, '_authgem_account_id', None) or self._extract_authgem_account_id(self.model)
+        request_model = self._get_active_request_model()
+        actual_model = self._strip_authgem_prefix(request_model)
+        account_id = self._extract_authgem_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authgem_account_id', None)
 
         try:
             if _authgem_get_store_by_id is not None and account_id:
@@ -25215,7 +25241,8 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        actual_model = self.model
+        request_model = self._get_active_request_model()
+        actual_model = request_model
         import re as _re
         _m = _re.match(r'^search\d{0,4}/', actual_model, _re.IGNORECASE)
         if _m:
@@ -25387,7 +25414,7 @@ class UnifiedClient:
         print(f"🚀 AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
 
         cache_keys = []
-        for key in (getattr(self, 'model', None), actual_model, f"authnd/{actual_model}"):
+        for key in (request_model, actual_model, f"authnd/{actual_model}"):
             key = str(key or '').strip()
             if key and key not in cache_keys:
                 cache_keys.append(key)
@@ -25623,7 +25650,8 @@ class UnifiedClient:
             )
 
         # Strip the authza/ or authzaN/ prefix to get the actual model name
-        actual_model = self.model
+        request_model = self._get_active_request_model()
+        actual_model = request_model
         import re as _re
         _m = _re.match(r'^authza\d{0,4}/', actual_model)
         if _m:
@@ -25634,7 +25662,9 @@ class UnifiedClient:
             actual_model = 'glm-4-plus'  # sensible default
 
         # Extract account ID from prefix
-        account_id = getattr(self, '_authza_account_id', None) or self._extract_authza_account_id(self.model)
+        account_id = self._extract_authza_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authza_account_id', None)
         acct_label = f" (Account #{account_id})" if account_id else ""
 
         # Obtain a valid JWT (auto-triggers browser login if needed)
