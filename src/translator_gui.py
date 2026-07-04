@@ -5952,6 +5952,7 @@ Recent translations to summarize:
                             m = key_data.get('model', '')
                         else:
                             m = getattr(key_data, 'model', '')
+                        m = str(m or '').strip().lower()
                         for provider, pat in patterns.items():
                             match = pat.match(m)
                             if match:
@@ -5973,7 +5974,7 @@ Recent translations to summarize:
         pool_ids = self._collect_auth_account_ids_from_pools()
 
         # Also include the primary model's account ID
-        model = getattr(self, 'model_var', '') or self.config.get('model', '')
+        model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         _prov_patterns = {
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
             'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
@@ -6010,10 +6011,14 @@ Recent translations to summarize:
             combo_name = combo_map.get(provider)
             if combo_name and hasattr(self, combo_name):
                 combo = getattr(self, combo_name)
-                # Determine if the main login button for this provider is visible
+                # Determine whether this provider is configured.  Do not key this
+                # off QWidget.isVisible(): startup/login status refreshes can run
+                # while the parent row is hidden or before the button has been
+                # reshown, which made the account-slot dropdown disappear after a
+                # successful login even though authgemN/ pool entries still exist.
                 main_btn_name = f"{provider}_login_btn"
-                main_visible = hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible()
-                show_combo = len(sorted_ids) > 1 and main_visible
+                provider_configured = bool(acct_set) and hasattr(self, main_btn_name)
+                show_combo = len(sorted_ids) > 1 and provider_configured
                 if show_combo:
                     # Repopulate items (block signals to avoid triggering change handler)
                     combo.blockSignals(True)
@@ -6167,7 +6172,7 @@ Recent translations to summarize:
                         _os.remove(_cc_creds)
                     except OSError:
                         pass
-                self._update_authcd_login_status()
+                self._refresh_auth_account_arrows()
                 self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
             return
 
@@ -6177,7 +6182,7 @@ Recent translations to summarize:
             creds = _load_claude_code_credentials()
             if creds:
                 store.save_tokens(creds)
-                self._update_authcd_login_status()
+                self._refresh_auth_account_arrows()
                 self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
                 return
 
@@ -6272,13 +6277,13 @@ Recent translations to summarize:
     @Slot()
     def _authcd_login_status_changed(self):
         """Called (thread-safe) whenever AuthCD tokens are saved or cleared."""
-        self._update_authcd_login_status()
+        self._refresh_auth_account_arrows()
 
     @Slot()
     def _authcd_login_finished(self):
         """Called on GUI thread after successful AuthCD login."""
         self.authcd_login_btn.setEnabled(True)
-        self._update_authcd_login_status()
+        self._refresh_auth_account_arrows()
         acct_id = self._get_authcd_account_id()
         acct_suffix = f" #{acct_id}" if acct_id else ""
         self.append_log(f"\u2705 Claude{acct_suffix}: Logged in")
@@ -6287,7 +6292,7 @@ Recent translations to summarize:
     def _authcd_login_failed(self):
         """Called on GUI thread after AuthCD login failure."""
         self.authcd_login_btn.setEnabled(True)
-        self._update_authcd_login_status()
+        self._refresh_auth_account_arrows()
         err = getattr(self, '_authcd_login_error', 'Unknown error')
         self.append_log(f"\u274c Claude login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"Claude login failed:\n{err}")
@@ -6383,7 +6388,7 @@ Recent translations to summarize:
             )
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
-                self._update_authgpt_login_status()
+                self._refresh_auth_account_arrows()
                 self.append_log(f"\ud83d\udd13 ChatGPT{acct_suffix}: Logged out")
             return
 
@@ -6415,13 +6420,13 @@ Recent translations to summarize:
     @Slot()
     def _authgpt_login_status_changed(self):
         """Called (thread-safe) whenever AuthGPT tokens are saved or cleared."""
-        self._update_authgpt_login_status()
+        self._refresh_auth_account_arrows()
 
     @Slot()
     def _authgpt_login_finished(self):
         """Called on GUI thread after successful AuthGPT login."""
         self.authgpt_login_btn.setEnabled(True)
-        self._update_authgpt_login_status()
+        self._refresh_auth_account_arrows()
         try:
             store = self._get_authgpt_store_for_current_model()
             info = store.account_info
@@ -6438,7 +6443,7 @@ Recent translations to summarize:
     def _authgpt_login_failed(self):
         """Called on GUI thread after AuthGPT login failure."""
         self.authgpt_login_btn.setEnabled(True)
-        self._update_authgpt_login_status()
+        self._refresh_auth_account_arrows()
         err = getattr(self, '_authgpt_login_error', 'Unknown error')
         self.append_log(f"\u274c ChatGPT login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"ChatGPT login failed:\n{err}")
@@ -6785,7 +6790,7 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.clear()
                     self.authgem_project_combo.hide()
-                self._update_authgem_login_status()
+                self._refresh_auth_account_arrows()
                 self.append_log(f"🔓 Gemini{acct_suffix}: Logged out")
             return
 
@@ -6816,7 +6821,7 @@ Recent translations to summarize:
     @Slot()
     def _authgem_login_status_changed(self):
         """Called (thread-safe) whenever AuthGem tokens are saved or cleared."""
-        self._update_authgem_login_status()
+        self._refresh_auth_account_arrows()
 
     @Slot()
     def _authgem_login_finished(self):
@@ -6825,7 +6830,7 @@ Recent translations to summarize:
         # Clear and re-fetch projects for the new account
         if hasattr(self, 'authgem_project_combo'):
             self.authgem_project_combo.clear()
-        self._update_authgem_login_status()
+        self._refresh_auth_account_arrows()
         try:
             store = self._get_authgem_store_for_current_model()
             info = store.account_info
@@ -6842,7 +6847,7 @@ Recent translations to summarize:
     def _authgem_login_failed(self):
         """Called on GUI thread after AuthGem login failure."""
         self.authgem_login_btn.setEnabled(True)
-        self._update_authgem_login_status()
+        self._refresh_auth_account_arrows()
         err = getattr(self, '_authgem_login_error', 'Unknown error')
         self.append_log(f"❌ Gemini login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"Gemini login failed:\n{err}")
