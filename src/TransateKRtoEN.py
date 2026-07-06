@@ -4089,7 +4089,26 @@ class ProgressManager:
                 best_sev = severity_rank.get(existing.get("status", "unknown"), 0)
                 cur_sev = severity_rank.get(chapter_info.get("status", "unknown"), 0)
                 if (cur_sev > best_sev) or (cur_sev == best_sev and chapter_info.get("last_updated", 0) > existing.get("last_updated", 0)):
+                    loser = existing
                     new_chapters[new_key] = chapter_info
+                else:
+                    loser = chapter_info
+                # SPECIAL FILES FIX: multiple distinct special files (cover/info/
+                # notices) all share actual_num == 0, so they all collide on key
+                # "0" here. Dropping the losers destroys their refinement_status/
+                # tts_status every run, which makes multipass refinement re-send
+                # already-refined special files forever. Keep the losing chapter-0
+                # row under the same "<num>_<basename>" composite key shape that
+                # _get_chapter_key() resolves for same-number/different-file cases;
+                # the output_file fallbacks in update()/update_refinement_status()
+                # and _find_progress_entry_for_output() find it there. Non-zero
+                # collisions keep the previous behavior.
+                if str(loser.get("actual_num")) == "0":
+                    loser_norm = _normalize_out(loser.get("output_file"))
+                    if loser_norm:
+                        composite_key = f"{loser.get('actual_num')}_{loser_norm}"
+                        if composite_key not in new_chapters:
+                            new_chapters[composite_key] = loser
             else:
                 new_chapters[new_key] = chapter_info
             migrated_count += 1
@@ -15279,7 +15298,31 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     entry = dict(existing_entry)
 
         if mode == "refinement":
-            if entry.get("refinement_status") == "refined" and not preserve_multipass_qa_status:
+            # SPECIAL FILES FIX: several special files (cover/info/notices) can all
+            # share actual_num == 0, so the "already refined" decision must come from
+            # the progress row matched to THIS output file, not chapter number alone.
+            refinement_entry = entry
+            if (
+                refinement_entry.get("output_file") != output_file
+                and pre_existing_entry.get("output_file") == output_file
+            ):
+                refinement_entry = pre_existing_entry
+            refinement_state = str(refinement_entry.get("refinement_status", "") or "").strip().lower()
+            refinement_entry_num = refinement_entry.get("actual_num", refinement_entry.get("chapter_num"))
+            if (
+                str(refinement_entry_num) == "0"
+                and refinement_entry.get("output_file") == output_file
+                and refinement_state in ("refined", "completed")
+            ):
+                # This chapter-0 special file's own progress row is already refined:
+                # never re-send it, even when multipass QA preservation is active.
+                # Failed/not_refined/missing chapter-0 rows stay eligible.
+                return "skipped", None, {
+                    "kind": "already_refined",
+                    "chapter": actual_num,
+                    "reason": "special file already refined",
+                }
+            if refinement_state == "refined" and not preserve_multipass_qa_status:
                 return "skipped", None, {
                     "kind": "already_refined",
                     "chapter": actual_num,
@@ -15712,6 +15755,25 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
             pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
             pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
+
+            # SPECIAL FILES FIX: several special files (cover/info/notices) can all
+            # share actual_num == 0, and the pre-refinement QA scan can re-flag them
+            # as qa_failed while leaving refinement_status untouched. If THIS output
+            # file's own progress row is already refined, do not re-send it in
+            # partial.b2 batches. Failed/not_refined/missing chapter-0 rows stay
+            # eligible.
+            _b2_refinement_state = str(pre_existing_entry.get("refinement_status", "") or "").strip().lower()
+            _b2_entry_num = pre_existing_entry.get("actual_num", pre_existing_entry.get("chapter_num"))
+            if (
+                str(_b2_entry_num) == "0"
+                and pre_existing_entry.get("output_file") == output_file
+                and _b2_refinement_state in ("refined", "completed")
+            ):
+                return "skipped", None, {
+                    "kind": "already_refined",
+                    "chapter": actual_num,
+                    "reason": "special file already refined",
+                }
 
             if pre_existing_qa_source_entry is not None and not pre_existing_has_foreign_qa_issue:
                 return "excluded", None, {
