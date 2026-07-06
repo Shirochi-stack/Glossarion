@@ -373,6 +373,35 @@ def _payload_model_name(model_path: str) -> str:
     return model
 
 
+def _payload_model_key(model: str) -> str:
+    return str(model or "").strip("/").lower()
+
+
+def _select_payload_model(metadata_payload_model: str, model_path: str, log_fn: Optional[Callable[[str], None]] = None) -> str:
+    requested_payload_model = _payload_model_name(model_path)
+    scraped_payload_model = str(metadata_payload_model or "").strip()
+    if not scraped_payload_model:
+        return requested_payload_model
+
+    if os.getenv("AUTHND_TRUST_PAGE_PAYLOAD_MODEL", "0").lower() in ("1", "true", "yes"):
+        return scraped_payload_model
+
+    requested_key = _payload_model_key(requested_payload_model)
+    scraped_key = _payload_model_key(scraped_payload_model)
+    if scraped_key == requested_key:
+        return scraped_payload_model
+
+    hidden_variant_prefixes = (requested_key + "-", requested_key + "_")
+    if any(scraped_key.startswith(prefix) for prefix in hidden_variant_prefixes):
+        _log(
+            log_fn,
+            f"AuthND: ignoring page payload model variant {scraped_payload_model!r}; using requested model {requested_payload_model!r}",
+        )
+        return requested_payload_model
+
+    return scraped_payload_model
+
+
 def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
     with _metadata_lock:
         cached = _metadata_cache.get(page_url)
@@ -1589,7 +1618,7 @@ def _post_prediction(
     metadata = _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
     endpoint_id = metadata.get("endpoint_id") or model_id
-    payload_model = metadata.get("payload_model") or _payload_model_name(model_path)
+    payload_model = _select_payload_model(metadata.get("payload_model") or "", model_path, log_fn=log_fn)
     url = f"{API_BASE_URL}/v2/predict/models/{org_id}/{endpoint_id}"
     payload: Dict[str, Any] = {
         "messages": messages,
