@@ -99,6 +99,12 @@ def _progress_entry_refined_for_display(entry):
     return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
 
 
+def _progress_entry_refinement_failed_for_display(entry):
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get('refinement_status') or '').lower().strip() in ('failed', 'error')
+
+
 def _progress_entry_model_for_display(entry):
     if not isinstance(entry, dict):
         return ''
@@ -12439,7 +12445,9 @@ class RetranslationMixin:
                 }
                 icon = icons.get(status) or '\u2b1c'
                 status_label = status.replace('_', ' ').title()
-                if status == 'completed' and _progress_entry_refined_for_display(entry):
+                if status == 'completed' and _progress_entry_refinement_failed_for_display(entry):
+                    status_label = f"{status_label} 💀"
+                elif status == 'completed' and _progress_entry_refined_for_display(entry):
                     status_label = f"{status_label} ⭐"
                 display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
                 if issues:
@@ -12461,7 +12469,8 @@ class RetranslationMixin:
                     if not isinstance(info, dict):
                         continue
                     entry_type = str(info.get('entry_type') or key.replace('type::', '')).strip() or 'entry type'
-                    status = str(info.get('status') or 'unknown').lower()
+                    raw_status = str(info.get('status') or 'unknown').lower()
+                    status = 'refine_failed' if raw_status in ('failed', 'error') else raw_status
                     before = info.get('entry_count_before')
                     after = info.get('entry_count_after')
                     total_chunks = info.get('total_chunks')
@@ -12476,11 +12485,13 @@ class RetranslationMixin:
                         'completed': '\u2705',
                         'failed': '\u274c',
                         'qa_failed': '\u274c',
+                        'refine_failed': '💀',
                         'in_progress': '\U0001f504',
                         'not_refined': '\u2728',
                     }
                     icon = icon_map.get(status, '\u2b1c')
-                    display = f"Refinement | {icon} {status.replace('_', ' ').title():14s} | {entry_type} -> {model_name}{detail}"
+                    status_label = 'Refine Failed' if status == 'refine_failed' else status.replace('_', ' ').title()
+                    display = f"Refinement | {icon} {status_label:14s} | {entry_type} -> {model_name}{detail}"
                     rows.append((key, display, status))
                 return rows
 
@@ -12498,6 +12509,8 @@ class RetranslationMixin:
                     return '#17a2b8'
                 if status == 'in_progress':
                     return '#f59e0b'
+                if status == 'refine_failed':
+                    return '#7f5f00'
                 if status in ('failed', 'qa_failed'):
                     return '#e74c3c'
                 return '#5a9fd4'
@@ -12692,7 +12705,9 @@ class RetranslationMixin:
             n_merged = len(_merg_set_init)
             n_in_progress = len(_in_prog_set_init)
             n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
-            n_not_refined = _gp_refinement_status_counts(gp_data).get('not_refined', 0)
+            _gp_ref_counts_init = _gp_refinement_status_counts(gp_data)
+            n_not_refined = _gp_ref_counts_init.get('not_refined', 0)
+            n_refine_failed = _gp_ref_counts_init.get('refine_failed', 0)
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -12729,7 +12744,7 @@ class RetranslationMixin:
             if n_merged == 0:
                 lbl_gp_merged.setVisible(False)
             
-            lbl_gp_remaining = QLabel(f"⬜ Not Translated: {n_remaining}{' | ' if n_not_refined else ''}")
+            lbl_gp_remaining = QLabel(f"⬜ Not Translated: {n_remaining}{' | ' if (n_not_refined or n_refine_failed) else ''}")
             lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
@@ -12741,6 +12756,13 @@ class RetranslationMixin:
             lbl_gp_not_refined.setCursor(Qt.PointingHandCursor)
             lbl_gp_not_refined.setVisible(n_not_refined > 0)
             gp_stats_layout.addWidget(lbl_gp_not_refined)
+
+            lbl_gp_refine_failed = QLabel(f"💀 Refine Failed: {n_refine_failed}")
+            lbl_gp_refine_failed.setFont(gp_stats_font)
+            lbl_gp_refine_failed.setStyleSheet("color: #7f5f00;")
+            lbl_gp_refine_failed.setCursor(Qt.PointingHandCursor)
+            lbl_gp_refine_failed.setVisible(n_refine_failed > 0)
+            gp_stats_layout.addWidget(lbl_gp_refine_failed)
             
             gp_stats_layout.addStretch()
             p_layout.addWidget(gp_stats_frame)
@@ -12848,7 +12870,9 @@ class RetranslationMixin:
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
                 _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
-                _not_refined2 = _gp_refinement_status_counts(_d).get('not_refined', 0)
+                _ref_counts2 = _gp_refinement_status_counts(_d)
+                _not_refined2 = _ref_counts2.get('not_refined', 0)
+                _refine_failed2 = _ref_counts2.get('refine_failed', 0)
                 return {
                     'total': _total,
                     'completed': len(_comp2 - _merg2),
@@ -12856,6 +12880,7 @@ class RetranslationMixin:
                     'failed': len(_fail2),
                     'merged': len(_merg2),
                     'not_refined': _not_refined2,
+                    'refine_failed': _refine_failed2,
                     'remaining': max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2)),
                 }
 
@@ -12871,9 +12896,12 @@ class RetranslationMixin:
                 lbl_gp_merged.setText(f"🔗 Merged: {merged_count} | ")
                 lbl_gp_merged.setVisible(merged_count > 0)
                 not_refined = stats.get('not_refined', 0)
-                lbl_gp_remaining.setText(f"⬜ Not Translated: {stats.get('remaining', 0)}{' | ' if not_refined else ''}")
+                refine_failed = stats.get('refine_failed', 0)
+                lbl_gp_remaining.setText(f"⬜ Not Translated: {stats.get('remaining', 0)}{' | ' if (not_refined or refine_failed) else ''}")
                 lbl_gp_not_refined.setText(f"✨ Not Refined: {not_refined}")
                 lbl_gp_not_refined.setVisible(not_refined > 0)
+                lbl_gp_refine_failed.setText(f"💀 Refine Failed: {refine_failed}")
+                lbl_gp_refine_failed.setVisible(refine_failed > 0)
 
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
@@ -14155,6 +14183,7 @@ class RetranslationMixin:
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
             lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed', 'not_translated', 'no_tts'), gp_listbox)
             lbl_gp_not_refined.mousePressEvent = _gp_make_cycle(('not_refined',), gp_listbox)
+            lbl_gp_refine_failed.mousePressEvent = _gp_make_cycle(('refine_failed',), gp_listbox)
             
             p_layout.addWidget(gp_listbox)
             
@@ -14372,9 +14401,11 @@ class RetranslationMixin:
                     lbl_gp_failed.setText(f"❌ Failed: {len(result['fail'])} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(result['merg'])} | ")
                     lbl_gp_merged.setVisible(len(result['merg']) > 0)
-                    lbl_gp_remaining.setText(f"⬜ Not Translated: {result['nr']}{' | ' if result['not_refined'] else ''}")
+                    lbl_gp_remaining.setText(f"⬜ Not Translated: {result['nr']}{' | ' if (result['not_refined'] or result.get('refine_failed', 0)) else ''}")
                     lbl_gp_not_refined.setText(f"✨ Not Refined: {result['not_refined']}")
                     lbl_gp_not_refined.setVisible(result['not_refined'] > 0)
+                    lbl_gp_refine_failed.setText(f"💀 Refine Failed: {result.get('refine_failed', 0)}")
+                    lbl_gp_refine_failed.setVisible(result.get('refine_failed', 0) > 0)
                     
                     if result.get('bt') and bt_label:
                         bt_label.setText(f"📖 {result['bt']}")
@@ -14440,7 +14471,9 @@ class RetranslationMixin:
 
                             _comp, _fail, _merg = _gp_sets(_d)
                             _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
-                            _not_refined = _gp_refinement_status_counts(_d).get('not_refined', 0)
+                            _ref_counts = _gp_refinement_status_counts(_d)
+                            _not_refined = _ref_counts.get('not_refined', 0)
+                            _refine_failed = _ref_counts.get('refine_failed', 0)
                             _cache = _gp_status_cache(_d)
 
                             _item_updates = []
@@ -14459,6 +14492,7 @@ class RetranslationMixin:
                                 'cur_ts': _cur_ts,
                                 'comp': _comp, 'fail': _fail, 'merg': _merg, 'prog': _prog,
                                 'not_refined': _not_refined,
+                                'refine_failed': _refine_failed,
                                 'nr': _nr, 'total': _snap_total,
                                 'item_updates': _item_updates,
                                 'bt': _d.get('book_title', ''),
@@ -15064,7 +15098,7 @@ class RetranslationMixin:
                 pending += 1
             elif _st in ('not_translated', 'not_refined', 'no_tts'):
                 missing += 1
-            elif _st in ('failed', 'qa_failed'):
+            elif _st in ('failed', 'qa_failed', 'refine_failed'):
                 failed += 1
 
         # Create labels (outside the if/else so they always appear)
@@ -15116,9 +15150,12 @@ class RetranslationMixin:
         stats_layout.addWidget(lbl_missing)
         
         # Match list status: failed/qa_failed use ❌ and red (clickable — jumps to next failure)
-        lbl_failed = QLabel(f"❌ Failed: {failed} | ")
+        _failed_label_icon = "💀" if _current_output_mode == 'refinement' else "❌"
+        _failed_label_text = "Refine Failed" if _current_output_mode == 'refinement' else "Failed"
+        _failed_label_color = "#7f5f00" if _current_output_mode == 'refinement' else "red"
+        lbl_failed = QLabel(f"{_failed_label_icon} {_failed_label_text}: {failed} | ")
         lbl_failed.setFont(stats_font)
-        lbl_failed.setStyleSheet("color: red;")
+        lbl_failed.setStyleSheet(f"color: {_failed_label_color};")
         lbl_failed.setCursor(Qt.PointingHandCursor)
         stats_layout.addWidget(lbl_failed)
 
@@ -15204,7 +15241,7 @@ class RetranslationMixin:
         lbl_in_progress.mousePressEvent = _make_cycle_handler(('in_progress',))
         lbl_pending.mousePressEvent     = _make_cycle_handler(('pending',))
         lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated', 'not_refined', 'no_tts'))
-        lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
+        lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed', 'refine_failed'))
         lbl_skipped.mousePressEvent     = _make_cycle_handler(('skipped',))
         
         # Large progress lists are populated after result setup so the dialog can paint first.
@@ -15302,7 +15339,7 @@ class RetranslationMixin:
                     payload = item.data(Qt.UserRole) or {}
                     display_status = self._progress_display_status(payload.get('info', {}), data)
                 if status_to_select == 'failed':
-                    matched = display_status in ['failed', 'qa_failed']
+                    matched = display_status in ['failed', 'qa_failed', 'refine_failed']
                 elif status_to_select == 'qa_failed':
                     matched = display_status == 'qa_failed'
                 else:
@@ -18156,7 +18193,7 @@ class RetranslationMixin:
         if mode == 'refinement':
             ref_status = ref_status or 'not_refined'
             if ref_status in ('failed', 'error'):
-                return 'failed'
+                return 'refine_failed'
             if ref_status == 'in_progress':
                 return 'in_progress'
             if ref_status not in ('refined', 'completed'):
@@ -18178,6 +18215,16 @@ class RetranslationMixin:
             if not isinstance(entry, dict):
                 return False
             return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
+        except Exception:
+            return False
+
+    def _progress_entry_refinement_failed(self, info):
+        """Return True when translation completed but refinement failed."""
+        try:
+            entry = info.get('progress_entry') or info.get('info') or info
+            if not isinstance(entry, dict):
+                return False
+            return str(entry.get('refinement_status') or '').lower().strip() in ('failed', 'error')
         except Exception:
             return False
 
@@ -18365,6 +18412,7 @@ class RetranslationMixin:
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
+            'refine_failed': '💀',
             'in_progress': '🔄',
             'pending': '❓',
             'not_translated': '⬜',
@@ -18378,6 +18426,7 @@ class RetranslationMixin:
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
+            'refine_failed': 'Refine Failed',
             'in_progress': 'In Progress',
             'pending': 'Pending',
             'not_translated': 'Not Translated',
@@ -18393,7 +18442,9 @@ class RetranslationMixin:
         output_display = self._progress_model_column_text(info, data, output_file)
         icon = status_icons.get(status, '❓')
         status_label = status_labels.get(status, status)
-        if status == 'completed' and self._progress_entry_is_refined(info):
+        if status == 'completed' and self._progress_entry_refinement_failed(info):
+            status_label = f"{status_label} 💀"
+        elif status == 'completed' and self._progress_entry_is_refined(info):
             status_label = f"{status_label} ⭐"
         chapter_info = info.get('info') or info.get('progress_entry') or {}
         ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
@@ -18452,6 +18503,8 @@ class RetranslationMixin:
             item.setForeground(QColor('#17a2b8'))
         elif status in ['failed', 'qa_failed']:
             item.setForeground(QColor('red'))
+        elif status == 'refine_failed':
+            item.setForeground(QColor('#7f5f00'))
         elif status == 'not_translated':
             item.setForeground(QColor('#2b6cb0'))
         elif status in ['not_refined', 'no_tts']:
@@ -18646,7 +18699,7 @@ class RetranslationMixin:
                             labels['pending'] = child
                         elif text.startswith('⬜ Not Translated:') or text.startswith('✨ Not Refined:') or text.startswith('🔊 No TTS:'):
                             labels['missing'] = child
-                        elif text.startswith('❌ Failed:'):
+                        elif text.startswith('❌ Failed:') or text.startswith('💀 Refine Failed:'):
                             labels['failed'] = child
                         elif text.startswith('⏭️ Skipped:'):
                             labels['skipped'] = child
@@ -18695,7 +18748,7 @@ class RetranslationMixin:
                 in_progress = sum(1 for status in display_statuses if status == 'in_progress')
                 pending = sum(1 for status in display_statuses if status == 'pending')
                 missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
-                failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed'])
+                failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed', 'refine_failed'])
             
             # Update labels
             if 'total' in stats_labels:
@@ -18725,7 +18778,11 @@ class RetranslationMixin:
                 missing_label = "✨ Not Refined" if mode == 'refinement' else ("🔊 No TTS" if mode == 'audio' else "⬜ Not Translated")
                 stats_labels['missing'].setText(f"{missing_label}: {missing} | ")
             if 'failed' in stats_labels:
-                stats_labels['failed'].setText(f"❌ Failed: {failed} | ")
+                mode = self._current_progress_output_mode(data)
+                failed_icon = "💀" if mode == 'refinement' else "❌"
+                failed_label = "Refine Failed" if mode == 'refinement' else "Failed"
+                stats_labels['failed'].setText(f"{failed_icon} {failed_label}: {failed} | ")
+                stats_labels['failed'].setStyleSheet(f"color: {'#7f5f00' if mode == 'refinement' else 'red'};")
             if 'skipped' in stats_labels:
                 stats_labels['skipped'].setText(f"⏭️ Skipped: {skipped}")
                 stats_labels['skipped'].setVisible(skipped > 0)
