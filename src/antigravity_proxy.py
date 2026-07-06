@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-06-29-numbered-antigravity-accounts"
+RUNTIME_PATCH_VERSION = "2026-07-06-antigravity-finish-reason-mapping"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -379,6 +379,94 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
     )
 
 
+def _patch_runtime_finish_reason_mapping(runtime_dir: str) -> bool:
+    """Keep Google finish reasons truthful when converting to OpenAI chunks."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    if not os.path.exists(transform_path):
+        return False
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    updated = content
+    changed = False
+
+    finish_reason_source = (
+        "  const finishReason = candidate.finishReason ?? candidate.finish_reason ?? "
+        "candidate.finishReasonEnum ?? candidate.finish_reason_enum;"
+    )
+    if finish_reason_source not in updated:
+        updated, count = re.subn(
+            r'  const finishReason = candidate\.finishReason;',
+            finish_reason_source,
+            updated,
+            count=1,
+        )
+        changed = changed or count > 0
+
+    marker = "const finishReasonCode = Number(finishReason);"
+    replacement = '''  let openaiFinishReason: string | null = null;
+  if (finishReason !== undefined && finishReason !== null) {
+    const finishReasonText = String(finishReason);
+    const finishReasonUpper = finishReasonText.toUpperCase();
+    const finishReasonCode = Number(finishReason);
+    if (toolCalls.length > 0 || hasPriorToolCalls) {
+      openaiFinishReason = "tool_calls";
+    } else if (finishReasonCode === 2 || (finishReasonUpper.includes("MAX") && finishReasonUpper.includes("TOKEN"))) {
+      openaiFinishReason = "length";
+    } else if (finishReasonCode === 1 || finishReasonUpper === "STOP" || finishReasonUpper.endsWith("_STOP")) {
+      openaiFinishReason = "stop";
+    } else if (
+      finishReasonCode === 3 ||
+      finishReasonCode === 4 ||
+      finishReasonCode === 6 ||
+      finishReasonCode === 7 ||
+      finishReasonCode === 8 ||
+      finishReasonUpper.includes("SAFETY") ||
+      finishReasonUpper.includes("RECITATION") ||
+      finishReasonUpper.includes("BLOCK") ||
+      finishReasonUpper.includes("PROHIBITED") ||
+      finishReasonUpper.includes("SPII")
+    ) {
+      openaiFinishReason = "content_filter";
+    } else if (finishReasonCode === 9 || finishReasonUpper.includes("MALFORMED_FUNCTION_CALL")) {
+      openaiFinishReason = "tool_calls";
+    } else {
+      openaiFinishReason = finishReasonText.toLowerCase();
+    }
+  }'''
+
+    if marker not in updated:
+        updated, count = re.subn(
+            r'  let openaiFinishReason: string \| null = null;\n'
+            r'  if \(finishReason\) \{\n'
+            r'    if \(toolCalls\.length > 0 \|\| hasPriorToolCalls\) \{\n'
+            r'      openaiFinishReason = "tool_calls";\n'
+            r'    \} else if \(finishReason === "STOP"\) \{\n'
+            r'      openaiFinishReason = "stop";\n'
+            r'    \} else if \(finishReason === "MAX_TOKENS"\) \{\n'
+            r'      openaiFinishReason = "length";\n'
+            r'    \} else if \(finishReason === "SAFETY"\) \{\n'
+            r'      openaiFinishReason = "content_filter";\n'
+            r'    \} else if \(finishReason === "MALFORMED_FUNCTION_CALL"\) \{\n'
+            r'      openaiFinishReason = "tool_calls";\n'
+            r'    \} else \{\n'
+            r'      openaiFinishReason = "stop";\n'
+            r'    \}\n'
+            r'  \}',
+            replacement,
+            updated,
+            count=1,
+        )
+        changed = changed or count > 0
+
+    if changed:
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    return marker in updated and finish_reason_source in updated
+
+
 def _patch_runtime_account_reset_support(runtime_dir: str) -> bool:
     """Ensure proxy reset endpoints clear stale unsupported-model flags."""
     patches = [
@@ -583,6 +671,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive did not contain ANTIGRAVITY_VERSION")
         if not _patch_runtime_gemini35_flash_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
+        if not _patch_runtime_finish_reason_mapping(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for finish reason mapping")
         if not _patch_runtime_account_reset_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         if not _patch_runtime_forced_account_support(archive_root):
@@ -629,6 +719,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
             return False
         if not _patch_runtime_gemini35_flash_support(runtime_dir):
+            return False
+        if not _patch_runtime_finish_reason_mapping(runtime_dir):
             return False
         if not _patch_runtime_account_reset_support(runtime_dir):
             return False
