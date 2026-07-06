@@ -15421,7 +15421,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         if (
                             not refined_batch
                             or not str(refined_batch).strip()
-                            or finish_reason in ("content_filter", "prohibited_content", "error")
+                            or str(finish_reason or "").strip().lower() not in ("stop", "complete", "end_turn", "finished")
                         ):
                             raise RuntimeError(
                                 f"Partial batch refinement returned no usable content for Chapter {actual_num} "
@@ -15529,7 +15529,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         if (
                             not refined_fragment
                             or not str(refined_fragment).strip()
-                            or finish_reason in ("content_filter", "prohibited_content", "error")
+                            or str(finish_reason or "").strip().lower() not in ("stop", "complete", "end_turn", "finished")
                         ):
                             raise RuntimeError(
                                 f"Partial refinement returned no usable content for fragment {target_index}/{len(partial_targets)} "
@@ -15572,7 +15572,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         bypass_graceful_stop=True,
                         before_send_callback=_mark_refinement_progress_on_send,
                     )
-                    if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
+                    if (
+                        not refined
+                        or not str(refined).strip()
+                        or str(finish_reason or "").strip().lower() not in ("stop", "complete", "end_turn", "finished")
+                    ):
                         raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
                     refined = _strip_refinement_code_fence(refined)
                     if enhanced_chapter_info is not None:
