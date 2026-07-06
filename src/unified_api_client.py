@@ -10916,9 +10916,18 @@ class UnifiedClient:
             configured_fallbacks = json.loads(fallback_keys_json)
             # Filter to only enabled keys with valid data
             raw_fallback_count = len(configured_fallbacks) if isinstance(configured_fallbacks, list) else 0
-            configured_fallbacks = [fb for fb in configured_fallbacks if fb.get('enabled') is not False and fb.get('api_key') and fb.get('model')]
+            def _valid_direct_fallback(fb):
+                if not isinstance(fb, dict) or fb.get('enabled') is False:
+                    return False
+                model = fb.get('model')
+                if not model:
+                    return False
+                api_key = fb.get('api_key')
+                return bool(api_key) or not self._key_data_needs_api_key(fb, model)
+
+            configured_fallbacks = [fb for fb in configured_fallbacks if _valid_direct_fallback(fb)]
             if not configured_fallbacks:
-                print(f"[FALLBACK DIRECT] No enabled fallback keys available ({raw_fallback_count} configured, all disabled/invalid)")
+                print(f"[FALLBACK DIRECT] No usable fallback entries available ({raw_fallback_count} configured; all disabled, missing model, or missing a required API key)")
                 del tls.tried_fallback_direct_per_request[request_id]
                 return None
             print(f"[FALLBACK DIRECT] 🔑 Loaded {len(configured_fallbacks)} fallback key{'s' if len(configured_fallbacks) != 1 else ''}")
