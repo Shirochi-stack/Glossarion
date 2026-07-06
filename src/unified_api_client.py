@@ -25141,7 +25141,13 @@ class UnifiedClient:
                 )
 
                 content = result.get("content", "")
-                finish_reason = result.get("finish_reason", "stop")
+                finish_reason = self._normalize_finish_reason(result.get("finish_reason", "stop")) or "stop"
+                if finish_reason == "stop" and not str(content or "").strip():
+                    result["original_finish_reason"] = finish_reason
+                    result["finish_reason"] = "prohibited_content"
+                    result["finish_reason_fallback"] = "antigravity_empty_stop_response"
+                    finish_reason = "prohibited_content"
+                    print("Antigravity: empty stop response treated as prohibited_content")
                 usage = result.get("usage")
 
                 return UnifiedResponse(
