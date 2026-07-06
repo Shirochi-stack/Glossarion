@@ -101,6 +101,93 @@ def _is_externally_stopped() -> bool:
     return False
 
 
+_GEMINI_FINISH_REASON_MAP = {
+    "STOP": "stop",
+    "MAX_TOKENS": "length",
+    "SAFETY": "content_filter",
+    "RECITATION": "content_filter",
+    "FINISH_REASON_UNSPECIFIED": "stop",
+    "BLOCKLIST": "safety",
+    "PROHIBITED_CONTENT": "prohibited_content",
+    "SPII": "safety",
+    "LANGUAGE": "other",
+    "OTHER": "other",
+    "MALFORMED_FUNCTION_CALL": "tool_calls",
+}
+
+_GEMINI_FINISH_REASON_INT_MAP = {
+    0: "stop",
+    1: "stop",
+    2: "length",
+    3: "content_filter",
+    4: "content_filter",
+    5: "other",
+    6: "other",
+    7: "safety",
+    8: "prohibited_content",
+    9: "safety",
+    10: "tool_calls",
+}
+
+
+def _candidate_finish_reason(candidate: Dict[str, Any]) -> Any:
+    """Read Gemini finish reasons across Code Assist/Vertex response shapes."""
+    if not isinstance(candidate, dict):
+        return None
+    for key in ("finishReason", "finish_reason", "finishReasonEnum", "finish_reason_enum"):
+        value = candidate.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_gemini_finish_reason(finish_reason: Any) -> str:
+    """Map Gemini finish reasons to OpenAI-style values without hiding unknowns."""
+    if finish_reason in (None, ""):
+        return "stop"
+
+    if isinstance(finish_reason, int) and not isinstance(finish_reason, bool):
+        return _GEMINI_FINISH_REASON_INT_MAP.get(finish_reason, str(finish_reason))
+
+    raw = str(finish_reason).strip()
+    if not raw:
+        return "stop"
+
+    try:
+        numeric_reason = int(raw)
+    except (TypeError, ValueError):
+        numeric_reason = None
+    if numeric_reason is not None:
+        return _GEMINI_FINISH_REASON_INT_MAP.get(numeric_reason, raw.lower())
+
+    reason = raw.upper().split(".")[-1]
+    if reason in _GEMINI_FINISH_REASON_MAP:
+        return _GEMINI_FINISH_REASON_MAP[reason]
+
+    if reason.startswith("FINISH_REASON_"):
+        reason_suffix = reason[len("FINISH_REASON_"):]
+        if reason_suffix in _GEMINI_FINISH_REASON_MAP:
+            return _GEMINI_FINISH_REASON_MAP[reason_suffix]
+
+    if "MAX" in reason and "TOKEN" in reason:
+        return "length"
+    if reason == "STOP" or reason.endswith("_STOP"):
+        return "stop"
+    if "PROHIBITED" in reason:
+        return "prohibited_content"
+    if (
+        "SAFETY" in reason
+        or "RECITATION" in reason
+        or "BLOCK" in reason
+        or "SPII" in reason
+    ):
+        return "content_filter"
+    if "MALFORMED_FUNCTION_CALL" in reason:
+        return "tool_calls"
+
+    return raw.lower()
+
+
 # ===========================================================================
 # Constants – Gemini CLI OAuth client (same as google-gemini/gemini-cli)
 # ===========================================================================
@@ -1971,7 +2058,7 @@ def _stream_gemini_common(
         thought_parts = []
         finish_reason = "STOP"
         for candidate in data.get("candidates", []):
-            fr = candidate.get("finishReason", "")
+            fr = _candidate_finish_reason(candidate)
             if fr:
                 finish_reason = fr
             for part in candidate.get("content", {}).get("parts", []):
@@ -2005,19 +2092,7 @@ def _stream_gemini_common(
             _log("⚠️ AuthGem: Empty response — no text received.")
 
         # Map Gemini finish reasons to OpenAI-style (same mapping as streaming path)
-        _ns_finish_reason_map = {
-            "STOP": "stop",
-            "MAX_TOKENS": "length",
-            "SAFETY": "content_filter",
-            "RECITATION": "content_filter",
-            "FINISH_REASON_UNSPECIFIED": "stop",
-            "BLOCKLIST": "safety",
-            "PROHIBITED_CONTENT": "prohibited_content",
-            "SPII": "safety",
-            "LANGUAGE": "other",
-            "OTHER": "other",
-        }
-        mapped_finish_reason = _ns_finish_reason_map.get(finish_reason, finish_reason.lower() if finish_reason else "stop")
+        mapped_finish_reason = _normalize_gemini_finish_reason(finish_reason)
 
         return {
             "content": final_content,
@@ -2109,7 +2184,7 @@ def _process_gemini_sse_line(
     candidates = data.get("candidates", [])
     for candidate in candidates:
         # Update finish reason from the last candidate
-        fr = candidate.get("finishReason", "")
+        fr = _candidate_finish_reason(candidate)
         if fr:
             state["finish_reason"] = fr
 
@@ -2268,20 +2343,8 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
         _log("⚠️ AuthGem: Empty response — no text received.")
 
     # Map Gemini finish reasons to OpenAI-style
-    finish_reason_map = {
-        "STOP": "stop",
-        "MAX_TOKENS": "length",
-        "SAFETY": "content_filter",
-        "RECITATION": "content_filter",
-        "FINISH_REASON_UNSPECIFIED": "stop",
-        "BLOCKLIST": "safety",
-        "PROHIBITED_CONTENT": "prohibited_content",
-        "SPII": "safety",
-        "LANGUAGE": "other",
-        "OTHER": "other",
-    }
     raw_fr = state["finish_reason"]
-    mapped_reason = finish_reason_map.get(raw_fr, raw_fr.lower() if raw_fr else "stop")
+    mapped_reason = _normalize_gemini_finish_reason(raw_fr)
 
     # Extract usage
     usage = None
