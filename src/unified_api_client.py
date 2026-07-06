@@ -25393,7 +25393,8 @@ class UnifiedClient:
                 error_type="config_error"
             )
 
-        actual_model = self.model
+        request_model = self._get_active_request_model()
+        actual_model = request_model
         import re as _re
         _m = _re.match(r'^authnd\d{0,4}/', actual_model, _re.IGNORECASE)
         if _m:

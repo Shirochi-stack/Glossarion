@@ -363,13 +363,13 @@ def get_model_options() -> List[str]:
         "authnd/mistralai/mistral-7b-instruct-v0.3",
         "authnd/mistralai/mixtral-8x22b-instruct-v0.1",
         "authnd/mistralai/mixtral-8x7b-instruct-v0.1",
-        "authnd/z-ai/glm-5.1",
+        "authnd/z-ai/glm-5.2",
 
         # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
         "nd/mistralai/mistral-medium-3.5-128b",
         "nd/deepseek-ai/deepseek-v4-flash",
         "nd/deepseek-ai/deepseek-v4-pro",
-        "nd/z-ai/glm-5.1",
+        "nd/z-ai/glm-5.2",
         "nd/minimaxai/minimax-m2.7",
         "nd/google/gemma-4-31b-it",
         "nd/minimaxai/minimax-m2.5",
