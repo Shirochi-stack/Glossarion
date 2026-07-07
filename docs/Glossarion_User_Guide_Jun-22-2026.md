@@ -619,6 +619,7 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
 | **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **free Google AI Studio key** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Gemini coding endpoint** | `authgem/...` | A **Google login** (🔐 button) | Free, but throttled to **1 request per minute (RPM)**. |
+| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login** plus **Node.js LTS or Bun** for compiled `.exe` builds | Free Cloud Code routing through a local proxy on `localhost:3000` using `frieser/antigravity-proxy`; see [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds). |
 | **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **free OpenRouter key** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
 | **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
 | **Your own local AI** | your model name (e.g. `llama3`) | **LM Studio or Ollama** on your PC | Free and private, but quality and speed depend on your computer. |
@@ -640,13 +641,16 @@ Go to Google AI Studio, create a **free API key** (this is a *Google AI Studio k
 **5. `authgem/` — Gemini's coding endpoint (free, but slow).**
 Log in with the **🔐 Gemini Login** and use an `authgem/...` model. This routes through **Gemini's coding endpoint**, which is free but **capped at 1 request per minute**. Fine for slow background translation; frustrating if you're in a hurry. (Tip: raise your **API call delay** in Section 6 so you don't trip the limit.)
 
-**6. `or/` — free models on OpenRouter.**
+**6. `antigravity/` — Antigravity through the local proxy.**
+Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `frieser/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds)**.
+
+**7. `or/` — free models on OpenRouter.**
 Make a **free OpenRouter key** and type an OpenRouter model with the `:free` suffix, e.g. `or/deepseek/deepseek-v4-flash:free`. OpenRouter rotates which models are free, so check their site for the current `:free` list.
 
-**7. `google-translate-free` — free machine translation.**
+**8. `google-translate-free` — free machine translation.**
 Type exactly `google-translate-free` in the Model box. This is **classic machine translation** (like the Google Translate website), not an AI model — so it needs no key and costs nothing, but it won't follow your profile/glossary or keep long-range context. Good for a rough, instant draft.
 
-**8. Host your own local AI (totally free, fully private).**
+**9. Host your own local AI (totally free, fully private).**
 Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. Full setup (all three ways to connect a local model) is in **[Section 9](#9-local-ai--custom-endpoints--the-3-methods)**.
 
 > **✅ Best free starting point:** try **`authnd/`** (zero setup) or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
@@ -657,7 +661,7 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 
 ## 18. Antigravity proxy setup for compiled `.exe` builds
 
-Antigravity models use a **local helper server** called the **Antigravity proxy**. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
+Antigravity models use a **local helper server** called the **Antigravity proxy**, based on the `frieser/antigravity-proxy` repository. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
 
 ### What the user must install
 
