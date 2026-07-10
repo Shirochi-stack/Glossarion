@@ -901,6 +901,103 @@ def is_cancelled() -> bool:
     return _cancel_event.is_set()
 
 
+# ---------------------------------------------------------------------------
+# Proxy log forwarding (SSE)
+# ---------------------------------------------------------------------------
+# The Bun proxy prints its per-attempt diagnostics ("[Request] Model: ...",
+# "[Error] Google API (...) returned 429 (quota_exhausted): ...") only to its
+# own console window, so the GUI never sees them. The proxy mirrors every
+# console line to Server-Sent Events at /api/sse; Glossarion subscribes there
+# and forwards error lines into the GUI log.
+#
+# Control with ANTIGRAVITY_FORWARD_PROXY_LOGS:
+#   "errors" (default) - forward [ERROR]/[WARN] proxy console lines
+#   "all"              - forward every proxy console line
+#   "off"              - disable forwarding
+
+_proxy_log_thread: Optional[threading.Thread] = None
+_proxy_log_thread_lock = threading.Lock()
+_proxy_log_sink = _log_noop
+
+
+def _proxy_log_forward_mode() -> str:
+    mode = os.environ.get("ANTIGRAVITY_FORWARD_PROXY_LOGS", "errors").strip().lower()
+    if mode in ("", "1", "true", "yes", "on", "error", "errors"):
+        return "errors"
+    if mode in ("0", "false", "no", "off", "none"):
+        return "off"
+    return "all"
+
+
+def _forward_proxy_log_line(line: str) -> None:
+    line = (line or "").strip()
+    if not line:
+        return
+    mode = _proxy_log_forward_mode()
+    if mode == "off":
+        return
+    if mode == "errors":
+        upper = line.upper()
+        if "[ERROR]" not in upper and "[WARN]" not in upper:
+            return
+    sink = _proxy_log_sink
+    try:
+        sink(f"🛸 Antigravity proxy: {line[:2000]}")
+    except Exception:
+        pass
+
+
+def _proxy_log_forwarder_loop() -> None:
+    sse_url = f"{get_proxy_url()}/api/sse"
+    while True:
+        try:
+            with requests.get(sse_url, stream=True, timeout=(5, None)) as resp:
+                if resp.status_code == 200:
+                    event_name = ""
+                    data_lines: List[str] = []
+                    for raw in resp.iter_lines(decode_unicode=True):
+                        if raw is None:
+                            continue
+                        if raw == "":
+                            # Blank line = end of one SSE event. Only forward
+                            # live "log" events; the "init" event replays old
+                            # buffered logs and is skipped.
+                            if event_name == "log" and data_lines:
+                                try:
+                                    payload = json.loads("\n".join(data_lines))
+                                    _forward_proxy_log_line(str(payload.get("message") or ""))
+                                except Exception:
+                                    pass
+                            event_name = ""
+                            data_lines = []
+                            continue
+                        if raw.startswith("event:"):
+                            event_name = raw[len("event:"):].strip()
+                        elif raw.startswith("data:"):
+                            data_lines.append(raw[len("data:"):].lstrip())
+        except Exception:
+            pass
+        # Proxy not running yet or connection dropped - retry shortly.
+        time.sleep(5)
+
+
+def _ensure_proxy_log_forwarder(log_fn=None) -> None:
+    """Mirror proxy console errors into the caller's log function (GUI log)."""
+    global _proxy_log_thread, _proxy_log_sink
+    if log_fn is not None and log_fn is not _log_noop:
+        _proxy_log_sink = log_fn
+    if _proxy_log_forward_mode() == "off":
+        return
+    with _proxy_log_thread_lock:
+        if _proxy_log_thread is None or not _proxy_log_thread.is_alive():
+            _proxy_log_thread = threading.Thread(
+                target=_proxy_log_forwarder_loop,
+                name="antigravity-proxy-log-forwarder",
+                daemon=True,
+            )
+            _proxy_log_thread.start()
+
+
 def _open_auth_browser_once(proxy_url: str, log_fn=None) -> bool:
     """Open the proxy OAuth URL in the browser, but only once per session."""
     global _auth_browser_opened
@@ -1756,6 +1853,7 @@ def send_message(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
     _log = log_fn or _log_noop
+    _ensure_proxy_log_forwarder(_log)
     _ensure_account_slot_available(account_id, proxy_url, _log)
     headers = _build_headers(account_id)
     _log(f"🚀 Antigravity: sending to {proxy_url} (model={payload['model']})")
@@ -1969,6 +2067,7 @@ def send_message_stream(
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
     _log = log_fn or _log_noop
+    _ensure_proxy_log_forwarder(_log)
     _ensure_account_slot_available(account_id, proxy_url, _log)
     headers = _build_headers(account_id)
     _log(f"🌊 Antigravity: streaming from {proxy_url} (model={payload['model']})")
