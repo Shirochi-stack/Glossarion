@@ -25204,7 +25204,8 @@ class UnifiedClient:
                     break
 
                 # Rate limit / quota exhausted
-                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA_EXHAUSTED" in error_str:
+                if self._is_rate_limit_error(exc) or "resource_exhausted" in error_str.lower() or "insufficient_quota" in error_str.lower():
+                    last_error = exc
                     if attempt < max_retries - 1:
                         delay = self._get_send_interval() * (attempt + 1)
                         print(f"⏳ Antigravity: Rate limited – retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
@@ -25238,9 +25239,10 @@ class UnifiedClient:
                     time.sleep(self._get_send_interval())
                     continue
 
+        final_error_type = "rate_limit" if last_error is not None and self._is_rate_limit_error(last_error) else "api_error"
         raise UnifiedClientError(
             f"Antigravity request failed after {max_retries} attempts: {last_error}",
-            error_type="api_error"
+            error_type=final_error_type
         )
 
     def _send_search_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:

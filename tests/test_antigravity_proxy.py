@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 
@@ -218,6 +219,104 @@ def test_antigravity_token_limit_log_reports_clamp():
 def test_min_accounts_for_auth_retry_follows_numbered_prefix_slots():
     assert antigravity_proxy._min_accounts_for_auth_retry("Quota Exhausted: All accounts failed") == 1
     assert antigravity_proxy._min_accounts_for_auth_retry("No accounts configured", account_id=2) == 2
+
+
+def test_quota_access_denied_does_not_trigger_auth_wait(monkeypatch):
+    monkeypatch.setattr(antigravity_proxy, "_proxy_has_accounts", lambda: True)
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Access denied: quota_exhausted",
+                "type": "access_denied",
+                "code": "403",
+            }
+        }
+    )
+
+    assert antigravity_proxy._error_text_suggests_rate_limit(body) is True
+    assert antigravity_proxy._should_wait_for_auth_status_error(403, body) is False
+
+
+def test_proxy_status_message_includes_quota_and_cooldown_context(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "antigravity-accounts.json"
+    accounts_file.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "email": "limited@example.test",
+                        "refreshToken": "redacted",
+                        "quota": [
+                            {
+                                "groupName": "Gemini 3 Flash",
+                                "quotaLeft": "0%",
+                                "resetIn": "12m",
+                            }
+                        ],
+                        "cooldowns": {
+                            "sandbox|Gemini 3 Flash": int((time.time() + 90) * 1000),
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTIGRAVITY_ACCOUNTS_FILE", str(accounts_file))
+
+    message = antigravity_proxy._format_proxy_status_message(
+        403,
+        json.dumps({"error": {"message": "Access denied: quota_exhausted"}}),
+        payload={"model": "antigravity-gemini-3-flash"},
+        account_id=1,
+    )
+
+    assert "quota_exhausted" in message
+    assert "Antigravity quota/rate limit detail" in message
+    assert "limited@example.test" in message
+    assert "cooldown sandbox|Gemini 3 Flash resets in" in message
+    assert "Gemini 3 Flash 0% left, reset in 12m" in message
+
+
+def test_proxy_status_message_prioritizes_upstream_429_over_final_403():
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Access denied: unknown_error - API disabled",
+                "type": "access_denied",
+                "code": "403",
+                "attempts": [
+                    {
+                        "email": "limited@example.test",
+                        "status": 429,
+                        "reason": "quota_exhausted",
+                        "message": "Individual quota reached. Resets in 112h0m45s.",
+                    },
+                    {
+                        "email": "limited@example.test",
+                        "status": 403,
+                        "reason": "unknown_error",
+                        "message": "API disabled",
+                    },
+                ],
+            }
+        }
+    )
+
+    message = antigravity_proxy._format_proxy_status_message(
+        403,
+        body,
+        payload={"model": "antigravity-gemini-3.5-flash-low"},
+        account_id=3,
+    )
+
+    assert "Antigravity: HTTP 429" in message
+    assert "HTTP 429" in message
+    assert "quota_exhausted" in message
+    assert "Individual quota reached. Resets in 112h0m45s." in message
+    assert "HTTP 403" not in message
+    assert "API disabled" not in message
+    assert "Antigravity quota/rate limit detail" in message
 
 
 def test_numbered_antigravity_prefix_forces_account_header(monkeypatch):
@@ -517,6 +616,74 @@ def test_patch_runtime_forced_account_support(tmp_path):
     assert "X-Antigravity-Account" in server
     assert "!account && !forcedAccountEmail" in server
     assert "export async function getAccountByEmail" in manager
+
+
+def test_patch_runtime_verbose_access_denied_preserves_upstream_details(tmp_path):
+    server_file = tmp_path / "src" / "server.ts"
+    errors_file = tmp_path / "src" / "utils" / "errors.ts"
+    server_file.parent.mkdir(parents=True)
+    errors_file.parent.mkdir(parents=True)
+    server_file.write_text(
+        "const attemptLogs: Array<{ email: string, status: number, reason: string }> = [];\n"
+        "attemptLogs.push({ email: account.email, status, reason: parsedError.reason });\n"
+        '                   await updateAccountUsage(account.email, false, openaiBody.model, useCliPool ? "cli" : "sandbox", clientId, status);\n'
+        '                   return new Response(JSON.stringify({ \n'
+        '                       error: { message: "Access denied: " + parsedError.reason, type: "access_denied", code: status.toString() } \n'
+        '                   }), { \n'
+        '                       status, \n'
+        '                       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Antigravity-Attempts": attempts.toString() } \n'
+        '                   });\n',
+        encoding="utf-8",
+    )
+    errors_file.write_text(
+        'export function parseGoogleError(body: string): { message?: string; status: number; } {\n'
+        '  let reason = "unknown_error";\n'
+        "  let validationUrl: string | undefined;\n"
+        "  let isQuotaExhausted = false;\n"
+        "  let isChallengeRequired = false;\n"
+        "  let isModelUnsupported = false;\n"
+        "  let status = 500;\n"
+        "  let message: string | undefined;\n"
+        "  const json = JSON.parse(body);\n"
+        "  const err = json.error;\n"
+        "  if (err) {\n"
+        "      message = err.message;\n"
+        '      if (err.status === "RESOURCE_EXHAUSTED" || err.message?.includes("quota")) {\n'
+        "        isQuotaExhausted = true;\n"
+        '        reason = "quota_exhausted";\n'
+        "        status = 429;\n"
+        "      }\n"
+        "      if (err.details) {\n"
+        "        for (const detail of err.details) {\n"
+        '          if (detail.reason === "RATE_LIMIT_EXCEEDED") {\n'
+        "            isQuotaExhausted = true;\n"
+        '            reason = "quota_exhausted";\n'
+        "            status = 429;\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "  }\n"
+        "  return { reason, validationUrl, isQuotaExhausted, isChallengeRequired, isModelUnsupported, status };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_verbose_access_denied(str(tmp_path))
+
+    server = server_file.read_text(encoding="utf-8")
+    errors = errors_file.read_text(encoding="utf-8")
+    assert 'message: "Access denied: " + parsedError.reason' not in server
+    assert "accessDeniedMessage" in server
+    assert "body: errText.slice(0, 2000)" in server
+    assert "hasQuotaAttempt" in server
+    assert "Quota exhausted:" in server
+    assert "status: accessDeniedStatus" in server
+    assert "attempts: responseAttempts" in server
+    assert "google_body" in server
+    assert "insufficient_quota" in server
+    assert "combinedErrorText" in errors
+    assert "detailText" in errors
+    assert "status, message" in errors
 
 
 def test_account_summary_strips_tokens_and_reports_unsupported_models():

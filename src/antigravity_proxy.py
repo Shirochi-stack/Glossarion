@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-07-06-antigravity-finish-reason-mapping"
+RUNTIME_PATCH_VERSION = "2026-07-10-antigravity-quota-priority"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -586,6 +586,221 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
     )
 
 
+def _patch_runtime_verbose_access_denied(runtime_dir: str) -> bool:
+    """Return the upstream Google error details instead of only unknown_error."""
+    server_path = os.path.join(runtime_dir, "src", "server.ts")
+    errors_path = os.path.join(runtime_dir, "src", "utils", "errors.ts")
+    if not os.path.exists(server_path) or not os.path.exists(errors_path):
+        return False
+
+    with open(errors_path, "r", encoding="utf-8") as f:
+        errors = f.read()
+
+    quota_needle = (
+        '      if (err.status === "RESOURCE_EXHAUSTED" || err.message?.includes("quota")) {\n'
+        '        isQuotaExhausted = true;\n'
+        '        reason = "quota_exhausted";\n'
+        '        status = 429;\n'
+        '      }\n'
+    )
+    quota_replacement = (
+        '      const combinedErrorText = `${err.status || ""} ${err.message || ""} ${body || ""}`.toLowerCase();\n'
+        '      if (\n'
+        '        err.status === "RESOURCE_EXHAUSTED" ||\n'
+        '        combinedErrorText.includes("quota") ||\n'
+        '        combinedErrorText.includes("rate limit") ||\n'
+        '        combinedErrorText.includes("rate_limit") ||\n'
+        '        combinedErrorText.includes("resource exhausted") ||\n'
+        '        combinedErrorText.includes("too many requests") ||\n'
+        '        combinedErrorText.includes("retry after") ||\n'
+        '        combinedErrorText.includes("reset after") ||\n'
+        '        combinedErrorText.includes("cooldown")\n'
+        '      ) {\n'
+        '        isQuotaExhausted = true;\n'
+        '        reason = "quota_exhausted";\n'
+        '        status = 429;\n'
+        '      }\n'
+    )
+    if "combinedErrorText" not in errors and quota_needle in errors:
+        errors = errors.replace(quota_needle, quota_replacement, 1)
+
+    detail_needle = (
+        '          if (detail.reason === "RATE_LIMIT_EXCEEDED") {\n'
+        '            isQuotaExhausted = true;\n'
+        '            reason = "quota_exhausted";\n'
+        '            status = 429;\n'
+        '          }\n'
+    )
+    detail_replacement = (
+        '          const detailText = `${detail.reason || ""} ${detail.errorInfo?.reason || ""} ${JSON.stringify(detail.metadata || {})}`.toLowerCase();\n'
+        '          if (\n'
+        '            detail.reason === "RATE_LIMIT_EXCEEDED" ||\n'
+        '            detail.errorInfo?.reason === "RATE_LIMIT_EXCEEDED" ||\n'
+        '            detailText.includes("rate_limit") ||\n'
+        '            detailText.includes("quota") ||\n'
+        '            detailText.includes("resource exhausted") ||\n'
+        '            detailText.includes("retry after") ||\n'
+        '            detailText.includes("reset after") ||\n'
+        '            detailText.includes("cooldown")\n'
+        '          ) {\n'
+        '            isQuotaExhausted = true;\n'
+        '            reason = "quota_exhausted";\n'
+        '            status = 429;\n'
+        '          }\n'
+    )
+    if "detailText" not in errors and detail_needle in errors:
+        errors = errors.replace(detail_needle, detail_replacement, 1)
+
+    errors = errors.replace(
+        "  return { reason, validationUrl, isQuotaExhausted, isChallengeRequired, isModelUnsupported, status };",
+        "  return { reason, validationUrl, isQuotaExhausted, isChallengeRequired, isModelUnsupported, status, message };",
+        1,
+    )
+
+    with open(errors_path, "w", encoding="utf-8") as f:
+        f.write(errors)
+
+    with open(server_path, "r", encoding="utf-8") as f:
+        server = f.read()
+
+    server = server.replace(
+        "const attemptLogs: Array<{ email: string, status: number, reason: string }> = [];",
+        "const attemptLogs: Array<{ email: string, status: number, reason: string, message?: string, body?: string }> = [];",
+        1,
+    )
+    server = server.replace(
+        "attemptLogs.push({ email: account.email, status, reason: parsedError.reason });",
+        "attemptLogs.push({ email: account.email, status, reason: parsedError.reason, message: parsedError.message, body: errText.slice(0, 2000) });",
+        1,
+    )
+
+    response_needle = (
+        '                   await updateAccountUsage(account.email, false, openaiBody.model, useCliPool ? "cli" : "sandbox", clientId, status);\n'
+        '                   return new Response(JSON.stringify({ \n'
+        '                       error: { message: "Access denied: " + parsedError.reason, type: "access_denied", code: status.toString() } \n'
+        '                   }), { \n'
+        '                       status, \n'
+        '                       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Antigravity-Attempts": attempts.toString() } \n'
+        '                   });\n'
+    )
+    response_replacement = (
+        '                   const hasQuotaAttempt = parsedError.isQuotaExhausted || attemptLogs.some(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted");\n'
+        '                   const accessDeniedStatus = hasQuotaAttempt ? 429 : status;\n'
+        '                   await updateAccountUsage(account.email, false, openaiBody.model, useCliPool ? "cli" : "sandbox", clientId, accessDeniedStatus);\n'
+        '                   if (hasQuotaAttempt) {\n'
+        '                       markCooldown(account.email, useCliPool ? "cli" : "sandbox", getFamilyName(openaiBody.model));\n'
+        '                   }\n'
+        '                   const quotaAttempt = attemptLogs.find(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted");\n'
+        '                   const quotaMessage = quotaAttempt?.message || quotaAttempt?.body?.slice(0, 1000) || "";\n'
+        '                   const upstreamMessage = hasQuotaAttempt ? quotaMessage : (parsedError.message || errText.slice(0, 1000));\n'
+        '                   const accessDeniedMessage = hasQuotaAttempt\n'
+        '                       ? `Quota exhausted: ${upstreamMessage || "Upstream quota/rate limit reached."}`\n'
+        '                       : `Access denied: ${parsedError.reason}${upstreamMessage ? ` - ${upstreamMessage}` : ""}`;\n'
+        '                   const responseAttempts = hasQuotaAttempt ? attemptLogs.filter(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted") : attemptLogs;\n'
+        '                   return new Response(JSON.stringify({ \n'
+        '                       error: {\n'
+        '                           message: accessDeniedMessage,\n'
+        '                           type: hasQuotaAttempt ? "rate_limit" : "access_denied",\n'
+        '                           code: hasQuotaAttempt ? "insufficient_quota" : status.toString(),\n'
+        '                           google_status: hasQuotaAttempt ? 429 : status,\n'
+        '                           google_reason: hasQuotaAttempt ? "quota_exhausted" : parsedError.reason,\n'
+        '                           google_message: upstreamMessage,\n'
+        '                           attempts: responseAttempts,\n'
+        '                           google_body: hasQuotaAttempt ? (quotaAttempt?.body || errText).slice(0, 4000) : errText.slice(0, 4000)\n'
+        '                       } \n'
+        '                   }), { \n'
+        '                       status: accessDeniedStatus, \n'
+        '                       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Antigravity-Attempts": attempts.toString() } \n'
+        '                   });\n'
+    )
+    if "accessDeniedMessage" not in server and response_needle in server:
+        server = server.replace(response_needle, response_replacement, 1)
+    server = server.replace(
+        "const accessDeniedStatus = parsedError.isQuotaExhausted ? 429 : status;",
+        'const hasQuotaAttempt = parsedError.isQuotaExhausted || attemptLogs.some(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted");\n'
+        '                   const accessDeniedStatus = hasQuotaAttempt ? 429 : status;',
+        1,
+    )
+    server = server.replace(
+        "if (parsedError.isQuotaExhausted) {\n                       markCooldown",
+        "if (hasQuotaAttempt) {\n                       markCooldown",
+        1,
+    )
+    server = server.replace(
+        'type: parsedError.isQuotaExhausted ? "rate_limit" : "access_denied"',
+        'type: hasQuotaAttempt ? "rate_limit" : "access_denied"',
+        1,
+    )
+    server = server.replace(
+        'code: parsedError.isQuotaExhausted ? "insufficient_quota" : status.toString()',
+        'code: hasQuotaAttempt ? "insufficient_quota" : status.toString()',
+        1,
+    )
+    server = server.replace(
+        '                   const upstreamMessage = parsedError.message || errText.slice(0, 1000);\n'
+        '                   const accessDeniedMessage = `Access denied: ${parsedError.reason}${upstreamMessage ? ` - ${upstreamMessage}` : ""}`;',
+        '                   const quotaAttempt = attemptLogs.find(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted");\n'
+        '                   const quotaMessage = quotaAttempt?.message || quotaAttempt?.body?.slice(0, 1000) || "";\n'
+        '                   const upstreamMessage = hasQuotaAttempt ? quotaMessage : (parsedError.message || errText.slice(0, 1000));\n'
+        '                   const accessDeniedMessage = hasQuotaAttempt\n'
+        '                       ? `Quota exhausted: ${upstreamMessage || "Upstream quota/rate limit reached."}`\n'
+        '                       : `Access denied: ${parsedError.reason}${upstreamMessage ? ` - ${upstreamMessage}` : ""}`;\n'
+        '                   const responseAttempts = hasQuotaAttempt ? attemptLogs.filter(attempt => attempt.status === 429 || attempt.reason === "quota_exhausted") : attemptLogs;',
+        1,
+    )
+    server = server.replace(
+        "                           google_status: status,\n"
+        "                           google_reason: parsedError.reason,\n"
+        "                           google_message: parsedError.message,\n"
+        "                           attempts: attemptLogs,\n"
+        "                           google_body: errText.slice(0, 4000)",
+        '                           google_status: hasQuotaAttempt ? 429 : status,\n'
+        '                           google_reason: hasQuotaAttempt ? "quota_exhausted" : parsedError.reason,\n'
+        '                           google_message: upstreamMessage,\n'
+        '                           attempts: responseAttempts,\n'
+        '                           google_body: hasQuotaAttempt ? (quotaAttempt?.body || errText).slice(0, 4000) : errText.slice(0, 4000)',
+        1,
+    )
+    server = server.replace(
+        "                   }), { \n"
+        "                       status, \n"
+        '                       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Antigravity-Attempts": attempts.toString() } \n'
+        "                   });",
+        "                   }), { \n"
+        "                       status: accessDeniedStatus, \n"
+        '                       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Antigravity-Attempts": attempts.toString() } \n'
+        "                   });",
+        1,
+    )
+    if "google_message: parsedError.message,\n                           attempts: attemptLogs," not in server:
+        server = server.replace(
+            "                           google_message: parsedError.message,\n"
+            "                           google_body: errText.slice(0, 4000)",
+            "                           google_message: parsedError.message,\n"
+            "                           attempts: attemptLogs,\n"
+            "                           google_body: errText.slice(0, 4000)",
+            1,
+        )
+
+    with open(server_path, "w", encoding="utf-8") as f:
+        f.write(server)
+
+    return (
+        "combinedErrorText" in errors
+        and "detailText" in errors
+        and "status, message" in errors
+        and "message?: string, body?: string" in server
+        and "body: errText.slice(0, 2000)" in server
+        and "hasQuotaAttempt" in server
+        and "Quota exhausted:" in server
+        and "accessDeniedMessage" in server
+        and "attempts: responseAttempts" in server
+        and "status: accessDeniedStatus" in server
+        and "google_body" in server
+        and "insufficient_quota" in server
+    )
+
+
 def _runtime_has_entrypoint(runtime_dir: str) -> bool:
     return os.path.exists(os.path.join(runtime_dir, "src", "server.ts")) and os.path.exists(
         os.path.join(runtime_dir, "package.json")
@@ -677,6 +892,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive could not be patched for account reset")
         if not _patch_runtime_forced_account_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for forced account routing")
+        if not _patch_runtime_verbose_access_denied(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for verbose access-denied errors")
         _write_runtime_metadata(archive_root, release, client_version)
 
         _copy_runtime_tree(archive_root, runtime_dir)
@@ -725,6 +942,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_account_reset_support(runtime_dir):
             return False
         if not _patch_runtime_forced_account_support(runtime_dir):
+            return False
+        if not _patch_runtime_verbose_access_denied(runtime_dir):
             return False
         _write_runtime_metadata(runtime_dir, release, client_version)
         (log_fn or _log_noop)("Antigravity: patched cached proxy runtime in place.")
@@ -1141,12 +1360,132 @@ def _extract_error_message(resp: requests.Response) -> str:
         data = resp.json()
         error = data.get("error")
         if isinstance(error, dict):
-            return str(error.get("message") or error)
+            message = _quota_message_from_attempts(error.get("attempts")) or str(error.get("message") or error)
+            attempts = _format_proxy_attempts(error.get("attempts"))
+            return f"{message} Attempts: {attempts}" if attempts else message
         if error:
             return str(error)
     except Exception:
         pass
-    return (getattr(resp, "text", "") or "")[:1000]
+    return _extract_error_message_from_text((getattr(resp, "text", "") or "")[:4000])
+
+
+def _extract_error_message_from_text(text: str) -> str:
+    raw = str(text or "")
+    try:
+        data = json.loads(raw)
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            message = _quota_message_from_attempts(error.get("attempts")) or str(error.get("message") or error)
+            attempts = _format_proxy_attempts(error.get("attempts"))
+            return f"{message} Attempts: {attempts}" if attempts else message
+        if error:
+            return str(error)
+    except Exception:
+        pass
+    return raw[:1000]
+
+
+def _proxy_attempt_is_rate_limit(item: Dict[str, Any]) -> bool:
+    status = str(item.get("status") or "").strip()
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("reason", "message", "body", "code", "type")
+    ).lower()
+    return status == "429" or any(
+        marker in text
+        for marker in (
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "resource_exhausted",
+            "insufficient_quota",
+            "too many requests",
+        )
+    )
+
+
+def _quota_message_from_attempts(attempts: Any) -> str:
+    if not isinstance(attempts, list):
+        return ""
+    for item in attempts:
+        if not isinstance(item, dict) or not _proxy_attempt_is_rate_limit(item):
+            continue
+        detail = _format_proxy_attempt_detail(item)
+        return f"Quota exhausted: {detail}" if detail else "Quota exhausted: upstream quota/rate limit reached."
+    return ""
+
+
+def _format_proxy_attempts(attempts: Any) -> str:
+    if not isinstance(attempts, list):
+        return ""
+    quota_attempts = [
+        item for item in attempts
+        if isinstance(item, dict) and _proxy_attempt_is_rate_limit(item)
+    ]
+    visible_attempts = quota_attempts or attempts
+    parts = []
+    for item in visible_attempts[:8]:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        reason = item.get("reason")
+        email = item.get("email") or item.get("account")
+        bits = []
+        if email:
+            bits.append(str(email))
+        if status:
+            bits.append(f"HTTP {status}")
+        if reason:
+            bits.append(str(reason))
+        detail = _format_proxy_attempt_detail(item)
+        if detail:
+            bits.append(detail)
+        if bits:
+            parts.append(" / ".join(bits))
+    return "; ".join(parts)
+
+
+def _format_proxy_attempt_detail(item: Dict[str, Any]) -> str:
+    message = str(item.get("message") or "").strip()
+    if not message:
+        body = str(item.get("body") or "").strip()
+        if body:
+            try:
+                data = json.loads(body)
+                error = data.get("error") if isinstance(data, dict) else None
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "").strip()
+            except Exception:
+                message = body
+    if not message:
+        return ""
+    message = re.sub(r"\s+", " ", message)
+    if len(message) > 260:
+        message = message[:257].rstrip() + "..."
+    return message
+
+
+def _error_text_suggests_rate_limit(error_text: str) -> bool:
+    lowered = (error_text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "429",
+            "rate limit",
+            "rate_limit",
+            "rate-limit",
+            "quota",
+            "resource_exhausted",
+            "insufficient_quota",
+            "all accounts failed",
+            "all accounts failed or are exhausted",
+            "cooldown",
+            "reset after",
+            "retrydelay",
+            "retry delay",
+        )
+    )
 
 
 def _health_details_have_accounts(details: Any) -> bool:
@@ -1172,16 +1511,18 @@ def _proxy_has_accounts() -> bool:
 
 
 def _error_text_suggests_account_setup(error_text: str) -> bool:
+    if _error_text_suggests_rate_limit(error_text):
+        return False
     lowered = (error_text or "").lower()
     return any(
         marker in lowered
         for marker in (
             "no account",
             "add account",
-            "exhausted all accounts",
-            "all accounts failed",
-            "quota exhausted",
-            "insufficient_quota",
+            "google account link required",
+            "authentication timed out",
+            "validation_required",
+            "subscription_required",
         )
     )
 
@@ -1207,6 +1548,8 @@ def _min_accounts_for_auth_retry(error_text: str = "", account_id: Optional[int]
 def _should_wait_for_auth(resp: requests.Response) -> bool:
     """Return True when the request likely failed because no account is linked."""
     error_text = _extract_error_message(resp)
+    if _error_text_suggests_rate_limit(error_text):
+        return False
 
     if resp.status_code in (401, 403):
         return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
@@ -1221,6 +1564,9 @@ def _should_wait_for_auth(resp: requests.Response) -> bool:
 
 
 def _should_wait_for_auth_status_error(status_code: int, error_text: str = "") -> bool:
+    if _error_text_suggests_rate_limit(error_text):
+        return False
+
     if status_code in (401, 403):
         return not _proxy_has_accounts() or _error_text_suggests_account_setup(error_text)
 
@@ -1832,9 +2178,149 @@ def _raise_connection_refused() -> None:
     )
 
 
-def _raise_for_proxy_status(resp: requests.Response) -> None:
+def _format_duration_from_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _cooldown_remaining(value: Any, now: Optional[float] = None) -> str:
+    try:
+        expiry = float(value)
+    except Exception:
+        return ""
+    if expiry < 10_000_000_000:
+        expiry *= 1000
+    remaining = expiry - ((now or time.time()) * 1000)
+    if remaining <= 0:
+        return ""
+    return _format_duration_from_seconds(remaining / 1000)
+
+
+def _model_family_terms(model: str) -> List[str]:
+    lower = _normalize_model_name(model or "").lower()
+    terms = []
+    for term in ("gemini", "claude", "gpt"):
+        if term in lower:
+            terms.append(term)
+    return terms
+
+
+def _row_matches_model_family(row: Dict[str, Any], terms: List[str]) -> bool:
+    if not terms:
+        return True
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("groupName", "limitName", "name")
+    ).lower()
+    return any(term in text for term in terms)
+
+
+def _format_rate_limit_context(model: str = "", account_id: Optional[int] = None) -> str:
+    try:
+        accounts = _load_stored_accounts()
+    except Exception:
+        accounts = []
+    if not accounts:
+        return "Antigravity quota/rate limit detail: no stored account quota metadata is available."
+
+    terms = _model_family_terms(model)
+    now = time.time()
+    if account_id and 1 <= int(account_id) <= len(accounts):
+        selected = [(int(account_id), accounts[int(account_id) - 1])]
+    else:
+        selected = list(enumerate(accounts, start=1))
+
+    lines = []
+    for slot, account in selected[:6]:
+        if not isinstance(account, dict):
+            continue
+        account_bits = []
+
+        cooldowns = account.get("cooldowns") if isinstance(account.get("cooldowns"), dict) else {}
+        cooldown_bits = []
+        for key, expiry in sorted(cooldowns.items(), key=lambda item: str(item[0])):
+            key_text = str(key)
+            if terms and not any(term in key_text.lower() for term in terms):
+                continue
+            remaining = _cooldown_remaining(expiry, now=now)
+            if remaining:
+                cooldown_bits.append(f"{key_text} resets in {remaining}")
+        if cooldown_bits:
+            account_bits.append("cooldown " + ", ".join(cooldown_bits[:3]))
+
+        quota_rows = account.get("quota") if isinstance(account.get("quota"), list) else []
+        relevant_rows = [
+            row for row in quota_rows
+            if isinstance(row, dict) and _row_matches_model_family(row, terms)
+        ]
+        if not relevant_rows and terms:
+            relevant_rows = [
+                row for row in quota_rows
+                if isinstance(row, dict) and str(row.get("quotaLeft") or "").strip() in ("0%", "0")
+            ]
+        relevant_rows.sort(key=lambda row: 0 if str(row.get("quotaLeft") or "").strip() in ("0%", "0") else 1)
+        quota_bits = []
+        for row in relevant_rows[:3]:
+            name = row.get("groupName") or row.get("limitName") or "quota"
+            left = row.get("quotaLeft") or ""
+            reset = row.get("resetIn") or ""
+            detail = str(name)
+            if left:
+                detail += f" {left} left"
+            if reset:
+                detail += f", reset in {reset}"
+            quota_bits.append(detail)
+        if quota_bits:
+            account_bits.append("quota " + "; ".join(quota_bits))
+
+        if account_bits:
+            email = str(account.get("email") or "").strip()
+            label = f"account slot #{slot}"
+            if email:
+                label += f" ({email})"
+            lines.append(f"{label}: " + " | ".join(account_bits))
+
+    if not lines:
+        return "Antigravity quota/rate limit detail: proxy reported quota/rate exhaustion, but no matching active cooldown or quota row was found."
+    return "Antigravity quota/rate limit detail: " + " || ".join(lines)
+
+
+def _format_proxy_status_message(
+    status_code: int,
+    error_text: str,
+    payload: Optional[Dict[str, Any]] = None,
+    account_id: Optional[int] = None,
+) -> str:
+    error_msg = _extract_error_message_from_text(error_text)
+    is_rate_limit = _error_text_suggests_rate_limit(error_msg)
+    display_status = 429 if is_rate_limit else status_code
+    message = f"Antigravity: HTTP {display_status} - {error_msg}"
+    if is_rate_limit:
+        model = str((payload or {}).get("model") or "")
+        message += "\n" + _format_rate_limit_context(model=model, account_id=account_id)
+    return message
+
+
+def _raise_for_proxy_status(
+    resp: requests.Response,
+    payload: Optional[Dict[str, Any]] = None,
+    account_id: Optional[int] = None,
+    log_fn=None,
+) -> None:
     error_msg = _extract_error_message(resp)
-    raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_msg}")
+    message = _format_proxy_status_message(resp.status_code, error_msg, payload=payload, account_id=account_id)
+    if _error_text_suggests_rate_limit(error_msg):
+        (log_fn or _log_noop)(message)
+    raise RuntimeError(message)
 
 
 def send_message(
@@ -1892,7 +2378,7 @@ def send_message(
             )
 
     if resp.status_code != 200:
-        _raise_for_proxy_status(resp)
+        _raise_for_proxy_status(resp, payload=payload, account_id=account_id, log_fn=_log)
 
     try:
         data = resp.json()
@@ -2079,7 +2565,7 @@ def send_message_stream(
         with _stream_chat_with_httpx(url, payload, headers, timeout) as resp:
             if resp.status_code != 200:
                 try:
-                    error_text = resp.read().decode("utf-8", errors="replace")[:1000]
+                    error_text = resp.read().decode("utf-8", errors="replace")[:20000]
                 except Exception:
                     error_text = ""
 
@@ -2102,7 +2588,15 @@ def send_message_stream(
                         f"Open {proxy_url} and add your Google account, then try again."
                     )
 
-                raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
+                message = _format_proxy_status_message(
+                    resp.status_code,
+                    error_text,
+                    payload=payload,
+                    account_id=account_id,
+                )
+                if _error_text_suggests_rate_limit(message):
+                    _log(message)
+                raise RuntimeError(message)
 
             try:
                 return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
@@ -2170,14 +2664,22 @@ def send_message_stream(
 
     if resp.status_code != 200:
         try:
-            error_text = resp.text[:1000]
+            error_text = resp.text[:20000]
         except Exception:
             error_text = ""
         try:
             resp.close()
         except Exception:
             pass
-        raise RuntimeError(f"Antigravity: HTTP {resp.status_code} - {error_text}")
+        message = _format_proxy_status_message(
+            resp.status_code,
+            error_text,
+            payload=payload,
+            account_id=account_id,
+        )
+        if _error_text_suggests_rate_limit(message):
+            _log(message)
+        raise RuntimeError(message)
 
     try:
         return _consume_openai_stream(resp, log_fn=log_fn, log_stream=log_stream)
