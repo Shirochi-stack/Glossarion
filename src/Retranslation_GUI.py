@@ -971,7 +971,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
         requested_output_files = list(getattr(self, "_sdlxliff_autogen_output_files", None) or [])
         output_files = requested_output_files or None
-        if force and not output_files:
+        if force:
             output_files = self._review_autogen_output_names(signature) or None
         elif not force:
             changed_outputs = [] if previous_signature is None else self._changed_review_autogen_outputs(previous_signature, signature)
@@ -981,7 +981,7 @@ class SDLXLIFFReviewDialog(QDialog):
                 + (missing_outputs or [])
                 + (stale_outputs or [])
             ))
-            if requested_output_files:
+            if requested_output_files and previous_signature is None:
                 requested_names = {
                     os.path.basename(str(name).replace("\\", "/")).lower()
                     for name in requested_output_files
@@ -1648,7 +1648,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     # to any changed sidecar path, so force a full reload (None)
                     # instead of the incremental path - otherwise it would
                     # short-circuit below and rebuild nothing.
-                    force_full_reload = bool(result.get("sidecar_path_set_changed") or result.get("settings_changed"))
+                    force_full_reload = bool(
+                        result.get("force")
+                        or result.get("sidecar_path_set_changed")
+                        or result.get("settings_changed")
+                    )
                     changed_paths = None if force_full_reload else result.get("changed_sidecar_paths")
                     if changed_paths is not None:
                         changed_paths = self._refresh_visible_sidecar_paths(changed_paths)

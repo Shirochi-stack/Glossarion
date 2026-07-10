@@ -2985,6 +2985,68 @@ def test_sdlxliff_review_manual_refresh_regenerates_current_sidecar(tmp_path, mo
     assert piece["rows"][1]["target"] == "Target body."
 
 
+def test_sdlxliff_review_manual_refresh_ignores_single_file_open_scope(tmp_path, monkeypatch):
+    source_one = tmp_path / "chapter0001.xhtml"
+    source_two = tmp_path / "chapter0002.xhtml"
+    output_one = tmp_path / "response_chapter0001.html"
+    output_two = tmp_path / "response_chapter0002.html"
+    source_one.write_text("<h1>Source One</h1><p>Source body one.</p>", encoding="utf-8")
+    source_two.write_text("<h1>Source Two</h1><p>Source body two.</p>", encoding="utf-8")
+    output_one.write_text("<h1>Target One</h1><p>Target body one.</p>", encoding="utf-8")
+    output_two.write_text("<h1>Target Two</h1><p>Target body two.</p>", encoding="utf-8")
+    (tmp_path / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "1": {
+                        "actual_num": 1,
+                        "status": "completed",
+                        "output_file": output_one.name,
+                        "original_basename": source_one.name,
+                    },
+                    "2": {
+                        "actual_num": 2,
+                        "status": "completed",
+                        "output_file": output_two.name,
+                        "original_basename": source_two.name,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUTPUT_SDLXLIFF", "0")
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+    dialog.output_dir = str(tmp_path)
+    dialog._book_entries = []
+    dialog._book_index = 0
+    dialog._sdlxliff_autogen_owner = mixin
+    dialog._sdlxliff_autogen_output_files = [output_one.name]
+
+    assert dialog._maybe_regenerate_review_sidecars(force=True) is True
+    sidecar_one = tmp_path / "SDLXLIFF" / f"{output_one.name}.sdlxliff"
+    sidecar_two = tmp_path / "SDLXLIFF" / f"{output_two.name}.sdlxliff"
+    sidecar_one.write_text("manual refresh must replace current sidecar", encoding="utf-8")
+    sidecar_two.write_text("manual refresh must also replace non-current sidecar", encoding="utf-8")
+
+    result = dialog._build_review_refresh_scan_result(
+        force=True,
+        current_path=str(sidecar_one),
+        last_review_signature=dialog._current_review_signature(),
+        last_mt_signature=dialog._current_machine_translation_signature(),
+        last_autogen_signature=dialog._current_review_autogen_signature(),
+    )
+    piece_one = dialog._build_piece(str(sidecar_one), 0, {"output_name": output_one.name})
+    piece_two = dialog._build_piece(str(sidecar_two), 1, {"output_name": output_two.name})
+
+    assert result["error"] == ""
+    assert result["sidecars_generated"] is True
+    assert result["stats"]["created"] == 2
+    assert piece_one["rows"][0]["target"] == "Target One"
+    assert piece_two["rows"][0]["target"] == "Target Two"
+
+
 def test_sdlxliff_review_autorefresh_regenerates_deleted_sidecar_folder(tmp_path, monkeypatch):
     import shutil
 
