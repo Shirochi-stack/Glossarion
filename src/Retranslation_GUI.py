@@ -93,6 +93,59 @@ def _get_progress_manager_nonblocking():
 # -----------------------------------------------------------------------------
 
 
+def _normalize_progress_match_name(name):
+    """Normalize source/output names used by Progress Manager matching."""
+    if not name:
+        return ""
+    base = os.path.basename(str(name))
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    while True:
+        new_base, ext = os.path.splitext(base)
+        if not ext:
+            break
+        base = new_base
+    return base
+
+
+def _snapshot_progress_output_dir(output_dir):
+    """Return one reusable directory snapshot for large EPUB matching.
+
+    The old loader repeatedly called ``listdir``/``isfile`` for every spine
+    entry.  Keeping names, normalized-name matches, and mtimes together makes
+    the initial scan linear in the number of files.
+    """
+    filenames = set()
+    normalized = {}
+    mtimes = {}
+    try:
+        with os.scandir(output_dir) as scan:
+            for entry in scan:
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                filenames.add(entry.name)
+                normalized.setdefault(_normalize_progress_match_name(entry.name), entry.name)
+                try:
+                    mtimes[entry.name] = entry.stat().st_mtime
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return filenames, normalized, mtimes
+
+
+def _progress_path_signature(path):
+    """Cheap signature used to avoid parsing unchanged progress files."""
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
 def _progress_entry_refined_for_display(entry):
     if not isinstance(entry, dict):
         return False
@@ -10691,6 +10744,13 @@ class RetranslationMixin:
             with open(progress_file, 'r', encoding='utf-8') as f:
                 prog = json.load(f)
 
+        # Snapshot the output directory once.  Large EPUBs used to rescan and
+        # restat this directory for every spine row, turning a 2,000-file book
+        # into millions of filesystem operations on the GUI thread.
+        (_existing_output_files,
+         _normalized_output_files,
+         _output_file_mtimes) = _snapshot_progress_output_dir(output_dir)
+
         # Helper: auto-discover completed files when no OPF is available
         def _auto_discover_from_output_dir(output_dir, prog):
             updated = False
@@ -10699,10 +10759,9 @@ class RetranslationMixin:
                 # file itself does NOT contain "_translated" in its name
                 source_has_translated = "_translated" in os.path.basename(file_path).lower()
                 files = [
-                    f for f in os.listdir(output_dir)
-                    if os.path.isfile(os.path.join(output_dir, f))
+                    f for f in _existing_output_files
                     # accept any extension except known non-chapter files
-                    and (source_has_translated or not f.lower().endswith("_translated.txt"))
+                    if (source_has_translated or not f.lower().endswith("_translated.txt"))
                     and (source_has_translated or not f.lower().endswith("_translated.pdf"))
                     and (source_has_translated or not f.lower().endswith("_translated.html"))
                     and f != "translation_progress.json"
@@ -10710,7 +10769,12 @@ class RetranslationMixin:
                     and not f.lower().endswith(".epub")
                     and not f.lower().endswith(".cache")
                 ]
-                for fname in files:
+                tracked_output_files = {
+                    ch.get("output_file")
+                    for ch in prog.get("chapters", {}).values()
+                    if isinstance(ch, dict) and ch.get("output_file")
+                }
+                for fname in sorted(files):
                     base = os.path.basename(fname)
                     # Normalize by stripping response_ and all extensions
                     if base.startswith("response_"):
@@ -10731,11 +10795,7 @@ class RetranslationMixin:
                         continue
                     
                     # Also check if any existing entry already references this output file
-                    already_tracked = any(
-                        ch.get("output_file") == fname
-                        for ch in prog.get("chapters", {}).values()
-                    )
-                    if already_tracked:
+                    if fname in tracked_output_files:
                         continue
 
                     prog.setdefault("chapters", {})[key] = {
@@ -10743,10 +10803,11 @@ class RetranslationMixin:
                         "content_hash": "",
                         "output_file": fname,
                         "status": "completed",
-                        "last_updated": os.path.getmtime(os.path.join(output_dir, fname)),
+                        "last_updated": _output_file_mtimes.get(fname, time.time()),
                         "auto_discovered": True,
                         "original_basename": fname
                     }
+                    tracked_output_files.add(fname)
                     updated = True
             except Exception as e:
                 print(f"⚠️ Auto-discovery (no OPF) failed: {e}")
@@ -10909,46 +10970,51 @@ class RetranslationMixin:
             # OPF-AWARE AUTO-DISCOVERY: Use OPF filenames as original_basename
             # This ensures correct mapping between OPF entries and response files
             progress_updated = False
+            _progress_chapters = prog.setdefault("chapters", {})
+            _progress_by_original = {
+                ch.get("original_basename"): ch
+                for ch in _progress_chapters.values()
+                if isinstance(ch, dict) and ch.get("original_basename")
+            }
+            _progress_by_output = {
+                ch.get("output_file"): ch
+                for ch in _progress_chapters.values()
+                if isinstance(ch, dict) and ch.get("output_file")
+            }
             for spine_ch in spine_chapters:
                 opf_filename = spine_ch['filename']  # e.g., "0009_10_.xhtml"
                 base_name = os.path.splitext(opf_filename)[0]  # e.g., "0009_10_"
                 
                 # Look for corresponding response file on disk
                 response_file = f"response_{base_name}.html"
-                response_path = os.path.join(output_dir, response_file)
-                
-                if os.path.exists(response_path):
-                    # Check if we already have a progress entry with correct original_basename
-                    already_tracked = False
-                    for ch_info in prog.get("chapters", {}).values():
-                        if ch_info.get("original_basename") == opf_filename:
-                            already_tracked = True
-                            break
-                        # Also check by output_file
-                        if ch_info.get("output_file") == response_file:
-                            # Update original_basename if missing or wrong
-                            if ch_info.get("original_basename") != opf_filename:
-                                ch_info["original_basename"] = opf_filename
-                                progress_updated = True
-                            already_tracked = True
-                            break
-                    
-                    if not already_tracked:
+                if response_file in _existing_output_files:
+                    tracked_info = _progress_by_original.get(opf_filename)
+                    if tracked_info is None:
+                        tracked_info = _progress_by_output.get(response_file)
+                        if tracked_info is not None and tracked_info.get("original_basename") != opf_filename:
+                            tracked_info["original_basename"] = opf_filename
+                            _progress_by_original[opf_filename] = tracked_info
+                            progress_updated = True
+
+                    if tracked_info is None:
                         # Create new progress entry with correct original_basename
                         chapter_num = spine_ch['file_chapter_num']
                         key = str(chapter_num) if chapter_num else f"special_{base_name}"
                         
                         # Avoid duplicate keys
-                        if key not in prog.get("chapters", {}):
-                            prog.setdefault("chapters", {})[key] = {
+                        if key not in _progress_chapters:
+                            new_entry = {
                                 "actual_num": chapter_num,
                                 "content_hash": "",
                                 "output_file": response_file,
                                 "status": "completed",
-                                "last_updated": os.path.getmtime(response_path),
+                                "last_updated": _output_file_mtimes.get(response_file, time.time()),
                                 "auto_discovered": True,
                                 "original_basename": opf_filename  # CORRECT: OPF filename
                             }
+                            _progress_chapters[key] = new_entry
+                            _progress_by_original[opf_filename] = new_entry
+                            _progress_by_output[response_file] = new_entry
                             progress_updated = True
                             print(f"✅ OPF-aware discovery: {opf_filename} -> {response_file}")
             
@@ -10971,50 +11037,39 @@ class RetranslationMixin:
         # files like "chapter001.xhtml" and "response_chapter001.xhtml"
         # are treated as referring to the same logical entry.
         def _normalize_opf_match_name(name: str) -> str:
-            if not name:
-                return ""
-            base = os.path.basename(name)
-            # Remove response_ prefix
-            if base.startswith("response_"):
-                base = base[len("response_"):]
-            # Remove all extensions so that .html, .xhtml, .htm, etc. all match
-            # and double extensions like .html.xhtml collapse to the stem.
-            while True:
-                new_base, ext = os.path.splitext(base)
-                if not ext:
-                    break
-                base = new_base
-            return base
+            return _normalize_progress_match_name(name)
 
         def _opf_names_equal(a: str, b: str) -> bool:
             return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
 
-        # Build a map of original basenames to progress entries (normalized)
+        # Build all matching indexes once.  Several of these used to be full
+        # progress-dictionary scans inside the spine loop.
         basename_to_progress = {}
+        response_file_to_progress = {}
+        actualnum_to_progress = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            progress_ref = (chapter_key, chapter_info)
             original_basename = chapter_info.get("original_basename", "")
             if original_basename:
                 norm_key = _normalize_opf_match_name(original_basename)
-                if norm_key not in basename_to_progress:
-                    basename_to_progress[norm_key] = []
-                basename_to_progress[norm_key].append((chapter_key, chapter_info))
-        
-        # Also build a map of response files (include both exact and normalized keys)
-        response_file_to_progress = {}
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                basename_to_progress.setdefault(norm_key, []).append(progress_ref)
             output_file = chapter_info.get("output_file", "")
             if output_file:
-                # Exact key
-                if output_file not in response_file_to_progress:
-                    response_file_to_progress[output_file] = []
-                response_file_to_progress[output_file].append((chapter_key, chapter_info))
-                # Normalized key (ignoring response_ prefix)
+                response_file_to_progress.setdefault(output_file, []).append(progress_ref)
                 norm_key = _normalize_opf_match_name(output_file)
                 if norm_key != output_file:
-                    if norm_key not in response_file_to_progress:
-                        response_file_to_progress[norm_key] = []
-                    response_file_to_progress[norm_key].append((chapter_key, chapter_info))
-        
+                    response_file_to_progress.setdefault(norm_key, []).append(progress_ref)
+            actual_num = chapter_info.get('actual_num')
+            if actual_num is None:
+                actual_num = chapter_info.get('chapter_num')
+            if actual_num is not None:
+                actualnum_to_progress.setdefault(actual_num, []).append(progress_ref)
+
+        retain_source_extension = (
+            os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1'
+            or self.config.get('retain_source_extension', False)
+        )
+
         _n_spine = len(spine_chapters)
         for idx, spine_ch in enumerate(spine_chapters):
             if idx % 80 == 0:
@@ -11031,19 +11086,16 @@ class RetranslationMixin:
             if is_special:
                 # Check for response_ prefix version
                 response_with_prefix = f"response_{base_name}.html"
-                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                
-                if retain:
+                if retain_source_extension:
                     expected_response = filename
-                elif os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                elif response_with_prefix in _existing_output_files:
                     expected_response = response_with_prefix
                 else:
                     # Fallback to original filename
                     expected_response = filename
             else:
                 # Use OPF filename directly to avoid mismatching
-                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                if retain:
+                if retain_source_extension:
                     expected_response = filename
                 else:
                     # Handle .htm.html -> .html conversion
@@ -11055,11 +11107,9 @@ class RetranslationMixin:
                     # Also check for response_ prefix version (used by the translator
                     # when TRANSLATE_ALL_NUMBERED_HTML overrides the special-file skip)
                     response_with_prefix = f"response_{base_name}.html"
-                    if not os.path.exists(os.path.join(output_dir, expected_response)) and \
-                       os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                    if expected_response not in _existing_output_files and \
+                       response_with_prefix in _existing_output_files:
                         expected_response = response_with_prefix
-            
-            response_path = os.path.join(output_dir, expected_response)
             
             # Check various ways to find the translation progress info
             matched_info = None
@@ -11085,32 +11135,22 @@ class RetranslationMixin:
                         _set_matched_progress(chapter_key, chapter_info)
             
             # Method 2: Check by response file (with corrected extension)
-            if not matched_info and expected_response in response_file_to_progress:
-                entries = response_file_to_progress[expected_response]
-                if entries:
-                    chapter_key, chapter_info = entries[0]
-                    # For in_progress/failed/qa_failed/pending, also verify actual_num matches
-                    status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                        if chapter_info.get('actual_num') == chapter_num:
-                            _set_matched_progress(chapter_key, chapter_info)
-                    else:
-                        _set_matched_progress(chapter_key, chapter_info)
-            
-            # Method 3: Search through all progress entries for matching output file
             if not matched_info:
-                for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                    out_file = chapter_info.get('output_file')
-                    if out_file == expected_response or _opf_names_equal(out_file, expected_response):
-                        # For in_progress/failed/qa_failed/pending, also verify actual_num matches
+                entries = (
+                    response_file_to_progress.get(expected_response)
+                    or response_file_to_progress.get(_normalize_opf_match_name(expected_response))
+                )
+                if entries:
+                    for chapter_key, chapter_info in entries:
+                        # For transient states, also verify actual_num matches.
                         status = chapter_info.get('status', '')
                         if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                            if chapter_info.get('actual_num') == chapter_num:
-                                _set_matched_progress(chapter_key, chapter_info)
-                                break
+                            if chapter_info.get('actual_num') != chapter_num:
+                                continue
+                            _set_matched_progress(chapter_key, chapter_info)
                         else:
                             _set_matched_progress(chapter_key, chapter_info)
-                            break
+                        break
             
             # Method 4: CRUCIAL - Match by chapter number (actual_num vs file_chapter_num)
             # Also check composite keys for special files (e.g., "0_message", "0_TOC")
@@ -11174,7 +11214,7 @@ class RetranslationMixin:
                 # This prevents files like "000_information.xhtml" and "0153_0.xhtml"
                 # (both parsed as chapter 0) from being conflated.
                 if not matched_info:
-                    for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    for chapter_key, chapter_info in actualnum_to_progress.get(chapter_num, ()):
                         actual_num = chapter_info.get('actual_num')
                         # Also check 'chapter_num' as fallback
                         if actual_num is None:
@@ -11237,7 +11277,7 @@ class RetranslationMixin:
                                     break
             
             # Determine if translation file exists
-            file_exists = os.path.exists(response_path)
+            file_exists = expected_response in _existing_output_files
             
             # Set status and output file based on findings
             if matched_info:
@@ -11271,13 +11311,11 @@ class RetranslationMixin:
                 
                 # Verify file actually exists for completed status
                 if status == 'completed':
-                    output_path = os.path.join(output_dir, spine_ch['output_file'])
-                    if not os.path.exists(output_path):
+                    if spine_ch['output_file'] not in _existing_output_files:
                         # If the expected_response file exists, prefer that and
                         # transparently update the progress entry.
                         if file_exists and expected_response:
-                            fixed_output_path = os.path.join(output_dir, expected_response)
-                            if os.path.exists(fixed_output_path):
+                            if expected_response in _existing_output_files:
                                 spine_ch['output_file'] = expected_response
 
                                 # If this spine chapter is tied to a concrete
@@ -11285,12 +11323,9 @@ class RetranslationMixin:
                                 if 'progress_entry' in spine_ch and spine_ch['progress_entry'] is not None:
                                     spine_ch['progress_entry']['output_file'] = expected_response
 
-                                    # Also update the master prog dict so the
-                                    # corrected value is written back later.
-                                    for ch_key, ch_info in prog.get('chapters', {}).items():
-                                        if ch_info is spine_ch['progress_entry']:
-                                            prog['chapters'][ch_key]['output_file'] = expected_response
-                                            break
+                                    # matched_key already identifies the master entry.
+                                    if matched_key in prog.get('chapters', {}):
+                                        prog['chapters'][matched_key]['output_file'] = expected_response
                             else:
                                 # No matching file anywhere – mark as missing.
                                 spine_ch['status'] = 'not_translated'
@@ -11308,36 +11343,12 @@ class RetranslationMixin:
                 # This handles the case where progress file was deleted but files exist
                 # Match by filename only (ignore response_ prefix and all extensions)
                 
-                def normalize_filename(fname):
-                    """Remove response_ prefix and all extensions for exact comparison"""
-                    base = os.path.basename(fname)
-                    # Remove response_ prefix
-                    if base.startswith('response_'):
-                        base = base[9:]
-                    # Remove all extensions (including double extensions like .html.xhtml)
-                    while True:
-                        new_base, ext = os.path.splitext(base)
-                        if not ext:
-                            break
-                        base = new_base
-                    return base
-                
                 # Normalize the OPF filename
-                normalized_opf = normalize_filename(filename)
-                
-                # Search for exact matching file in output directory
-                matched_file = None
-                if os.path.exists(output_dir):
-                    try:
-                        for existing_file in os.listdir(output_dir):
-                            if os.path.isfile(os.path.join(output_dir, existing_file)):
-                                normalized_existing = normalize_filename(existing_file)
-                                # Exact match only - no fuzzy logic
-                                if normalized_existing == normalized_opf:
-                                    matched_file = existing_file
-                                    break
-                    except Exception as e:
-                        print(f"Warning: Error scanning output directory for match: {e}")
+                normalized_opf = _normalize_opf_match_name(filename)
+
+                # O(1) lookup in the one directory snapshot instead of one
+                # listdir/isfile pass per unmatched spine entry.
+                matched_file = _normalized_output_files.get(normalized_opf)
                 
                 if matched_file:
                     # Found an exact matching file by normalized name - mark as completed
@@ -11388,7 +11399,7 @@ class RetranslationMixin:
                     "content_hash": "",  # Unknown since we don't have the source
                     "output_file": output_file,
                     "status": "completed",
-                    "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                    "last_updated": _output_file_mtimes.get(output_file, time.time()),
                     "auto_discovered": True,
                     "original_basename": filename
                 }
@@ -14930,6 +14941,10 @@ class RetranslationMixin:
                 # Skip if parent dialog is not visible (no point scanning filesystem)
                 if hasattr(dialog, 'isVisible') and not dialog.isVisible():
                     return
+                # In a multi-file dialog, only the active tab should run this
+                # all-EPUB filesystem check.
+                if tab_frame is not None and not container.isVisible():
+                    return
                 
                 # Check all EPUBs from multi-file dialog, or just this file
                 all_epubs = [file_path]
@@ -15280,6 +15295,11 @@ class RetranslationMixin:
             'show_model_info_state': show_model_info[0],
             'show_model_info_cb': show_model_info_cb
         }
+        result['_last_applied_snapshot_signatures'] = (
+            _progress_path_signature(progress_file),
+            (len(_existing_output_files), hash(frozenset(_existing_output_files))),
+            None,
+        )
         show_model_info_cb._progress_data_ref = result
         
         # If standalone (no parent), add buttons and show dialog
@@ -16119,17 +16139,27 @@ class RetranslationMixin:
                 dlg = data.get('dialog')
                 if not (dlg and dlg.isVisible()):
                     return
+                # All embedded pages share the same visible parent dialog.
+                # Checking the page itself prevents 39 selected EPUBs from
+                # launching 39 scans and GUI refreshes every second.
+                page = data.get('container')
+                if page is not None and page is not dlg and not page.isVisible():
+                    return
 
                 # Phase 2: apply the snapshot prefetched by the previous tick
                 if data.pop('_prefetch_ready', False):
+                    snapshot_signatures = data.pop('_prefetched_signatures', None)
                     try:
                         data['_refresh_read_only'] = True
                         self._refresh_retranslation_data(data)
+                        if snapshot_signatures is not None:
+                            data['_last_applied_snapshot_signatures'] = snapshot_signatures
                     finally:
                         data['_refresh_read_only'] = False
                         # Drop any unconsumed snapshot keys
                         for _k in ('_prefetched_prog', '_prefetched_prog_path',
-                                   '_prefetched_output_listing', '_prefetched_tts_listing'):
+                                   '_prefetched_output_listing', '_prefetched_tts_listing',
+                                   '_prefetched_signatures'):
                             data.pop(_k, None)
 
                 # Phase 1: kick off the next disk snapshot in the background
@@ -16138,39 +16168,67 @@ class RetranslationMixin:
                 data['_prefetch_running'] = True
                 _pf_path = data.get('progress_file')
                 _pf_outdir = data.get('output_dir')
+                _prefetch_tts = self._current_progress_output_mode(data) == 'audio' or any(
+                    isinstance(entry, dict) and (entry.get('tts_status') or entry.get('tts_file'))
+                    for entry in (data.get('prog') or {}).get('chapters', {}).values()
+                )
 
                 def _bg_prefetch():
                     prog = None
                     listing = None
-                    tts_listing = set()
+                    tts_listing = None
                     try:
+                        progress_signature = _progress_path_signature(_pf_path)
+                        try:
+                            with os.scandir(_pf_outdir) as _scan:
+                                listing = {e.name for e in _scan if e.is_file()}
+                        except Exception:
+                            listing = set()
+                        if _prefetch_tts:
+                            try:
+                                tts_listing = {
+                                    name.lower()
+                                    for name in os.listdir(os.path.join(_pf_outdir, "text_to_speech"))
+                                }
+                            except OSError:
+                                tts_listing = set()
+
+                        listing_signature = (len(listing), hash(frozenset(listing)))
+                        tts_signature = (
+                            (len(tts_listing), hash(frozenset(tts_listing)))
+                            if tts_listing is not None else None
+                        )
+                        snapshot_signatures = (
+                            progress_signature,
+                            listing_signature,
+                            tts_signature,
+                        )
+
+                        # Stable books should be a true no-op: do not parse JSON
+                        # and, more importantly, do not touch thousands of Qt rows.
+                        if snapshot_signatures == data.get('_last_applied_snapshot_signatures'):
+                            return
+
                         try:
                             with open(_pf_path, 'r', encoding='utf-8') as f:
                                 loaded = json.load(f)
                             if isinstance(loaded, dict):
                                 prog = loaded
                         except Exception:
-                            prog = None
-                        try:
-                            with os.scandir(_pf_outdir) as _scan:
-                                listing = {e.name for e in _scan if e.is_file()}
-                        except Exception:
-                            listing = None
-                        try:
-                            tts_listing = {
-                                name.lower()
-                                for name in os.listdir(os.path.join(_pf_outdir, "text_to_speech"))
-                            }
-                        except OSError:
-                            tts_listing = set()
+                            # A transient writer lock/replacement should not force
+                            # the GUI thread back into synchronous retry I/O.
+                            prog = copy.deepcopy(data.get('prog') or {})
                     finally:
                         if prog is not None:
                             data['_prefetched_prog'] = prog
                             data['_prefetched_prog_path'] = _pf_path
                         if listing is not None:
                             data['_prefetched_output_listing'] = listing
-                        data['_prefetched_tts_listing'] = tts_listing
-                        data['_prefetch_ready'] = True
+                        if tts_listing is not None:
+                            data['_prefetched_tts_listing'] = tts_listing
+                        if prog is not None and 'snapshot_signatures' in locals():
+                            data['_prefetched_signatures'] = snapshot_signatures
+                            data['_prefetch_ready'] = True
                         data['_prefetch_running'] = False
 
                 threading.Thread(
@@ -16193,21 +16251,33 @@ class RetranslationMixin:
         # ticks. Uses the same prefetch path, so no disk I/O on the GUI thread.
         _pm_dialog = data.get('dialog')
         if _pm_dialog is not None:
-            _original_pm_show_event = _pm_dialog.showEvent
+            if not hasattr(_pm_dialog, '_progress_show_refreshers'):
+                _pm_dialog._progress_show_refreshers = []
+            _pm_dialog._progress_show_refreshers.append(_silent_refresh)
 
-            def _pm_show_event(event, _orig=_original_pm_show_event):
-                try:
-                    _orig(event)
-                except Exception:
-                    pass
-                try:
-                    _silent_refresh()                        # start snapshot now
-                    QTimer.singleShot(250, _silent_refresh)  # apply when ready
-                    QTimer.singleShot(900, _silent_refresh)  # slow-disk fallback
-                except Exception:
-                    pass
+            # Install one show handler per dialog, not one nested wrapper per
+            # EPUB tab.  The refreshers themselves ignore inactive pages.
+            if not getattr(_pm_dialog, '_progress_show_handler_installed', False):
+                _pm_dialog._progress_show_handler_installed = True
+                _original_pm_show_event = _pm_dialog.showEvent
 
-            _pm_dialog.showEvent = _pm_show_event
+                def _run_visible_refreshers():
+                    for refresher in list(getattr(_pm_dialog, '_progress_show_refreshers', ())):
+                        try:
+                            refresher()
+                        except Exception:
+                            pass
+
+                def _pm_show_event(event, _orig=_original_pm_show_event):
+                    try:
+                        _orig(event)
+                    except Exception:
+                        pass
+                    _run_visible_refreshers()
+                    QTimer.singleShot(250, _run_visible_refreshers)
+                    QTimer.singleShot(900, _run_visible_refreshers)
+
+                _pm_dialog.showEvent = _pm_show_event
 
         # ==== Context menu on listbox ====
         listbox = data['listbox']
@@ -16861,11 +16931,9 @@ class RetranslationMixin:
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
 
-        # Automatically refresh once when dialog is opened
-        # Skip for multi-tab dialogs — the parent will do a single bulk refresh
-        is_multi_tab = data.get('dialog') and hasattr(data['dialog'], '_tab_data')
-        if not is_multi_tab:
-            animated_refresh()
+        # The builder has just read and matched this progress snapshot, so an
+        # immediate second full refresh only duplicates large-EPUB work.  The
+        # silent change-detecting timer handles subsequent updates.
 
     def _refresh_all_tabs(self, tab_data_list):
         """Refresh all tabs in a multi-file retranslation dialog"""
@@ -17190,29 +17258,9 @@ class RetranslationMixin:
             # Update statistics if available
             self._update_statistics_display(data)
 
-            # Ensure the special-files toggle is applied after every refresh.
-            try:
-                show_special = data.get('show_special_files_state', False)
-                cb = data.get('show_special_files_cb')
-                if cb:
-                    show_special = cb.isChecked()
-                listbox = data.get('listbox')
-                if listbox:
-                    for i in range(listbox.count()):
-                        item = listbox.item(i)
-                        if not item:
-                            continue
-                        meta = item.data(Qt.UserRole) or {}
-                        _info = meta.get('info') or {}
-                        _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
-                        is_skipped_special = self._progress_file_is_skipped_special(
-                            _fname,
-                            meta.get('is_special', False),
-                        )
-                        item.setHidden(is_skipped_special and not show_special)
-                data['show_special_files_state'] = show_special
-            except Exception:
-                pass
+            # _update_listbox_display already applies the current filter while
+            # updating item metadata; avoid a second all-rows Qt pass here.
+            self._progress_list_show_special(data)
             
             # Restore scroll position and repaint immediately after rebuild
             if 'listbox' in data and data['listbox']:
@@ -17318,17 +17366,7 @@ class RetranslationMixin:
         spine_chapters = data['spine_chapters']
 
         def _normalize_opf_match_name(name: str) -> str:
-            if not name:
-                return ""
-            base = os.path.basename(name)
-            if base.startswith("response_"):
-                base = base[len("response_"):]
-            while True:
-                new_base, ext = os.path.splitext(base)
-                if not ext:
-                    break
-                base = new_base
-            return base
+            return _normalize_progress_match_name(name)
 
         def _opf_names_equal(a: str, b: str) -> bool:
             return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
@@ -17372,11 +17410,20 @@ class RetranslationMixin:
                     existing_files = {e.name for e in _scan if e.is_file()}
             except Exception:
                 existing_files = set()
+        normalized_existing_files = {}
+        for existing_file in existing_files:
+            normalized_existing_files.setdefault(
+                _normalize_opf_match_name(existing_file),
+                existing_file,
+            )
 
         def file_exists_fast(fname: str) -> bool:
             return fname in existing_files
 
         for spine_ch in spine_chapters:
+            # Do not retain a progress object removed by a newer JSON snapshot.
+            spine_ch.pop('progress_key', None)
+            spine_ch.pop('progress_entry', None)
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             is_special = spine_ch.get('is_special', False)
@@ -17393,7 +17440,13 @@ class RetranslationMixin:
                 else:
                     expected_response = filename
             else:
-                expected_response = filename if retain else filename
+                response_with_prefix = f"response_{base_name}.html"
+                if retain:
+                    expected_response = filename
+                elif not file_exists_fast(filename) and file_exists_fast(response_with_prefix):
+                    expected_response = response_with_prefix
+                else:
+                    expected_response = filename
 
             matched_info = None
             matched_key = None
@@ -17522,11 +17575,7 @@ class RetranslationMixin:
 
             else:
                 norm_target = _normalize_opf_match_name(filename)
-                matched_file = None
-                for f in existing_files:
-                    if _normalize_opf_match_name(f) == norm_target:
-                        matched_file = f
-                        break
+                matched_file = normalized_existing_files.get(norm_target)
                 if matched_file:
                     spine_ch['status'] = 'completed'
                     spine_ch['output_file'] = matched_file
@@ -17549,7 +17598,7 @@ class RetranslationMixin:
                 # Require normalized filename match between spine file and output file, and the file must exist
                 norm_spine = _normalize_opf_match_name(filename)
                 norm_out = _normalize_opf_match_name(output_file)
-                file_exists = os.path.exists(os.path.join(output_dir, output_file))
+                file_exists = file_exists_fast(output_file)
                 if norm_spine != norm_out or not file_exists:
                     continue
 
@@ -17563,7 +17612,7 @@ class RetranslationMixin:
                         "content_hash": "",  # Unknown since we don't have the source
                         "output_file": output_file,
                         "status": "completed",
-                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                        "last_updated": time.time(),
                         "auto_discovered": True,
                         "original_basename": filename
                     }
@@ -18106,6 +18155,12 @@ class RetranslationMixin:
         output_dir = data.get('output_dir')
         if not output_dir:
             return False
+        chapters = prog.get('chapters', {})
+        if self._current_progress_output_mode(data) != 'audio' and not any(
+            isinstance(entry, dict) and (entry.get('tts_status') or entry.get('tts_file'))
+            for entry in chapters.values()
+        ):
+            return False
 
         # One directory listing per reconcile pass instead of per-candidate
         # os.path.exists probes (~chapters x ~18 stats each tick on the GUI
@@ -18122,7 +18177,7 @@ class RetranslationMixin:
 
         changed = False
         now = time.time()
-        for _key, entry in prog.get('chapters', {}).items():
+        for _key, entry in chapters.items():
             if not isinstance(entry, dict):
                 continue
             output_file = entry.get('output_file')
@@ -18616,7 +18671,6 @@ class RetranslationMixin:
                     self._apply_progress_list_item_visuals(item, status)
                     self._set_progress_list_item_metadata(item, info, status, show_special_files)
                     self._add_compact_inline_list_item(listbox, item)
-                    self._set_progress_list_item_metadata(item, info, status, show_special_files)
                     if selected_keys and self._progress_list_item_key(info) in selected_keys:
                         item.setSelected(True)
                 state['idx'] = end_idx
@@ -19097,20 +19151,6 @@ class RetranslationMixin:
                 cached_dialog.activateWindow()
                 if getattr(cached_dialog, '_multi_file_tabs_building', False):
                     return
-
-                def _refresh_cached_tabs():
-                    if not hasattr(cached_dialog, '_tab_data') or not cached_dialog._tab_data:
-                        return
-                    print(f"[DEBUG] Auto-clicking refresh on all {len(cached_dialog._tab_data)} tabs in cached dialog...")
-                    for _td in cached_dialog._tab_data:
-                        _rf = _td.get('refresh_func') if _td else None
-                        if callable(_rf):
-                            try:
-                                _rf()
-                            except Exception as _e:
-                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-
-                QTimer.singleShot(50, _refresh_cached_tabs)
                 return
             
             # If there's an existing dialog for a different selection, destroy it first
@@ -19206,6 +19246,9 @@ class RetranslationMixin:
                     nav_next.setEnabled(idx < n - 1)
                     nav_counter.setText(f"{idx + 1} / {n}")
                     stack.setCurrentIndex(idx)
+                    populate_current = getattr(dialog, '_populate_current_progress_tab', None)
+                    if callable(populate_current):
+                        QTimer.singleShot(0, populate_current)
 
                 combo.currentIndexChanged.connect(lambda _: _update_nav())
                 nav_prev.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() - 1))
@@ -19274,6 +19317,12 @@ class RetranslationMixin:
                     }
                 """)
                 dialog_layout.addWidget(notebook)
+                notebook.currentChanged.connect(
+                    lambda _idx: QTimer.singleShot(
+                        0,
+                        getattr(dialog, '_populate_current_progress_tab', lambda: None),
+                    )
+                )
             
             # Track all tab data
             tab_data = []
@@ -19281,6 +19330,23 @@ class RetranslationMixin:
             
             # Store tab_data reference on the dialog for cross-tab operations
             dialog._tab_data = tab_data
+
+            def _populate_current_progress_tab():
+                """Materialize QListWidgetItems only for the visible page."""
+                for tab_result in list(tab_data):
+                    if not tab_result or tab_result.get('_initial_population_requested'):
+                        continue
+                    page = tab_result.get('container')
+                    try:
+                        if page is not None and not page.isVisible():
+                            continue
+                    except RuntimeError:
+                        continue
+                    tab_result['_initial_population_requested'] = True
+                    self._populate_progress_listbox_streamed(tab_result)
+                    break
+
+            dialog._populate_current_progress_tab = _populate_current_progress_tab
 
             # Paint the full-size multi-file shell before scanning/building every EPUB tab.
             dialog.show()
@@ -19414,10 +19480,7 @@ class RetranslationMixin:
                     return
 
                 _update_dropdown_nav_safe()
-                if tab_data:
-                    print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
-                    QTimer.singleShot(100, lambda: _refresh_tabs_streamed(0))
-                else:
+                if not tab_data:
                     print(f"[WARN] No tab data to refresh on dialog open")
 
             def _build_next_tab():
@@ -19446,7 +19509,7 @@ class RetranslationMixin:
                             in_progress = sum(1 for info in cdi if info.get('status') == 'in_progress')
                             tab_data.append(tab_result)
                             build_state['tabs_created'] = True
-                            QTimer.singleShot(25, lambda td=tab_result: self._populate_progress_listbox_streamed(td))
+                            QTimer.singleShot(0, _populate_current_progress_tab)
                             print(f"[DEBUG] Successfully created tab for {label} (progress: {completed} done, {in_progress} in-progress)")
                         else:
                             if tab_frame.layout():

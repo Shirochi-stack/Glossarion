@@ -3929,6 +3929,54 @@ class ProgressManager:
         cleaned_count = 0
         deleted_parents = set()  # Track which parent chapters were deleted
         parents_with_missing_files = set()  # Track parents with missing files (for merged children clearing)
+
+        # Snapshot the output directory once for this cleanup pass.  The old
+        # implementation called ``os.path.exists`` for every progress row and,
+        # for every missing row, scanned the whole directory again looking for
+        # a response_/HTML-extension rename.  Large EPUBs could therefore turn
+        # a single cleanup into thousands of directory scans on the GUI thread.
+        #
+        # Keep the original top-level lookup semantics (including choosing the
+        # first matching renamed file returned by the directory listing).  Only
+        # nested/absolute output paths fall back to ``os.path.exists`` because a
+        # non-recursive directory snapshot cannot represent those safely.
+        _html_exts = {'.html', '.xhtml', '.htm', '.xml'}
+
+        def _norm_cleanup(fn):
+            b = os.path.basename(os.fspath(fn))
+            if b.startswith('response_'):
+                b = b[len('response_'):]
+            while True:
+                b2, e2 = os.path.splitext(b)
+                if e2.lower() in _html_exts:
+                    b = b2
+                else:
+                    break
+            return b.lower()
+
+        try:
+            output_names = os.listdir(output_dir)
+            output_snapshot_available = True
+        except Exception:
+            output_names = []
+            output_snapshot_available = False
+
+        existing_top_level = {
+            os.path.normcase(name)
+            for name in output_names
+        }
+        renamed_html_by_normalized_name = {}
+        for name in output_names:
+            if name.lower().endswith(('.html', '.xhtml', '.htm')):
+                renamed_html_by_normalized_name.setdefault(_norm_cleanup(name), name)
+
+        def _output_exists(output_file):
+            output_name = os.fspath(output_file)
+            if output_snapshot_available and not os.path.isabs(output_name):
+                normalized_name = os.path.normpath(output_name)
+                if os.path.dirname(normalized_name) in ('', '.'):
+                    return os.path.normcase(os.path.basename(normalized_name)) in existing_top_level
+            return os.path.exists(os.path.join(output_dir, output_name))
         
         # First pass: Remove entries for missing files (except merged children and certain non-final states)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
@@ -3950,32 +3998,10 @@ class ProgressManager:
                 continue
             
             if output_file:
-                output_path = os.path.join(output_dir, output_file)
-                if not os.path.exists(output_path):
+                if not _output_exists(output_file):
                     # Before deleting, check if the file was renamed (response_/extension toggle)
-                    _html_exts = {'.html', '.xhtml', '.htm', '.xml'}
-                    def _norm_cleanup(fn):
-                        b = os.path.basename(fn)
-                        if b.startswith('response_'):
-                            b = b[len('response_'):]
-                        while True:
-                            b2, e2 = os.path.splitext(b)
-                            if e2.lower() in _html_exts:
-                                b = b2
-                            else:
-                                break
-                        return b.lower()
-
                     expected_norm = _norm_cleanup(output_file)
-                    renamed_match = None
-                    try:
-                        for f in os.listdir(output_dir):
-                            if f.lower().endswith(('.html', '.xhtml', '.htm')):
-                                if _norm_cleanup(f) == expected_norm:
-                                    renamed_match = f
-                                    break
-                    except Exception:
-                        pass
+                    renamed_match = renamed_html_by_normalized_name.get(expected_norm)
 
                     if renamed_match:
                         # File was renamed (retain toggle) – update the stored filename
