@@ -6670,6 +6670,7 @@ class EpubLibraryDialog(QDialog):
     _INACTIVE_TAB_IDLE_MS = 1200
     _CARD_HOVER_RECONCILE_MS = 50
     _CARD_HOVER_SETTLE_MS = 6000
+    _GRID_SCROLLBAR_RESERVE = 8
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -6719,6 +6720,7 @@ class EpubLibraryDialog(QDialog):
         self._active_card_stream_key: str | None = None
         self._dirty_card_tabs: set[str] = {"ip", "comp"}
         self._pending_card_reflow: set[str] = set()
+        self._grid_layout_widths: dict[str, int] = {}
         self._cover_queue = deque()
         self._cover_queued_paths: set[str] = set()
         self._cover_active_loaders: dict[_CoverLoader, str] = {}
@@ -6987,6 +6989,47 @@ class EpubLibraryDialog(QDialog):
         through so normal grid scrolling keeps working.
         """
         from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Resize:
+            # The dialog can finish resizing before a hidden/newly shown
+            # QScrollArea viewport receives its final geometry. Those viewport
+            # resize events are the authoritative signal that the frozen
+            # column count may be stale.
+            tab_key = None
+            for key, area in (
+                ("ip", getattr(self, "_ip_scroll", None)),
+                ("comp", getattr(self, "_comp_scroll", None)),
+            ):
+                try:
+                    if area is not None and obj is area.viewport():
+                        tab_key = key
+                        break
+                except Exception:
+                    continue
+            if tab_key is not None:
+                try:
+                    raw_width_changed = (
+                        event.oldSize().width() != event.size().width()
+                    )
+                except Exception:
+                    raw_width_changed = True
+                grid_widget = (
+                    getattr(self, "_comp_grid_container", None)
+                    if tab_key == "comp"
+                    else getattr(self, "_ip_grid_container", None)
+                )
+                current_width = self._effective_grid_width(area, grid_widget)
+                previous_width = self._grid_layout_widths.get(tab_key)
+                if (
+                    raw_width_changed
+                    and hasattr(self, "_grid_reflow_timer")
+                    and current_width > 0
+                    and current_width != previous_width
+                    and (
+                        bool(self._cards_for_tab_key(tab_key))
+                        or self._is_card_stream_active(tab_key)
+                    )
+                ):
+                    self._schedule_grid_reflow(tab_key)
         if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop, QEvent.DragLeave):
             return self._handle_library_drop_filter_event(event)
         if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
@@ -7708,6 +7751,79 @@ class EpubLibraryDialog(QDialog):
     def _cards_for_tab_key(self, tab_key: str) -> list[_BookCard]:
         return self._comp_cards if tab_key == "comp" else self._ip_cards
 
+    def _effective_grid_width(
+        self,
+        scroll_area: QScrollArea | None,
+        grid_widget: QWidget | None = None,
+    ) -> int:
+        """Return a stable card-grid width, including for hidden tabs.
+
+        A hidden ``QScrollArea`` commonly keeps its pre-layout/default width
+        (about 640 px on Windows). The same can happen for a newly revealed
+        viewport for one event-loop turn. Both values are valid positive
+        integers, so falling back only when the width is zero or tiny still
+        lets the grid lock in too few columns. The Library tabs occupy the
+        dialog's full content width, therefore the visible sibling scroll area
+        and a conservative dialog-width floor are safe geometry sources while
+        the target viewport is settling.
+        """
+        widths: list[int] = []
+
+        def _collect(area: QScrollArea | None) -> None:
+            if area is None:
+                return
+            try:
+                widths.append(int(area.viewport().width()))
+            except Exception:
+                pass
+            try:
+                # ``contentsRect`` stays constant when the vertical scrollbar
+                # appears; the viewport itself becomes narrower by exactly the
+                # reserved scrollbar width. Using both values lets card
+                # streaming toggle the scrollbar without changing the layout
+                # width and recursively triggering another full rebuild.
+                widths.append(int(area.contentsRect().width()))
+            except Exception:
+                pass
+
+        # Inactive tabs are deliberately pre-populated for fast switching, but
+        # Qt does not lay their scroll areas out to the final width until they
+        # become visible. Borrow the already-settled sibling width instead.
+        try:
+            target_visible = bool(scroll_area and scroll_area.isVisible())
+        except Exception:
+            target_visible = False
+        if target_visible:
+            _collect(scroll_area)
+        else:
+            for sibling in (
+                getattr(self, "_ip_scroll", None),
+                getattr(self, "_comp_scroll", None),
+            ):
+                if sibling is None or sibling is scroll_area:
+                    continue
+                try:
+                    if sibling.isVisible():
+                        _collect(sibling)
+                        break
+                except Exception:
+                    continue
+
+        try:
+            widths.append(max(0, int(self.width()) - 40))
+        except Exception:
+            pass
+        if not any(width > 0 for width in widths):
+            _collect(scroll_area)
+        if not any(width > 0 for width in widths) and grid_widget is not None:
+            try:
+                widths.append(int(grid_widget.width()))
+            except Exception:
+                pass
+
+        measured = max((width for width in widths if width > 0), default=0)
+        return max(0, measured - self._GRID_SCROLLBAR_RESERVE)
+
     def _sync_card_size_from_combo(self) -> None:
         combo = getattr(self, "_size_combo", None)
         if combo is not None:
@@ -7762,6 +7878,31 @@ class EpubLibraryDialog(QDialog):
         if self._is_card_stream_active(key):
             return
         self._grid_reflow_timer.start(90)
+
+    def _schedule_grid_reflow_if_width_changed(
+        self, tab_key: str | None = None
+    ) -> None:
+        """Queue a reflow only when the tab's usable width really changed."""
+        key = tab_key or self._active_card_tab_key()
+        if not (
+            self._cards_for_tab_key(key)
+            or self._is_card_stream_active(key)
+        ):
+            return
+        scroll_area = (
+            getattr(self, "_comp_scroll", None)
+            if key == "comp" else getattr(self, "_ip_scroll", None)
+        )
+        grid_widget = (
+            getattr(self, "_comp_grid_container", None)
+            if key == "comp" else getattr(self, "_ip_grid_container", None)
+        )
+        current_width = self._effective_grid_width(scroll_area, grid_widget)
+        if (
+            current_width > 0
+            and current_width != self._grid_layout_widths.get(key)
+        ):
+            self._schedule_grid_reflow(key)
 
     def _run_pending_grid_reflow(self) -> None:
         pending = list(getattr(self, "_pending_card_reflow", set()) or set())
@@ -10343,42 +10484,12 @@ class EpubLibraryDialog(QDialog):
         spacing = preset["spacing"]
         grid_layout.setHorizontalSpacing(spacing)
         grid_layout.setVerticalSpacing(spacing + 2)
-        # Prefer the scroll viewport width: it is the actual visible
-        # surface for the card grid. The grid widget itself can briefly
-        # report an old/shrunken width while QScrollArea is settling
-        # after the loading overlay hides, which used to make the first
-        # paint render too few columns until a manual zoom/resize.
-        try:
-            viewport = scroll_area.viewport() if scroll_area is not None else None
-            viewport_w = int(viewport.width()) if viewport is not None else 0
-        except Exception:
-            viewport_w = 0
-        try:
-            scroll_w = int(scroll_area.width()) if scroll_area is not None else 0
-        except Exception:
-            scroll_w = 0
-        if viewport_w <= 0:
-            try:
-                viewport_w = int(grid_widget.width()) if grid_widget else 0
-            except Exception:
-                viewport_w = 0
-        # During first open the scroll viewport can briefly report a tiny
-        # positive width even after the tab widget is shown. Treat that as
-        # stale geometry and fall back to the surrounding visible widths so
-        # the streamed grid does not start as a single vertical column.
-        dialog_w = max(0, self.width() - 40)
-        if viewport_w < max(1, min(dialog_w, preset_card_w * 2 + spacing)):
-            viewport_w = max(viewport_w, scroll_w, dialog_w)
-        if viewport_w <= 0:
-            viewport_w = dialog_w
-        # Reserve room for the vertical scrollbar. The scroll area's
-        # stylesheet fixes it to an 8 px track and we need to subtract
-        # it ahead of time because the scrollbar only pops in once the
-        # grid's total height overflows the viewport — without the
-        # reserve the rightmost column gets clipped the instant the
-        # scrollbar appears.
-        _SCROLLBAR_RESERVE = 8
-        viewport_w = max(0, viewport_w - _SCROLLBAR_RESERVE)
+        # Resolve geometry through the dialog/visible sibling as well as the
+        # target viewport. This rejects stale-but-plausible first-layout and
+        # hidden-tab widths, the two cases that previously left half the
+        # Library blank until zoom forced a second render.
+        viewport_w = self._effective_grid_width(scroll_area, grid_widget)
+        self._grid_layout_widths[stream_key] = viewport_w
         cols = max(1, (viewport_w + spacing) // (preset_card_w + spacing))
         # Redistribute the leftover horizontal space across the cards
         # themselves so the grid fills the viewport instead of leaving
@@ -12066,13 +12177,21 @@ class EpubLibraryDialog(QDialog):
         # Keep the drag overlay + toast glued to the current geometry — they
         # don't participate in the root layout since they float above it.
         self._reposition_overlays()
-        # Debounce: re-flow cards once the user stops dragging (300ms).
-        if not (self._ip_cards or self._comp_cards):
+        # Debounce: re-flow cards once the user stops dragging (300ms). An
+        # active stream may have captured its column count before adding its
+        # first card, so an empty card list is not enough reason to ignore the
+        # resize.
+        active_key = self._active_card_tab_key()
+        if not (
+            self._cards_for_tab_key(active_key)
+            or self._is_card_stream_active(active_key)
+        ):
             return
         if not hasattr(self, '_resize_timer'):
             self._resize_timer = QTimer(self)
             self._resize_timer.setSingleShot(True)
-            self._resize_timer.timeout.connect(self._schedule_grid_reflow)
+            self._resize_timer.timeout.connect(
+                self._schedule_grid_reflow_if_width_changed)
         self._resize_timer.start(300)
 
     def _reposition_overlays(self):

@@ -105,5 +105,6 @@ tests/**
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_antigravity_proxy.py
 !tests/test_epub_utils.py
+!tests/test_epub_library_layout.py
 junktests/
 warp.md
