@@ -6309,6 +6309,11 @@ class TranslationProcessor:
                         return "[TIMEOUT]", "timeout", None
                 
                 elif getattr(e, "error_type", None) == "rate_limit" or getattr(e, "http_status", None) == 429:
+                    # Graceful stop may let the request that was already on the
+                    # wire finish, but a failed request must never be retried.
+                    if os.environ.get('GRACEFUL_STOP') == '1':
+                        print(f"⏸️ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Rate-limited during graceful stop — not retrying")
+                        return None, "graceful_stop", None
                     # Rate limit errors - clean handling without traceback
                     print("⚠️ Rate limited, sleeping 60s…")
                     for i in range(60):

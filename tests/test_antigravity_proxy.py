@@ -1,11 +1,21 @@
 import json
 import time
+import types
 
 import pytest
 
 import antigravity_proxy
+import unified_api_client
 from html_output_utils import ensure_utf8_html_document
 from model_options import get_model_options
+from unified_api_client import UnifiedClient, UnifiedClientError
+
+
+@pytest.fixture(autouse=True)
+def _reset_antigravity_cancel_state():
+    antigravity_proxy.reset_cancel()
+    yield
+    antigravity_proxy.reset_cancel()
 
 
 class FakeStreamResponse:
@@ -68,6 +78,21 @@ class EncodingAwareStreamResponse:
 
 def _sse_event(payload):
     return "data: " + json.dumps(payload)
+
+
+def _unified_antigravity_client(model="antigravity/gemini-3.1-pro-low"):
+    client = UnifiedClient.__new__(UnifiedClient)
+    client.model = model
+    client.client_type = "antigravity"
+    client.current_key_output_token_limit = None
+    client._cancelled = False
+    client._ignore_graceful_stop = False
+    client._get_thread_local_client = lambda: types.SimpleNamespace(
+        output_token_limit=None,
+        per_key_max_output_tokens=None,
+    )
+    client._is_o_series_model = lambda: False
+    return client
 
 
 def test_normalize_model_name_prefixes_gemini_ids_for_upstream_proxy():
@@ -188,6 +213,142 @@ def test_consume_openai_stream_forces_utf8_for_unicode_content():
 
     assert result["content"] == "I’m telling you."
     assert response.encoding == "utf-8"
+
+
+def test_cancel_stream_closes_registered_active_response():
+    response = FakeStreamResponse([])
+    antigravity_proxy._register_active_response(response)
+
+    antigravity_proxy.cancel_stream()
+
+    assert response.closed is True
+    assert antigravity_proxy.is_cancelled() is True
+
+
+def test_cancelled_chat_preflight_never_posts(monkeypatch):
+    post_calls = []
+    monkeypatch.setattr(
+        antigravity_proxy.requests,
+        "post",
+        lambda *_args, **_kwargs: post_calls.append((_args, _kwargs)),
+    )
+    antigravity_proxy.cancel_stream()
+
+    with pytest.raises(RuntimeError, match="cancelled by user"):
+        antigravity_proxy._post_chat(
+            {"messages": []},
+            timeout=30,
+            stream=True,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert post_calls == []
+
+
+def test_graceful_stop_aborts_antigravity_429_retry_before_second_post(monkeypatch):
+    client = _unified_antigravity_client()
+    client.request_timeout = 300
+    client._is_stop_requested = lambda: False
+    client._get_max_retries = lambda: 3
+    client._get_send_interval = lambda: 0.01
+    client._streaming_enabled = lambda: True
+    client._is_rate_limit_error = lambda _exc: True
+
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    monkeypatch.setattr(unified_api_client, "_antigravity_cancel_stream", lambda: None)
+
+    post_calls = []
+
+    def rate_limited_send(**_kwargs):
+        post_calls.append(True)
+        monkeypatch.setenv("GRACEFUL_STOP", "1")
+        raise RuntimeError("Antigravity: HTTP 429 - quota exhausted")
+
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", rate_limited_send)
+
+    with pytest.raises(UnifiedClientError) as exc_info:
+        client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert exc_info.value.error_type == "cancelled"
+    assert post_calls == [True]
+
+
+def test_antigravity_worker_never_resets_shared_cancel_event(monkeypatch):
+    client = _unified_antigravity_client("antigravity1/gemini-3.5-flash-low")
+    client.request_timeout = 300
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_max_retries = lambda: 1
+    client._streaming_enabled = lambda: True
+
+    reset_calls = []
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    monkeypatch.setattr(unified_api_client, "_antigravity_reset_cancel", lambda: reset_calls.append(True))
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_send_stream",
+        lambda **_kwargs: {"content": "ok", "finish_reason": "stop", "usage": None},
+    )
+
+    result = client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert result.content == "ok"
+    assert reset_calls == []
+
+
+def test_should_abort_retry_treats_graceful_stop_as_retry_only_cancel(monkeypatch):
+    client = _unified_antigravity_client()
+    client._is_stop_requested = lambda: False
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+
+    assert client._should_abort_retry() is True
+
+    client._ignore_graceful_stop = True
+    assert client._should_abort_retry() is False
+
+
+def test_outer_rate_limit_sleep_exits_immediately_on_graceful_stop(monkeypatch):
+    client = _unified_antigravity_client()
+    client._is_stop_requested = lambda: False
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setattr(
+        unified_api_client.time,
+        "sleep",
+        lambda _seconds: pytest.fail("cancelled retry wait must not sleep"),
+    )
+
+    assert client._sleep_with_cancel(60, 0.5) is False
+
+
+def test_antigravity_cancel_resets_only_on_explicit_new_run_reset(monkeypatch):
+    calls = []
+    monkeypatch.setattr(unified_api_client, "_antigravity_cancel_stream", lambda: calls.append("cancel"))
+    monkeypatch.setattr(unified_api_client, "_antigravity_reset_cancel", lambda: calls.append("reset"))
+
+    try:
+        unified_api_client.set_stop_flag(True)
+        unified_api_client.set_stop_flag(False)
+    finally:
+        unified_api_client.global_stop_flag = False
+        UnifiedClient.set_global_cancellation(False)
+
+    assert calls == ["cancel", "reset"]
 
 
 def test_antigravity_payload_clamps_model_token_limits():
@@ -402,7 +563,7 @@ def test_wait_for_auth_keeps_httpx_stream_open_until_consumer_closes(monkeypatch
     context = FakeStreamContext()
 
     monkeypatch.setattr(antigravity_proxy, "httpx", object())
-    monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(antigravity_proxy, "_wait_for_cancel", lambda _seconds: False)
     monkeypatch.setattr(antigravity_proxy, "_open_auth_browser_once", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(antigravity_proxy, "_proxy_has_accounts", lambda: True)
     monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
@@ -434,6 +595,35 @@ def test_wait_for_auth_keeps_httpx_stream_open_until_consumer_closes(monkeypatch
 
     assert response.closed is True
     assert context.exited is True
+
+
+def test_wait_for_auth_cancel_does_not_launch_retry_post(monkeypatch):
+    post_calls = []
+    monkeypatch.setattr(antigravity_proxy, "_open_auth_browser_once", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(antigravity_proxy, "_proxy_account_count", lambda: 1)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_wait_for_cancel",
+        lambda _seconds: (antigravity_proxy.cancel_stream() or True),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy.requests,
+        "post",
+        lambda *_args, **_kwargs: post_calls.append((_args, _kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled by user"):
+        antigravity_proxy._wait_for_auth(
+            "http://localhost:3000/v1/chat/completions",
+            {"stream": False},
+            {"Content-Type": "application/json"},
+            "http://localhost:3000",
+            log_fn=lambda _message: None,
+            max_wait=5,
+            poll_interval=5,
+        )
+
+    assert post_calls == []
 
 
 def test_utf8_html_output_helper_adds_charset_to_fragments_and_documents():

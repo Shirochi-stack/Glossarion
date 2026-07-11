@@ -3588,7 +3588,12 @@ class UnifiedClient:
         # Clear any lingering global stop/cancel state when starting a new client context
         # BUT skip this when creating internal fallback/retry clients during an active stop
         global global_stop_flag
-        if not _skip_cancel_reset:
+        hard_stop_active = (
+            bool(global_stop_flag)
+            or os.environ.get('TRANSLATION_CANCELLED') == '1'
+            or self.is_globally_cancelled()
+        )
+        if not _skip_cancel_reset and not hard_stop_active:
             global_stop_flag = False
             try:
                 self.set_global_cancellation(False)
@@ -13657,6 +13662,8 @@ class UnifiedClient:
                 return True
             if global_stop_flag:
                 return True
+            if self.__class__.is_globally_cancelled():
+                return True
             from TransateKRtoEN import is_stop_requested as _tk_is_stop
             if _tk_is_stop():
                 return True
@@ -17726,14 +17733,17 @@ class UnifiedClient:
         """Check if retry/wait operations should abort.
 
         This extends _is_stop_requested() by also checking TRANSLATION_CANCELLED,
-        which the GUI sets on BOTH graceful and immediate stop.  Use this in
-        retry loops, backoff waits and _sleep_with_cancel — anywhere we want
-        graceful stop to bail out of repeated attempts, but NOT on the success
-        path where an in-flight result has already been received.
+        plus graceful-stop state. Use this in retry loops, backoff waits and
+        _sleep_with_cancel — anywhere a current in-flight success may finish,
+        but another HTTP attempt must not begin.
         """
         if self._is_stop_requested():
             return True
-        # TRANSLATION_CANCELLED is set by the GUI on both graceful and immediate stop
+        if (
+            os.environ.get('GRACEFUL_STOP') == '1'
+            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+        ) and not getattr(self, '_ignore_graceful_stop', False):
+            return True
         if os.environ.get('TRANSLATION_CANCELLED') == '1':
             return True
         return False
@@ -25078,6 +25088,14 @@ class UnifiedClient:
         The unnumbered prefix forces account #1; numbered variants force
         subsequent account slots.
         """
+        if self._should_abort_retry():
+            if _antigravity_cancel_stream is not None:
+                _antigravity_cancel_stream()
+            raise UnifiedClientError(
+                "Antigravity: Translation stopped by user",
+                error_type="cancelled",
+            )
+
         if not ANTIGRAVITY_AVAILABLE or _antigravity_send is None:
             raise UnifiedClientError(
                 "Antigravity proxy module is not available. Ensure antigravity_proxy.py exists in src/.\n"
@@ -25094,6 +25112,13 @@ class UnifiedClient:
                     f"Antigravity proxy could not be started: {error_msg}",
                     error_type="config_error"
                 )
+        if self._should_abort_retry():
+            if _antigravity_cancel_stream is not None:
+                _antigravity_cancel_stream()
+            raise UnifiedClientError(
+                "Antigravity: Translation stopped by user",
+                error_type="cancelled",
+            )
 
         account_id = self._extract_antigravity_account_id(self.model) or 1
         actual_model = self._strip_antigravity_model_prefix(self.model)
@@ -25117,8 +25142,8 @@ class UnifiedClient:
 
 
         for attempt in range(max_retries):
-            # Check stop flag
-            if self._is_stop_requested():
+            # Retry attempts must stop for both immediate and graceful Stop.
+            if self._should_abort_retry():
                 # Also signal the antigravity cancel event so any in-flight stream aborts
                 if _antigravity_cancel_stream is not None:
                     _antigravity_cancel_stream()
@@ -25128,15 +25153,22 @@ class UnifiedClient:
                 )
 
             try:
-                # Reset cancel flag before each attempt
-                if _antigravity_reset_cancel is not None:
-                    _antigravity_reset_cancel()
-
                 # Determine stream log visibility from the GUI toggles.
                 if os.getenv("BATCH_TRANSLATION", "0") == "1":
                     log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
                 else:
                     log_stream = self._streaming_enabled() and os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+                # Never clear Antigravity's process-wide cancel event from a
+                # worker. Recheck immediately before the POST so a Stop racing
+                # request setup cannot launch another retry.
+                if self._should_abort_retry():
+                    if _antigravity_cancel_stream is not None:
+                        _antigravity_cancel_stream()
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled",
+                    )
 
                 result = _antigravity_send_stream(
                     messages=messages,
@@ -25223,7 +25255,11 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    time.sleep(self._get_send_interval())
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.1):
+                        raise UnifiedClientError(
+                            "Antigravity: Translation stopped by user",
+                            error_type="cancelled",
+                        )
                     continue
 
             except Exception as exc:
@@ -25236,9 +25272,18 @@ class UnifiedClient:
                 last_error = exc
                 if attempt < max_retries - 1:
                     print(f"⚠️ Antigravity error (attempt {attempt+1}/{max_retries}): {error_str}")
-                    time.sleep(self._get_send_interval())
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.1):
+                        raise UnifiedClientError(
+                            "Antigravity: Translation stopped by user",
+                            error_type="cancelled",
+                        )
                     continue
 
+        if self._should_abort_retry():
+            raise UnifiedClientError(
+                "Antigravity: Translation stopped by user",
+                error_type="cancelled",
+            )
         final_error_type = "rate_limit" if last_error is not None and self._is_rate_limit_error(last_error) else "api_error"
         raise UnifiedClientError(
             f"Antigravity request failed after {max_retries} attempts: {last_error}",
@@ -28614,10 +28659,16 @@ def set_stop_flag(value: bool = True):
             UnifiedClient.reset_api_call_stagger()
         except Exception:
             pass
-    # Also signal browser-backed cancel events so in-flight requests abort.
+    # Antigravity cancellation is process-wide. Workers must never reset it;
+    # only this explicit lifecycle reset (called before a new run) may clear it.
     if value and _antigravity_cancel_stream is not None:
         try:
             _antigravity_cancel_stream()
+        except Exception:
+            pass
+    elif not value and _antigravity_reset_cancel is not None:
+        try:
+            _antigravity_reset_cancel()
         except Exception:
             pass
     if value and _authnd_cancel_stream is not None:

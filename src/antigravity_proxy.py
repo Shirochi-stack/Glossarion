@@ -81,6 +81,8 @@ PROXY_REPO_URL = "https://github.com/frieser/antigravity-proxy"
 
 # Module-level cancellation flag.
 _cancel_event = threading.Event()
+_active_response_lock = threading.Lock()
+_active_responses: Dict[int, Any] = {}
 
 # Module-level proxy subprocess tracking.
 _proxy_process: Optional[subprocess.Popen] = None
@@ -1101,6 +1103,15 @@ def invalidate_api_key_cache() -> None:
 def cancel_stream() -> None:
     """Signal any active Antigravity proxy stream to abort."""
     _cancel_event.set()
+    # Closing the live response wakes a thread blocked in SSE iteration instead
+    # of waiting for the proxy/model to yield another line.
+    with _active_response_lock:
+        responses = list(_active_responses.values())
+    for response in responses:
+        try:
+            response.close()
+        except Exception:
+            pass
 
 
 def reset_cancel() -> None:
@@ -1118,6 +1129,30 @@ def reset_auth_browser() -> None:
 
 def is_cancelled() -> bool:
     return _cancel_event.is_set()
+
+
+def _raise_if_cancelled() -> None:
+    if _cancel_event.is_set():
+        raise RuntimeError("Antigravity: stream cancelled by user")
+
+
+def _wait_for_cancel(timeout: float) -> bool:
+    """Wait up to *timeout*, returning immediately when cancellation is set."""
+    return _cancel_event.wait(max(0.0, float(timeout)))
+
+
+def _register_active_response(response: Any) -> None:
+    if response is None:
+        return
+    with _active_response_lock:
+        _active_responses[id(response)] = response
+
+
+def _unregister_active_response(response: Any) -> None:
+    if response is None:
+        return
+    with _active_response_lock:
+        _active_responses.pop(id(response), None)
 
 
 # ---------------------------------------------------------------------------
@@ -1621,16 +1656,16 @@ def _wait_for_auth(
 
     elapsed = 0
     while elapsed < max_wait:
-        if _cancel_event.is_set():
-            return None
-
-        time.sleep(poll_interval)
+        _raise_if_cancelled()
+        if _wait_for_cancel(poll_interval):
+            _raise_if_cancelled()
         elapsed += poll_interval
 
         if _proxy_account_count() >= max(1, int(min_account_count or 1)):
             _log("Antigravity: account detected, retrying request...")
             retry_resp = None
             try:
+                _raise_if_cancelled()
                 if stream and prefer_httpx_stream and httpx is not None:
                     retry_resp = _HttpxStreamResponseAdapter(
                         _stream_chat_with_httpx(url, payload, headers, request_timeout)
@@ -1681,9 +1716,9 @@ def _ensure_account_slot_available(
 
     elapsed = 0.0
     while elapsed < max_wait:
-        if _cancel_event.is_set():
-            raise RuntimeError("Antigravity: account linking cancelled by user")
-        time.sleep(poll_interval)
+        _raise_if_cancelled()
+        if _wait_for_cancel(poll_interval):
+            _raise_if_cancelled()
         elapsed += poll_interval
         if _proxy_account_count() >= account_id:
             _log(f"✅ Antigravity: account slot #{account_id} detected.")
@@ -2135,6 +2170,7 @@ def _post_chat(
     stream: bool,
     headers: Optional[Dict[str, str]] = None,
 ) -> requests.Response:
+    _raise_if_cancelled()
     return requests.post(
         f"{get_proxy_url()}{CHAT_COMPLETIONS_ENDPOINT}",
         json=payload,
@@ -2150,6 +2186,7 @@ def _stream_chat_with_httpx(
     headers: Dict[str, str],
     timeout: float,
 ):
+    _raise_if_cancelled()
     if httpx is None:
         raise ImportError("httpx is not installed")
 
@@ -2333,6 +2370,7 @@ def send_message(
     account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a non-streaming message to frieser/antigravity-proxy."""
+    _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
     account_id = account_id or _extract_antigravity_account_id(model) or 1
@@ -2348,6 +2386,7 @@ def send_message(
     _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
+        _raise_if_cancelled()
         resp = _post_chat(payload, timeout=timeout, stream=False, headers=headers)
     except requests.ConnectionError:
         _raise_connection_refused()
@@ -2357,6 +2396,7 @@ def send_message(
             "The model may need more time for long translations."
         )
 
+    _raise_if_cancelled()
     if _should_wait_for_auth(resp):
         error_text = _extract_error_message(resp)
         auth_resp = _wait_for_auth(
@@ -2372,6 +2412,7 @@ def send_message(
         if auth_resp is not None:
             resp = auth_resp
         else:
+            _raise_if_cancelled()
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"
                 f"Open {proxy_url} and add your Google account, then try again."
@@ -2449,6 +2490,8 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
         "off",
     )
 
+    _raise_if_cancelled()
+    _register_active_response(resp)
     try:
         try:
             resp.encoding = "utf-8"
@@ -2521,7 +2564,10 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
             if remainder:
                 _log(remainder)
 
+        _raise_if_cancelled()
+
     finally:
+        _unregister_active_response(resp)
         try:
             resp.close()
         except Exception:
@@ -2547,6 +2593,7 @@ def send_message_stream(
     account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send a streaming message to frieser/antigravity-proxy."""
+    _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
     account_id = account_id or _extract_antigravity_account_id(model) or 1
@@ -2562,7 +2609,9 @@ def send_message_stream(
     _log_payload_token_limit(_log, max_tokens, payload)
 
     try:
+        _raise_if_cancelled()
         with _stream_chat_with_httpx(url, payload, headers, timeout) as resp:
+            _raise_if_cancelled()
             if resp.status_code != 200:
                 try:
                     error_text = resp.read().decode("utf-8", errors="replace")[:20000]
@@ -2583,6 +2632,7 @@ def send_message_stream(
                     )
                     if auth_resp is not None:
                         return _consume_openai_stream(auth_resp, log_fn=log_fn, log_stream=log_stream)
+                    _raise_if_cancelled()
                     raise RuntimeError(
                         f"Antigravity: authentication timed out.\n"
                         f"Open {proxy_url} and add your Google account, then try again."
@@ -2632,12 +2682,14 @@ def send_message_stream(
         raise
 
     try:
+        _raise_if_cancelled()
         resp = _post_chat(payload, timeout=timeout, stream=True, headers=headers)
     except requests.ConnectionError:
         _raise_connection_refused()
     except requests.Timeout:
         raise RuntimeError(f"Antigravity proxy streaming request timed out after {timeout}s.")
 
+    _raise_if_cancelled()
     if _should_wait_for_auth(resp):
         error_text = _extract_error_message(resp)
         try:
@@ -2657,6 +2709,7 @@ def send_message_stream(
         if auth_resp is not None:
             resp = auth_resp
         else:
+            _raise_if_cancelled()
             raise RuntimeError(
                 f"Antigravity: authentication timed out.\n"
                 f"Open {proxy_url} and add your Google account, then try again."
