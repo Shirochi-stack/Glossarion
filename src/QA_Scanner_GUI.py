@@ -2826,6 +2826,7 @@ class QAScannerMixin:
                     sample_size_label = QLabel("Check the first")
                     sample_size_spinbox = QSpinBox()
                     sample_size_spinbox.setRange(1, 1_000_000)
+                    sample_size_spinbox.setSingleStep(250)
                     sample_size_spinbox.setValue(500)
                     sample_size_spinbox.setMinimumWidth(110)
                     sample_size_spinbox.setToolTip(
