@@ -2921,6 +2921,12 @@ class QAScannerMixin:
                         button_box = confirm_box.findChild(QDialogButtonBox)
                         if button_box is not None:
                             button_box.setCenterButtons(True)
+                            if button_box.layout() is not None:
+                                button_box.layout().setSpacing(24)
+                        for standard_button in (QMessageBox.Yes, QMessageBox.No):
+                            button = confirm_box.button(standard_button)
+                            if button is not None:
+                                button.setMinimumWidth(110)
                         result = confirm_box.exec()
                         if result != QMessageBox.Yes:
                             return
