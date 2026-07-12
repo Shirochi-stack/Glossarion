@@ -5311,12 +5311,27 @@ class QAScannerMixin:
 
             def reset_defaults():
                 """Reset to default settings"""
-                result = QMessageBox.question(
-                    dialog,
-                    "Reset to Defaults",
-                    "Are you sure you want to reset all settings to defaults?\n\n(Your excluded characters list will be preserved)",
-                    QMessageBox.Yes | QMessageBox.No
+                confirm_box = QMessageBox(dialog)
+                confirm_box.setIcon(QMessageBox.Question)
+                confirm_box.setWindowTitle("Reset to Defaults")
+                confirm_box.setText(
+                    "Are you sure you want to reset all settings to defaults?"
                 )
+                confirm_box.setInformativeText(
+                    "Your excluded characters list will be preserved."
+                )
+                confirm_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                confirm_box.setDefaultButton(QMessageBox.No)
+                button_box = confirm_box.findChild(QDialogButtonBox)
+                if button_box is not None:
+                    button_box.setCenterButtons(True)
+                    if button_box.layout() is not None:
+                        button_box.layout().setSpacing(24)
+                for standard_button in (QMessageBox.Yes, QMessageBox.No):
+                    button = confirm_box.button(standard_button)
+                    if button is not None:
+                        button.setMinimumWidth(110)
+                result = confirm_box.exec()
                 if result == QMessageBox.Yes:
                     # Save current excluded characters before reset
                     saved_excluded_chars = excluded_text.toPlainText()
