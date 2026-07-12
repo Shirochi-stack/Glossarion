@@ -9908,7 +9908,13 @@ class UnifiedClient:
                         # Always back off at least once even when indefinite retry is disabled
                         rate_limit_retry_count += 1
                         wait_time = 60
-                        print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count}/{internal_retries})")
+                        if self.client_type == "antigravity" and "quota exhausted" in error_str:
+                            print(
+                                f"⏳ Antigravity quota exhausted; waiting {wait_time}s cooldown before "
+                                f"scheduled retry #{rate_limit_retry_count}/{internal_retries}"
+                            )
+                        else:
+                            print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count}/{internal_retries})")
                         if not self._sleep_with_cancel(wait_time, 0.5):
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         self._last_retry_error_type = '429_rate_limit'
@@ -25216,14 +25222,13 @@ class UnifiedClient:
                         error_type="cancelled",
                     )
 
-                # Exhausted subscription/account quota is not a transient 429.
-                # Retrying it locally cannot succeed before the stated reset.
+                # Avoid a nested provider retry. The outer scheduler owns the
+                # cooldown wait and the next visible retry count.
                 if any(marker in error_lower for marker in (
                     "individual quota reached",
                     "quota exhausted",
                     "insufficient_quota",
                 )):
-                    print("⛔ Antigravity: quota is exhausted; not retrying this request")
                     raise UnifiedClientError(error_str, error_type="rate_limit")
 
                 # Account/auth setup errors are fatal for this attempt.
