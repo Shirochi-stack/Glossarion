@@ -81,6 +81,7 @@ def default_qa_scan_settings():
         "check_ai_artifacts": True,
         "check_ai_thinking_preamble": False,
         "ai_thinking_preamble_patterns": list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
+        "ai_thinking_preamble_patterns_are_regex": False,
         "check_punctuation_mismatch": False,
         "punctuation_loss_threshold": 49,
         "flag_excess_punctuation": False,
@@ -201,6 +202,9 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_AI_THINKING_PREAMBLE_PATTERNS_JSON": json.dumps(
             settings.get("ai_thinking_preamble_patterns", DEFAULT_AI_THINKING_PREAMBLE_PATTERNS)
         ),
+        "QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX": "1" if settings.get(
+            "ai_thinking_preamble_patterns_are_regex", False
+        ) else "0",
         "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",
         "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",
         "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),
@@ -402,6 +406,12 @@ def run_qa_scan_path(
     finally:
         restore_env(previous_env)
 DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
-    r'The user wants (?:a |me to )',
-    r'(?:I need to|Let me) (?:translate|analyze|verify)',
+    'The user wants a ',
+    'The user wants me to ',
+    'I need to translate',
+    'I need to analyze',
+    'I need to verify',
+    'Let me translate',
+    'Let me analyze',
+    'Let me verify',
 ]

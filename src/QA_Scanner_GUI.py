@@ -11,15 +11,21 @@ from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButt
                                QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
                                QRadioButton, QButtonGroup, QGroupBox, QComboBox,
-                               QFileDialog, QMessageBox, QSizePolicy)
+                               QFileDialog, QMessageBox, QSizePolicy, QDialogButtonBox)
 from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl, QEventLoop
 from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
 
 DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
-    r'The user wants (?:a |me to )',
-    r'(?:I need to|Let me) (?:translate|analyze|verify)',
+    'The user wants a ',
+    'The user wants me to ',
+    'I need to translate',
+    'I need to analyze',
+    'I need to verify',
+    'Let me translate',
+    'Let me analyze',
+    'Let me verify',
 ]
 
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -482,6 +488,7 @@ class QAScannerMixin:
                     'check_ai_artifacts': True,
                     'check_ai_thinking_preamble': False,
                     'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
+                    'ai_thinking_preamble_patterns_are_regex': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -2780,8 +2787,8 @@ class QAScannerMixin:
                 "Disabled by default because similar phrases can occur in normal prose."
             )
             ai_thinking_preamble_layout.addWidget(check_ai_thinking_preamble_checkbox)
-            edit_ai_thinking_preamble_button = QPushButton("Patterns…")
-            edit_ai_thinking_preamble_button.setToolTip("View and edit the AI preamble regular expressions")
+            edit_ai_thinking_preamble_button = QPushButton("Edit phrases…")
+            edit_ai_thinking_preamble_button.setToolTip("View and edit phrases that should be flagged")
             ai_thinking_preamble_layout.addWidget(edit_ai_thinking_preamble_button)
             ai_thinking_preamble_layout.addStretch()
             detection_layout.addWidget(ai_thinking_preamble_row)
@@ -2792,26 +2799,64 @@ class QAScannerMixin:
                     DEFAULT_AI_THINKING_PREAMBLE_PATTERNS,
                 )
             )]
+            ai_thinking_preamble_regex_holder = [bool(
+                qa_settings.get('ai_thinking_preamble_patterns_are_regex', False)
+            )]
 
             def show_ai_thinking_preamble_patterns():
                 editor_dialog = getattr(self, '_qa_ai_preamble_patterns_dialog', None)
                 if editor_dialog is None:
                     editor_dialog = QDialog(self)
-                    editor_dialog.setWindowTitle("AI Thinking Preamble Patterns")
+                    editor_dialog.setWindowTitle("AI Thinking Preamble Phrases")
                     editor_dialog.setModal(False)
                     editor_dialog.setWindowModality(Qt.NonModal)
                     editor_dialog.setMinimumSize(620, 380)
                     editor_layout = QVBoxLayout(editor_dialog)
                     help_label = QLabel(
-                        "One Python regular expression per line. Patterns are matched "
-                        "case-insensitively against the first 500 characters of each file."
+                        "Enter one phrase per line. If any phrase appears near the start of a file, "
+                        "the scanner will flag it. Capitalization does not matter."
                     )
                     help_label.setWordWrap(True)
                     editor_layout.addWidget(help_label)
                     pattern_editor = QTextEdit()
                     pattern_editor.setAcceptRichText(False)
-                    pattern_editor.setPlaceholderText("Enter one regular expression per line")
+                    pattern_editor.setPlaceholderText(
+                        "Example:\nI need to verify\nLet me translate"
+                    )
                     editor_layout.addWidget(pattern_editor)
+                    regex_checkbox = self._create_styled_checkbox(
+                        "Advanced: treat each line as a regular expression"
+                    )
+                    regex_checkbox.setToolTip(
+                        "Enable only if you are familiar with Python regular expressions."
+                    )
+                    editor_layout.addWidget(regex_checkbox)
+                    regex_example_label = QLabel(
+                        "Example:  I need to (verify|check)\n"
+                        "Matches either ‘I need to verify’ or ‘I need to check’."
+                    )
+                    regex_example_label.setWordWrap(True)
+                    regex_example_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    regex_example_label.setStyleSheet(
+                        "color: #b8b8b8; padding: 6px 10px; "
+                        "background-color: #252525; border-radius: 4px;"
+                    )
+                    regex_example_label.setVisible(False)
+                    editor_layout.addWidget(regex_example_label)
+
+                    def toggle_regex_help(enabled):
+                        regex_example_label.setVisible(enabled)
+                        if enabled:
+                            pattern_editor.setPlaceholderText(
+                                "One Python regular expression per line\n"
+                                "Example: I need to (verify|check)"
+                            )
+                        else:
+                            pattern_editor.setPlaceholderText(
+                                "Example:\nI need to verify\nLet me translate"
+                            )
+
+                    regex_checkbox.toggled.connect(toggle_regex_help)
                     status_label = QLabel("")
                     editor_layout.addWidget(status_label)
                     button_row = QHBoxLayout()
@@ -2830,11 +2875,12 @@ class QAScannerMixin:
                             if line.strip()
                         ]
                         invalid = []
-                        for line_number, pattern in enumerate(patterns, 1):
-                            try:
-                                re.compile(pattern, re.IGNORECASE)
-                            except re.error as exc:
-                                invalid.append(f"Line {line_number}: {exc}")
+                        if regex_checkbox.isChecked():
+                            for line_number, pattern in enumerate(patterns, 1):
+                                try:
+                                    re.compile(pattern, re.IGNORECASE)
+                                except re.error as exc:
+                                    invalid.append(f"Line {line_number}: {exc}")
                         if invalid:
                             status_label.setText("❌ " + invalid[0])
                             QMessageBox.warning(
@@ -2844,21 +2890,45 @@ class QAScannerMixin:
                             )
                             return
                         ai_thinking_preamble_patterns_holder[0] = patterns
+                        ai_thinking_preamble_regex_holder[0] = regex_checkbox.isChecked()
                         qa_settings['ai_thinking_preamble_patterns'] = list(patterns)
+                        qa_settings['ai_thinking_preamble_patterns_are_regex'] = regex_checkbox.isChecked()
                         self.config.setdefault('qa_scanner_settings', {})[
                             'ai_thinking_preamble_patterns'
                         ] = list(patterns)
-                        status_label.setText(f"✅ Saved {len(patterns)} pattern(s)")
+                        self.config['qa_scanner_settings'][
+                            'ai_thinking_preamble_patterns_are_regex'
+                        ] = regex_checkbox.isChecked()
+                        noun = "advanced pattern" if regex_checkbox.isChecked() else "phrase"
+                        status_label.setText(f"✅ Saved {len(patterns)} {noun}(s)")
                         try:
                             self.save_config(show_message=False)
                         except Exception as exc:
                             status_label.setText(f"❌ Could not save configuration: {exc}")
 
-                    restore_button.clicked.connect(
-                        lambda: pattern_editor.setPlainText(
-                            "\n".join(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS)
+                    def restore_defaults():
+                        confirm_box = QMessageBox(editor_dialog)
+                        confirm_box.setIcon(QMessageBox.Question)
+                        confirm_box.setWindowTitle("Restore Default Phrases?")
+                        confirm_box.setText(
+                            "Replace all phrases currently shown with the default list?"
                         )
-                    )
+                        confirm_box.setInformativeText(
+                            "Your saved phrases will not change until you click Save Phrases."
+                        )
+                        confirm_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                        confirm_box.setDefaultButton(QMessageBox.No)
+                        button_box = confirm_box.findChild(QDialogButtonBox)
+                        if button_box is not None:
+                            button_box.setCenterButtons(True)
+                        result = confirm_box.exec()
+                        if result != QMessageBox.Yes:
+                            return
+                        pattern_editor.setPlainText("\n".join(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))
+                        regex_checkbox.setChecked(False)
+                        status_label.setText("Defaults loaded. Click Save Phrases to keep them.")
+                    restore_button.clicked.connect(restore_defaults)
+                    save_button.setText("Save Phrases")
                     save_button.clicked.connect(save_patterns)
                     close_button.clicked.connect(editor_dialog.close)
                     def persist_geometry(_result):
@@ -2870,12 +2940,14 @@ class QAScannerMixin:
                             pass
                     editor_dialog.finished.connect(persist_geometry)
                     editor_dialog._pattern_editor = pattern_editor
+                    editor_dialog._regex_checkbox = regex_checkbox
                     editor_dialog._status_label = status_label
                     self._qa_ai_preamble_patterns_dialog = editor_dialog
 
                 editor_dialog._pattern_editor.setPlainText(
                     "\n".join(ai_thinking_preamble_patterns_holder[0])
                 )
+                editor_dialog._regex_checkbox.setChecked(ai_thinking_preamble_regex_holder[0])
                 editor_dialog._status_label.setText("")
                 geometry_hex = self.config.get('qa_ai_preamble_patterns_dialog_geometry', '')
                 if geometry_hex and not getattr(editor_dialog, '_geometry_restored', False):
@@ -4703,6 +4775,7 @@ class QAScannerMixin:
                         'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
                         'check_ai_thinking_preamble': (check_ai_thinking_preamble_checkbox, lambda x: x.isChecked()),
                         'ai_thinking_preamble_patterns': (ai_thinking_preamble_patterns_holder, lambda x: list(x[0])),
+                        'ai_thinking_preamble_patterns_are_regex': (ai_thinking_preamble_regex_holder, lambda x: bool(x[0])),
                         'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
@@ -4962,6 +5035,7 @@ class QAScannerMixin:
                             ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
                             ('QA_CHECK_AI_THINKING_PREAMBLE', '1' if qa_settings.get('check_ai_thinking_preamble', False) else '0'),
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_JSON', json.dumps(qa_settings.get('ai_thinking_preamble_patterns', DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))),
+                            ('QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX', '1' if qa_settings.get('ai_thinking_preamble_patterns_are_regex', False) else '0'),
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
@@ -5162,6 +5236,9 @@ class QAScannerMixin:
                         DEFAULT_AI_THINKING_PREAMBLE_PATTERNS,
                     )
                 )
+                ai_thinking_preamble_regex_holder[0] = bool(
+                    s.get('ai_thinking_preamble_patterns_are_regex', False)
+                )
 
                 # --- Report format radio group ---
                 def _set_report_format():
@@ -5252,6 +5329,7 @@ class QAScannerMixin:
                     ai_thinking_preamble_patterns_holder[0] = list(
                         DEFAULT_AI_THINKING_PREAMBLE_PATTERNS
                     )
+                    ai_thinking_preamble_regex_holder[0] = False
                     check_punctuation_checkbox.setChecked(False)
                     punct_threshold_spinbox.setValue(49)
                     excess_punct_checkbox.setChecked(False)

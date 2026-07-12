@@ -1277,8 +1277,14 @@ def detect_translation_artifacts(text):
     return artifacts_found
 
 DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = (
-    r'The user wants (?:a |me to )',
-    r'(?:I need to|Let me) (?:translate|analyze|verify)',
+    'The user wants a ',
+    'The user wants me to ',
+    'I need to translate',
+    'I need to analyze',
+    'I need to verify',
+    'Let me translate',
+    'Let me analyze',
+    'Let me verify',
 )
 
 
@@ -1286,6 +1292,7 @@ def detect_ai_artifacts(
     text,
     check_ai_thinking_preamble=False,
     ai_thinking_preamble_patterns=None,
+    ai_thinking_preamble_patterns_are_regex=False,
 ):
     """Detect AI response artifacts, with optional thinking-preamble detection."""
     artifacts_found = []
@@ -1437,8 +1444,9 @@ def detect_ai_artifacts(
             pattern = str(pattern).strip()
             if not pattern:
                 continue
+            search_pattern = pattern if ai_thinking_preamble_patterns_are_regex else re.escape(pattern)
             try:
-                match = re.search(pattern, preamble_zone, re.IGNORECASE)
+                match = re.search(search_pattern, preamble_zone, re.IGNORECASE)
             except re.error:
                 # GUI validation normally prevents invalid expressions, but a
                 # manually edited config must not abort an entire QA scan.
@@ -7312,6 +7320,9 @@ def process_html_file_batch(args):
                 ),
                 ai_thinking_preamble_patterns=qa_settings.get(
                     'ai_thinking_preamble_patterns'
+                ),
+                ai_thinking_preamble_patterns_are_regex=qa_settings.get(
+                    'ai_thinking_preamble_patterns_are_regex', False
                 ),
             )
             if ai_artifacts:

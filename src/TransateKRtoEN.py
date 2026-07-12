@@ -786,6 +786,9 @@ def _load_qa_scanner_settings_from_env():
             "check_translation_artifacts": _env_bool("QA_CHECK_ARTIFACTS", False),
             "check_ai_artifacts": _env_bool("QA_CHECK_AI_ARTIFACTS", False),
             "check_ai_thinking_preamble": _env_bool("QA_CHECK_AI_THINKING_PREAMBLE", False),
+            "ai_thinking_preamble_patterns_are_regex": _env_bool(
+                "QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX", False
+            ),
             "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
             "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
             "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
@@ -798,6 +801,14 @@ def _load_qa_scanner_settings_from_env():
             "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),
             "check_word_count_ratio": _env_bool("QA_CHECK_WORD_COUNT_RATIO", True),
         }
+        try:
+            patterns_json = os.getenv("QA_AI_THINKING_PREAMBLE_PATTERNS_JSON", "")
+            if patterns_json:
+                parsed_patterns = json.loads(patterns_json)
+                if isinstance(parsed_patterns, list):
+                    settings["ai_thinking_preamble_patterns"] = parsed_patterns
+        except Exception as exc:
+            print(f"Warning: failed to parse QA AI preamble phrases: {exc}")
 
     try:
         from qa_scan_runtime import normalize_qa_scan_settings
@@ -3966,14 +3977,6 @@ class ProgressManager:
             os.path.normcase(name)
             for name in output_names
         }
-        try:
-            patterns_json = os.getenv("QA_AI_THINKING_PREAMBLE_PATTERNS_JSON", "")
-            if patterns_json:
-                parsed_patterns = json.loads(patterns_json)
-                if isinstance(parsed_patterns, list):
-                    settings["ai_thinking_preamble_patterns"] = parsed_patterns
-        except Exception as exc:
-            print(f"Warning: failed to parse QA AI preamble patterns: {exc}")
         renamed_html_by_normalized_name = {}
         for name in output_names:
             if name.lower().endswith(('.html', '.xhtml', '.htm')):
