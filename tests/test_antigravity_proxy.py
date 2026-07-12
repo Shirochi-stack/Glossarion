@@ -788,7 +788,8 @@ def test_patch_runtime_forced_account_support(tmp_path):
         '            }\n'
         '            if (!account) {\n'
         '                account = await getBestAccount(useCliPool ? "cli" : "sandbox", openaiBody.model, clientId, triedEmails, false);\n'
-        '            }\n',
+        '            }\n'
+        '        while (attempts < MAX_ATTEMPTS) {\n',
         encoding="utf-8",
     )
     manager_file.write_text(
@@ -805,7 +806,40 @@ def test_patch_runtime_forced_account_support(tmp_path):
     assert "forcedAccountEmail" in server
     assert "X-Antigravity-Account" in server
     assert "!account && !forcedAccountEmail" in server
+    assert "while (attempts < (forcedAccountEmail ? 1 : MAX_ATTEMPTS))" in server
     assert "export async function getAccountByEmail" in manager
+
+
+def test_antigravity_exhausted_quota_is_not_retried(monkeypatch):
+    client = _unified_antigravity_client()
+    client.request_timeout = 300
+    client._get_max_retries = lambda: 7
+    client._is_stop_requested = lambda: False
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    calls = []
+
+    def exhausted_send(**_kwargs):
+        calls.append(True)
+        raise RuntimeError(
+            "Antigravity: HTTP 429 - Quota exhausted: Individual quota reached. "
+            "Resets in 61h20m31s."
+        )
+
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", exhausted_send)
+
+    with pytest.raises(UnifiedClientError) as exc_info:
+        client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert exc_info.value.error_type == "rate_limit"
+    assert calls == [True]
 
 
 def test_patch_runtime_verbose_access_denied_preserves_upstream_details(tmp_path):

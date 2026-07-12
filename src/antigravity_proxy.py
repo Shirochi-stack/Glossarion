@@ -63,7 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
-RUNTIME_PATCH_VERSION = "2026-07-10-antigravity-quota-priority"
+RUNTIME_PATCH_VERSION = "2026-07-12-antigravity-single-forced-account-attempt"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -575,6 +575,13 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
         "if (!account && !forcedAccountEmail) {\n                account = await getBestAccount(useCliPool ? \"cli\" : \"sandbox\", openaiBody.model, clientId, triedEmails, false);\n            }",
         1,
     )
+    # A forced account cannot rotate to another account, so repeating the same
+    # exhausted request only delays the caller and creates a second retry count.
+    server = server.replace(
+        "while (attempts < MAX_ATTEMPTS) {",
+        "while (attempts < (forcedAccountEmail ? 1 : MAX_ATTEMPTS)) {",
+        1,
+    )
 
     with open(server_path, "w", encoding="utf-8") as f:
         f.write(server)
@@ -585,6 +592,7 @@ def _patch_runtime_forced_account_support(runtime_dir: str) -> bool:
         and "forcedAccountEmail" in server
         and "Forced account" in server
         and "!account && !forcedAccountEmail" in server
+        and "forcedAccountEmail ? 1 : MAX_ATTEMPTS" in server
     )
 
 

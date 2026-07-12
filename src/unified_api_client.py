@@ -25200,6 +25200,7 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+                error_lower = error_str.lower()
 
                 # Stream cancelled
                 if "cancelled" in error_str.lower():
@@ -25208,6 +25209,22 @@ class UnifiedClient:
                         "Antigravity: Translation stopped by user",
                         error_type="cancelled"
                     )
+
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled",
+                    )
+
+                # Exhausted subscription/account quota is not a transient 429.
+                # Retrying it locally cannot succeed before the stated reset.
+                if any(marker in error_lower for marker in (
+                    "individual quota reached",
+                    "quota exhausted",
+                    "insufficient_quota",
+                )):
+                    print("⛔ Antigravity: quota is exhausted; not retrying this request")
+                    raise UnifiedClientError(error_str, error_type="rate_limit")
 
                 # Account/auth setup errors are fatal for this attempt.
                 if "authentication timed out" in error_str.lower() or "add your google account" in error_str.lower():
