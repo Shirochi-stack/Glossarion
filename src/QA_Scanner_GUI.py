@@ -2827,14 +2827,15 @@ class QAScannerMixin:
                     sample_size_spinbox = QSpinBox()
                     sample_size_spinbox.setRange(1, 1_000_000)
                     sample_size_spinbox.setValue(500)
-                    sample_size_spinbox.setSuffix(" characters")
-                    sample_size_spinbox.setMinimumWidth(150)
+                    sample_size_spinbox.setMinimumWidth(110)
                     sample_size_spinbox.setToolTip(
                         "Only this many characters from the beginning of each file are checked."
                     )
                     disable_wheel_event(sample_size_spinbox)
+                    sample_size_unit_label = QLabel("characters")
                     sample_size_row.addWidget(sample_size_label)
                     sample_size_row.addWidget(sample_size_spinbox)
+                    sample_size_row.addWidget(sample_size_unit_label)
                     sample_size_row.addStretch()
                     editor_layout.addLayout(sample_size_row)
                     pattern_editor = QTextEdit()
