@@ -3966,6 +3966,14 @@ class ProgressManager:
             os.path.normcase(name)
             for name in output_names
         }
+        try:
+            patterns_json = os.getenv("QA_AI_THINKING_PREAMBLE_PATTERNS_JSON", "")
+            if patterns_json:
+                parsed_patterns = json.loads(patterns_json)
+                if isinstance(parsed_patterns, list):
+                    settings["ai_thinking_preamble_patterns"] = parsed_patterns
+        except Exception as exc:
+            print(f"Warning: failed to parse QA AI preamble patterns: {exc}")
         renamed_html_by_normalized_name = {}
         for name in output_names:
             if name.lower().endswith(('.html', '.xhtml', '.htm')):

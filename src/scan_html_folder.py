@@ -1276,7 +1276,17 @@ def detect_translation_artifacts(text):
     
     return artifacts_found
 
-def detect_ai_artifacts(text, check_ai_thinking_preamble=False):
+DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = (
+    r'The user wants (?:a |me to )',
+    r'(?:I need to|Let me) (?:translate|analyze|verify)',
+)
+
+
+def detect_ai_artifacts(
+    text,
+    check_ai_thinking_preamble=False,
+    ai_thinking_preamble_patterns=None,
+):
     """Detect AI response artifacts, with optional thinking-preamble detection."""
     artifacts_found = []
     if not isinstance(text, str) or not text.strip():
@@ -1418,11 +1428,21 @@ def detect_ai_artifacts(text, check_ai_thinking_preamble=False):
         # of the document, where leaked model reasoning normally appears.
         preamble_zone = text[:500]
         thinking_hits = []
-        for pattern in (
-            r'The user wants (?:a |me to )',
-            r'(?:I need to|Let me) (?:translate|analyze|verify)',
-        ):
-            match = re.search(pattern, preamble_zone, re.IGNORECASE)
+        patterns = ai_thinking_preamble_patterns
+        if patterns is None:
+            patterns = DEFAULT_AI_THINKING_PREAMBLE_PATTERNS
+        if isinstance(patterns, str):
+            patterns = patterns.splitlines()
+        for pattern in patterns:
+            pattern = str(pattern).strip()
+            if not pattern:
+                continue
+            try:
+                match = re.search(pattern, preamble_zone, re.IGNORECASE)
+            except re.error:
+                # GUI validation normally prevents invalid expressions, but a
+                # manually edited config must not abort an entire QA scan.
+                continue
             if match:
                 thinking_hits.append(match.group(0).strip()[:80])
         if thinking_hits:
@@ -7289,6 +7309,9 @@ def process_html_file_batch(args):
                 raw_text,
                 check_ai_thinking_preamble=qa_settings.get(
                     'check_ai_thinking_preamble', False
+                ),
+                ai_thinking_preamble_patterns=qa_settings.get(
+                    'ai_thinking_preamble_patterns'
                 ),
             )
             if ai_artifacts:

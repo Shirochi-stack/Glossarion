@@ -17,6 +17,11 @@ from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
 
+DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
+    r'The user wants (?:a |me to )',
+    r'(?:I need to|Let me) (?:translate|analyze|verify)',
+]
+
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
@@ -476,6 +481,7 @@ class QAScannerMixin:
                     'check_translation_artifacts': True,
                     'check_ai_artifacts': True,
                     'check_ai_thinking_preamble': False,
+                    'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -2759,18 +2765,131 @@ class QAScannerMixin:
             check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
             detection_layout.addWidget(check_ai_artifacts_checkbox)
 
+            ai_thinking_preamble_row = QWidget()
+            ai_thinking_preamble_layout = QHBoxLayout(ai_thinking_preamble_row)
+            ai_thinking_preamble_layout.setContentsMargins(40, 0, 0, 0)
+
             check_ai_thinking_preamble_checkbox = self._create_styled_checkbox(
                 "Detect AI thinking preambles (may produce false positives)"
             )
             check_ai_thinking_preamble_checkbox.setChecked(
                 qa_settings.get('check_ai_thinking_preamble', False)
             )
-            check_ai_thinking_preamble_checkbox.setContentsMargins(40, 0, 0, 0)
             check_ai_thinking_preamble_checkbox.setToolTip(
                 "Optionally flags phrases such as 'I need to verify' near the start of a file. "
                 "Disabled by default because similar phrases can occur in normal prose."
             )
-            detection_layout.addWidget(check_ai_thinking_preamble_checkbox)
+            ai_thinking_preamble_layout.addWidget(check_ai_thinking_preamble_checkbox)
+            edit_ai_thinking_preamble_button = QPushButton("Patterns…")
+            edit_ai_thinking_preamble_button.setToolTip("View and edit the AI preamble regular expressions")
+            ai_thinking_preamble_layout.addWidget(edit_ai_thinking_preamble_button)
+            ai_thinking_preamble_layout.addStretch()
+            detection_layout.addWidget(ai_thinking_preamble_row)
+
+            ai_thinking_preamble_patterns_holder = [list(
+                qa_settings.get(
+                    'ai_thinking_preamble_patterns',
+                    DEFAULT_AI_THINKING_PREAMBLE_PATTERNS,
+                )
+            )]
+
+            def show_ai_thinking_preamble_patterns():
+                editor_dialog = getattr(self, '_qa_ai_preamble_patterns_dialog', None)
+                if editor_dialog is None:
+                    editor_dialog = QDialog(self)
+                    editor_dialog.setWindowTitle("AI Thinking Preamble Patterns")
+                    editor_dialog.setModal(False)
+                    editor_dialog.setWindowModality(Qt.NonModal)
+                    editor_dialog.setMinimumSize(620, 380)
+                    editor_layout = QVBoxLayout(editor_dialog)
+                    help_label = QLabel(
+                        "One Python regular expression per line. Patterns are matched "
+                        "case-insensitively against the first 500 characters of each file."
+                    )
+                    help_label.setWordWrap(True)
+                    editor_layout.addWidget(help_label)
+                    pattern_editor = QTextEdit()
+                    pattern_editor.setAcceptRichText(False)
+                    pattern_editor.setPlaceholderText("Enter one regular expression per line")
+                    editor_layout.addWidget(pattern_editor)
+                    status_label = QLabel("")
+                    editor_layout.addWidget(status_label)
+                    button_row = QHBoxLayout()
+                    restore_button = QPushButton("Restore Defaults")
+                    save_button = QPushButton("Save Patterns")
+                    close_button = QPushButton("Close")
+                    button_row.addWidget(restore_button)
+                    button_row.addStretch()
+                    button_row.addWidget(save_button)
+                    button_row.addWidget(close_button)
+                    editor_layout.addLayout(button_row)
+
+                    def save_patterns():
+                        patterns = [
+                            line.strip() for line in pattern_editor.toPlainText().splitlines()
+                            if line.strip()
+                        ]
+                        invalid = []
+                        for line_number, pattern in enumerate(patterns, 1):
+                            try:
+                                re.compile(pattern, re.IGNORECASE)
+                            except re.error as exc:
+                                invalid.append(f"Line {line_number}: {exc}")
+                        if invalid:
+                            status_label.setText("❌ " + invalid[0])
+                            QMessageBox.warning(
+                                editor_dialog,
+                                "Invalid Regular Expression",
+                                "The patterns were not saved:\n\n" + "\n".join(invalid),
+                            )
+                            return
+                        ai_thinking_preamble_patterns_holder[0] = patterns
+                        qa_settings['ai_thinking_preamble_patterns'] = list(patterns)
+                        self.config.setdefault('qa_scanner_settings', {})[
+                            'ai_thinking_preamble_patterns'
+                        ] = list(patterns)
+                        status_label.setText(f"✅ Saved {len(patterns)} pattern(s)")
+                        try:
+                            self.save_config(show_message=False)
+                        except Exception as exc:
+                            status_label.setText(f"❌ Could not save configuration: {exc}")
+
+                    restore_button.clicked.connect(
+                        lambda: pattern_editor.setPlainText(
+                            "\n".join(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS)
+                        )
+                    )
+                    save_button.clicked.connect(save_patterns)
+                    close_button.clicked.connect(editor_dialog.close)
+                    def persist_geometry(_result):
+                        try:
+                            geometry_hex = bytes(editor_dialog.saveGeometry().toHex()).decode('ascii')
+                            self.config['qa_ai_preamble_patterns_dialog_geometry'] = geometry_hex
+                            self.save_config(show_message=False)
+                        except Exception:
+                            pass
+                    editor_dialog.finished.connect(persist_geometry)
+                    editor_dialog._pattern_editor = pattern_editor
+                    editor_dialog._status_label = status_label
+                    self._qa_ai_preamble_patterns_dialog = editor_dialog
+
+                editor_dialog._pattern_editor.setPlainText(
+                    "\n".join(ai_thinking_preamble_patterns_holder[0])
+                )
+                editor_dialog._status_label.setText("")
+                geometry_hex = self.config.get('qa_ai_preamble_patterns_dialog_geometry', '')
+                if geometry_hex and not getattr(editor_dialog, '_geometry_restored', False):
+                    try:
+                        from PySide6.QtCore import QByteArray
+                        editor_dialog.restoreGeometry(QByteArray.fromHex(geometry_hex.encode('ascii')))
+                    except Exception:
+                        pass
+                    editor_dialog._geometry_restored = True
+                editor_dialog.show()
+                editor_dialog.raise_()
+                editor_dialog.activateWindow()
+
+            edit_ai_thinking_preamble_button.clicked.connect(show_ai_thinking_preamble_patterns)
 
             def toggle_ai_thinking_preamble(enabled):
                 check_ai_thinking_preamble_checkbox.setEnabled(enabled)
@@ -4583,6 +4702,7 @@ class QAScannerMixin:
                         'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                         'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
                         'check_ai_thinking_preamble': (check_ai_thinking_preamble_checkbox, lambda x: x.isChecked()),
+                        'ai_thinking_preamble_patterns': (ai_thinking_preamble_patterns_holder, lambda x: list(x[0])),
                         'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
@@ -4841,6 +4961,7 @@ class QAScannerMixin:
                             ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
                             ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
                             ('QA_CHECK_AI_THINKING_PREAMBLE', '1' if qa_settings.get('check_ai_thinking_preamble', False) else '0'),
+                            ('QA_AI_THINKING_PREAMBLE_PATTERNS_JSON', json.dumps(qa_settings.get('ai_thinking_preamble_patterns', DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))),
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
@@ -5035,6 +5156,13 @@ class QAScannerMixin:
                 for key, widget, default in simple:
                     _apply(lambda k=key, w=widget, d=default: _set_value(w, s.get(k, d)))
 
+                ai_thinking_preamble_patterns_holder[0] = list(
+                    s.get(
+                        'ai_thinking_preamble_patterns',
+                        DEFAULT_AI_THINKING_PREAMBLE_PATTERNS,
+                    )
+                )
+
                 # --- Report format radio group ---
                 def _set_report_format():
                     target = s.get('report_format', 'detailed')
@@ -5121,6 +5249,9 @@ class QAScannerMixin:
                     check_artifacts_checkbox.setChecked(True)
                     check_ai_artifacts_checkbox.setChecked(True)
                     check_ai_thinking_preamble_checkbox.setChecked(False)
+                    ai_thinking_preamble_patterns_holder[0] = list(
+                        DEFAULT_AI_THINKING_PREAMBLE_PATTERNS
+                    )
                     check_punctuation_checkbox.setChecked(False)
                     punct_threshold_spinbox.setValue(49)
                     excess_punct_checkbox.setChecked(False)
