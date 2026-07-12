@@ -489,6 +489,7 @@ class QAScannerMixin:
                     'check_ai_thinking_preamble': False,
                     'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
                     'ai_thinking_preamble_patterns_are_regex': False,
+                    'ai_thinking_preamble_sample_size': 500,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -2802,6 +2803,9 @@ class QAScannerMixin:
             ai_thinking_preamble_regex_holder = [bool(
                 qa_settings.get('ai_thinking_preamble_patterns_are_regex', False)
             )]
+            ai_thinking_preamble_sample_size_holder = [int(
+                qa_settings.get('ai_thinking_preamble_sample_size', 500)
+            )]
 
             def show_ai_thinking_preamble_patterns():
                 editor_dialog = getattr(self, '_qa_ai_preamble_patterns_dialog', None)
@@ -2818,6 +2822,21 @@ class QAScannerMixin:
                     )
                     help_label.setWordWrap(True)
                     editor_layout.addWidget(help_label)
+                    sample_size_row = QHBoxLayout()
+                    sample_size_label = QLabel("Check the first")
+                    sample_size_spinbox = QSpinBox()
+                    sample_size_spinbox.setRange(1, 1_000_000)
+                    sample_size_spinbox.setValue(500)
+                    sample_size_spinbox.setSuffix(" characters")
+                    sample_size_spinbox.setMinimumWidth(150)
+                    sample_size_spinbox.setToolTip(
+                        "Only this many characters from the beginning of each file are checked."
+                    )
+                    disable_wheel_event(sample_size_spinbox)
+                    sample_size_row.addWidget(sample_size_label)
+                    sample_size_row.addWidget(sample_size_spinbox)
+                    sample_size_row.addStretch()
+                    editor_layout.addLayout(sample_size_row)
                     pattern_editor = QTextEdit()
                     pattern_editor.setAcceptRichText(False)
                     pattern_editor.setPlaceholderText(
@@ -2891,14 +2910,19 @@ class QAScannerMixin:
                             return
                         ai_thinking_preamble_patterns_holder[0] = patterns
                         ai_thinking_preamble_regex_holder[0] = regex_checkbox.isChecked()
+                        ai_thinking_preamble_sample_size_holder[0] = sample_size_spinbox.value()
                         qa_settings['ai_thinking_preamble_patterns'] = list(patterns)
                         qa_settings['ai_thinking_preamble_patterns_are_regex'] = regex_checkbox.isChecked()
+                        qa_settings['ai_thinking_preamble_sample_size'] = sample_size_spinbox.value()
                         self.config.setdefault('qa_scanner_settings', {})[
                             'ai_thinking_preamble_patterns'
                         ] = list(patterns)
                         self.config['qa_scanner_settings'][
                             'ai_thinking_preamble_patterns_are_regex'
                         ] = regex_checkbox.isChecked()
+                        self.config['qa_scanner_settings'][
+                            'ai_thinking_preamble_sample_size'
+                        ] = sample_size_spinbox.value()
                         noun = "advanced pattern" if regex_checkbox.isChecked() else "phrase"
                         status_label.setText(f"✅ Saved {len(patterns)} {noun}(s)")
                         try:
@@ -2932,6 +2956,7 @@ class QAScannerMixin:
                             return
                         pattern_editor.setPlainText("\n".join(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))
                         regex_checkbox.setChecked(False)
+                        sample_size_spinbox.setValue(500)
                         status_label.setText("Defaults loaded. Click Save Phrases to keep them.")
                     restore_button.clicked.connect(restore_defaults)
                     save_button.setText("Save Phrases")
@@ -2947,6 +2972,7 @@ class QAScannerMixin:
                     editor_dialog.finished.connect(persist_geometry)
                     editor_dialog._pattern_editor = pattern_editor
                     editor_dialog._regex_checkbox = regex_checkbox
+                    editor_dialog._sample_size_spinbox = sample_size_spinbox
                     editor_dialog._status_label = status_label
                     self._qa_ai_preamble_patterns_dialog = editor_dialog
 
@@ -2954,6 +2980,9 @@ class QAScannerMixin:
                     "\n".join(ai_thinking_preamble_patterns_holder[0])
                 )
                 editor_dialog._regex_checkbox.setChecked(ai_thinking_preamble_regex_holder[0])
+                editor_dialog._sample_size_spinbox.setValue(
+                    ai_thinking_preamble_sample_size_holder[0]
+                )
                 editor_dialog._status_label.setText("")
                 geometry_hex = self.config.get('qa_ai_preamble_patterns_dialog_geometry', '')
                 if geometry_hex and not getattr(editor_dialog, '_geometry_restored', False):
@@ -4782,6 +4811,7 @@ class QAScannerMixin:
                         'check_ai_thinking_preamble': (check_ai_thinking_preamble_checkbox, lambda x: x.isChecked()),
                         'ai_thinking_preamble_patterns': (ai_thinking_preamble_patterns_holder, lambda x: list(x[0])),
                         'ai_thinking_preamble_patterns_are_regex': (ai_thinking_preamble_regex_holder, lambda x: bool(x[0])),
+                        'ai_thinking_preamble_sample_size': (ai_thinking_preamble_sample_size_holder, lambda x: int(x[0])),
                         'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
@@ -5042,6 +5072,7 @@ class QAScannerMixin:
                             ('QA_CHECK_AI_THINKING_PREAMBLE', '1' if qa_settings.get('check_ai_thinking_preamble', False) else '0'),
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_JSON', json.dumps(qa_settings.get('ai_thinking_preamble_patterns', DEFAULT_AI_THINKING_PREAMBLE_PATTERNS))),
                             ('QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX', '1' if qa_settings.get('ai_thinking_preamble_patterns_are_regex', False) else '0'),
+                            ('QA_AI_THINKING_PREAMBLE_SAMPLE_SIZE', str(qa_settings.get('ai_thinking_preamble_sample_size', 500))),
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
@@ -5245,6 +5276,9 @@ class QAScannerMixin:
                 ai_thinking_preamble_regex_holder[0] = bool(
                     s.get('ai_thinking_preamble_patterns_are_regex', False)
                 )
+                ai_thinking_preamble_sample_size_holder[0] = int(
+                    s.get('ai_thinking_preamble_sample_size', 500)
+                )
 
                 # --- Report format radio group ---
                 def _set_report_format():
@@ -5351,6 +5385,7 @@ class QAScannerMixin:
                         DEFAULT_AI_THINKING_PREAMBLE_PATTERNS
                     )
                     ai_thinking_preamble_regex_holder[0] = False
+                    ai_thinking_preamble_sample_size_holder[0] = 500
                     check_punctuation_checkbox.setChecked(False)
                     punct_threshold_spinbox.setValue(49)
                     excess_punct_checkbox.setChecked(False)

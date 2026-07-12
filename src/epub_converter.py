@@ -2700,6 +2700,29 @@ class EPUBCompiler:
 
     def _fix_encoding_issues(self, content: str) -> str:
         """Convert smart quotes and other Unicode punctuation to ASCII."""
+        # Repair attributes such as src="”../Images/foo.webp”" before the
+        # general smart-quote replacement below. Replacing punctuation first
+        # would turn that into src=""../Images/foo.webp"", which HTML parsers
+        # misread as an empty src plus bogus attributes such as ``..=""``.
+        def _repair_img_tag(match):
+            tag = match.group(0)
+            if not re.match(r'<\s*img\b', tag, flags=re.IGNORECASE):
+                return tag
+
+            def _repair_attr(attr_match):
+                prefix = attr_match.group(1)
+                ascii_quote = attr_match.group(2)
+                value = attr_match.group(4)
+                return f'{prefix}{ascii_quote}{value}{ascii_quote}'
+
+            return re.sub(
+                r'(\s[A-Za-z_:][A-Za-z0-9_.:-]*\s*=\s*)(["\'])([“”‘’])([^"\'“”‘’]*?)([“”‘’])?/?\2',
+                _repair_attr,
+                tag,
+            )
+
+        content = re.sub(r'<\s*img\b[^>]*>', _repair_img_tag, content, flags=re.IGNORECASE)
+
         # Convert smart quotes to regular quotes and other punctuation
         fixes = {
             '’': "'",   # Right single quotation mark

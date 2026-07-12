@@ -82,6 +82,7 @@ def default_qa_scan_settings():
         "check_ai_thinking_preamble": False,
         "ai_thinking_preamble_patterns": list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
         "ai_thinking_preamble_patterns_are_regex": False,
+        "ai_thinking_preamble_sample_size": 500,
         "check_punctuation_mismatch": False,
         "punctuation_loss_threshold": 49,
         "flag_excess_punctuation": False,
@@ -205,6 +206,9 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX": "1" if settings.get(
             "ai_thinking_preamble_patterns_are_regex", False
         ) else "0",
+        "QA_AI_THINKING_PREAMBLE_SAMPLE_SIZE": str(
+            settings.get("ai_thinking_preamble_sample_size", 500)
+        ),
         "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",
         "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",
         "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),

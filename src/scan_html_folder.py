@@ -1293,6 +1293,7 @@ def detect_ai_artifacts(
     check_ai_thinking_preamble=False,
     ai_thinking_preamble_patterns=None,
     ai_thinking_preamble_patterns_are_regex=False,
+    ai_thinking_preamble_sample_size=500,
 ):
     """Detect AI response artifacts, with optional thinking-preamble detection."""
     artifacts_found = []
@@ -1433,7 +1434,11 @@ def detect_ai_artifacts(
     if check_ai_thinking_preamble:
         # Restrict this optional, higher-false-positive check to the beginning
         # of the document, where leaked model reasoning normally appears.
-        preamble_zone = text[:500]
+        try:
+            sample_size = max(1, int(ai_thinking_preamble_sample_size))
+        except (TypeError, ValueError):
+            sample_size = 500
+        preamble_zone = text[:sample_size]
         thinking_hits = []
         patterns = ai_thinking_preamble_patterns
         if patterns is None:
@@ -7323,6 +7328,9 @@ def process_html_file_batch(args):
                 ),
                 ai_thinking_preamble_patterns_are_regex=qa_settings.get(
                     'ai_thinking_preamble_patterns_are_regex', False
+                ),
+                ai_thinking_preamble_sample_size=qa_settings.get(
+                    'ai_thinking_preamble_sample_size', 500
                 ),
             )
             if ai_artifacts:

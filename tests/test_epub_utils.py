@@ -88,6 +88,51 @@ def test_html_entity_decoder_encoding_fixes_no_crash():
     assert isinstance(decoded, str) and len(decoded) >= 3
 
 
+@pytest.mark.parametrize(
+    ("source", "expected_src", "expected_alt"),
+    [
+        (
+            '<img alt="”16”" src="”../Images/chapter0007_img_1.webp" width="”100%”"/>',
+            "../Images/chapter0007_img_1.webp",
+            "16",
+        ),
+        (
+            '<img alt="”17”" src="”../Images/chapter0007_img_2.webp" width="”100%”"/>',
+            "../Images/chapter0007_img_2.webp",
+            "17",
+        ),
+    ],
+)
+def test_epub_image_repair_normalizes_nested_smart_quote_attributes(
+    tmp_path, source, expected_src, expected_alt
+):
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    repaired = compiler._fix_encoding_issues(source)
+
+    assert f'src="{expected_src}"' in repaired
+    assert f'alt="{expected_alt}"' in repaired
+    assert 'width="100%"' in repaired
+    assert 'src=""' not in repaired
+
+
+def test_epub_image_repair_preserves_and_resolves_real_image_path(tmp_path):
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+    source = '<img alt="”16”" src="”../Images/chapter0007_img_1.webp" width="”100%”"/>'
+    repaired = compiler._fix_encoding_issues(source)
+    xhtml = epub_converter.XHTMLConverter.ensure_compliance(repaired, "Chapter 7")
+
+    processed, missing = compiler._process_chapter_images(
+        xhtml,
+        {"chapter0007_img_1.webp": "chapter0007_img_1.webp"},
+    )
+    validated = epub_converter.XHTMLConverter.validate(processed)
+
+    assert missing == []
+    assert 'src="images/chapter0007_img_1.webp"' in validated
+    assert '..=""' not in validated
+
+
 def test_xml_validator_valid_codepoints():
     # Basic BMP and some punctuation
     assert XMLValidator.is_valid_char_code(ord('A')) is True

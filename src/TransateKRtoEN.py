@@ -789,6 +789,9 @@ def _load_qa_scanner_settings_from_env():
             "ai_thinking_preamble_patterns_are_regex": _env_bool(
                 "QA_AI_THINKING_PREAMBLE_PATTERNS_ARE_REGEX", False
             ),
+            "ai_thinking_preamble_sample_size": _env_int(
+                "QA_AI_THINKING_PREAMBLE_SAMPLE_SIZE", 500
+            ),
             "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
             "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
             "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
