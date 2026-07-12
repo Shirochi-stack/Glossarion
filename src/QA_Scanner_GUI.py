@@ -475,6 +475,7 @@ class QAScannerMixin:
                     'check_repetition': True,
                     'check_translation_artifacts': True,
                     'check_ai_artifacts': True,
+                    'check_ai_thinking_preamble': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -2758,6 +2759,25 @@ class QAScannerMixin:
             check_ai_artifacts_checkbox.setContentsMargins(20, 0, 0, 0)
             detection_layout.addWidget(check_ai_artifacts_checkbox)
 
+            check_ai_thinking_preamble_checkbox = self._create_styled_checkbox(
+                "Detect AI thinking preambles (may produce false positives)"
+            )
+            check_ai_thinking_preamble_checkbox.setChecked(
+                qa_settings.get('check_ai_thinking_preamble', False)
+            )
+            check_ai_thinking_preamble_checkbox.setContentsMargins(40, 0, 0, 0)
+            check_ai_thinking_preamble_checkbox.setToolTip(
+                "Optionally flags phrases such as 'I need to verify' near the start of a file. "
+                "Disabled by default because similar phrases can occur in normal prose."
+            )
+            detection_layout.addWidget(check_ai_thinking_preamble_checkbox)
+
+            def toggle_ai_thinking_preamble(enabled):
+                check_ai_thinking_preamble_checkbox.setEnabled(enabled)
+
+            check_ai_artifacts_checkbox.toggled.connect(toggle_ai_thinking_preamble)
+            toggle_ai_thinking_preamble(check_ai_artifacts_checkbox.isChecked())
+
             check_punctuation_checkbox = self._create_styled_checkbox("Check ?! punctuation mismatches (compares with source file)")
             check_punctuation_checkbox.setChecked(qa_settings.get('check_punctuation_mismatch', False))
             detection_layout.addWidget(check_punctuation_checkbox)
@@ -4562,6 +4582,7 @@ class QAScannerMixin:
                         'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                         'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                         'check_ai_artifacts': (check_ai_artifacts_checkbox, lambda x: x.isChecked()),
+                        'check_ai_thinking_preamble': (check_ai_thinking_preamble_checkbox, lambda x: x.isChecked()),
                         'check_punctuation_mismatch': (check_punctuation_checkbox, lambda x: x.isChecked()),
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
@@ -4819,6 +4840,7 @@ class QAScannerMixin:
                             ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                             ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
                             ('QA_CHECK_AI_ARTIFACTS', '1' if qa_settings.get('check_ai_artifacts', False) else '0'),
+                            ('QA_CHECK_AI_THINKING_PREAMBLE', '1' if qa_settings.get('check_ai_thinking_preamble', False) else '0'),
                             ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
                             ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                             ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
@@ -4965,6 +4987,7 @@ class QAScannerMixin:
                     ('check_repetition', check_repetition_checkbox, True),
                     ('check_translation_artifacts', check_artifacts_checkbox, True),
                     ('check_ai_artifacts', check_ai_artifacts_checkbox, True),
+                    ('check_ai_thinking_preamble', check_ai_thinking_preamble_checkbox, False),
                     ('check_punctuation_mismatch', check_punctuation_checkbox, False),
                     ('punctuation_loss_threshold', punct_threshold_spinbox, 49),
                     ('flag_excess_punctuation', excess_punct_checkbox, False),
@@ -5097,6 +5120,7 @@ class QAScannerMixin:
                     check_repetition_checkbox.setChecked(True)
                     check_artifacts_checkbox.setChecked(True)
                     check_ai_artifacts_checkbox.setChecked(True)
+                    check_ai_thinking_preamble_checkbox.setChecked(False)
                     check_punctuation_checkbox.setChecked(False)
                     punct_threshold_spinbox.setValue(49)
                     excess_punct_checkbox.setChecked(False)

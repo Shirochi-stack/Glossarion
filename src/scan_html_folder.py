@@ -1276,8 +1276,8 @@ def detect_translation_artifacts(text):
     
     return artifacts_found
 
-def detect_ai_artifacts(text):
-    """Detect AI response artifacts (when removal is enabled in translation pipeline)"""
+def detect_ai_artifacts(text, check_ai_thinking_preamble=False):
+    """Detect AI response artifacts, with optional thinking-preamble detection."""
     artifacts_found = []
     if not isinstance(text, str) or not text.strip():
         return artifacts_found
@@ -1413,33 +1413,25 @@ def detect_ai_artifacts(text):
                 'severity': 'critical'
             })
 
-    # Leaked AI thinking preamble (chain-of-thought leaked into output)
-    # Only check the first ~500 chars — leaked thinking always appears at
-    # the very start, never mid-chapter.  This avoids false positives from
-    # prose like "Let me check" in dialogue or "thought" as a section header.
-    #
-    # NOTE: We intentionally do NOT flag a bare first line of "thought" or
-    # "thinking" on its own.  Many novels legitimately begin chapters,
-    # sections, or scene breaks with the single word "Thought" / "Thinking"
-    # (e.g. a character's inner monologue heading), which produced too many
-    # false positives.  Only flag clear, unambiguously AI-only phrases.
-    _preamble_zone = text[:500]
-    _thinking_hits = []
-    # These are unambiguously AI-only phrases (chain-of-thought leakage)
-    for tp in [
-        r'The user wants (?:a |me to )',
-        r'(?:I need to|Let me) (?:translate|analyze|verify)',
-    ]:
-        m = re.search(tp, _preamble_zone, re.IGNORECASE)
-        if m:
-            _thinking_hits.append(m.group(0).strip()[:80])
-    if _thinking_hits:
-        artifacts_found.append({
-            'type': 'ai_thinking_preamble',
-            'count': len(_thinking_hits),
-            'examples': _thinking_hits[:3],
-            'severity': 'high'
-        })
+    if check_ai_thinking_preamble:
+        # Restrict this optional, higher-false-positive check to the beginning
+        # of the document, where leaked model reasoning normally appears.
+        preamble_zone = text[:500]
+        thinking_hits = []
+        for pattern in (
+            r'The user wants (?:a |me to )',
+            r'(?:I need to|Let me) (?:translate|analyze|verify)',
+        ):
+            match = re.search(pattern, preamble_zone, re.IGNORECASE)
+            if match:
+                thinking_hits.append(match.group(0).strip()[:80])
+        if thinking_hits:
+            artifacts_found.append({
+                'type': 'ai_thinking_preamble',
+                'count': len(thinking_hits),
+                'examples': thinking_hits[:3],
+                'severity': 'high'
+            })
 
     # Leaked prompt section headers (translation system prompt leaked into output)
     _prompt_section_headers = [
@@ -7293,7 +7285,12 @@ def process_html_file_batch(args):
                             'severity': 'high'
                         })
         if check_ai_artifacts:
-            ai_artifacts = detect_ai_artifacts(raw_text)
+            ai_artifacts = detect_ai_artifacts(
+                raw_text,
+                check_ai_thinking_preamble=qa_settings.get(
+                    'check_ai_thinking_preamble', False
+                ),
+            )
             if ai_artifacts:
                 artifacts.extend(ai_artifacts)
             
@@ -9082,7 +9079,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 elif artifact['type'] == 'ai_thinking_preamble':
                     examples = artifact.get('examples', [])
                     if examples:
-                        first_example = str(examples[0])[:60] if len(str(examples[0])) > 60 else str(examples[0])
+                        first_example = str(examples[0])[:60]
                         log(f"   🤖 AI thinking preamble detected: '{first_example}'")
                         issue_text = f"ai_thinking_preamble: '{first_example[:40]}'"
                         if artifact['count'] > 1:

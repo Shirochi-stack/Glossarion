@@ -785,6 +785,7 @@ def _load_qa_scanner_settings_from_env():
             "check_repetition": _env_bool("QA_CHECK_REPETITION", True),
             "check_translation_artifacts": _env_bool("QA_CHECK_ARTIFACTS", False),
             "check_ai_artifacts": _env_bool("QA_CHECK_AI_ARTIFACTS", False),
+            "check_ai_thinking_preamble": _env_bool("QA_CHECK_AI_THINKING_PREAMBLE", False),
             "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
             "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
             "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
