@@ -24,6 +24,7 @@ from glossary_usage import (
     html_to_text,
     prepare_translated_output_text,
 )
+from language_options import TARGET_LANGUAGES
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -2793,12 +2794,7 @@ class GlossaryManagerMixin:
             self.manual_target_language_combo = QComboBox()
             self.manual_target_language_combo.setMaximumWidth(200)
             self.manual_target_language_combo.setEditable(True)
-            languages = [
-                "English", "Spanish", "French", "German", "Italian", "Portuguese",
-                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
-            ]
-            self.manual_target_language_combo.addItems(languages)
+            self.manual_target_language_combo.addItems(list(TARGET_LANGUAGES))
             
             # Lock mousewheel scrolling on target language dropdown
             self._disable_combobox_mousewheel(self.manual_target_language_combo)
@@ -4356,12 +4352,7 @@ Do not stop after the glossary."""
             self.glossary_target_language_combo = QComboBox()
             self.glossary_target_language_combo.setMaximumWidth(120)
             self.glossary_target_language_combo.setEditable(True)
-            languages = [
-                "English", "Spanish", "French", "German", "Italian", "Portuguese",
-                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
-            ]
-            self.glossary_target_language_combo.addItems(languages)
+            self.glossary_target_language_combo.addItems(list(TARGET_LANGUAGES))
             
             # Lock mousewheel scrolling on target language dropdown
             self._disable_combobox_mousewheel(self.glossary_target_language_combo)

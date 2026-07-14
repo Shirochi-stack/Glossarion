@@ -272,6 +272,7 @@ datas.append(('WhereIsMyOutput.png', '.'))
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
+    ('language_options.py', '.'),
     ('splash_utils.py', '.'),
     ('dpi_setup.py', '.'),
     ('other_settings.py', '.'),
@@ -430,6 +431,7 @@ except Exception as e:
 # Application modules
 app_modules = [
     'TransateKRtoEN',
+    'language_options',
     'refinement_prompts',
     'extract_glossary_from_epub',
     'glossary_usage',

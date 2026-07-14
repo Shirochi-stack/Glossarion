@@ -19,6 +19,8 @@ import logging
 import time
 import copy
 
+from language_options import TARGET_LANGUAGES
+
 # Use the same logging infrastructure initialized by translator_gui
 logger = logging.getLogger(__name__)
 
@@ -2209,13 +2211,7 @@ class MangaSettingsDialog(QDialog):
         # Disable mouse wheel scrolling to prevent accidental changes
         self.manual_translate_language.wheelEvent = lambda event: event.ignore()
         
-        # Add common languages (same list as translator_gui.py)
-        languages = [
-            "English", "Spanish", "French", "German", "Italian", "Portuguese",
-            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-            "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
-        ]
-        self.manual_translate_language.addItems(languages)
+        self.manual_translate_language.addItems(list(TARGET_LANGUAGES))
         
         # Get target language from main GUI first, fallback to saved settings, then default
         target_lang = 'English'  # default

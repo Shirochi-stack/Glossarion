@@ -17,6 +17,8 @@ from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
 
+from language_options import TARGET_LANGUAGES
+
 DEFAULT_AI_THINKING_PREAMBLE_PATTERNS = [
     'The user wants a ',
     'The user wants me to ',
@@ -2675,16 +2677,9 @@ class QAScannerMixin:
             # Capitalize the stored value for display in combobox
             stored_language = qa_settings.get('target_language', 'english')
             display_language = stored_language.capitalize()
-            target_language_options = [
-                'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
-                'Russian', 'Arabic', 'Hindi', 'Chinese (Simplified)',
-                'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
-                'Hebrew', 'Thai'
-            ]
-
             target_language_combo = QComboBox()
             target_language_combo.setEditable(True)
-            target_language_combo.addItems(target_language_options)
+            target_language_combo.addItems(list(TARGET_LANGUAGES))
 
             target_language_combo.setMinimumWidth(360)
             target_language_combo.setMinimumContentsLength(24)  # ensure popup and line edit stay wide

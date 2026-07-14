@@ -84,6 +84,7 @@ from refinement_prompts import (
     DEFAULT_REFINEMENT_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_USER_PROMPT,
 )
+from language_options import TARGET_LANGUAGES
 
 
 def _authnd_auto_token_limits():
@@ -11924,12 +11925,7 @@ Recent translations to summarize:
         self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         # Disable mouse wheel scrolling to prevent accidental changes
         self.target_lang_combo.wheelEvent = lambda event: event.ignore()
-        languages = [
-            "English", "Spanish", "French", "German", "Italian", "Portuguese",
-            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-            "Chinese (Traditional)", "Japanese", "Korean", "Turkish", "Vietnamese"
-        ]
-        self.target_lang_combo.addItems(languages)
+        self.target_lang_combo.addItems(list(TARGET_LANGUAGES))
         
         # Set initial value from config - prioritize glossary_target_language for consistency
         # If both exist but differ, use output_language and sync glossary_target_language

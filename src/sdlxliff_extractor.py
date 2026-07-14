@@ -27,7 +27,15 @@ CONFIRMED_STATES = {
     "translationapproved",
 }
 LANGUAGE_NAME_TO_CODE = {
+    "afrikaans": "af-ZA",
+    "amharic": "am-ET",
     "arabic": "ar-SA",
+    "azerbaijani": "az-Latn-AZ",
+    "bahasa indonesia": "id-ID",
+    "bengali": "bn-BD",
+    "bulgarian": "bg-BG",
+    "burmese": "my-MM",
+    "catalan": "ca-ES",
     "chinese": "zh-CN",
     "chinese simplified": "zh-CN",
     "chinese traditional": "zh-TW",
@@ -40,24 +48,48 @@ LANGUAGE_NAME_TO_CODE = {
     "french": "fr-FR",
     "german": "de-DE",
     "greek": "el-GR",
+    "gujarati": "gu-IN",
+    "hausa": "ha-NG",
     "hebrew": "he-IL",
     "hindi": "hi-IN",
     "hungarian": "hu-HU",
     "indonesian": "id-ID",
     "italian": "it-IT",
     "japanese": "ja-JP",
+    "kannada": "kn-IN",
+    "kazakh": "kk-KZ",
+    "khmer": "km-KH",
     "korean": "ko-KR",
+    "lao": "lo-LA",
+    "malayalam": "ml-IN",
     "malay": "ms-MY",
+    "marathi": "mr-IN",
+    "nepali": "ne-NP",
     "norwegian": "nb-NO",
     "polish": "pl-PL",
     "portuguese": "pt-PT",
+    "punjabi": "pa-IN",
     "romanian": "ro-RO",
     "russian": "ru-RU",
+    "serbian": "sr-Latn-RS",
+    "sinhala": "si-LK",
+    "slovak": "sk-SK",
+    "slovenian": "sl-SI",
+    "persian": "fa-IR",
     "spanish": "es-ES",
     "swedish": "sv-SE",
     "thai": "th-TH",
+    "tamil": "ta-IN",
+    "telugu": "te-IN",
     "turkish": "tr-TR",
+    "ukrainian": "uk-UA",
+    "urdu": "ur-PK",
+    "uzbek": "uz-Latn-UZ",
     "vietnamese": "vi-VN",
+    "swahili": "sw-KE",
+    "yoruba": "yo-NG",
+    "zulu": "zu-ZA",
+    "croatian": "hr-HR",
 }
 
 
@@ -242,8 +274,7 @@ def normalize_target_language_code(language: Any) -> Optional[str]:
     value = str(language or "").strip()
     if not value:
         return None
-    value = re.sub(r"\s*\([^)]*\)\s*", " ", value).strip()
-    key = re.sub(r"[\s_-]+", " ", value).strip().lower()
+    key = re.sub(r"[\s_()\-]+", " ", value).strip().lower()
     if key in LANGUAGE_NAME_TO_CODE:
         return LANGUAGE_NAME_TO_CODE[key]
 

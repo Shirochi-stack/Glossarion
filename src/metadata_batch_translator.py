@@ -30,6 +30,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
+from language_options import TARGET_LANGUAGES
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -1475,14 +1476,11 @@ class MetadataBatchTranslatorUI:
         output_desc.setContentsMargins(0, 0, 0, 10)
         output_layout.addWidget(output_desc)
         
-        common_langs = ['English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese', 
-                       'Russian', 'Japanese', 'Korean', 'Chinese (Simplified)', 'Chinese (Traditional)', 'Turkish']
-        
         lang_label = QLabel("Target language:")
         output_layout.addWidget(lang_label)
         
         self.output_lang_combo = QComboBox()
-        self.output_lang_combo.addItems(common_langs)
+        self.output_lang_combo.addItems(list(TARGET_LANGUAGES))
         self.output_lang_combo.setEditable(True)
         self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
         self.output_lang_combo.setFixedWidth(250)

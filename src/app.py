@@ -14,6 +14,8 @@ import threading
 import uuid
 from pathlib import Path
 
+from language_options import TARGET_LANGUAGES
+
 # CRITICAL: Set API delay IMMEDIATELY at module level before any other imports
 # This ensures unified_api_client reads the correct value when it's imported
 if 'SEND_INTERVAL_SECONDS' not in os.environ:
@@ -3439,7 +3441,7 @@ class GlossarionWeb:
                             )
                             
                             epub_target_language = gr.Dropdown(
-                                choices=["English", "Korean", "Japanese", "Chinese", "Spanish", "French", "German", "Portuguese", "Russian", "Arabic", "Thai", "Vietnamese", "Indonesian", "Malay", "Filipino", "Hindi", "Turkish", "Italian", "Polish", "Dutch", "Swedish", "Czech", "Romanian", "Hungarian", "Greek", "Hebrew", "Danish", "Finnish", "Norwegian"],
+                                choices=list(TARGET_LANGUAGES),
                                 value=self.get_config_value('output_language', 'English'),
                                 label="🌐 Target Language",
                                 allow_custom_value=True,
@@ -5263,9 +5265,7 @@ class GlossarionWeb:
                                                 
                                                 # Target language dropdown
                                                 target_language = gr.Dropdown(
-                                                    choices=["English", "Spanish", "French", "German", "Italian", "Portuguese",
-                                                            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                                                            "Chinese (Traditional)", "Japanese", "Korean"],
+                                                    choices=list(TARGET_LANGUAGES),
                                                     value=self.get_config_value('glossary_target_language', 'English'),
                                                     label="Target language",
                                                     info="Language for translated glossary entries"
@@ -5310,9 +5310,7 @@ class GlossarionWeb:
                                     
                                     # Target language dropdown (synced with extraction settings)
                                     target_language_prompt = gr.Dropdown(
-                                        choices=["English", "Spanish", "French", "German", "Italian", "Portuguese",
-                                                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                                                "Chinese (Traditional)", "Japanese", "Korean"],
+                                        choices=list(TARGET_LANGUAGES),
                                         value=self.get_config_value('glossary_target_language', 'English'),
                                         label="Target language",
                                         info="Language for translated glossary entries"
