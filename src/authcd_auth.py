@@ -799,8 +799,8 @@ def send_chat_completion(
     }
     if system_prompt:
         body["system"] = system_prompt
-    # Some models (e.g. claude-opus-4-7) have deprecated the temperature param
-    _no_temp_models = ("claude-opus-4-7",)
+    # Some models have deprecated the temperature parameter.
+    _no_temp_models = ("claude-opus-4-7", "claude-opus-4-8", "claude-fable-5")
     if temperature is not None and not any(m in model for m in _no_temp_models):
         body["temperature"] = temperature
 

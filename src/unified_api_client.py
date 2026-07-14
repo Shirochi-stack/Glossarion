@@ -6629,6 +6629,16 @@ class UnifiedClient:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _temperature_parameter_disabled() -> bool:
+        """Return whether callers requested that temperature be omitted entirely."""
+        return str(os.getenv('DISABLE_TEMPERATURE', '0')).strip().lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+
+    def _effective_temperature(self, temperature: Optional[float]) -> Optional[float]:
+        return None if self._temperature_parameter_disabled() else temperature
+
     def _send_core(self,
                    messages,
                    temperature: Optional[float] = None,
@@ -6639,6 +6649,7 @@ class UnifiedClient:
         """
         Unified front for send and send_image. Includes multi-key retry wrapper.
         """
+        temperature = self._effective_temperature(temperature)
         if not context:
             inherited_context = str(getattr(self, 'context', '') or '').strip()
             if inherited_context in (
@@ -13796,8 +13807,9 @@ class UnifiedClient:
                     "model": model_name,
                     "messages": anthropic_messages,
                     "max_tokens": max_tokens,
-                    "temperature": temperature,
                 }
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
                 
                 if system_prompt:
                     kwargs["system"] = system_prompt
@@ -14120,9 +14132,10 @@ class UnifiedClient:
                 except Exception:
                     pass
                 config_params = {
-                    "temperature": temperature,
                     "max_output_tokens": _requested_max,
                 }
+                if temperature is not None:
+                    config_params["temperature"] = temperature
                 
                 # Add response modalities for image generation
                 if enable_image_output:
@@ -16953,14 +16966,15 @@ class UnifiedClient:
         elif provider == "openrouter":
             headers['X-Safe-Mode'] = 'false'
 
-    def _build_anthropic_payload(self, formatted_messages: list, temperature: float, max_tokens: int, anti_dupe_params: dict, system_message: Optional[str] = None) -> dict:
+    def _build_anthropic_payload(self, formatted_messages: list, temperature: Optional[float], max_tokens: int, anti_dupe_params: dict, system_message: Optional[str] = None) -> dict:
         data = {
             "model": self._get_active_request_model(),
             "messages": formatted_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
             **(anti_dupe_params or {})
         }
+        if temperature is not None:
+            data["temperature"] = temperature
         if system_message:
             data["system"] = system_message
         
@@ -17169,6 +17183,9 @@ class UnifiedClient:
             max_completion_tokens: Maximum completion tokens (for o-series models)
             response_name: Name for saving response
         """
+        # Also normalize here because a few retry/fallback paths call this method directly.
+        temperature = self._effective_temperature(temperature)
+
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
         _set_thread_run_id_from_env()
         self._restore_thread_endpoint_state_if_needed()
@@ -18537,8 +18554,9 @@ class UnifiedClient:
         params = {
             "model": self._get_active_request_model(),
             "messages": messages,
-            "temperature": temperature
         }
+        if temperature is not None:
+            params["temperature"] = temperature
         
         # Determine which token parameter to use based on model
         if self._is_o_series_model():
@@ -18991,10 +19009,11 @@ class UnifiedClient:
 
                 # Build generation config with anti-duplicate parameters
                 generation_config_params = {
-                    "temperature": temperature,
                     "max_output_tokens": max_tokens,
                     **anti_dupe_params  # Add user's custom parameters
                 }
+                if temperature is not None:
+                    generation_config_params["temperature"] = temperature
                 
                 # Log the request - only if not stopping
                 if not self._is_stop_requested():
@@ -20885,9 +20904,10 @@ class UnifiedClient:
             "model": self.model,
             "message": message,
             "chat_history": chat_history,
-            "temperature": temperature,
             "max_tokens": max_tokens
         }
+        if temperature is not None:
+            data["temperature"] = temperature
 
         resp = self._http_request_with_retries(
             method="POST",
@@ -20920,9 +20940,10 @@ class UnifiedClient:
         
         data = {
             "prompt": prompt,
-            "temperature": temperature,
             "maxTokens": max_tokens
         }
+        if temperature is not None:
+            data["temperature"] = temperature
         
         resp = self._http_request_with_retries(
             method="POST",
@@ -20961,10 +20982,11 @@ class UnifiedClient:
             "version": self.model,  # Model should be the version ID
             "input": {
                 "prompt": prompt,
-                "temperature": temperature,
                 "max_tokens": max_tokens
             }
         }
+        if temperature is not None:
+            data["input"]["temperature"] = temperature
         
         # Create prediction
         resp = self._http_request_with_retries(
@@ -21134,7 +21156,7 @@ class UnifiedClient:
                             }
                             
                             # O-series models don't support temperature parameter
-                            if not self._is_o_series_model():
+                            if temperature is not None and not self._is_o_series_model():
                                 params["temperature"] = temperature
 
                             # Normalize token parameter for Azure endpoint
@@ -21494,7 +21516,7 @@ class UnifiedClient:
                     # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
                     req_temperature = temperature
                     try:
-                        if self._is_o_series_model():
+                        if req_temperature is not None and self._is_o_series_model():
                             req_temperature = 1.0
                     except Exception:
                         pass
@@ -21604,6 +21626,9 @@ class UnifiedClient:
                             params["max_completion_tokens"] = norm_max_completion_tokens
                         elif norm_max_tokens is not None:
                             params["max_tokens"] = norm_max_tokens
+
+                    if req_temperature is None:
+                        params.pop("temperature", None)
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
@@ -22036,6 +22061,8 @@ class UnifiedClient:
                                     "messages": messages,
                                     "temperature": temperature,
                                 }
+                                if temperature is None:
+                                    fb_body.pop("temperature", None)
                                 if _norm_mct is not None:
                                     fb_body["max_completion_tokens"] = _norm_mct
                                 elif _norm_mt is not None:
@@ -23218,6 +23245,8 @@ class UnifiedClient:
                                 "messages": messages,
                                 "temperature": req_temperature,
                             }
+                            if req_temperature is None:
+                                body.pop("temperature", None)
                             if norm_max_completion_tokens is not None:
                                 body["max_completion_tokens"] = norm_max_completion_tokens
                             elif norm_max_tokens is not None:
@@ -23428,7 +23457,7 @@ class UnifiedClient:
             # Enforce fixed temperature for o-series (e.g., GPT-5) to avoid 400s
             req_temperature = temperature
             try:
-                if provider == 'openai' and self._is_o_series_model():
+                if req_temperature is not None and provider == 'openai' and self._is_o_series_model():
                     req_temperature = 1.0
             except Exception:
                 pass
@@ -23645,6 +23674,8 @@ class UnifiedClient:
                     data.setdefault("thinking", {"type": "disabled"})
             
             anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)
+            if req_temperature is None:
+                data.pop("temperature", None)
             anti_dupe_min_p_params = self._get_anti_duplicate_min_p_params(
                 provider,
                 is_local_endpoint=is_local_endpoint,
@@ -26793,8 +26824,9 @@ class UnifiedClient:
         payload = {
             "model": model_override or self.model,
             "messages": messages,
-            "temperature": temperature,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if norm_mct is not None:
             payload["max_completion_tokens"] = norm_mct
         elif norm_mt is not None:
@@ -27191,8 +27223,9 @@ class UnifiedClient:
         
         data = {
             "messages": messages,
-            "temperature": temperature
         }
+        if temperature is not None:
+            data["temperature"] = temperature
         
         # Use _is_o_series_model to determine which token parameter to use
         if self._is_o_series_model():
@@ -27254,8 +27287,9 @@ class UnifiedClient:
             "model": self.model,
             "prompt": prompt,
             "maximum_tokens": max_tokens,
-            "temperature": temperature
         }
+        if temperature is not None:
+            data["temperature"] = temperature
         
         try:
             resp = self._http_request_with_retries(
@@ -27292,8 +27326,9 @@ class UnifiedClient:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
@@ -27338,10 +27373,11 @@ class UnifiedClient:
             "inputs": prompt,
             "parameters": {
                 "max_new_tokens": max_tokens,
-                "temperature": temperature,
                 "return_full_text": False
             }
         }
+        if temperature is not None:
+            data["parameters"]["temperature"] = temperature
         
         try:
             resp = self._http_request_with_retries(
@@ -27624,9 +27660,10 @@ class UnifiedClient:
         data = {
             "model": request_model,
             "messages": formatted_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens
         }
+        if temperature is not None:
+            data["temperature"] = temperature
 
         # Get user-configured anti-duplicate parameters
         anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=None, log=False)

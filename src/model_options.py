@@ -37,8 +37,8 @@ def get_model_options() -> List[str]:
         "gemma-2-27b-it", "gemma-2-9b-it", "gemma-2-2b-it",
         
         # Anthropic Claude Models
-        "claude-opus-4-7","claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
-        "claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001",
+        "claude-fable-5","claude-opus-4-8","claude-opus-4-7","claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
+        "claude-sonnet-5","claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001",
         "claude-3-haiku-20240307",       
         
         # Grok Models
@@ -265,7 +265,7 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
 
         # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
-        "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5",
+        "authcd/claude-sonnet-5", "authcd/claude-fable-5", "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5", "authcd/claude-opus-4-8",
         "authcd/claude-opus-4-7", "authcd/claude-opus-4-6", "authcd/claude-haiku-4-5",
 
         # AuthGem – Gemini-cli via Google OAuth (no API key needed)

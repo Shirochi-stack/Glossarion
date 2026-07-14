@@ -397,6 +397,34 @@ def test_antigravity_payload_clamps_model_token_limits():
     assert gemini_payload["max_tokens"] == 64000
 
 
+def test_disable_temperature_omits_parameter_from_request_payloads(monkeypatch):
+    monkeypatch.setenv("DISABLE_TEMPERATURE", "1")
+    client = UnifiedClient.__new__(UnifiedClient)
+    client._get_active_request_model = lambda: "example-model"
+    client._is_o_series_model = lambda: False
+
+    effective_temperature = client._effective_temperature(0.3)
+    openai_payload = client._build_openai_params(
+        [{"role": "user", "content": "hello"}],
+        effective_temperature,
+        1024,
+    )
+    anthropic_payload = client._build_anthropic_payload(
+        [{"role": "user", "content": "hello"}],
+        effective_temperature,
+        1024,
+        {},
+    )
+    antigravity_payload = antigravity_proxy._payload_for_openai_chat(
+        [], "claude-sonnet-4-6", effective_temperature, 1024, False
+    )
+
+    assert effective_temperature is None
+    assert "temperature" not in openai_payload
+    assert "temperature" not in anthropic_payload
+    assert "temperature" not in antigravity_payload
+
+
 def test_antigravity_token_limit_log_reports_clamp():
     payload = antigravity_proxy._payload_for_openai_chat(
         [], "gemini-2.5-flash", 0.2, 65536, False

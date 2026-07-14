@@ -1311,18 +1311,20 @@ def _normalize_model_name(model: str) -> str:
 def _payload_for_openai_chat(
     messages: List[Dict],
     model: str,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     stream: bool,
 ) -> Dict[str, Any]:
     normalized_model = _normalize_model_name(model)
-    return {
+    payload = {
         "model": normalized_model,
         "messages": messages,
         "max_tokens": _clamp_max_tokens_for_model(normalized_model, max_tokens),
-        "temperature": temperature,
         "stream": stream,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    return payload
 
 
 def clamp_output_tokens_for_model(model: str, max_tokens: Any, default: int = 8192) -> int:
@@ -2371,7 +2373,7 @@ def _raise_for_proxy_status(
 def send_message(
     messages: List[Dict],
     model: str = "claude-sonnet-4-6",
-    temperature: float = 0.7,
+    temperature: Optional[float] = 0.7,
     max_tokens: int = 8192,
     timeout: float = 300,
     log_fn=None,
@@ -2593,7 +2595,7 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
 def send_message_stream(
     messages: List[Dict],
     model: str = "claude-sonnet-4-6",
-    temperature: float = 0.7,
+    temperature: Optional[float] = 0.7,
     max_tokens: int = 8192,
     timeout: float = 300,
     log_fn=None,

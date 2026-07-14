@@ -4130,6 +4130,10 @@ Recent translations to summarize:
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', True)
+        self.disable_temperature_var = self._coerce_live_bool(
+            self.config.get('disable_temperature', False),
+            False,
+        )
         self.api_key_visible = False  # Default to hidden
         
         if 'glossary_duplicate_key_mode' not in self.config:
@@ -5042,6 +5046,7 @@ Recent translations to summarize:
         temp_layout = getattr(self, 'temp_layout', None)
         temp_container = getattr(self, 'temp_container', None)
         temp_entry = getattr(self, 'trans_temp', None)
+        disable_temp_checkbox = getattr(self, 'disable_temperature_checkbox', None)
         compact_spacer = getattr(self, '_refinement_prompt_compact_spacer', None)
         if not all((controls_layout, controls_widget, combo, button, row, batch_size, checkbox, temp_layout, temp_container)):
             return
@@ -5104,10 +5109,11 @@ Recent translations to summarize:
                     self._refinement_prompt_compact_spacer = compact_spacer
                 compact_spacer.setFixedWidth(50)
                 insert_at = 2
-                if temp_entry is not None:
-                    temp_index = temp_layout.indexOf(temp_entry)
-                    if temp_index >= 0:
-                        insert_at = temp_index + 1
+                for temperature_widget in (temp_entry, disable_temp_checkbox):
+                    if temperature_widget is not None:
+                        temp_index = temp_layout.indexOf(temperature_widget)
+                        if temp_index >= 0:
+                            insert_at = max(insert_at, temp_index + 1)
                 temp_layout.insertWidget(insert_at, compact_spacer)
                 compact_spacer.show()
                 temp_layout.insertWidget(insert_at + 1, button)
@@ -9710,6 +9716,17 @@ Recent translations to summarize:
         self.trans_temp.setText(str(self.config.get('translation_temperature', 0.3)))
         self.trans_temp.setMaximumWidth(60)
         temp_layout.addWidget(self.trans_temp)
+
+        self.disable_temperature_checkbox = self._create_styled_checkbox("Disable temperature")
+        self.disable_temperature_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Omits the temperature parameter from API requests and uses the provider or model default."
+            "</p></qt>"
+        )
+        self.disable_temperature_checkbox.setChecked(self.disable_temperature_var)
+        self.disable_temperature_checkbox.stateChanged.connect(self._on_disable_temperature_toggle)
+        temp_layout.addWidget(self.disable_temperature_checkbox)
+        self._on_disable_temperature_toggle()
         temp_layout.addStretch()
         self.temp_layout = temp_layout
         self.temp_container = temp_container
@@ -10996,6 +11013,23 @@ Recent translations to summarize:
                     return value
         value = self.config.get(config_key, default)
         return str(value if value is not None else default).strip()
+
+    def _on_disable_temperature_toggle(self, state=None):
+        """Keep the live request flag and temperature field in sync."""
+        checkbox = getattr(self, 'disable_temperature_checkbox', None)
+        if checkbox is not None:
+            disabled = bool(checkbox.isChecked())
+        else:
+            disabled = self._coerce_live_bool(
+                getattr(self, 'disable_temperature_var', self.config.get('disable_temperature', False)),
+                False,
+            )
+        self.disable_temperature_var = disabled
+        self.config['disable_temperature'] = disabled
+        os.environ['DISABLE_TEMPERATURE'] = '1' if disabled else '0'
+        temperature_entry = getattr(self, 'trans_temp', None)
+        if temperature_entry is not None:
+            temperature_entry.setEnabled(not disabled)
 
     def _current_auto_glossary_mode(self):
         combo = getattr(self, 'auto_glossary_mode_combo', None)
@@ -15595,6 +15629,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
                 # Update temperature and max output tokens from GUI's current values
                 os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
+                os.environ['DISABLE_TEMPERATURE'] = '1' if self.disable_temperature_var else '0'
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 # Set batch header translation prompts from config
                 _output_lang = self.config.get('output_language', 'English')
@@ -18533,6 +18568,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ROLLING_SUMMARY_MAX_TOKENS': str(self.rolling_summary_max_tokens_var),
             'PROFILE_NAME': self.lang_var.lower(),
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
+            'DISABLE_TEMPERATURE': '1' if self.disable_temperature_var else '0',
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': _get_app_dir(),
             'OUTPUT_DIRECTORY': os.path.abspath(output_override_for_env) if output_override_for_env else '',
@@ -20252,6 +20288,7 @@ Important rules:
 
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
+                    'DISABLE_TEMPERATURE': '1' if self.disable_temperature_var else '0',
                     'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
                     'MODEL': self.model_var,
                     'OPENAI_API_KEY': api_key,
@@ -20694,6 +20731,7 @@ Important rules:
             
             # Set translation parameters from GUI
             os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
+            os.environ['DISABLE_TEMPERATURE'] = '1' if self.disable_temperature_var else '0'
             os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
             os.environ['OUTPUT_LANGUAGE'] = self.config.get('output_language', 'English')
             
@@ -27792,6 +27830,7 @@ Important rules:
                 ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
                 ('thread_submission_delay', ['thread_delay_entry'], '0.0001', _format_plain_decimal_setting),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
+                ('disable_temperature', ['disable_temperature_checkbox', 'disable_temperature_var'], False, bool),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
 
                 ('break_split_count', ['break_split_count_var'], '', str),
