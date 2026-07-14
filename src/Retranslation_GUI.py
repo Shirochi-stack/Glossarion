@@ -114,6 +114,39 @@ def _normalize_progress_match_name(name):
     return base
 
 
+def _glossary_progress_filename_keys(name):
+    """Return filename keys shared by glossary progress/index matching."""
+    base = os.path.basename(str(name or ""))
+    if not base:
+        return set()
+    stem = os.path.splitext(base)[0]
+    keys = {base.lower(), stem.lower()}
+    if stem.lower().startswith('response_'):
+        keys.add(stem[9:].lower())
+    return {key for key in keys if key}
+
+
+def _map_zero_based_glossary_progress_index(value, progress_data, filename_key_to_index):
+    """Map an extraction-list index onto the full OPF progress-manager view."""
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    progress_data = progress_data if isinstance(progress_data, dict) else {}
+    chapter_filenames = progress_data.get('chapter_filenames', {})
+    progress_filename = None
+    if isinstance(chapter_filenames, dict):
+        progress_filename = chapter_filenames.get(str(index))
+        if progress_filename is None:
+            progress_filename = chapter_filenames.get(index)
+    if progress_filename:
+        for filename_key in _glossary_progress_filename_keys(progress_filename):
+            if filename_key in filename_key_to_index:
+                return filename_key_to_index[filename_key]
+        return None
+    return index
+
+
 def _snapshot_progress_output_dir(output_dir):
     """Return one reusable directory snapshot for large EPUB matching.
 
@@ -12467,14 +12500,7 @@ class RetranslationMixin:
 
             def _gp_filename_keys(name):
                 """Normalize a filename into a set of lowercase lookup keys."""
-                base = os.path.basename(str(name or ""))
-                if not base:
-                    return set()
-                stem = os.path.splitext(base)[0]
-                keys = {base.lower(), stem.lower()}
-                if stem.lower().startswith('response_'):
-                    keys.add(stem[9:].lower())
-                return {k for k in keys if k}
+                return _glossary_progress_filename_keys(name)
 
             def _rebuild_reverse_lookups():
                 """Rebuild O(1) lookup dicts from chapter_map. Call after chapter_map changes."""
@@ -12570,7 +12596,16 @@ class RetranslationMixin:
                 except (TypeError, ValueError):
                     return None
                 if str(_d.get('indexing', '')).lower() == 'chapter_index_zero_based':
-                    return ivalue
+                    # Glossary extraction indices only cover files that were
+                    # eligible for extraction. The progress-manager list uses
+                    # the full OPF spine, which can contain an earlier cover or
+                    # other non-requested file. Resolve through the persisted
+                    # filename map before treating the integer as a UI row.
+                    return _map_zero_based_glossary_progress_index(
+                        ivalue,
+                        _d,
+                        panel_state.get('_fk_to_ci') or {},
+                    )
                 positions = _d.get('chapter_positions', {})
                 if isinstance(positions, dict) and str(ivalue) in positions:
                     return ivalue
@@ -12593,7 +12628,7 @@ class RetranslationMixin:
                 fail = set()
                 merg = set()
                 chapters = _d.get('chapters', {})
-                used_chapter_entries = False
+                represented = set()
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
@@ -12601,7 +12636,7 @@ class RetranslationMixin:
                         ci = _gp_index_for_entry(info, key, _d)
                         if ci is None:
                             continue
-                        used_chapter_entries = True
+                        represented.add(ci)
                         status = str(info.get('status', '')).lower()
                         if status in ('failed', 'qa_failed', 'error'):
                             fail.add(ci)
@@ -12609,10 +12644,15 @@ class RetranslationMixin:
                             merg.add(ci)
                         elif status == 'completed':
                             comp.add(ci)
-                if not used_chapter_entries:
-                    comp = _index_set(_d.get('completed', []))
-                    fail = _index_set(_d.get('failed', []))
-                    merg = _index_set(_d.get('merged_indices', []))
+
+                # A progress file can briefly contain a mixture of structured
+                # chapter entries and legacy/top-level arrays while the
+                # extractor is saving or after a row was removed manually.
+                # Structured entries win for their own index, but must not make
+                # unrelated top-level updates disappear from the live view.
+                comp |= _index_set(_d.get('completed', [])) - represented
+                fail |= _index_set(_d.get('failed', [])) - represented
+                merg |= _index_set(_d.get('merged_indices', [])) - represented
                 comp |= _gp_auto_completed_indices()
                 # Failed should win over completed in the UI.
                 comp -= fail
@@ -12623,24 +12663,24 @@ class RetranslationMixin:
                     _d = {}
                 result = set()
                 chapters = _d.get('chapters', {})
-                used_chapter_entries = False
+                represented = set()
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is None:
+                            continue
                         status = str(info.get('status', '')).lower()
                         if status:
-                            used_chapter_entries = True
+                            represented.add(ci)
                         if status != 'in_progress':
                             continue
-                        ci = _gp_index_for_entry(info, key, _d)
-                        if ci is not None:
-                            result.add(ci)
-                if not used_chapter_entries:
-                    for value in _gp_int_list(_d.get('in_progress', [])):
-                        ci = _gp_index_for_progress_value(value, _d)
-                        if ci is not None:
-                            result.add(ci)
+                        result.add(ci)
+                for value in _gp_int_list(_d.get('in_progress', [])):
+                    ci = _gp_index_for_progress_value(value, _d)
+                    if ci is not None and ci not in represented:
+                        result.add(ci)
                 if _precomputed_sets:
                     comp, fail, merg = _precomputed_sets
                 else:
@@ -12941,6 +12981,8 @@ class RetranslationMixin:
                 'translate_special': _ts_init,
                 'populate_generation': 0,
                 'mark_completed_lock': threading.Lock(),
+                '_gp_bg_running': False,
+                '_refresh_generation': 0,
             }
             if not panel_state['chapter_map']:
                 chapter_filenames = gp_data.get('chapter_filenames', {})
@@ -12964,11 +13006,30 @@ class RetranslationMixin:
             _rebuild_reverse_lookups()
             _pump_loading_frame()
             
-            # Track file mtime for dirty-checking on refresh
-            try:
-                panel_state['_last_mtime'] = os.path.getmtime(gp_path) if os.path.isfile(gp_path) else 0
-            except OSError:
-                panel_state['_last_mtime'] = 0
+            def _gp_file_signature(path):
+                """Return a precise signature for an atomically replaced progress file."""
+                try:
+                    stat = os.stat(path)
+                    return (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                except OSError:
+                    return None
+
+            # The extractor atomically replaces this file, sometimes several
+            # times inside one second. A float mtime alone can miss those
+            # transitions on Windows, so track nanosecond timestamps and size.
+            panel_state['_last_signature'] = _gp_file_signature(gp_path)
+            panel_state['_last_forced_refresh'] = time.monotonic()
+
+            # Background results are generation-tagged so a manual deletion can
+            # invalidate an already queued snapshot instead of letting it paint
+            # stale statuses back over the list.
+            _gp_pending_result = []
+
+            def _invalidate_gp_refresh():
+                panel_state['_refresh_generation'] = panel_state.get('_refresh_generation', 0) + 1
+                panel_state['_last_signature'] = None
+                panel_state['_last_forced_refresh'] = 0.0
+                _gp_pending_result.clear()
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -14251,6 +14312,7 @@ class RetranslationMixin:
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
+                nonlocal gp_data
                 # Gather selected items that are deletable
                 clicked_item = gp_listbox.itemAt(pos)
                 if clicked_item is not None and not clicked_item.isSelected():
@@ -14409,6 +14471,8 @@ class RetranslationMixin:
                     if changed:
                         with open(_rp, 'w', encoding='utf-8') as _f:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
+                        gp_data = _d
+                        _invalidate_gp_refresh()
                         # Update all affected items
                         _cmap = panel_state['chapter_map']
                         for it, (kind, value) in removable_targets:
@@ -14649,17 +14713,24 @@ class RetranslationMixin:
                     self._add_compact_inline_list_item(gp_listbox, item)
                 _populate_gp_listbox(_d)
             
-            # Shared result queue: background thread writes, main-thread timer reads
-            _gp_pending_result = []
-
             def _apply_pending_gp_result():
                 """Main-thread: apply any result left by a background refresh."""
+                nonlocal gp_data
                 if not _gp_pending_result:
                     return False
                 result = _gp_pending_result.pop()
                 _gp_pending_result.clear()  # discard any older stale results
+                if result.get('generation') != panel_state.get('_refresh_generation'):
+                    return False
+                result_signature = result.get('signature')
+                if result_signature != _gp_file_signature(result.get('path')):
+                    panel_state['_last_signature'] = None
+                    return False
                 try:
                     _d = result['d']
+                    gp_data = _d
+                    panel_state['_last_signature'] = result_signature
+                    panel_state['_last_forced_refresh'] = time.monotonic()
                     
                     if result.get('toggle_changed'):
                         panel_state['translate_special'] = result['cur_ts']
@@ -14695,23 +14766,29 @@ class RetranslationMixin:
                     if result.get('bt') and bt_label:
                         bt_label.setText(f"📖 {result['bt']}")
                     
+                    chapter_items = {}
+                    for row in range(gp_listbox.count()):
+                        item = gp_listbox.item(row)
+                        if not item or item.data(Qt.UserRole + 3):
+                            continue
+                        try:
+                            chapter_items[int(item.data(Qt.UserRole + 1))] = item
+                        except (TypeError, ValueError):
+                            continue
+
                     for ci, new_status, new_color, display_text, _issues in result.get('item_updates', []):
-                        if ci >= gp_listbox.count():
-                            break
-                        item = gp_listbox.item(ci)
-                        if not item:
+                        item = chapter_items.get(ci)
+                        if item is None:
                             continue
-                        if item.data(Qt.UserRole + 3):
-                            continue
-                        old_status = item.data(Qt.UserRole)
-                        if new_status != old_status or _issues:
-                            if display_text:
-                                item.setText(display_text)
-                            item.setForeground(QColor(new_color))
-                            item.setData(Qt.UserRole, new_status)
+                        # The model/key can change while the status stays the
+                        # same, so refresh the complete row every time.
+                        if display_text:
+                            item.setText(display_text)
+                        item.setForeground(QColor(new_color))
+                        item.setData(Qt.UserRole, new_status)
                     _refresh_refinement_rows(_d)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"⚠️ Could not apply glossary progress refresh: {e}")
                 return True
 
             panel_state['_gp_bg_running'] = False
@@ -14731,24 +14808,30 @@ class RetranslationMixin:
                     
                     # Dirty-check: skip if file hasn't changed
                     try:
-                        _cur_mtime = os.path.getmtime(_rp)
+                        _cur_signature = _gp_file_signature(_rp)
                     except OSError:
-                        _cur_mtime = 0
+                        _cur_signature = None
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    if (_cur_mtime == panel_state.get('_last_mtime', -1)
-                            and _cur_ts == panel_state.get('translate_special')):
+                    _force_due = time.monotonic() - panel_state.get('_last_forced_refresh', 0.0) >= 5.0
+                    if (_cur_signature == panel_state.get('_last_signature')
+                            and _cur_ts == panel_state.get('translate_special')
+                            and not _force_due):
                         return  # Nothing changed — skip
-                    panel_state['_last_mtime'] = _cur_mtime
                     panel_state['_gp_bg_running'] = True
 
                     # Snapshot values the background thread needs
                     _snap_total = panel_state['total']
                     _snap_cmap = dict(panel_state['chapter_map'])
                     _snap_ts = panel_state.get('translate_special')
+                    _snap_generation = panel_state.get('_refresh_generation', 0)
 
                     def _bg_work():
                         try:
+                            _before_signature = _gp_file_signature(_rp)
                             _d = _gp_load_progress_dict(_rp)
+                            _after_signature = _gp_file_signature(_rp)
+                            if _before_signature != _after_signature:
+                                return
                             _toggle_changed = (_cur_ts != _snap_ts)
                             _spine_result = None
                             if _toggle_changed:
@@ -14772,6 +14855,9 @@ class RetranslationMixin:
                             _nr = max(0, _snap_total - len(_comp | _fail | _merg | _prog))
                             _gp_pending_result.append({
                                 'd': _d,
+                                'path': _rp,
+                                'signature': _after_signature,
+                                'generation': _snap_generation,
                                 'toggle_changed': _toggle_changed,
                                 'spine_result': _spine_result,
                                 'cur_ts': _cur_ts,
@@ -14782,15 +14868,16 @@ class RetranslationMixin:
                                 'item_updates': _item_updates,
                                 'bt': _d.get('book_title', ''),
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"⚠️ Could not read glossary progress refresh: {e}")
                         finally:
                             panel_state['_gp_bg_running'] = False
 
                     import threading
                     threading.Thread(target=_bg_work, name="gp-refresh-bg", daemon=True).start()
-                except Exception:
+                except Exception as e:
                     panel_state['_gp_bg_running'] = False
+                    print(f"⚠️ Could not schedule glossary progress refresh: {e}")
             
             return panel, _refresh
         

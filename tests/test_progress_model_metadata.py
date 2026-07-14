@@ -9,6 +9,8 @@ import pytest
 
 from Retranslation_GUI import (
     RetranslationMixin,
+    _glossary_progress_filename_keys,
+    _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
     _progress_path_signature,
     _progress_entry_model_for_display,
@@ -238,6 +240,66 @@ def test_progress_display_selector_prefers_active_and_refined_entries():
     )
     assert selected is refined_completed
     assert _progress_entry_refined_for_display(selected)
+
+
+def test_glossary_progress_index_uses_filename_before_full_spine_row():
+    progress_data = {
+        "indexing": "chapter_index_zero_based",
+        "chapter_filenames": {
+            "0": "info.xhtml",
+            "1": "chapter0001.xhtml",
+        },
+    }
+    filename_key_to_index = {}
+    for view_index, filename in enumerate(("cover.html", "info.xhtml", "chapter0001.xhtml")):
+        for key in _glossary_progress_filename_keys(filename):
+            filename_key_to_index[key] = view_index
+
+    assert _map_zero_based_glossary_progress_index(0, progress_data, filename_key_to_index) == 1
+    assert _map_zero_based_glossary_progress_index(1, progress_data, filename_key_to_index) == 2
+
+
+def test_glossary_stop_reset_clears_unified_module_and_class_flags():
+    import extract_glossary_from_epub as glossary
+    import unified_api_client as unified
+
+    try:
+        unified.set_stop_flag(True)
+        assert unified.is_stop_requested()
+
+        glossary.set_stop_flag(False)
+
+        assert not glossary.is_stop_requested()
+        assert not unified.is_stop_requested()
+        assert not UnifiedClient.is_globally_cancelled()
+    finally:
+        glossary.set_stop_flag(False)
+        unified.set_stop_flag(False)
+
+
+def test_glossary_explicit_user_cancel_is_not_retried_as_timeout(monkeypatch):
+    from extract_glossary_from_epub import send_with_interrupt
+    from unified_api_client import UnifiedClientError
+
+    class CancelledClient:
+        _multi_key_mode = False
+        client_type = "openai"
+
+        def __init__(self):
+            self.calls = 0
+
+        def send(self, *args, **kwargs):
+            self.calls += 1
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+    monkeypatch.setenv("TIMEOUT_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    client = CancelledClient()
+
+    with pytest.raises(UnifiedClientError, match="Operation cancelled by user"):
+        send_with_interrupt([], client, 0, 10, lambda: False)
+
+    assert client.calls == 1
 
 
 @pytest.mark.parametrize(

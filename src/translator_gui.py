@@ -21978,6 +21978,10 @@ Important rules:
                 self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ Glossary extraction stop requested.")
+        # Keep polling until the worker has actually exited, then clear every
+        # extractor/client/proxy stop source. A one-shot check while the worker
+        # is still alive leaves cancellation state behind for the next run.
+        QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
 
@@ -22359,21 +22363,21 @@ Important rules:
         try:
             # If a thread-based run is still alive, exit
             if getattr(self, 'glossary_thread', None) and getattr(self.glossary_thread, 'is_alive', lambda: False)():
+                QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
                 return
             # If using executor future and it's not done, exit
             if getattr(self, 'glossary_future', None) and hasattr(self.glossary_future, 'done') and not self.glossary_future.done():
+                QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
                 return
         except Exception:
             pass
-        # If a stop is currently requested (or graceful stop active), don't clear yet
-        if getattr(self, 'stop_requested', False) or getattr(self, 'graceful_stop_active', False):
-            return
 
         # Local flags
         self.stop_requested = False
         self.graceful_stop_active = False
         os.environ['GRACEFUL_STOP'] = '0'
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         os.environ['WAIT_FOR_CHUNKS'] = '0'
         os.environ.pop('TRANSLATION_CANCELLED', None)
 

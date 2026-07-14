@@ -789,8 +789,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         
         except UnifiedClientError as e:
             error_msg = str(e)
+
+            # A deliberate cancellation is terminal, not a network timeout.
+            # Retrying it only repeats the cancelled state and produces a chain
+            # of misleading "timeout retry" messages after the Stop button.
+            if (
+                str(getattr(e, 'error_type', '') or '').lower() == 'cancelled'
+                or 'operation cancelled by user' in error_msg.lower()
+                or 'glossary extraction stopped by user' in error_msg.lower()
+            ):
+                raise
             
-            # Treat cancelled errors (from client being closed) as timeout
+            # Treat non-user transport cancellations (from a client being
+            # closed unexpectedly) as timeouts.
             if "cancelled" in error_msg.lower() or "Gemini client not initialized" in error_msg or "timed out" in error_msg.lower():
                 # Check stop flag before retrying
                 if stop_check_fn():
@@ -1290,29 +1301,25 @@ def _ensure_book_title_entry(glossary: List[Dict], context=None) -> List[Dict]:
 def set_stop_flag(value):
     """Set the global stop flag"""
     global _stop_requested
-    _stop_requested = value
+    _stop_requested = bool(value)
     
-    # When clearing the stop flag, also clear the multi-key environment variable
+    # Keep the extractor and UnifiedClient cancellation lifecycles symmetric.
+    # Previously the True path set unified_api_client.global_stop_flag, while
+    # the False path only cleared UnifiedClient._global_cancelled. The module
+    # flag therefore survived into the next glossary run and every request was
+    # rejected as "Operation cancelled by user".
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, 'set_stop_flag'):
+            unified_api_client.set_stop_flag(bool(value))
+        elif hasattr(unified_api_client, 'UnifiedClient'):
+            unified_api_client.UnifiedClient._global_cancelled = bool(value)
+    except Exception:
+        pass
+
+    # When clearing the stop flag, also clear the shared environment variable.
     if not value:
         os.environ['TRANSLATION_CANCELLED'] = '0'
-        
-        # Also clear UnifiedClient global flag
-        try:
-            import unified_api_client
-            if hasattr(unified_api_client, 'UnifiedClient'):
-                unified_api_client.UnifiedClient._global_cancelled = False
-        except:
-            pass
-    else:
-        # Propagate stop to UnifiedClient (for streaming cancellation)
-        try:
-            import unified_api_client
-            if hasattr(unified_api_client, 'set_stop_flag'):
-                unified_api_client.set_stop_flag(True)
-            elif hasattr(unified_api_client, 'UnifiedClient'):
-                unified_api_client.UnifiedClient._global_cancelled = True
-        except Exception:
-            pass
 
 def is_stop_requested():
     """Check if stop was requested"""
