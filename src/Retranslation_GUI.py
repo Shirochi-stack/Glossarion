@@ -43,6 +43,12 @@ from glossary_usage import (
     read_epub_spine_chapters,
     write_completed_summary,
 )
+from metadata_progress import (
+    METADATA_PROGRESS_KEY,
+    build_metadata_progress_plan,
+    is_metadata_progress_entry,
+    metadata_field_complete,
+)
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
@@ -10151,61 +10157,146 @@ class RetranslationMixin:
         return self._progress_entry_is_skipped_special(info)
 
     def _ensure_metadata_progress_entry(self, prog, output_dir, file_path=None):
-        """Create, repair, or remove the special metadata progress entry."""
+        """Synchronize special metadata rows with the configured API-call mode."""
         if not isinstance(prog, dict):
             return False
         chapters = prog.setdefault('chapters', {})
-        key = '__metadata__'
+        old_entries = {
+            key: dict(entry)
+            for key, entry in chapters.items()
+            if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
+        }
         if not self._metadata_progress_tracking_enabled(file_path):
-            return chapters.pop(key, None) is not None
+            for key in old_entries:
+                chapters.pop(key, None)
+            return bool(old_entries)
 
         metadata_path = os.path.join(output_dir, 'metadata.json')
         metadata_exists = os.path.isfile(metadata_path)
-        entry = chapters.get(key)
-        changed = False
-        if not isinstance(entry, dict):
-            entry = {
+        if not metadata_exists:
+            if old_entries:
+                changed = False
+                for key, entry in old_entries.items():
+                    entry_changed = False
+                    if str(entry.get('status', '')).lower() != 'pending':
+                        entry['status'] = 'pending'
+                        changed = True
+                        entry_changed = True
+                    if not entry.get('metadata_regeneration_requested'):
+                        entry['metadata_regeneration_requested'] = True
+                        changed = True
+                        entry_changed = True
+                    if entry_changed:
+                        entry['last_updated'] = time.time()
+                    chapters[key] = entry
+                return changed
+            chapters[METADATA_PROGRESS_KEY] = {
                 'actual_num': -1,
                 'content_hash': '',
                 'output_file': 'metadata.json',
                 'original_basename': 'metadata.json',
-                'status': 'completed' if metadata_exists else 'pending',
-                'last_updated': os.path.getmtime(metadata_path) if metadata_exists else time.time(),
+                'status': 'pending',
+                'last_updated': time.time(),
                 'is_special': True,
                 'special_type': 'metadata',
+                'metadata_progress_key': METADATA_PROGRESS_KEY,
+                'metadata_mode': self.config.get('metadata_translation_mode', 'together'),
+                'metadata_phase': 'combined',
+                'metadata_fields': [],
+                'metadata_label': 'Metadata',
+                'metadata_index': 0,
+                'metadata_regeneration_requested': True,
             }
-            if not metadata_exists:
-                entry['metadata_regeneration_requested'] = True
-            chapters[key] = entry
             return True
 
-        expected = {
-            'actual_num': -1,
-            'output_file': 'metadata.json',
-            'original_basename': 'metadata.json',
-            'is_special': True,
-            'special_type': 'metadata',
-        }
-        for field, value in expected.items():
-            if entry.get(field) != value:
-                entry[field] = value
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as metadata_file:
+                metadata = json.load(metadata_file)
+        except Exception:
+            metadata = {}
+
+        field_settings = getattr(self, 'translate_metadata_fields', None)
+        if not isinstance(field_settings, dict):
+            field_settings = self.config.get('translate_metadata_fields', {})
+        mode = self.config.get('metadata_translation_mode', 'together')
+        plan = build_metadata_progress_plan(
+            mode,
+            metadata,
+            field_settings,
+            source_path=file_path,
+        )
+
+        legacy_entry = old_entries.get(METADATA_PROGRESS_KEY)
+        for key in old_entries:
+            chapters.pop(key, None)
+        changed = False
+        if not plan:
+            return bool(old_entries)
+
+        for phase in plan:
+            key = phase['key']
+            fields = list(phase['fields'])
+            existing = old_entries.get(key)
+            fallback = legacy_entry if existing is None and len(old_entries) == 1 else None
+            previous = existing or fallback or {}
+            fields_complete = bool(fields) and all(
+                metadata_field_complete(metadata, field) for field in fields
+            )
+            existing_matches_phase = bool(
+                existing is not None
+                and list(existing.get('metadata_fields') or []) == fields
+                and existing.get('metadata_mode', phase['mode']) == phase['mode']
+            )
+            if existing_matches_phase:
+                status = str(existing.get('status') or 'pending').lower()
+            elif fields_complete:
+                status = 'completed'
+            elif fallback is not None:
+                fallback_status = str(fallback.get('status') or 'pending').lower()
+                status = 'pending' if fallback_status == 'completed' else fallback_status
+            else:
+                status = 'pending'
+            entry = {
+                'actual_num': -1,
+                'content_hash': previous.get('content_hash', ''),
+                'output_file': 'metadata.json',
+                'original_basename': 'metadata.json',
+                'status': status,
+                'last_updated': previous.get('last_updated', os.path.getmtime(metadata_path)),
+                'is_special': True,
+                'special_type': 'metadata',
+                'metadata_progress_key': key,
+                'metadata_mode': phase['mode'],
+                'metadata_phase': phase['phase'],
+                'metadata_fields': fields,
+                'metadata_label': phase['label'],
+                'metadata_index': phase['index'],
+            }
+            for preserved_key in (
+                'model_name', 'model', 'key_identifier', 'failure_reason',
+                'error_message', 'metadata_regeneration_requested',
+            ):
+                if preserved_key in previous:
+                    entry[preserved_key] = previous[preserved_key]
+            chapters[key] = entry
+            if old_entries.get(key) != entry:
                 changed = True
-        if not metadata_exists and str(entry.get('status', '')).lower() == 'completed':
-            entry['status'] = 'pending'
-            entry['metadata_regeneration_requested'] = True
-            entry['last_updated'] = time.time()
-            changed = True
-        return changed
+        return changed or set(old_entries) != {phase['key'] for phase in plan}
 
     def _append_metadata_display_info(self, data, chapter_display_info):
-        """Add the tracked metadata phase as a selectable special-file row."""
+        """Add each tracked metadata API phase as a selectable row."""
         metadata_enabled = self._metadata_progress_tracking_enabled(data.get('file_path'))
         prog = data.get('prog') or {}
-        entry = prog.get('chapters', {}).get('__metadata__')
+        chapters = prog.get('chapters', {})
+        rows = []
         if metadata_enabled:
-            if not isinstance(entry, dict):
+            entries = [
+                (key, entry) for key, entry in chapters.items()
+                if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
+            ]
+            entries.sort(key=lambda item: (item[1].get('metadata_index', 999), str(item[0])))
+            if not entries:
                 return
-            status = str(entry.get('status') or 'pending').lower()
         else:
             # Disabled metadata is a display-only skipped special file. It does
             # not belong in translation_progress.json until translation is on.
@@ -10217,25 +10308,33 @@ class RetranslationMixin:
                 'is_special': True,
                 'special_type': 'metadata',
                 'metadata_translation_enabled': False,
+                'metadata_label': 'Metadata',
             }
-            status = 'skipped'
+            entries = [(METADATA_PROGRESS_KEY, entry)]
         metadata_path = os.path.join(data.get('output_dir') or '', 'metadata.json')
-        if status == 'completed' and not os.path.isfile(metadata_path):
-            status = 'pending'
-        chapter_display_info.insert(0, {
-            'key': '__metadata__',
-            'num': -1,
-            'info': entry,
-            'output_file': 'metadata.json',
-            'status': status,
-            'duplicate_count': 1,
-            'entries': [('__metadata__', entry)],
-            'original_filename': 'metadata.json',
-            'is_special': True,
-            'special_type': 'metadata',
-            'metadata_translation_enabled': metadata_enabled,
-            'progress_key': '__metadata__' if metadata_enabled else None,
-        })
+        for key, entry in entries:
+            status = str(entry.get('status') or ('pending' if metadata_enabled else 'skipped')).lower()
+            if not metadata_enabled:
+                status = 'skipped'
+            elif status == 'completed' and not os.path.isfile(metadata_path):
+                status = 'pending'
+            rows.append({
+                'key': key,
+                'num': -1,
+                'info': entry,
+                'output_file': 'metadata.json',
+                'status': status,
+                'duplicate_count': 1,
+                'entries': [(key, entry)],
+                'original_filename': 'metadata.json',
+                'is_special': True,
+                'special_type': 'metadata',
+                'metadata_translation_enabled': metadata_enabled,
+                'metadata_label': entry.get('metadata_label', 'Metadata'),
+                'metadata_fields': list(entry.get('metadata_fields') or []),
+                'progress_key': key if metadata_enabled else None,
+            })
+        chapter_display_info[0:0] = rows
 
     _SPECIAL_KEYWORDS_DEFAULT = ('title, toc, copyright, preface, nav, message, '
                                  'notice, colophon, dedication, epigraph, foreword, '
@@ -15776,6 +15875,18 @@ class RetranslationMixin:
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
 
             metadata_selected = [ch for ch in selected_chapters if self._is_metadata_progress_info(ch)]
+            tracked_metadata_keys = {
+                key for key, entry in data.get('prog', {}).get('chapters', {}).items()
+                if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
+            }
+            selected_metadata_keys = {
+                ch.get('progress_key') for ch in metadata_selected if ch.get('progress_key')
+            }
+            reset_all_metadata = bool(
+                metadata_selected
+                and tracked_metadata_keys
+                and tracked_metadata_keys.issubset(selected_metadata_keys)
+            )
             if metadata_selected and not self._metadata_progress_tracking_enabled(data.get('file_path')):
                 self._styled_msgbox(
                     QMessageBox.Information,
@@ -15903,10 +16014,24 @@ class RetranslationMixin:
             
             count = len(selected_chapters)
             if metadata_selected and len(metadata_selected) == count:
-                confirm_msg = (
-                    "This will delete metadata.json, mark its progress entry pending, "
-                    "and regenerate the selected title/metadata on the next translation run.\n\nContinue?"
-                )
+                if reset_all_metadata:
+                    confirm_msg = (
+                        "This will delete metadata.json, mark all selected metadata phases pending, "
+                        "and regenerate them on the next translation run.\n\nContinue?"
+                    )
+                else:
+                    selected_labels = [
+                        ch.get('metadata_label')
+                        or (ch.get('info') or {}).get('metadata_label')
+                        or 'Metadata'
+                        for ch in metadata_selected
+                    ]
+                    confirm_msg = (
+                        "This will keep metadata.json, mark only the selected metadata phase(s) "
+                        "pending, and regenerate them on the next translation run:\n\n"
+                        + ", ".join(selected_labels)
+                        + "\n\nContinue?"
+                    )
             elif count > 10:
                 if missing_count > 0 and existing_count > 0:
                     confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters and their SDLXLIFF sidecars\n\nTotal: {count} chapters\n\nContinue?"
@@ -15916,7 +16041,11 @@ class RetranslationMixin:
                     confirm_msg = f"This will delete {existing_count} translated chapters and their SDLXLIFF sidecars, then mark them for retranslation.\n\nContinue?"
             else:
                 chapters = [
-                    "Metadata" if self._is_metadata_progress_info(ch) else f"Ch.{ch['num']}"
+                    (
+                        ch.get('metadata_label')
+                        or (ch.get('info') or {}).get('metadata_label')
+                        or "Metadata"
+                    ) if self._is_metadata_progress_info(ch) else f"Ch.{ch['num']}"
                     for ch in selected_chapters
                 ]
                 confirm_msg = f"This will process:\n\n{', '.join(chapters)}\n\n"
@@ -15942,6 +16071,7 @@ class RetranslationMixin:
             machine_translation_deleted_count = 0
             machine_translation_failed_count = 0
             progress_updated = False
+            metadata_file_deleted = False
 
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
@@ -15950,16 +16080,19 @@ class RetranslationMixin:
 
                 if self._is_metadata_progress_info(ch_info):
                     metadata_path = os.path.join(data['output_dir'], 'metadata.json')
-                    try:
-                        if os.path.exists(metadata_path):
-                            os.remove(metadata_path)
-                            deleted_count += 1
-                            print(f"Deleted metadata for regeneration: {metadata_path}")
-                    except Exception as e:
-                        print(f"Failed to delete metadata.json: {e}")
+                    if reset_all_metadata and not metadata_file_deleted:
+                        try:
+                            if os.path.exists(metadata_path):
+                                os.remove(metadata_path)
+                                deleted_count += 1
+                                print(f"Deleted metadata for regeneration: {metadata_path}")
+                            metadata_file_deleted = True
+                        except Exception as e:
+                            print(f"Failed to delete metadata.json: {e}")
 
+                    entry_key = progress_key or METADATA_PROGRESS_KEY
                     entry = data['prog'].setdefault('chapters', {}).setdefault(
-                        '__metadata__',
+                        entry_key,
                         {
                             'actual_num': -1,
                             'content_hash': '',
@@ -15967,6 +16100,9 @@ class RetranslationMixin:
                             'original_basename': 'metadata.json',
                             'is_special': True,
                             'special_type': 'metadata',
+                            'metadata_progress_key': entry_key,
+                            'metadata_fields': list(ch_info.get('metadata_fields') or []),
+                            'metadata_label': ch_info.get('metadata_label', 'Metadata'),
                         },
                     )
                     entry['status'] = 'pending'
@@ -15976,7 +16112,7 @@ class RetranslationMixin:
                     entry['last_updated'] = time.time()
                     progress_updated = True
                     status_reset_count += 1
-                    print("Reset metadata translation status to pending")
+                    print(f"Reset metadata translation phase to pending: {entry_key}")
                     continue
                 
                 if ch_info['status'] != 'not_translated':
@@ -18771,7 +18907,12 @@ class RetranslationMixin:
                 status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
 
         if self._is_metadata_progress_info(info):
-            display = f"Metadata | {icon} {status_label:11s} | metadata.json -> {output_display}"
+            metadata_label = (
+                info.get('metadata_label')
+                or (info.get('info') or {}).get('metadata_label')
+                or 'Metadata'
+            )
+            display = f"{metadata_label} | {icon} {status_label:11s} | metadata.json -> {output_display}"
         elif info.get('pdf_ocr'):
             display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
         elif 'opf_position' in info:

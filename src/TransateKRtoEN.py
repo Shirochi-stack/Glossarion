@@ -110,6 +110,13 @@ from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
 from html_output_utils import write_utf8_html_file
+from metadata_progress import (
+    METADATA_PROGRESS_KEY,
+    build_metadata_progress_plan,
+    is_metadata_progress_entry,
+    metadata_field_complete,
+    resolve_metadata_field_settings,
+)
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
@@ -2524,7 +2531,7 @@ def _normalize_output_filename_stem(fname):
 class ProgressManager:
     """Unified progress management"""
 
-    METADATA_PROGRESS_KEY = "__metadata__"
+    METADATA_PROGRESS_KEY = METADATA_PROGRESS_KEY
 
     def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
@@ -2638,47 +2645,222 @@ class ProgressManager:
             chapter_info["key_identifier"] = key_identifier
         return chapter_info
 
-    def metadata_entry(self):
-        """Return the tracked metadata phase entry, if one exists."""
-        entry = self.prog.get("chapters", {}).get(self.METADATA_PROGRESS_KEY)
-        return entry if isinstance(entry, dict) else None
+    def metadata_entries(self):
+        """Return all tracked metadata phase entries in display order."""
+        entries = []
+        for key, entry in self.prog.get("chapters", {}).items():
+            if isinstance(entry, dict) and is_metadata_progress_entry(key, entry):
+                entries.append((key, entry))
+        return sorted(
+            entries,
+            key=lambda item: (item[1].get("metadata_index", 999), str(item[0])),
+        )
 
-    def update_metadata_status(self, status, metadata_path=None, error=None):
-        """Track ``metadata.json`` as a special translation phase."""
-        existing = self.metadata_entry() or {}
-        content_hash = existing.get("content_hash", "")
+    def metadata_entry(self, key=None):
+        """Return one tracked metadata phase entry for compatibility callers."""
+        chapters = self.prog.get("chapters", {})
+        if key is not None:
+            entry = chapters.get(key)
+            return entry if isinstance(entry, dict) else None
+        legacy = chapters.get(self.METADATA_PROGRESS_KEY)
+        if isinstance(legacy, dict):
+            return legacy
+        entries = self.metadata_entries()
+        return entries[0][1] if entries else None
+
+    @staticmethod
+    def _metadata_content_hash(metadata_path, fallback=""):
+        content_hash = fallback
         if metadata_path and os.path.isfile(metadata_path):
             try:
                 with open(metadata_path, "rb") as metadata_file:
                     content_hash = hashlib.sha256(metadata_file.read()).hexdigest()
             except OSError:
                 pass
+        return content_hash
 
-        entry = {
-            "actual_num": -1,
-            "content_hash": content_hash,
-            "output_file": "metadata.json",
-            "original_basename": "metadata.json",
-            "status": status,
-            "last_updated": time.time(),
-            "is_special": True,
-            "special_type": "metadata",
+    def metadata_regeneration_request(self):
+        """Return ``(reset_all, fields)`` requested by pending metadata rows."""
+        reset_all = False
+        fields = set()
+        retry_statuses = {
+            "pending", "failed", "error", "file_missing", "not_translated"
         }
-        self._apply_model_info(
-            entry,
-            existing,
-            prefer_thread=status in ("in_progress", "completed", "failed", "error"),
+        for _key, entry in self.metadata_entries():
+            status = str(entry.get("status", "")).lower()
+            if status not in retry_statuses and not entry.get("metadata_regeneration_requested"):
+                continue
+            phase_fields = entry.get("metadata_fields")
+            if isinstance(phase_fields, list) and phase_fields:
+                fields.update(str(field) for field in phase_fields)
+            else:
+                reset_all = True
+        return reset_all, fields
+
+    def configure_metadata_progress(
+        self,
+        mode,
+        metadata,
+        field_settings,
+        metadata_path=None,
+        *,
+        title_allowed=True,
+        source_path=None,
+        reset_all=False,
+        reset_fields=None,
+    ):
+        """Synchronize metadata rows with the selected translation mode."""
+        chapters = self.prog.setdefault("chapters", {})
+        old_entries = {
+            key: dict(entry)
+            for key, entry in chapters.items()
+            if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
+        }
+        legacy_entry = old_entries.get(self.METADATA_PROGRESS_KEY)
+        for key in old_entries:
+            chapters.pop(key, None)
+
+        plan = build_metadata_progress_plan(
+            mode,
+            metadata,
+            field_settings,
+            title_allowed=title_allowed,
+            source_path=source_path,
         )
-        if error:
-            entry["failure_reason"] = str(error)
-            entry["error_message"] = str(error)
-        self.prog.setdefault("chapters", {})[self.METADATA_PROGRESS_KEY] = entry
-        return entry
+        reset_fields = {str(field) for field in (reset_fields or set())}
+        metadata_exists = bool(metadata_path and os.path.isfile(metadata_path))
+        content_hash = self._metadata_content_hash(metadata_path)
+
+        for phase in plan:
+            key = phase["key"]
+            fields = list(phase["fields"])
+            existing = old_entries.get(key)
+            fallback = legacy_entry if existing is None and len(old_entries) == 1 else None
+            previous = existing or fallback or {}
+            phase_reset = bool(reset_all or reset_fields.intersection(fields))
+            fields_complete = bool(fields) and all(
+                metadata_field_complete(metadata, field) for field in fields
+            )
+            existing_matches_phase = bool(
+                existing is not None
+                and list(existing.get("metadata_fields") or []) == fields
+                and existing.get("metadata_mode", phase["mode"]) == phase["mode"]
+            )
+            if phase_reset or not metadata_exists:
+                status = "pending"
+            elif existing_matches_phase:
+                status = str(existing.get("status") or "pending").lower()
+            elif fields_complete:
+                status = "completed"
+            elif fallback is not None:
+                fallback_status = str(fallback.get("status") or "pending").lower()
+                status = "pending" if fallback_status == "completed" else fallback_status
+            else:
+                status = "pending"
+
+            entry = {
+                "actual_num": -1,
+                "content_hash": content_hash or previous.get("content_hash", ""),
+                "output_file": "metadata.json",
+                "original_basename": "metadata.json",
+                "status": status,
+                "last_updated": previous.get("last_updated", time.time()),
+                "is_special": True,
+                "special_type": "metadata",
+                "metadata_progress_key": key,
+                "metadata_mode": phase["mode"],
+                "metadata_phase": phase["phase"],
+                "metadata_fields": fields,
+                "metadata_label": phase["label"],
+                "metadata_index": phase["index"],
+            }
+            self._apply_model_info(entry, previous)
+            if phase_reset or not metadata_exists:
+                entry["metadata_regeneration_requested"] = True
+            elif previous.get("failure_reason"):
+                entry["failure_reason"] = previous.get("failure_reason")
+                entry["error_message"] = previous.get("error_message", "")
+            chapters[key] = entry
+        return plan
+
+    def update_metadata_status(self, status, metadata_path=None, error=None, key=None):
+        """Update one metadata phase, or all phases when *key* is omitted."""
+        chapters = self.prog.setdefault("chapters", {})
+        keys = [key] if key is not None else [
+            entry_key for entry_key, _entry in self.metadata_entries()
+        ]
+        if not keys:
+            keys = [self.METADATA_PROGRESS_KEY]
+
+        updated = None
+        for entry_key in keys:
+            existing = chapters.get(entry_key)
+            existing = existing if isinstance(existing, dict) else {}
+            content_hash = self._metadata_content_hash(
+                metadata_path, existing.get("content_hash", "")
+            )
+            entry = dict(existing)
+            entry.update({
+                "actual_num": -1,
+                "content_hash": content_hash,
+                "output_file": "metadata.json",
+                "original_basename": "metadata.json",
+                "status": status,
+                "last_updated": time.time(),
+                "is_special": True,
+                "special_type": "metadata",
+                "metadata_progress_key": entry_key,
+            })
+            self._apply_model_info(
+                entry,
+                existing,
+                prefer_thread=status in ("in_progress", "completed", "failed", "error"),
+            )
+            if error:
+                entry["failure_reason"] = str(error)
+                entry["error_message"] = str(error)
+            elif status == "completed":
+                entry.pop("failure_reason", None)
+                entry.pop("error_message", None)
+                entry.pop("metadata_regeneration_requested", None)
+            chapters[entry_key] = entry
+            updated = entry
+        return updated
+
+    def reset_in_progress_metadata(self):
+        """Return interrupted metadata phases to pending without touching completed rows."""
+        changed = False
+        for key, entry in self.metadata_entries():
+            if str(entry.get("status", "")).lower() == "in_progress":
+                entry["status"] = "pending"
+                entry["metadata_regeneration_requested"] = True
+                entry["last_updated"] = time.time()
+                self.prog["chapters"][key] = entry
+                changed = True
+        return changed
+
+    def refresh_metadata_content_hash(self, metadata_path):
+        """Refresh the shared metadata.json hash without merging phase statuses."""
+        content_hash = self._metadata_content_hash(metadata_path)
+        if not content_hash:
+            return False
+        changed = False
+        for key, entry in self.metadata_entries():
+            if entry.get("content_hash") != content_hash:
+                entry["content_hash"] = content_hash
+                self.prog["chapters"][key] = entry
+                changed = True
+        return changed
 
     def remove_metadata_progress(self):
-        """Stop tracking metadata when its overall translation toggle is off."""
+        """Stop tracking every metadata phase when its overall toggle is off."""
         chapters = self.prog.setdefault("chapters", {})
-        return chapters.pop(self.METADATA_PROGRESS_KEY, None) is not None
+        removed = False
+        for key, entry in list(chapters.items()):
+            if is_metadata_progress_entry(key, entry):
+                chapters.pop(key, None)
+                removed = True
+        return removed
 
     def _dedup_by_output(self):
         """Keep a single entry per normalized output filename; priority: qa_failed > pending > failed > in_progress > completed."""
@@ -2704,7 +2886,10 @@ class ProgressManager:
         dedup = {}
         for key, info in list(self.prog.get("chapters", {}).items()):
             out = info.get("output_file")
-            norm = _norm_out(out) or key
+            # Metadata phases intentionally share metadata.json. Their progress
+            # keys, rather than the output filename, are the unique identity.
+            is_metadata = is_metadata_progress_entry(key, info)
+            norm = key if is_metadata else (_norm_out(out) or key)
             if (info.get("actual_num") in (None, 0)) and out:
                 hint = _infer_num(out)
                 if hint is not None:
@@ -2720,7 +2905,7 @@ class ProgressManager:
         new_chapters = {}
         for norm, info in dedup.items():
             if info.get("special_type") == "metadata":
-                new_key = self.METADATA_PROGRESS_KEY
+                new_key = info.get("metadata_progress_key") or norm
             else:
                 new_key = str(info["actual_num"]) if info.get("actual_num") is not None else norm
             if new_key in new_chapters:
@@ -4047,6 +4232,21 @@ class ProgressManager:
             output_file = chapter_info.get("output_file")
             status = chapter_info.get("status")
             status_l = status.lower().strip() if isinstance(status, str) else (str(status).lower().strip() if status is not None else "")
+            if (
+                is_metadata_progress_entry(chapter_key, chapter_info)
+                and output_file
+                and not _output_exists(output_file)
+            ):
+                # metadata.json is a regeneratable shared output. Preserve all
+                # of its mode-specific phase rows when the file is deleted.
+                if (
+                    status_l != "pending"
+                    or not chapter_info.get("metadata_regeneration_requested")
+                ):
+                    chapter_info["status"] = "pending"
+                    chapter_info["metadata_regeneration_requested"] = True
+                    chapter_info["last_updated"] = time.time()
+                continue
             # MERGED CHAPTERS FIX: Don't delete merged children in first pass
             # They will be handled in second pass if their parent was deleted
             if status == "merged":
@@ -4134,7 +4334,8 @@ class ProgressManager:
         dedup = {}
         for old_key, chapter_info in self.prog["chapters"].items():
             out = chapter_info.get("output_file")
-            norm = _normalize_out(out)
+            is_metadata = is_metadata_progress_entry(old_key, chapter_info)
+            norm = old_key if is_metadata else _normalize_out(out)
             if not norm:
                 norm = old_key  # fallback to key to avoid losing entry
 
@@ -4163,7 +4364,7 @@ class ProgressManager:
             key_candidate = None
             # Prefer numeric key when available
             if chapter_info.get("special_type") == "metadata":
-                key_candidate = self.METADATA_PROGRESS_KEY
+                key_candidate = chapter_info.get("metadata_progress_key") or norm
             elif actual_num is not None:
                 key_candidate = str(actual_num)
             else:
@@ -18387,16 +18588,13 @@ def main(log_callback=None, stop_callback=None):
         and config.OUTPUT_MODE != "image"
     )
     _metadata_path_before_extraction = os.path.join(out, "metadata.json")
-    _metadata_progress_entry = progress_manager.metadata_entry()
-    _metadata_progress_status = str(
-        (_metadata_progress_entry or {}).get("status", "")
-    ).lower()
+    metadata_reset_all, metadata_reset_fields = (
+        progress_manager.metadata_regeneration_request()
+    )
+    if not os.path.isfile(_metadata_path_before_extraction):
+        metadata_reset_all = True
     metadata_regeneration_requested = metadata_progress_enabled and (
-        not os.path.isfile(_metadata_path_before_extraction)
-        or _metadata_progress_status in {
-            "pending", "failed", "error", "file_missing", "not_translated"
-        }
-        or bool((_metadata_progress_entry or {}).get("metadata_regeneration_requested"))
+        metadata_reset_all or bool(metadata_reset_fields)
     )
     if not metadata_progress_enabled:
         progress_manager.remove_metadata_progress()
@@ -19111,7 +19309,9 @@ def main(log_callback=None, stop_callback=None):
         translate_metadata_fields = {}
     if not isinstance(translate_metadata_fields, dict):
         translate_metadata_fields = {}
-    translate_metadata_fields.setdefault('title', True)
+    translate_metadata_fields = resolve_metadata_field_settings(
+        translate_metadata_fields, input_path
+    )
 
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
     if metadata_translation_mode not in ('together', 'parallel', 'metadata_separate'):
@@ -19126,7 +19326,24 @@ def main(log_callback=None, stop_callback=None):
     skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
     title_translation_allowed = not _non_book_ext and not (is_txt and skip_txt_title)
     title_selected = bool(translate_metadata_fields.get('title', True))
-    metadata_phase_failed = False
+    metadata_plan = []
+    metadata_phase_by_field = {}
+
+    if metadata_progress_enabled:
+        metadata_plan = progress_manager.configure_metadata_progress(
+            metadata_translation_mode,
+            metadata,
+            translate_metadata_fields,
+            metadata_path,
+            title_allowed=title_translation_allowed,
+            source_path=input_path,
+            reset_all=metadata_reset_all,
+            reset_fields=metadata_reset_fields,
+        )
+        for phase in metadata_plan:
+            for field_name in phase['fields']:
+                metadata_phase_by_field[field_name] = phase['key']
+        progress_manager.save()
 
     def _metadata_phase_stop_requested() -> bool:
         if (
@@ -19140,31 +19357,45 @@ def main(log_callback=None, stop_callback=None):
         except Exception:
             return False
 
-    def _set_metadata_progress(status, error=None):
+    def _set_metadata_progress(status, error=None, key=None):
         if not metadata_progress_enabled:
             return
-        progress_manager.update_metadata_status(status, metadata_path, error=error)
+        progress_manager.update_metadata_status(
+            status, metadata_path, error=error, key=key
+        )
         progress_manager.save()
 
+    def _set_metadata_field_progress(field_name, status, error=None):
+        phase_key = metadata_phase_by_field.get(field_name)
+        if phase_key:
+            _set_metadata_progress(status, error=error, key=phase_key)
+
     def _stop_metadata_phase():
-        _set_metadata_progress("pending")
+        if metadata_progress_enabled and progress_manager.reset_in_progress_metadata():
+            progress_manager.save()
         print("⏹️ Translation stopped during metadata phase")
 
     if metadata_regeneration_requested:
         # A Progress Manager reset can leave metadata.json on disk when deletion
         # fails. Restore saved originals and clear completion flags so the phase
         # still performs a real regeneration on the next run.
+        fields_to_reset = (
+            {
+                field_name for field_name, should_translate
+                in translate_metadata_fields.items() if should_translate
+            }
+            if metadata_reset_all else set(metadata_reset_fields)
+        )
         for field_name, should_translate in translate_metadata_fields.items():
             if not should_translate or field_name == '_per_epub':
+                continue
+            if field_name not in fields_to_reset:
                 continue
             original_key = 'original_title' if field_name == 'title' else f"original_{field_name}"
             translated_key = 'title_translated' if field_name == 'title' else f"{field_name}_translated"
             if original_key in metadata:
                 metadata[field_name] = metadata[original_key]
             metadata.pop(translated_key, None)
-
-    if metadata_progress_enabled:
-        _set_metadata_progress("in_progress")
 
     try:
         if _metadata_phase_stop_requested():
@@ -19187,6 +19418,7 @@ def main(log_callback=None, stop_callback=None):
             # title gets its dedicated prompt, followed by one metadata batch.
             original_title = metadata["title"]
             print(f"📚 Original title: {original_title}")
+            _set_metadata_field_progress("title", "in_progress")
             translated_title, title_request_succeeded = translate_title(
                 original_title,
                 client,
@@ -19204,8 +19436,11 @@ def main(log_callback=None, stop_callback=None):
                     print("✓ Title response matched the input; marking title translation complete")
                 else:
                     print(f"📚 Translated title: {translated_title}")
+                _set_metadata_field_progress("title", "completed")
             else:
-                metadata_phase_failed = True
+                _set_metadata_field_progress(
+                    "title", "failed", error="Title translation request failed"
+                )
                 print("⚠️ Title request failed or was interrupted — will retry on next run")
         elif title_selected and not title_translation_allowed:
             print(f"📚 Skipping title translation for {os.path.splitext(input_path)[1]} file")
@@ -19260,7 +19495,29 @@ def main(log_callback=None, stop_callback=None):
                 translator_mode = 'parallel' if metadata_translation_mode == 'parallel' else 'together'
                 print(f"📝 Using {metadata_translation_mode} metadata translation mode...")
 
-                translator = MetadataTranslator(client, mt_config, stop_check_fn=check_stop)
+                group_phase_key = next(
+                    (
+                        metadata_phase_by_field.get(field_name)
+                        for field_name in fields_to_translate
+                        if metadata_phase_by_field.get(field_name)
+                    ),
+                    None,
+                )
+                if metadata_translation_mode != 'parallel' and group_phase_key:
+                    _set_metadata_progress("in_progress", key=group_phase_key)
+
+                def _metadata_field_progress_callback(field_name, status, error=None):
+                    _set_metadata_field_progress(field_name, status, error=error)
+
+                translator = MetadataTranslator(
+                    client,
+                    mt_config,
+                    stop_check_fn=check_stop,
+                    progress_callback=(
+                        _metadata_field_progress_callback
+                        if metadata_translation_mode == 'parallel' else None
+                    ),
+                )
                 try:
                     translated_metadata = translator.translate_metadata(
                         metadata, fields_to_translate, mode=translator_mode
@@ -19287,6 +19544,8 @@ def main(log_callback=None, stop_callback=None):
                         metadata[original_key] = original_value
                         metadata[field_name] = translated_value
                     metadata[translated_key] = True
+                    if metadata_translation_mode == 'parallel':
+                        _set_metadata_field_progress(field_name, "completed")
                     if translated_value == original_value:
                         print(f"✓ {field_name} response matched the input; marking translation complete")
                     elif field_name == 'title':
@@ -19294,16 +19553,36 @@ def main(log_callback=None, stop_callback=None):
 
                 unresolved_fields = sorted(set(fields_to_translate) - completed_fields)
                 if unresolved_fields:
-                    metadata_phase_failed = True
+                    if metadata_translation_mode == 'parallel':
+                        for field_name in unresolved_fields:
+                            _set_metadata_field_progress(
+                                field_name,
+                                "failed",
+                                error="Metadata field translation did not complete",
+                            )
+                    elif group_phase_key:
+                        _set_metadata_progress(
+                            "failed",
+                            error=(
+                                "Metadata fields did not complete: "
+                                + ", ".join(unresolved_fields)
+                            ),
+                            key=group_phase_key,
+                        )
                     print(
                         "⚠️ Metadata fields did not complete successfully: "
                         + ", ".join(unresolved_fields)
                     )
+                elif metadata_translation_mode != 'parallel' and group_phase_key:
+                    _set_metadata_progress("completed", key=group_phase_key)
             else:
                 print("📋 No additional metadata fields to translate")
 
     except Exception as e:
-        metadata_phase_failed = True
+        if metadata_progress_enabled:
+            for phase_key, phase_entry in progress_manager.metadata_entries():
+                if str(phase_entry.get("status", "")).lower() == "in_progress":
+                    _set_metadata_progress("failed", error=e, key=phase_key)
         print(f"⚠️ Error processing metadata translation settings: {e}")
         import traceback
         traceback.print_exc()
@@ -19318,8 +19597,8 @@ def main(log_callback=None, stop_callback=None):
             with open(metadata_path, 'w', encoding='utf-8') as mf:
                 json.dump(metadata, mf, ensure_ascii=False, indent=2)
             print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
-            if metadata_progress_enabled:
-                _set_metadata_progress("failed" if metadata_phase_failed else "completed")
+            if metadata_progress_enabled and progress_manager.refresh_metadata_content_hash(metadata_path):
+                progress_manager.save()
         except Exception as metadata_save_error:
             _set_metadata_progress("failed", error=metadata_save_error)
             raise

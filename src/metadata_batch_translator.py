@@ -661,6 +661,10 @@ class MetadataBatchTranslatorUI:
                 self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
                 self.gui.config['metadata_translation_mode'] = selected_mode
                 self.gui.save_config(show_message=False)
+                if hasattr(self.gui, '_sync_metadata_progress_toggle'):
+                    self.gui._sync_metadata_progress_toggle(
+                        bool(getattr(self.gui, 'translate_book_title_var', True))
+                    )
                 dialog.hide()
             
             def reset_metadata_config():
@@ -2943,9 +2947,16 @@ class MetadataTranslationCancelled(Exception):
 class MetadataTranslator:
     """Translate EPUB metadata fields"""
     
-    def __init__(self, client, config: dict = None, stop_check_fn=None):
+    def __init__(
+        self,
+        client,
+        config: dict = None,
+        stop_check_fn=None,
+        progress_callback=None,
+    ):
         self.client = client
         self.config = config or {}
+        self.progress_callback = progress_callback
         self.system_prompt = os.getenv('METADATA_SYSTEM_PROMPT',
             "You are a translator. Respond with only the translated text, nothing else.")
         # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
@@ -2957,6 +2968,14 @@ class MetadataTranslator:
                 self.stop_check_fn = is_stop_requested
             except ImportError:
                 self.stop_check_fn = lambda: False
+
+    def _notify_field_progress(self, field_name, status, error=None):
+        if not callable(self.progress_callback):
+            return
+        try:
+            self.progress_callback(field_name, status, error)
+        except Exception as callback_error:
+            print(f"⚠️ Metadata progress callback failed: {callback_error}")
 
     def _stop_check_active(self) -> bool:
         try:
@@ -3084,6 +3103,7 @@ class MetadataTranslator:
             value = metadata.get(field)
             if should_translate and value and self._is_already_english(str(value)):
                 self.last_completed_fields.add(field)
+                self._notify_field_progress(field, "completed")
             
         return translated_metadata
  
@@ -3226,6 +3246,7 @@ class MetadataTranslator:
             ):
                 field, value = fields_to_process[next_field_index]
                 next_field_index += 1
+                self._notify_field_progress(field, "in_progress")
                 future = executor.submit(self._translate_single_field, field, value)
                 futures[future] = field
 
@@ -3250,7 +3271,12 @@ class MetadataTranslator:
                         result = future.result()
                         if result:
                             translated[field] = result
+                            self._notify_field_progress(field, "completed")
                             print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
+                        else:
+                            self._notify_field_progress(
+                                field, "failed", "Metadata field returned no translation"
+                            )
                     except Exception as e:
                         if self._is_cancelled_error(e):
                             force_cancelled = self._is_force_stop_requested()
@@ -3260,6 +3286,7 @@ class MetadataTranslator:
                                 pending_future.cancel()
                             raise
                         print(f"❌ Error translating {field}: {repr(e)}")
+                        self._notify_field_progress(field, "failed", e)
                         import traceback; traceback.print_exc()
 
                 submit_available_work()

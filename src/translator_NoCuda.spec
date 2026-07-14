@@ -138,6 +138,7 @@ app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
     ('language_options.py', '.'),
+    ('metadata_progress.py', '.'),
     ('splash_utils.py', '.'),
     ('dpi_setup.py', '.'),
     ('other_settings.py', '.'),
@@ -425,6 +426,7 @@ if platform.system() == 'Windows':
 app_modules = [
     'TransateKRtoEN',
     'language_options',
+    'metadata_progress',
     'refinement_prompts',
     'extract_glossary_from_epub',
     'glossary_usage',
