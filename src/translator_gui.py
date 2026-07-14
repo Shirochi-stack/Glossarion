@@ -2290,6 +2290,13 @@ Text to analyze:
                 self.config['translate_metadata_fields'] = _cfg_mf
             except Exception:
                 pass
+        # Title is now configurable alongside the other metadata fields.  It
+        # defaults on so existing configs retain the former always-translate
+        # behavior until the user explicitly disables it.
+        if 'title' not in _cfg_mf:
+            _cfg_mf = dict(_cfg_mf)
+            _cfg_mf['title'] = True
+            self.config['translate_metadata_fields'] = _cfg_mf
         self.translate_metadata_fields = _cfg_mf
         # Initialize metadata translation UI and prompts
         try:
@@ -25577,8 +25584,8 @@ Important rules:
             
             toggle_data = [
                 {
-                    "key": "translate_book_title", "emoji": "📖", "title": "Translate Book Title",
-                    "desc": "Translate the EPUB title in metadata for your e-reader library.",
+                    "key": "translate_book_title", "emoji": "📖", "title": "Translate Book Title / Metadata",
+                    "desc": "Translate the selected EPUB title and metadata fields for your e-reader library.",
                     "default": True,
                     "bg": "#162848", "accent": "#6aadff",
                 },

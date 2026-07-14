@@ -2524,6 +2524,8 @@ def _normalize_output_filename_stem(fname):
 class ProgressManager:
     """Unified progress management"""
 
+    METADATA_PROGRESS_KEY = "__metadata__"
+
     def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
@@ -2636,6 +2638,48 @@ class ProgressManager:
             chapter_info["key_identifier"] = key_identifier
         return chapter_info
 
+    def metadata_entry(self):
+        """Return the tracked metadata phase entry, if one exists."""
+        entry = self.prog.get("chapters", {}).get(self.METADATA_PROGRESS_KEY)
+        return entry if isinstance(entry, dict) else None
+
+    def update_metadata_status(self, status, metadata_path=None, error=None):
+        """Track ``metadata.json`` as a special translation phase."""
+        existing = self.metadata_entry() or {}
+        content_hash = existing.get("content_hash", "")
+        if metadata_path and os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, "rb") as metadata_file:
+                    content_hash = hashlib.sha256(metadata_file.read()).hexdigest()
+            except OSError:
+                pass
+
+        entry = {
+            "actual_num": -1,
+            "content_hash": content_hash,
+            "output_file": "metadata.json",
+            "original_basename": "metadata.json",
+            "status": status,
+            "last_updated": time.time(),
+            "is_special": True,
+            "special_type": "metadata",
+        }
+        self._apply_model_info(
+            entry,
+            existing,
+            prefer_thread=status in ("in_progress", "completed", "failed", "error"),
+        )
+        if error:
+            entry["failure_reason"] = str(error)
+            entry["error_message"] = str(error)
+        self.prog.setdefault("chapters", {})[self.METADATA_PROGRESS_KEY] = entry
+        return entry
+
+    def remove_metadata_progress(self):
+        """Stop tracking metadata when its overall translation toggle is off."""
+        chapters = self.prog.setdefault("chapters", {})
+        return chapters.pop(self.METADATA_PROGRESS_KEY, None) is not None
+
     def _dedup_by_output(self):
         """Keep a single entry per normalized output filename; priority: qa_failed > pending > failed > in_progress > completed."""
         def _norm_out(fname: str):
@@ -2675,7 +2719,10 @@ class ProgressManager:
                 dedup[norm] = info
         new_chapters = {}
         for norm, info in dedup.items():
-            new_key = str(info["actual_num"]) if info.get("actual_num") is not None else norm
+            if info.get("special_type") == "metadata":
+                new_key = self.METADATA_PROGRESS_KEY
+            else:
+                new_key = str(info["actual_num"]) if info.get("actual_num") is not None else norm
             if new_key in new_chapters:
                 cur_rank = severity.get(new_chapters[new_key].get("status", "unknown"), 0)
                 new_rank = severity.get(info.get("status", "unknown"), 0)
@@ -2874,6 +2921,8 @@ class ProgressManager:
 
                 self.prog["completed_list"] = []
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
+                    if chapter_info.get("special_type"):
+                        continue
                     if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                         actual_num = chapter_info.get("actual_num", 0)
                         self.prog["completed_list"].append({
@@ -4113,7 +4162,9 @@ class ProgressManager:
             actual_num = chapter_info.get("actual_num")
             key_candidate = None
             # Prefer numeric key when available
-            if actual_num is not None:
+            if chapter_info.get("special_type") == "metadata":
+                key_candidate = self.METADATA_PROGRESS_KEY
+            elif actual_num is not None:
                 key_candidate = str(actual_num)
             else:
                 key_candidate = norm
@@ -4202,13 +4253,18 @@ class ProgressManager:
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
         stats = {
-            "total_tracked": len(self.prog["chapters"]),
+            "total_tracked": sum(
+                1 for info in self.prog["chapters"].values()
+                if not info.get("special_type")
+            ),
             "completed": 0,
             "missing_files": 0,
             "in_progress": 0
         }
         
         for chapter_info in self.prog["chapters"].values():
+            if chapter_info.get("special_type"):
+                continue
             status = chapter_info.get("status")
             output_file = chapter_info.get("output_file")
             
@@ -16955,22 +17011,25 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
     
     return system
 
-def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
+def translate_title(title, client, system_prompt, user_prompt, temperature=0.3, return_status=False):
     """Translate the book title using the configured settings"""
+    def _result(value, succeeded):
+        return (value, succeeded) if return_status else value
+
     if not title or not title.strip():
-        return title
+        return _result(title, True)
         
     print(f"📚 Processing book title: {title}")
     
     try:
         if os.getenv("TRANSLATE_BOOK_TITLE", "1") == "0":
             print(f"📚 Book title translation disabled - keeping original")
-            return title
+            return _result(title, False)
         
         # Check graceful stop before starting
         if os.environ.get('GRACEFUL_STOP') == '1' or is_stop_requested():
             print(f"⏭️ Title translation skipped (graceful stop)")
-            return title
+            return _result(title, False)
         
         # Check if we're using a translation service (not AI)
         client_type = getattr(client, 'client_type', '')
@@ -17033,7 +17092,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         
         if not translated_title:
             print(f"⚠️ Empty response for title translation, keeping original")
-            return title
+            return _result(title, False)
         
         print(f"[DEBUG] Raw API response: '{translated_title}'")
         print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
@@ -17048,7 +17107,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         
         if '\n' in translated_title:
             print(f"⚠️ API returned multi-line content, keeping original title")
-            return title           
+            return _result(title, False)
             
         # Check for JSON-like structured content, but allow simple brackets like [END]
         if (any(char in translated_title for char in ['{', '}']) or 
@@ -17056,18 +17115,18 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             '"content":' in translated_title or
             ('[[' in translated_title and ']]' in translated_title)):  # Only flag double brackets
             print(f"⚠️ API returned structured content, keeping original title")
-            return title
+            return _result(title, False)
             
         if any(tag in translated_title.lower() for tag in ['<p>', '</p>', '<h1>', '</h1>', '<html']):
             print(f"⚠️ API returned HTML content, keeping original title")
-            return title
+            return _result(title, False)
         
         print(f"✅ Processed title: {translated_title}")
-        return translated_title
+        return _result(translated_title, True)
         
     except Exception as e:
         print(f"⚠️ Failed to process title: {e}")
-        return title
+        return _result(title, False)
 
 # =====================================================
 # FAILURE RESPONSES
@@ -18321,6 +18380,26 @@ def main(log_callback=None, stop_callback=None):
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
     progress_manager = ProgressManager(payloads_dir)
+    metadata_progress_enabled = (
+        config.TRANSLATE_BOOK_TITLE
+        and not is_text_file
+        and not is_pdf_file
+        and config.OUTPUT_MODE != "image"
+    )
+    _metadata_path_before_extraction = os.path.join(out, "metadata.json")
+    _metadata_progress_entry = progress_manager.metadata_entry()
+    _metadata_progress_status = str(
+        (_metadata_progress_entry or {}).get("status", "")
+    ).lower()
+    metadata_regeneration_requested = metadata_progress_enabled and (
+        not os.path.isfile(_metadata_path_before_extraction)
+        or _metadata_progress_status in {
+            "pending", "failed", "error", "file_missing", "not_translated"
+        }
+        or bool((_metadata_progress_entry or {}).get("metadata_regeneration_requested"))
+    )
+    if not metadata_progress_enabled:
+        progress_manager.remove_metadata_progress()
     should_keep_pdf_ocr_progress = is_pdf_file and config.OUTPUT_MODE == "vision"
     if not should_keep_pdf_ocr_progress:
         _clear_vision_ocr_source_env()
@@ -19022,43 +19101,32 @@ def main(log_callback=None, stop_callback=None):
         print("TRANSLATION_COMPLETE_SIGNAL")
         return
         
-    if config.OUTPUT_MODE == "image" and not is_text_file:
-        print("⏭️ Skipping title/metadata translation (image output mode)")
-    elif "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
-        # Skip title translation for non-book file types
-        _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md', '.sdlxliff'))
-        is_txt = input_path.lower().endswith(('.txt',))
-        skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
-        if _non_book_ext:
-            print(f"📚 Skipping title translation for {os.path.splitext(input_path)[1]} file")
-        elif is_txt and skip_txt_title:
-            print(f"📚 Skipping title translation for .txt file")
-        elif not check_stop():
-            original_title = metadata["title"]
-            print(f"📚 Original title: {original_title}")
-            translated_title = translate_title(
-                original_title, 
-                client, 
-                None,
-                None,
-                config.TEMP
-            )
-            
-            # Only mark as translated if the title actually changed
-            # (translate_title returns original on interrupt/error/graceful stop)
-            if translated_title and translated_title != original_title:
-                metadata["original_title"] = original_title
-                metadata["title"] = translated_title
-                metadata["title_translated"] = True
-                print(f"📚 Translated title: {translated_title}")
-            else:
-                print(f"⚠️ Title unchanged (interrupted or failed) — will retry on next run")
-            
-    # Translate other metadata fields if configured
-    # (skip entirely in image output mode — we're just copying HTML as-is)
-    _skip_metadata_translation = config.OUTPUT_MODE == "image" and not is_text_file
+    # The main toggle gates both title and metadata translation.  Title remains
+    # selected by default for configurations created before it became a field
+    # in the Custom Metadata dialog.
     translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
+    try:
+        translate_metadata_fields = json.loads(translate_metadata_fields_str)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        translate_metadata_fields = {}
+    if not isinstance(translate_metadata_fields, dict):
+        translate_metadata_fields = {}
+    translate_metadata_fields.setdefault('title', True)
+
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
+    if metadata_translation_mode not in ('together', 'parallel', 'metadata_separate'):
+        metadata_translation_mode = 'together'
+
+    _skip_metadata_translation = (
+        (config.OUTPUT_MODE == "image" and not is_text_file)
+        or not config.TRANSLATE_BOOK_TITLE
+    )
+    _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md', '.sdlxliff'))
+    is_txt = input_path.lower().endswith(('.txt',))
+    skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
+    title_translation_allowed = not _non_book_ext and not (is_txt and skip_txt_title)
+    title_selected = bool(translate_metadata_fields.get('title', True))
+    metadata_phase_failed = False
 
     def _metadata_phase_stop_requested() -> bool:
         if (
@@ -19072,35 +19140,107 @@ def main(log_callback=None, stop_callback=None):
         except Exception:
             return False
 
-    try:
-        translate_metadata_fields = json.loads(translate_metadata_fields_str)
-        if _metadata_phase_stop_requested():
-            print("⏹️ Translation stopped during metadata phase")
+    def _set_metadata_progress(status, error=None):
+        if not metadata_progress_enabled:
             return
-        
-        if not _skip_metadata_translation and translate_metadata_fields and any(translate_metadata_fields.values()):
-            # Filter out fields that should be translated (excluding already translated fields)
+        progress_manager.update_metadata_status(status, metadata_path, error=error)
+        progress_manager.save()
+
+    def _stop_metadata_phase():
+        _set_metadata_progress("pending")
+        print("⏹️ Translation stopped during metadata phase")
+
+    if metadata_regeneration_requested:
+        # A Progress Manager reset can leave metadata.json on disk when deletion
+        # fails. Restore saved originals and clear completion flags so the phase
+        # still performs a real regeneration on the next run.
+        for field_name, should_translate in translate_metadata_fields.items():
+            if not should_translate or field_name == '_per_epub':
+                continue
+            original_key = 'original_title' if field_name == 'title' else f"original_{field_name}"
+            translated_key = 'title_translated' if field_name == 'title' else f"{field_name}_translated"
+            if original_key in metadata:
+                metadata[field_name] = metadata[original_key]
+            metadata.pop(translated_key, None)
+
+    if metadata_progress_enabled:
+        _set_metadata_progress("in_progress")
+
+    try:
+        if _metadata_phase_stop_requested():
+            _stop_metadata_phase()
+            return
+
+        if config.OUTPUT_MODE == "image" and not is_text_file:
+            print("⏭️ Skipping title/metadata translation (image output mode)")
+        elif not config.TRANSLATE_BOOK_TITLE:
+            print("⏭️ Skipping title/metadata translation (disabled)")
+        elif (
+            metadata_translation_mode != 'together'
+            and title_selected
+            and title_translation_allowed
+            and "title" in metadata
+            and not metadata.get("title_translated", False)
+            and not check_stop()
+        ):
+            # metadata_separate preserves the former two-call behavior: the
+            # title gets its dedicated prompt, followed by one metadata batch.
+            original_title = metadata["title"]
+            print(f"📚 Original title: {original_title}")
+            translated_title, title_request_succeeded = translate_title(
+                original_title,
+                client,
+                None,
+                None,
+                config.TEMP,
+                return_status=True,
+            )
+            if title_request_succeeded:
+                if translated_title != original_title:
+                    metadata["original_title"] = original_title
+                    metadata["title"] = translated_title
+                metadata["title_translated"] = True
+                if translated_title == original_title:
+                    print("✓ Title response matched the input; marking title translation complete")
+                else:
+                    print(f"📚 Translated title: {translated_title}")
+            else:
+                metadata_phase_failed = True
+                print("⚠️ Title request failed or was interrupted — will retry on next run")
+        elif title_selected and not title_translation_allowed:
+            print(f"📚 Skipping title translation for {os.path.splitext(input_path)[1]} file")
+
+        if _metadata_phase_stop_requested():
+            _stop_metadata_phase()
+            return
+
+        if not _skip_metadata_translation and any(translate_metadata_fields.values()):
+            # Together mode includes the title in this one batch call.  The
+            # other modes keep the dedicated title phase above.
             fields_to_translate = {}
-            skipped_fields = []
-            
             for field_name, should_translate in translate_metadata_fields.items():
-                if should_translate and field_name != 'title' and field_name in metadata:
-                    # Check if already translated
-                    if metadata.get(f"{field_name}_translated", False):
-                        skipped_fields.append(field_name)
-                        print(f"✓ Skipping {field_name} - already translated")
-                    else:
-                        fields_to_translate[field_name] = should_translate
-            
+                if not should_translate or field_name == '_per_epub' or field_name not in metadata:
+                    continue
+                if field_name == 'title':
+                    if metadata_translation_mode != 'together' or not title_translation_allowed:
+                        continue
+                    translated_flag = 'title_translated'
+                else:
+                    translated_flag = f"{field_name}_translated"
+                if metadata.get(translated_flag, False):
+                    print(f"✓ Skipping {field_name} - already translated")
+                    continue
+                fields_to_translate[field_name] = True
+
             if fields_to_translate:
                 print("\n" + "="*50)
                 print("📋 METADATA TRANSLATION PHASE")
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
-                
+
                 # Use MetadataTranslator (same path as EPUB converter)
                 from metadata_batch_translator import MetadataTranslationCancelled, MetadataTranslator
-                
+
                 # Build config from environment variables
                 mt_config = {
                     'output_language': os.getenv('OUTPUT_LANGUAGE', 'English'),
@@ -19116,48 +19256,74 @@ def main(log_callback=None, stop_callback=None):
                 except:
                     mt_config['metadata_field_prompts'] = {}
                 mt_config['metadata_batch_prompt'] = os.getenv('METADATA_BATCH_PROMPT', '')
-                
-                # Determine translation mode from user's toggle
-                metadata_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
-                print(f"📝 Using {metadata_mode} metadata translation mode...")
-                
+
+                translator_mode = 'parallel' if metadata_translation_mode == 'parallel' else 'together'
+                print(f"📝 Using {metadata_translation_mode} metadata translation mode...")
+
                 translator = MetadataTranslator(client, mt_config, stop_check_fn=check_stop)
                 try:
                     translated_metadata = translator.translate_metadata(
-                        metadata, fields_to_translate, mode=metadata_mode
+                        metadata, fields_to_translate, mode=translator_mode
                     )
                 except MetadataTranslationCancelled:
-                    print("⏹️ Translation stopped during metadata phase")
+                    _stop_metadata_phase()
                     return
 
                 if _metadata_phase_stop_requested():
-                    print("⏹️ Translation stopped during metadata phase")
+                    _stop_metadata_phase()
                     return
-                
-                # Apply translated fields back to metadata
-                for field_name, translated_value in translated_metadata.items():
-                    if field_name in fields_to_translate and translated_value != metadata.get(field_name):
-                        metadata[f"original_{field_name}"] = metadata.get(field_name, '')
+
+                # Mark every successfully handled field complete, including
+                # valid responses whose output is identical to the input.
+                completed_fields = set(getattr(translator, 'last_completed_fields', set()))
+                for field_name in completed_fields:
+                    if field_name not in fields_to_translate:
+                        continue
+                    translated_value = translated_metadata.get(field_name, metadata.get(field_name))
+                    original_value = metadata.get(field_name, '')
+                    original_key = 'original_title' if field_name == 'title' else f"original_{field_name}"
+                    translated_key = 'title_translated' if field_name == 'title' else f"{field_name}_translated"
+                    if translated_value != original_value:
+                        metadata[original_key] = original_value
                         metadata[field_name] = translated_value
-                        metadata[f"{field_name}_translated"] = True
+                    metadata[translated_key] = True
+                    if translated_value == original_value:
+                        print(f"✓ {field_name} response matched the input; marking translation complete")
+                    elif field_name == 'title':
+                        print(f"📚 Translated title: {translated_value}")
+
+                unresolved_fields = sorted(set(fields_to_translate) - completed_fields)
+                if unresolved_fields:
+                    metadata_phase_failed = True
+                    print(
+                        "⚠️ Metadata fields did not complete successfully: "
+                        + ", ".join(unresolved_fields)
+                    )
             else:
                 print("📋 No additional metadata fields to translate")
-                
+
     except Exception as e:
+        metadata_phase_failed = True
         print(f"⚠️ Error processing metadata translation settings: {e}")
         import traceback
         traceback.print_exc()
 
     if _metadata_phase_stop_requested():
-        print("⏹️ Translation stopped during metadata phase")
+        _stop_metadata_phase()
         return
-    
+
     # Skip metadata.json for plain text files — it serves no purpose there
     if not is_text_file:
-        with open(metadata_path, 'w', encoding='utf-8') as mf:
-            json.dump(metadata, mf, ensure_ascii=False, indent=2)
-        print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
-        
+        try:
+            with open(metadata_path, 'w', encoding='utf-8') as mf:
+                json.dump(metadata, mf, ensure_ascii=False, indent=2)
+            print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
+            if metadata_progress_enabled:
+                _set_metadata_progress("failed" if metadata_phase_failed else "completed")
+        except Exception as metadata_save_error:
+            _set_metadata_progress("failed", error=metadata_save_error)
+            raise
+
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)

@@ -10078,6 +10078,165 @@ class RetranslationMixin:
         return self._progress_file_is_skipped_special(
             fname, bool(ch.get('is_special') or info.get('is_special')))
 
+    def _metadata_progress_tracking_enabled(self, file_path=None):
+        """Whether metadata.json should participate in translation progress."""
+        if file_path and not str(file_path).lower().endswith('.epub'):
+            return False
+        if hasattr(self, 'translate_book_title_var'):
+            return bool(getattr(self, 'translate_book_title_var'))
+        config = getattr(self, 'config', {})
+        return bool(config.get('translate_book_title', True)) if isinstance(config, dict) else True
+
+    def _sync_metadata_progress_toggle(self, enabled):
+        """Immediately refresh open/cached Progress Managers after a toggle change."""
+        enabled = bool(enabled)
+        self.translate_book_title_var = enabled
+        if isinstance(getattr(self, 'config', None), dict):
+            self.config['translate_book_title'] = enabled
+
+        cached_data = []
+        cache = getattr(self, '_retranslation_dialog_cache', {})
+        if isinstance(cache, dict):
+            cached_data.extend(value for value in cache.values() if isinstance(value, dict))
+
+        multi_dialog = getattr(self, '_multi_file_retranslation_dialog', None)
+        if multi_dialog is not None:
+            cached_data.extend(
+                value for value in getattr(multi_dialog, '_tab_data', [])
+                if isinstance(value, dict)
+            )
+
+        seen = set()
+        for data in cached_data:
+            data_id = id(data)
+            if data_id in seen or not data.get('progress_file'):
+                continue
+            seen.add(data_id)
+            # Discard any background-prefetched snapshot because it reflects
+            # the old setting and would otherwise restore the removed row.
+            data.pop('_prefetched_prog', None)
+            data.pop('_prefetched_prog_path', None)
+            data['_refresh_read_only'] = False
+
+            def _refresh(progress_data=data):
+                try:
+                    if self._is_data_valid(progress_data):
+                        self._refresh_retranslation_data(progress_data)
+                except Exception as exc:
+                    print(f"⚠️ Could not sync metadata progress visibility: {exc}")
+
+            QTimer.singleShot(0, _refresh)
+
+    @staticmethod
+    def _is_metadata_progress_info(info):
+        if not isinstance(info, dict):
+            return False
+        nested = info.get('info') if isinstance(info.get('info'), dict) else {}
+        entry = info.get('progress_entry') if isinstance(info.get('progress_entry'), dict) else nested
+        special_type = info.get('special_type') or entry.get('special_type')
+        output_file = info.get('output_file') or entry.get('output_file')
+        return special_type == 'metadata' or os.path.basename(str(output_file or '')).lower() == 'metadata.json'
+
+    def _progress_entry_needs_special_visibility(self, info):
+        """Return whether a row depends on the special-files visibility toggle."""
+        if self._is_metadata_progress_info(info):
+            nested = info.get('info') if isinstance(info.get('info'), dict) else {}
+            enabled = info.get(
+                'metadata_translation_enabled',
+                nested.get('metadata_translation_enabled', True),
+            )
+            # Active metadata is always visible. Disabled metadata behaves like
+            # every other skipped special file and follows the visibility toggle.
+            return not bool(enabled)
+        return self._progress_entry_is_skipped_special(info)
+
+    def _ensure_metadata_progress_entry(self, prog, output_dir, file_path=None):
+        """Create, repair, or remove the special metadata progress entry."""
+        if not isinstance(prog, dict):
+            return False
+        chapters = prog.setdefault('chapters', {})
+        key = '__metadata__'
+        if not self._metadata_progress_tracking_enabled(file_path):
+            return chapters.pop(key, None) is not None
+
+        metadata_path = os.path.join(output_dir, 'metadata.json')
+        metadata_exists = os.path.isfile(metadata_path)
+        entry = chapters.get(key)
+        changed = False
+        if not isinstance(entry, dict):
+            entry = {
+                'actual_num': -1,
+                'content_hash': '',
+                'output_file': 'metadata.json',
+                'original_basename': 'metadata.json',
+                'status': 'completed' if metadata_exists else 'pending',
+                'last_updated': os.path.getmtime(metadata_path) if metadata_exists else time.time(),
+                'is_special': True,
+                'special_type': 'metadata',
+            }
+            if not metadata_exists:
+                entry['metadata_regeneration_requested'] = True
+            chapters[key] = entry
+            return True
+
+        expected = {
+            'actual_num': -1,
+            'output_file': 'metadata.json',
+            'original_basename': 'metadata.json',
+            'is_special': True,
+            'special_type': 'metadata',
+        }
+        for field, value in expected.items():
+            if entry.get(field) != value:
+                entry[field] = value
+                changed = True
+        if not metadata_exists and str(entry.get('status', '')).lower() == 'completed':
+            entry['status'] = 'pending'
+            entry['metadata_regeneration_requested'] = True
+            entry['last_updated'] = time.time()
+            changed = True
+        return changed
+
+    def _append_metadata_display_info(self, data, chapter_display_info):
+        """Add the tracked metadata phase as a selectable special-file row."""
+        metadata_enabled = self._metadata_progress_tracking_enabled(data.get('file_path'))
+        prog = data.get('prog') or {}
+        entry = prog.get('chapters', {}).get('__metadata__')
+        if metadata_enabled:
+            if not isinstance(entry, dict):
+                return
+            status = str(entry.get('status') or 'pending').lower()
+        else:
+            # Disabled metadata is a display-only skipped special file. It does
+            # not belong in translation_progress.json until translation is on.
+            entry = {
+                'actual_num': -1,
+                'output_file': 'metadata.json',
+                'original_basename': 'metadata.json',
+                'status': 'skipped',
+                'is_special': True,
+                'special_type': 'metadata',
+                'metadata_translation_enabled': False,
+            }
+            status = 'skipped'
+        metadata_path = os.path.join(data.get('output_dir') or '', 'metadata.json')
+        if status == 'completed' and not os.path.isfile(metadata_path):
+            status = 'pending'
+        chapter_display_info.insert(0, {
+            'key': '__metadata__',
+            'num': -1,
+            'info': entry,
+            'output_file': 'metadata.json',
+            'status': status,
+            'duplicate_count': 1,
+            'entries': [('__metadata__', entry)],
+            'original_filename': 'metadata.json',
+            'is_special': True,
+            'special_type': 'metadata',
+            'metadata_translation_enabled': metadata_enabled,
+            'progress_key': '__metadata__' if metadata_enabled else None,
+        })
+
     _SPECIAL_KEYWORDS_DEFAULT = ('title, toc, copyright, preface, nav, message, '
                                  'notice, colophon, dedication, epigraph, foreword, '
                                  'acknowledgment, author, appendix, bibliography')
@@ -10832,6 +10991,13 @@ class RetranslationMixin:
             # Module still importing elsewhere — skip cleanup now; the 2s
             # auto-refresh will run it once the module is ready.
             print("⏳ TransateKRtoEN still loading — deferring progress cleanup to next refresh")
+
+        if self._ensure_metadata_progress_entry(prog, output_dir, file_path):
+            try:
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"⚠️ Could not update metadata progress entry: {e}")
         
         _pump_loading("Reading progress data...")
         
@@ -11549,8 +11715,10 @@ class RetranslationMixin:
             # Sort by chapter number
             chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
 
-        self._append_pdf_ocr_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
-        self._append_image_gen_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
+        _display_data = {'prog': prog, 'file_path': file_path, 'output_dir': output_dir}
+        self._append_metadata_display_info(_display_data, chapter_display_info)
+        self._append_pdf_ocr_display_info(_display_data, chapter_display_info)
+        self._append_image_gen_display_info(_display_data, chapter_display_info)
         
         _pump_loading(f"Preparing UI ({len(chapter_display_info)} chapters)...")
         
@@ -11630,9 +11798,12 @@ class RetranslationMixin:
         
         # Add toggle for showing special files
         from PySide6.QtWidgets import QCheckBox
-        show_special_files_cb = QCheckBox("Show skipped files")
+        show_special_files_cb = QCheckBox("Show special files")
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
-        show_special_files_cb.setToolTip("When enabled, shows files that would be skipped during translation\n(matching the special file keywords configured in Other Settings).")
+        show_special_files_cb.setToolTip(
+            "When enabled, shows files skipped by the special-file rules in Other Settings.\n"
+            "Active metadata.json is always visible; disabled metadata appears here as skipped."
+        )
         
         # Register this checkbox and checkmark with parent dialog for cross-tab syncing
         if parent_dialog and not hasattr(parent_dialog, '_all_toggle_checkboxes'):
@@ -15052,13 +15223,10 @@ class RetranslationMixin:
                         if item_data and isinstance(item_data, dict):
                             # Dynamically re-evaluate is_special to respect current
                             # translate_all_numbered_html setting.
-                            _info = item_data.get('info') or {}
-                            _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
-                            is_skipped_special = self._progress_file_is_skipped_special(
-                                _fname,
-                                item_data.get('is_special', False),
+                            is_skipped_special = self._progress_entry_needs_special_visibility(
+                                item_data.get('info') or item_data
                             )
-                            # Show all items if toggle is on, hide only files that translation skips.
+                            # Show all items if toggled on; otherwise hide special-only rows.
                             item.setHidden(is_skipped_special and not show_special_files[0])
         
         # Connect the checkbox to the handler
@@ -15345,8 +15513,14 @@ class RetranslationMixin:
         
         # Helper functions that work with the data dict
         def select_all():
-            data['listbox'].selectAll()
-            data['selection_count_label'].setText(f"Selected: {data['listbox'].count()}")
+            data['listbox'].clearSelection()
+            selected_count = 0
+            for idx in range(data['listbox'].count()):
+                item = data['listbox'].item(idx)
+                if item and not item.isHidden():
+                    item.setSelected(True)
+                    selected_count += 1
+            data['selection_count_label'].setText(f"Selected: {selected_count}")
         
         def clear_selection():
             data['listbox'].clearSelection()
@@ -15601,7 +15775,29 @@ class RetranslationMixin:
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
 
-            if self._current_progress_output_mode(data) == 'audio':
+            metadata_selected = [ch for ch in selected_chapters if self._is_metadata_progress_info(ch)]
+            if metadata_selected and not self._metadata_progress_tracking_enabled(data.get('file_path')):
+                self._styled_msgbox(
+                    QMessageBox.Information,
+                    data.get('dialog', self),
+                    "Metadata Translation Disabled",
+                    "Enable 'Translate Book Title / Metadata' before requesting metadata regeneration.",
+                )
+                return
+            if (
+                self._current_progress_output_mode(data) == 'audio'
+                and metadata_selected
+                and len(metadata_selected) != len(selected_chapters)
+            ):
+                self._styled_msgbox(
+                    QMessageBox.Warning,
+                    data.get('dialog', self),
+                    "Mixed Selection",
+                    "Select metadata.json separately from chapter rows when resetting Audio output.",
+                )
+                return
+
+            if self._current_progress_output_mode(data) == 'audio' and not metadata_selected:
                 count = len(selected_chapters)
                 reply = self._styled_msgbox(
                     QMessageBox.Question,
@@ -15706,7 +15902,12 @@ class RetranslationMixin:
             existing_count = sum(1 for ch in selected_chapters if ch['status'] != 'not_translated')
             
             count = len(selected_chapters)
-            if count > 10:
+            if metadata_selected and len(metadata_selected) == count:
+                confirm_msg = (
+                    "This will delete metadata.json, mark its progress entry pending, "
+                    "and regenerate the selected title/metadata on the next translation run.\n\nContinue?"
+                )
+            elif count > 10:
                 if missing_count > 0 and existing_count > 0:
                     confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters and their SDLXLIFF sidecars\n\nTotal: {count} chapters\n\nContinue?"
                 elif missing_count > 0:
@@ -15714,7 +15915,10 @@ class RetranslationMixin:
                 else:
                     confirm_msg = f"This will delete {existing_count} translated chapters and their SDLXLIFF sidecars, then mark them for retranslation.\n\nContinue?"
             else:
-                chapters = [f"Ch.{ch['num']}" for ch in selected_chapters]
+                chapters = [
+                    "Metadata" if self._is_metadata_progress_info(ch) else f"Ch.{ch['num']}"
+                    for ch in selected_chapters
+                ]
                 confirm_msg = f"This will process:\n\n{', '.join(chapters)}\n\n"
                 if missing_count > 0:
                     confirm_msg += f"• {missing_count} missing chapters will be marked for translation\n"
@@ -15743,6 +15947,37 @@ class RetranslationMixin:
                 output_file = ch_info['output_file']
                 actual_num = ch_info['num']
                 progress_key = ch_info.get('progress_key')
+
+                if self._is_metadata_progress_info(ch_info):
+                    metadata_path = os.path.join(data['output_dir'], 'metadata.json')
+                    try:
+                        if os.path.exists(metadata_path):
+                            os.remove(metadata_path)
+                            deleted_count += 1
+                            print(f"Deleted metadata for regeneration: {metadata_path}")
+                    except Exception as e:
+                        print(f"Failed to delete metadata.json: {e}")
+
+                    entry = data['prog'].setdefault('chapters', {}).setdefault(
+                        '__metadata__',
+                        {
+                            'actual_num': -1,
+                            'content_hash': '',
+                            'output_file': 'metadata.json',
+                            'original_basename': 'metadata.json',
+                            'is_special': True,
+                            'special_type': 'metadata',
+                        },
+                    )
+                    entry['status'] = 'pending'
+                    entry['metadata_regeneration_requested'] = True
+                    entry['failure_reason'] = ''
+                    entry['error_message'] = ''
+                    entry['last_updated'] = time.time()
+                    progress_updated = True
+                    status_reset_count += 1
+                    print("Reset metadata translation status to pending")
+                    continue
                 
                 if ch_info['status'] != 'not_translated':
                     # Reset status to pending for ALL non-not_translated chapters, but only if we can match the exact progress entry
@@ -17148,6 +17383,7 @@ class RetranslationMixin:
                             # accept any extension except .epub
                             and not f.lower().endswith("_translated.txt")
                             and f != "translation_progress.json"
+                            and f.lower() not in ("glossary.csv", "metadata.json", "styles.css", "rolling_summary.txt")
                             and not f.lower().endswith(".epub")
                             and not f.lower().endswith(".cache")
                         ]
@@ -17236,6 +17472,14 @@ class RetranslationMixin:
                         _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if self._reconcile_tts_audio_files(data) and not _read_only_tick:
+                _write_progress_json_safely(data['progress_file'], data['prog'])
+
+            if (
+                not _read_only_tick
+                and self._ensure_metadata_progress_entry(
+                    data['prog'], data['output_dir'], data.get('file_path')
+                )
+            ):
                 _write_progress_json_safely(data['progress_file'], data['prog'])
             
             # Check if we're using OPF-based display or fallback
@@ -17646,6 +17890,7 @@ class RetranslationMixin:
             }
             chapter_display_info.append(display_info)
         
+        self._append_metadata_display_info(data, chapter_display_info)
         self._append_pdf_ocr_display_info(data, chapter_display_info)
         self._append_image_gen_display_info(data, chapter_display_info)
         data['chapter_display_info'] = chapter_display_info
@@ -17765,6 +18010,7 @@ class RetranslationMixin:
         # Sort by chapter number
         chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
         
+        self._append_metadata_display_info(data, chapter_display_info)
         self._append_pdf_ocr_display_info(data, chapter_display_info)
         self._append_image_gen_display_info(data, chapter_display_info)
 
@@ -18211,6 +18457,13 @@ class RetranslationMixin:
 
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
+        # Metadata is a translation phase, not a chapter post-processing item.
+        # Keep its own status even when the current output mode is TTS/refine.
+        if self._is_metadata_progress_info(info):
+            status = str(info.get('status') or 'pending').lower()
+            if status in ('completed_empty', 'completed_image_only'):
+                return 'completed'
+            return status
         # Skipped special files (the rows the "Show skipped files" toggle
         # reveals) get their own display status instead of masquerading
         # as Not Translated.
@@ -18517,7 +18770,9 @@ class RetranslationMixin:
             if ocr_total > 0:
                 status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
 
-        if info.get('pdf_ocr'):
+        if self._is_metadata_progress_info(info):
+            display = f"Metadata | {icon} {status_label:11s} | metadata.json -> {output_display}"
+        elif info.get('pdf_ocr'):
             display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
         elif 'opf_position' in info:
             original_file = info.get('original_filename', '')
@@ -18577,8 +18832,7 @@ class RetranslationMixin:
 
     def _set_progress_list_item_metadata(self, item, info, status, show_special_files):
         is_special = info.get('is_special', False)
-        _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-        is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
+        is_skipped_special = self._progress_entry_needs_special_visibility(info)
         item.setData(Qt.UserRole, {
             'is_special': is_special,
             'info': info,

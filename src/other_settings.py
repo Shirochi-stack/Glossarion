@@ -7182,7 +7182,7 @@ def _create_prompt_management_section(self, parent):
     title_h = QHBoxLayout(title_w)
     title_h.setContentsMargins(0, 0, 0, 0)
     
-    translate_title_cb = self._create_styled_checkbox("Translate Book Title")
+    translate_title_cb = self._create_styled_checkbox("Translate Book Title / Metadata")
     try:
         translate_title_cb.setChecked(bool(self.translate_book_title_var))
     except Exception:
@@ -7236,7 +7236,12 @@ def _create_prompt_management_section(self, parent):
     def _on_translate_title_toggle(checked):
         try:
             self.translate_book_title_var = bool(checked)
+            self.config['translate_book_title'] = bool(checked)
+            os.environ['TRANSLATE_BOOK_TITLE'] = '1' if checked else '0'
             _update_glossary_title_state(checked)
+            sync_progress = getattr(self, '_sync_metadata_progress_toggle', None)
+            if callable(sync_progress):
+                sync_progress(checked)
         except Exception:
             pass
             
@@ -7275,7 +7280,7 @@ def _create_prompt_management_section(self, parent):
     title_h.addStretch()
     section_v.addWidget(title_w)
     
-    title_desc = QLabel("When enabled: Book titles and selected metadata will be translated")
+    title_desc = QLabel("When enabled: the selected book title and metadata fields will be translated")
     title_desc.setStyleSheet("color: gray; font-size: 9pt;")
     title_desc.setContentsMargins(20, 0, 0, 8)
     section_v.addWidget(title_desc)

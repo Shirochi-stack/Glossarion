@@ -392,7 +392,9 @@ class MetadataBatchTranslatorUI:
             sync_enabled = {'active': True}  # Guard to prevent recursion
             
             # Fields that are enabled by default
-            default_enabled_fields = {'description', 'subject'}
+            # Title used to be controlled exclusively by the main toggle. Keep
+            # it enabled when migrating configurations without an explicit key.
+            default_enabled_fields = {'title', 'description', 'subject'}
             
             # Get saved per-EPUB settings (or flat dict for backward compat)
             translate_fields_config = self.gui.config.get('translate_metadata_fields', {})
@@ -458,32 +460,9 @@ class MetadataBatchTranslatorUI:
                             frame_layout = QHBoxLayout(frame)
                             frame_layout.setContentsMargins(0, 5, 0, 5)
                             
-                            # Title field — info only, no checkbox
-                            if field == 'title':
-                                label_widget = QLabel(f"{label}:")
-                                label_font = QFont()
-                                label_font.setBold(True)
-                                label_widget.setFont(label_font)
-                                label_widget.setMinimumWidth(200)
-                                frame_layout.addWidget(label_widget)
-                                
-                                current_value = str(all_fields[field])
-                                if len(current_value) > 50:
-                                    current_value = current_value[:47] + "..."
-                                value_label = QLabel(current_value)
-                                value_label.setStyleSheet("color: gray; font-size: 9pt;")
-                                frame_layout.addWidget(value_label)
-                                frame_layout.addStretch()
-                                fields_layout.addWidget(frame)
-                                
-                                note_label = QLabel("ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface")
-                                note_label.setStyleSheet("color: #5dade2; font-size: 9pt;")
-                                note_label.setWordWrap(True)
-                                note_label.setContentsMargins(25, 0, 0, 10)
-                                fields_layout.addWidget(note_label)
-                                continue
-                            
-                            # Normal field with checkbox
+                            # Every standard field, including the title, is
+                            # configurable here. The main "Translate Book
+                            # Title / Metadata" toggle remains the overall gate.
                             default_value = field in default_enabled_fields
                             # Use synced state if available, then saved, then default
                             if field in field_sync_state:
@@ -629,11 +608,21 @@ class MetadataBatchTranslatorUI:
             translation_mode_group.addButton(rb1)
             mode_layout.addWidget(rb1)
             
-            rb2 = QRadioButton("Translate separately (parallel API calls)")
-            rb2.setChecked(current_mode == 'parallel')
-            rb2.setProperty("value", "parallel")
+            rb2 = QRadioButton("Translate Metadata separately (2 API calls)")
+            rb2.setChecked(current_mode == 'metadata_separate')
+            rb2.setProperty("value", "metadata_separate")
+            rb2.setToolTip(
+                "Translate the book title first, then translate all selected "
+                "metadata fields together in a second request."
+            )
             translation_mode_group.addButton(rb2)
             mode_layout.addWidget(rb2)
+
+            rb3 = QRadioButton("Translate separately (parallel API calls)")
+            rb3.setChecked(current_mode == 'parallel')
+            rb3.setProperty("value", "parallel")
+            translation_mode_group.addButton(rb3)
+            mode_layout.addWidget(rb3)
             
             mode_group.setLayout(mode_layout)
             main_layout.addWidget(mode_group)
@@ -3072,12 +3061,13 @@ class MetadataTranslator:
                           fields_to_translate: Dict[str, bool],
                           mode: str = 'together') -> Dict[str, Any]:
         """Translate selected metadata fields"""
+        self.last_completed_fields = set()
         if not any(fields_to_translate.values()):
             return metadata
             
         translated_metadata = metadata.copy()
         
-        if mode == 'together':
+        if mode != 'parallel':
             translated_fields = self._translate_fields_together(
                 metadata, fields_to_translate
             )
@@ -3087,6 +3077,15 @@ class MetadataTranslator:
                 metadata, fields_to_translate
             )
             translated_metadata.update(translated_fields)
+
+        # Completion is based on a successful response, not on whether the
+        # returned string differs from the input. Fields that already match the
+        # target language are also complete without an API request.
+        self.last_completed_fields.update(translated_fields.keys())
+        for field, should_translate in fields_to_translate.items():
+            value = metadata.get(field)
+            if should_translate and value and self._is_already_english(str(value)):
+                self.last_completed_fields.add(field)
             
         return translated_metadata
  
@@ -3114,6 +3113,8 @@ class MetadataTranslator:
         
         for field, should_translate in fields_to_translate.items():
             if should_translate and field in metadata and metadata[field]:
+                if metadata.get(f'{field}_translated', False):
+                    continue
                 if not self._is_already_english(metadata[field]):
                     fields_to_send[field] = metadata[field]
                 
@@ -3202,7 +3203,10 @@ class MetadataTranslator:
         """Translate fields in parallel"""
         fields_to_process = [
             (field, value) for field, should_translate in fields_to_translate.items()
-            if should_translate and (value := metadata.get(field)) and not self._is_already_english(value)
+            if should_translate
+            and not metadata.get(f'{field}_translated', False)
+            and (value := metadata.get(field))
+            and not self._is_already_english(value)
         ]
         
         if not fields_to_process:
@@ -3420,6 +3424,13 @@ def enhance_epub_compiler(compiler_instance):
     except Exception as e:
         print(f"[ERROR] Failed to parse TRANSLATE_METADATA_FIELDS: {e}")
         translate_metadata_fields = {}
+
+    # "Translate Book Title / Metadata" is the overall metadata gate.  Keep
+    # header translation independent, but do not let the compiler perform a
+    # second metadata pass when the main toggle is disabled.
+    if os.getenv('TRANSLATE_BOOK_TITLE', '1') != '1':
+        translate_metadata_fields = {}
+        print("[DEBUG] Book title / metadata translation disabled")
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
     headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', -1))
