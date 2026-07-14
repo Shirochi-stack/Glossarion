@@ -21734,9 +21734,11 @@ Important rules:
         else:
             self.append_log("🛑 Force stop requested — aborting queued/in-flight API calls")
 
-        # Schedule stop-flag reset once worker is idle
-        QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
-        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
+        # Do not schedule the glossary reset here.  Glossary and translation
+        # share GRACEFUL_STOP, and the glossary-idle callback sees no glossary
+        # worker during a translation, so it would clear the translation's
+        # graceful-stop request after 500 ms while its API call was still live.
+        # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes.
         
         if current_file and hasattr(self, 'entry_epub'):
             QTimer.singleShot(100, lambda: self.preserve_file_path(current_file))
@@ -22458,6 +22460,24 @@ Important rules:
         except Exception:
             pass
 
+        # These environment flags are shared with translation.  A glossary
+        # cleanup must never clear them while a translation worker is alive.
+        try:
+            translation_thread_running = bool(
+                getattr(self, 'translation_thread', None)
+                and getattr(self.translation_thread, 'is_alive', lambda: False)()
+            )
+            translation_future = getattr(self, 'translation_future', None)
+            translation_future_running = bool(
+                translation_future is not None
+                and hasattr(translation_future, 'done')
+                and not translation_future.done()
+            )
+            if translation_thread_running or translation_future_running:
+                return
+        except Exception:
+            return
+
         # Local flags
         self.stop_requested = False
         self.graceful_stop_active = False
@@ -22491,15 +22511,27 @@ Important rules:
     def _reset_stop_flags_if_idle(self):
         """Clear all stop flags once no translation thread is running."""
         try:
-            if getattr(self, 'translation_thread', None) and getattr(self.translation_thread, 'is_alive', lambda: False)():
-                return  # still running; let the scheduled timer try again later
+            translation_thread_running = bool(
+                getattr(self, 'translation_thread', None)
+                and getattr(self.translation_thread, 'is_alive', lambda: False)()
+            )
+            translation_future = getattr(self, 'translation_future', None)
+            translation_future_running = bool(
+                translation_future is not None
+                and hasattr(translation_future, 'done')
+                and not translation_future.done()
+            )
+            if translation_thread_running or translation_future_running:
+                # Keep the stop latched until the worker has actually returned.
+                QTimer.singleShot(500, self._reset_stop_flags_if_idle)
+                return
         except Exception:
-            pass
-        # If a stop is currently requested (or graceful stop active), don't clear yet
-        if getattr(self, 'stop_requested', False) or getattr(self, 'graceful_stop_active', False):
+            QTimer.singleShot(500, self._reset_stop_flags_if_idle)
             return
-
-        # Local flags
+        # The translation worker is now fully idle, so its latched stop state
+        # can be cleared.  Keeping the old stop_requested/graceful_stop_active
+        # early-return here made this timer permanently unable to clean up the
+        # very state it was scheduled to reset.
         self.stop_requested = False
         self.graceful_stop_active = False
         os.environ['GRACEFUL_STOP'] = '0'

@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import types
@@ -43,6 +44,17 @@ class SlowInterruptClient:
     def send(self, messages, temperature=0.0, max_tokens=None, context=None):
         time.sleep(self.sleep_seconds)
         return "late result"
+
+
+class TupleInterruptClient(SlowInterruptClient):
+    def __init__(self):
+        super().__init__(sleep_seconds=0)
+
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        # Reproduce the real race: Stop is clicked after this request is
+        # already in flight, then the provider returns a normal tuple.
+        os.environ["GRACEFUL_STOP"] = "1"
+        return "translated text", "stop"
 
 
 def _install_fake_argos(monkeypatch, translate_func):
@@ -261,6 +273,74 @@ def test_send_with_interrupt_user_stop_marks_client_cancel(monkeypatch):
 
     assert client.cancel_calls == 1
     assert client._cancelled is True
+
+
+def test_send_with_interrupt_marks_graceful_completion_for_normal_tuple_response(monkeypatch):
+    from TransateKRtoEN import send_with_interrupt
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+
+    result = send_with_interrupt(
+        [{"role": "user", "content": "hello"}],
+        TupleInterruptClient(),
+        temperature=0.0,
+        max_tokens=8,
+        stop_check_fn=lambda: False,
+        context="translation",
+    )
+
+    assert result == ("translated text", "stop", None)
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED", "0") == "1"
+
+
+def test_glossary_idle_cleanup_cannot_clear_active_translation_stop(monkeypatch):
+    import translator_gui
+
+    class AliveThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    owner = types.SimpleNamespace(
+        glossary_thread=None,
+        glossary_future=None,
+        translation_thread=AliveThread(),
+        translation_future=None,
+    )
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+
+    translator_gui.TranslatorGUI._reset_glossary_stop_flags_if_idle(owner)
+
+    assert os.environ.get("GRACEFUL_STOP", "0") == "1"
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED", "0") == "1"
+
+
+def test_translation_idle_cleanup_clears_latched_stop_after_worker_exits(monkeypatch):
+    import translator_gui
+
+    owner = types.SimpleNamespace(
+        translation_thread=None,
+        translation_future=None,
+        stop_requested=True,
+        graceful_stop_active=True,
+    )
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+    monkeypatch.setenv("WAIT_FOR_CHUNKS", "1")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+
+    translator_gui.TranslatorGUI._reset_stop_flags_if_idle(owner)
+
+    assert owner.stop_requested is False
+    assert owner.graceful_stop_active is False
+    assert os.environ.get("GRACEFUL_STOP") == "0"
+    assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "0"
+    assert os.environ.get("WAIT_FOR_CHUNKS") == "0"
+    assert "TRANSLATION_CANCELLED" not in os.environ
 
 
 def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):

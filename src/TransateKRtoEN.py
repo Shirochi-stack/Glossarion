@@ -16870,6 +16870,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 else:
                     raise result
             if isinstance(result, tuple):
+                # The provider call has returned. Latch this before any of the
+                # compatibility/result-coercion branches below can return.
+                if os.environ.get('GRACEFUL_STOP') == '1':
+                    os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
+
                 # Unpack the tuple (now includes raw_obj and optional model/key metadata)
                 if len(result) >= 5:
                     api_result, api_time, raw_obj, actual_model, actual_key = result[:5]
@@ -16938,9 +16943,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     except Exception:
                         pass
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
-                # If graceful stop was requested, mark that an API call completed
-                if os.environ.get('GRACEFUL_STOP') == '1':
-                    os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
                 return api_result
             return result
         except queue.Empty:
@@ -24917,18 +24919,25 @@ def main(log_callback=None, stop_callback=None):
             progress_manager.save()
             
             # After completing this chapter, check if we should stop
-            graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
+            graceful_stop_active = (
+                os.environ.get('GRACEFUL_STOP') == '1'
+                or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+            )
             wait_for_chunks = os.environ.get('WAIT_FOR_CHUNKS') == '1'
-            stop_requested = (stop_callback and stop_callback()) or is_stop_requested()
             
-            # Stop after saving if: partial result OR graceful stop + wait_for_chunks completed
+            # Stop after saving the completed response. WAIT_FOR_CHUNKS only
+            # controls whether the remaining chunks of this chapter may run;
+            # it must not allow the next chapter or a rolling-summary API call.
             if is_partial_result:
                 print(f"\n✅ Partial chapter {actual_num} saved. Stopping as requested (graceful stop).")
                 log_stop_once()
                 return
             
-            if stop_requested and graceful_stop_active and wait_for_chunks:
-                print(f"\n✅ Chapter {actual_num} completed. Stopping as requested (wait for chunks).")
+            if graceful_stop_active:
+                if wait_for_chunks:
+                    print(f"\n✅ Chapter {actual_num} completed. Stopping as requested (wait for chunks).")
+                else:
+                    print(f"\n✅ Chapter {actual_num} completed. Stopping before the next API call.")
                 log_stop_once()
                 return
             
