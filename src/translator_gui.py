@@ -7488,7 +7488,7 @@ Recent translations to summarize:
         self.frame.addWidget(model_label, 1, 0, Qt.AlignLeft)
         
         # Get default model and model list
-        default_model = self.config.get('model', 'authgpt/gpt-5.5')
+        default_model = self.config.get('model', 'authgpt/gpt-5.6-luna')
         self.model_var = default_model
         # Use custom model list from config if saved, otherwise default catalog
         models = self.config.get('custom_model_list', None)
