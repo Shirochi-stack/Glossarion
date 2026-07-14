@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.3.3 · Updated July 14, 2026**
+**Version 9.5.3 · Updated July 14, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -24,7 +24,7 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 12. [EPUB Converter (building your finished book)](#12-epub-converter-building-your-finished-book)
 13. [QA Scanner (checking quality)](#13-qa-scanner-checking-quality)
 14. [Multiple API keys (rotation)](#14-multiple-api-keys-rotation)
-15. [Refinement & output modes (new stuff in 9.3.3)](#15-refinement--output-modes)
+15. [Refinement & output modes](#15-refinement--output-modes)
 16. [Translation editing & review (.sdlxliff and formats)](#16-translation-editing--review-sdlxliff-and-supported-formats)
 17. [How to translate for free](#17-how-to-translate-for-free)
 18. [Antigravity proxy setup for compiled `.exe` builds](#18-antigravity-proxy-setup-for-compiled-exe-builds)
@@ -71,13 +71,13 @@ There are two kinds of users. Pick the one that matches you.
 >
 > | Package | What it is |
 > |---------|------------|
-> | **`L_Glossarion.v9.3.3.exe`** ⭐ | **The standard build — recommended for most people.** Full-featured translation (everything *except* manga). Most optimal build for **novel** translation. Includes the **EPUB Library/Reader**. |
-> | `L_Glossarion_Lite.v9.3.3.exe` | Same, but **excludes the EPUB Reader and `authnd/` prefix routing**. |
-> | `L_Glossarion_TurboLite.v9.3.3.exe` | Excludes the EPUB Reader, `authnd/` routing, Vertex AI SDK, and PDF generation. Smallest/fastest to start. |
-> | `N_Glossarion_NoCuda.v9.3.3.exe` | **Full build *with* manga translation** plus some experimental novel features (silent-truncation detection, Argos-translate fallback to Google Translate). Most optimal build for **manga**. Doesn't need an NVIDIA GPU. |
-> | `N_Glossarion_Heavy.v9.3.3.exe` | Adds CUDA (NVIDIA GPU) support for the manga translator. ⚠️ May be unstable. |
+> | **`L_Glossarion.v9.5.3.exe`** ⭐ | **The standard build — recommended for most people.** Full-featured translation (everything *except* manga). Most optimal build for **novel** translation. Includes the **EPUB Library/Reader**. |
+> | `L_Glossarion_Lite.v9.5.3.exe` | Same, but **excludes the EPUB Reader and `authnd/` prefix routing**. |
+> | `L_Glossarion_TurboLite.v9.5.3.exe` | Excludes the EPUB Reader, `authnd/` routing, Vertex AI SDK, and PDF generation. Smallest/fastest to start. |
+> | `N_Glossarion_NoCuda.v9.5.3.exe` | **Full build *with* manga translation** plus some experimental novel features (silent-truncation detection, Argos-translate fallback to Google Translate). Most optimal build for **manga**. Doesn't need an NVIDIA GPU. |
+> | `N_Glossarion_Heavy.v9.5.3.exe` | Adds CUDA (NVIDIA GPU) support for the manga translator. ⚠️ May be unstable. |
 >
-> **✅ Recommended: the standard `L_Glossarion.v9.3.3.exe`.** It keeps the built-in **EPUB Library**, which is what powers **browser-based requests using the `authnd/` provider** (e.g. `authnd/...` models). The `Lite` and `TurboLite` builds drop the EPUB Library *and* `authnd/` routing, so choose the standard build if you want those. Only pick a `N_` build if you specifically need **manga** translation.
+> **✅ Recommended: the standard `L_Glossarion.v9.5.3.exe`.** It keeps the built-in **EPUB Library**, which is what powers **browser-based requests using the `authnd/` provider** (e.g. `authnd/...` models). The `Lite` and `TurboLite` builds drop the EPUB Library *and* `authnd/` routing, so choose the standard build if you want those. Only pick a `N_` build if you specifically need **manga** translation.
 
 ### B) You have the source code and Python (advanced)
 
@@ -822,4 +822,4 @@ The log will show the account actually being used, for example:
 
 ---
 
-*Made with 🌸 for the translation community. This guide reflects Glossarion v9.3.3 as of June 22, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.5.3 as of July 14, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
