@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.3.3 · Updated June 22, 2026**
+**Version 9.3.3 · Updated July 14, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -256,6 +256,36 @@ Click **⚙️ Other Setting** to open the advanced window. **You can translate 
 > - a profile whose name contains **`_html2text`** (e.g. `Japanese_html2text`) forces **html2text** extraction.
 >
 > When you press Run, Glossarion auto-switches and logs `🔄 Auto-switched to … extraction (profile: …)`. So if extraction won't change no matter what you pick here, **check your profile's name** — the tag is winning. (To control extraction with this dropdown instead, use a profile name *without* either tag.)
+
+### Book title and metadata translation
+
+The **Meta Data** group controls translation of the EPUB's descriptive information — its title, author/creator, description, subject, publisher, and any other selected fields found in the source book.
+
+- **Translate Book Title / Metadata** — the master switch. When enabled, Glossarion translates the selected metadata fields and tracks the work in the Progress Manager. When disabled, no metadata API calls are made. `metadata.json` then behaves like a skipped special file and appears only when **Show special files** is enabled.
+- **Configure All** — opens the metadata setup window described below.
+- **Custom Metadata** — chooses which fields are eligible for translation. The book title is configurable here too. A checked field is translated only when that field actually exists and is non-empty in the source metadata.
+
+#### Metadata translation modes
+
+| Mode | API-call behavior | Progress Manager entries | Best use |
+|------|-------------------|--------------------------|----------|
+| **Translate together (single API call)** | Sends the title and all other enabled, present metadata fields in one request. | One combined **Metadata** entry. | **Recommended default.** It gives the AI all metadata context at once and uses the fewest requests. |
+| **Translate Metadata separately (2 API calls)** | Translates the book title with its dedicated title prompt, then sends all remaining enabled metadata fields together in a second request. | **Metadata: Book Title** and **Metadata: Other Fields**. | Use when the title needs its specialized prompt but the remaining fields should still share context. |
+| **Translate separately (parallel API calls)** | Gives every enabled, non-empty source field its own request. Independent field requests run in parallel where possible. | One entry per field, such as **Metadata: Book Title**, **Metadata: Creator**, and **Metadata: Description**. The number of entries depends on which selected fields are present in that book. | Use when fields need their own custom prompts or one problematic field should be retried independently. This mode makes the most API calls. |
+
+The currently selected mode also controls how `metadata.json` is represented inside `translation_progress.json`. Changing the mode or Custom Metadata selection refreshes an open Progress Manager so the rows match the calls Glossarion will actually make.
+
+#### Retrying or regenerating metadata
+
+All metadata rows write to the same physical `metadata.json`, but each row keeps its own translation status:
+
+- In **Translate separately** mode, selecting **Retranslate Selected** on one field marks only that field pending and keeps the other completed fields intact.
+- In **Translate Metadata separately** mode, retrying **Book Title** affects only the title; retrying **Other Fields** regenerates that grouped second request.
+- Selecting every metadata row for retranslation deletes `metadata.json` and regenerates the complete metadata phase.
+- Manually deleting `metadata.json` also marks every metadata row pending, so the next translation run rebuilds it.
+- A successful translation is considered complete even when the translated value is identical to the source value. Glossarion does not repeatedly retranslate unchanged metadata.
+
+Active metadata rows are always visible while **Translate Book Title / Metadata** is enabled. **Show special files** controls only the disabled/skipped metadata row.
 
 ### Image & PDF output
 
