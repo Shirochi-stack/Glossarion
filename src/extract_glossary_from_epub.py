@@ -1737,6 +1737,110 @@ def _glossary_restore_in_progress_entry(info):
             return restored
     return None
 
+
+def _restore_glossary_in_progress_file(context=None, indices=None):
+    """Atomically restore active glossary rows to their pre-run state.
+
+    ``previous_progress_entry`` is intentionally stored in each in-progress
+    row so a cancelled run can put the exact prior row back.  Do that directly
+    in the progress file instead of relying on a later general save, which may
+    preserve an abandoned in-progress row when the stop branch returns early.
+    ``indices=None`` restores every active row for the current book.
+    """
+    progress_file = _resolved_glossary_progress_file(context)
+    selected = None if indices is None else set(_unique_int_list(indices))
+
+    try:
+        with _progress_lock, _locked_glossary_progress_file(progress_file):
+            if not os.path.exists(progress_file):
+                return None
+            with open(progress_file, "r", encoding="utf-8") as progress_f:
+                progress_data = json.load(progress_f)
+            if not isinstance(progress_data, dict):
+                return None
+
+            chapters = progress_data.get("chapters", {})
+            if not isinstance(chapters, dict):
+                return None
+
+            changed = False
+            for chapter_key, info in list(chapters.items()):
+                if not isinstance(info, dict) or str(info.get("status", "")).lower() != "in_progress":
+                    continue
+                idx = _glossary_progress_entry_index(info, chapter_key)
+                if idx is None or (selected is not None and idx not in selected):
+                    continue
+                restored = _glossary_restore_in_progress_entry(info)
+                if restored is None:
+                    chapters.pop(chapter_key, None)
+                else:
+                    chapters[chapter_key] = restored
+                changed = True
+
+            if not changed:
+                return progress_data
+
+            completed = []
+            failed = []
+            merged = []
+            in_progress = []
+            for chapter_key, info in chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                idx = _glossary_progress_entry_index(info, chapter_key)
+                if idx is None:
+                    continue
+                status = str(info.get("status", "")).lower()
+                if status in ("failed", "qa_failed", "error"):
+                    failed.append(idx)
+                elif status == "in_progress":
+                    in_progress.append(idx)
+                elif status == "merged":
+                    merged.append(idx)
+                    completed.append(idx)
+                elif status == "completed":
+                    completed.append(idx)
+
+            progress_data["chapters"] = chapters
+            progress_data["completed"] = _unique_int_list(completed)
+            progress_data["failed"] = _unique_int_list(failed)
+            progress_data["merged_indices"] = _unique_int_list(merged)
+            progress_data["in_progress"] = _unique_int_list(in_progress)
+            progress_data["qa_issues_found"] = {
+                str(idx): issues
+                for idx, issues in _normalize_glossary_qa_issues(
+                    progress_data.get("qa_issues_found"), chapters
+                ).items()
+                if int(idx) in set(progress_data["failed"])
+            }
+
+            progress_dir = os.path.dirname(progress_file) or "."
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=progress_dir,
+                delete=False,
+                suffix=".tmp",
+            ) as temp_f:
+                temp_path = temp_f.name
+                json.dump(progress_data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())
+            try:
+                _atomic_replace_file(temp_path, progress_file)
+            except Exception:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                raise
+
+            _GLOSSARY_DISK_IN_PROGRESS_CACHE.clear()
+            return progress_data
+    except Exception as exc:
+        print(f"⚠️ Could not restore glossary progress after stop: {exc}")
+        return None
+
 def _glossary_failed_from_in_progress_entry(info):
     """Convert a glossary in-progress entry to failed without restoring previous state."""
     if not isinstance(info, dict):
@@ -7064,26 +7168,42 @@ def main(log_callback=None, stop_callback=None):
             save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
 
     def _restore_glossary_in_progress_for_hard_stop(indices):
-        forced_failed = []
-        disk_in_progress = _glossary_disk_in_progress_snapshot()
-        if disk_in_progress is None:
-            forced_failed = _unique_int_list(list(completed) + list(merged_indices) + list(in_progress) + list(indices))
-        else:
-            restore_indices = set(_unique_int_list(list(in_progress) + list(indices)))
-            in_progress[:] = [idx for idx in in_progress if idx not in restore_indices]
+        requested = set(_unique_int_list(list(in_progress) + list(indices or [])))
+        disk_in_progress = _glossary_disk_in_progress_snapshot(progress_context)
+        if disk_in_progress is not None:
+            requested.update(disk_in_progress)
 
-        if forced_failed:
-            for _idx in forced_failed:
-                if _idx in completed:
-                    completed.remove(_idx)
-                if _idx in merged_indices:
-                    merged_indices.remove(_idx)
-                if _idx in in_progress:
-                    in_progress.remove(_idx)
-                _mark_glossary_failed(failed, _idx)
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
-        else:
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+        # A stop abandons the whole run, so restore every active row in this
+        # book. This also catches callbacks that reached the API just before a
+        # parallel future was removed from the executor's active-future map.
+        restored_progress = _restore_glossary_in_progress_file(progress_context)
+        if restored_progress is not None:
+            completed[:] = _unique_int_list(restored_progress.get("completed", []))
+            failed[:] = _unique_int_list(restored_progress.get("failed", []))
+            merged_indices[:] = _unique_int_list(restored_progress.get("merged_indices", []))
+            in_progress[:] = _unique_int_list(restored_progress.get("in_progress", []))
+            return
+
+        # If the progress file disappeared during cancellation there is no
+        # previous snapshot to restore. Fail only the active requests; never
+        # turn already completed chapters into failures.
+        for _idx in sorted(requested):
+            if _idx in completed:
+                completed.remove(_idx)
+            if _idx in merged_indices:
+                merged_indices.remove(_idx)
+            if _idx in in_progress:
+                in_progress.remove(_idx)
+            _mark_glossary_failed(failed, _idx)
+        if requested:
+            save_progress(
+                completed,
+                glossary,
+                merged_indices,
+                failed=failed,
+                in_progress=in_progress,
+                context=progress_context,
+            )
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -7759,6 +7879,13 @@ def main(log_callback=None, stop_callback=None):
                             executor.shutdown(wait=False)
                             break
             
+            # The executor waits for running workers while leaving this block.
+            # Some futures are deliberately discarded on stop, so their result
+            # handlers never clear the pre-send in-progress marker. Restore all
+            # such rows only after those workers can no longer write new markers.
+            if stopped_early:
+                _restore_glossary_in_progress_for_hard_stop([])
+
             # After all futures in this batch complete, append history entries in order
             # This matches TransateKRtoEN batch mode behavior
             if contextual_enabled and batch_history_map:

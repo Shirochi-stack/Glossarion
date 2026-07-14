@@ -14725,6 +14725,11 @@ class RetranslationMixin:
                 result_signature = result.get('signature')
                 if result_signature != _gp_file_signature(result.get('path')):
                     panel_state['_last_signature'] = None
+                    # The extractor replaced the file again between the read
+                    # and GUI application. Retry immediately instead of
+                    # waiting for another timer tick; frequent atomic saves
+                    # could otherwise starve the progress view indefinitely.
+                    QTimer.singleShot(0, _refresh)
                     return False
                 try:
                     _d = result['d']
@@ -14791,6 +14796,22 @@ class RetranslationMixin:
                     print(f"⚠️ Could not apply glossary progress refresh: {e}")
                 return True
 
+            def _deliver_gp_refresh_result(result):
+                """Apply a worker snapshot immediately on Qt's GUI thread."""
+                _gp_pending_result.append(result)
+                _apply_pending_gp_result()
+
+            # A Python worker cannot safely update QListWidgetItems directly.
+            # Deliver completed snapshots through a Qt signal so live progress
+            # paints as soon as the disk read finishes, without depending on a
+            # later polling-timer tick.
+            gp_refresh_bridge = _GlossaryProgressAsyncBridge(
+                on_finished=_deliver_gp_refresh_result,
+                on_failed=lambda message: print(f"Glossary progress refresh failed: {message}"),
+                parent=panel,
+            )
+            panel._gp_refresh_bridge = gp_refresh_bridge
+
             panel_state['_gp_bg_running'] = False
 
             def _refresh():
@@ -14853,7 +14874,7 @@ class RetranslationMixin:
                                 _item_updates.append((ci, new_status, new_color, display_text, _issues))
 
                             _nr = max(0, _snap_total - len(_comp | _fail | _merg | _prog))
-                            _gp_pending_result.append({
+                            gp_refresh_bridge.finished.emit({
                                 'd': _d,
                                 'path': _rp,
                                 'signature': _after_signature,
@@ -14869,7 +14890,7 @@ class RetranslationMixin:
                                 'bt': _d.get('book_title', ''),
                             })
                         except Exception as e:
-                            print(f"⚠️ Could not read glossary progress refresh: {e}")
+                            gp_refresh_bridge.failed.emit(str(e))
                         finally:
                             panel_state['_gp_bg_running'] = False
 

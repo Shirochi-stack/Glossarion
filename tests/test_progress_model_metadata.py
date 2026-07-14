@@ -1,5 +1,6 @@
 import ast
 import inspect
+import json
 import os
 from pathlib import Path
 import textwrap
@@ -20,6 +21,10 @@ from Retranslation_GUI import (
 )
 from TransateKRtoEN import ProgressManager
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
+from extract_glossary_from_epub import (
+    make_glossary_progress_context,
+    _restore_glossary_in_progress_file,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -300,6 +305,72 @@ def test_glossary_explicit_user_cancel_is_not_retried_as_timeout(monkeypatch):
         send_with_interrupt([], client, 0, 10, lambda: False)
 
     assert client.calls == 1
+
+
+def test_glossary_stop_restores_previous_progress_entries_atomically(tmp_path):
+    progress_file = tmp_path / "book_glossary_progress.json"
+    failed_entry = {
+        "chapter_index": 4,
+        "actual_num": 4,
+        "status": "failed",
+        "output_file": "chapter0004.xhtml",
+        "model_name": "previous-model",
+    }
+    completed_entry = {
+        "chapter_index": 6,
+        "actual_num": 6,
+        "status": "completed",
+        "output_file": "chapter0006.xhtml",
+        "model_name": "previous-model",
+    }
+    progress_file.write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "4": {
+                        **failed_entry,
+                        "status": "in_progress",
+                        "model_name": "current-model",
+                        "previous_status": "failed",
+                        "previous_progress_entry": failed_entry,
+                    },
+                    "6": {
+                        **completed_entry,
+                        "status": "in_progress",
+                        "model_name": "current-model",
+                        "previous_status": "completed",
+                        "previous_progress_entry": completed_entry,
+                    },
+                    "7": {
+                        "chapter_index": 7,
+                        "actual_num": 7,
+                        "status": "in_progress",
+                        "output_file": "chapter0007.xhtml",
+                        "previous_status": "not_completed",
+                    },
+                },
+                "completed": [],
+                "failed": [],
+                "merged_indices": [],
+                "in_progress": [4, 6, 7],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    context = make_glossary_progress_context(progress_file=str(progress_file))
+
+    restored = _restore_glossary_in_progress_file(context)
+    on_disk = json.loads(progress_file.read_text(encoding="utf-8"))
+
+    assert restored == on_disk
+    assert on_disk["chapters"]["4"] == failed_entry
+    assert on_disk["chapters"]["6"] == completed_entry
+    assert "7" not in on_disk["chapters"]
+    assert on_disk["completed"] == [6]
+    assert on_disk["failed"] == [4]
+    assert on_disk["in_progress"] == []
 
 
 @pytest.mark.parametrize(

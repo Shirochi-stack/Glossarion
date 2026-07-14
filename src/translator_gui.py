@@ -21855,6 +21855,12 @@ Important rules:
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
         if not graceful_stop:
+            # Keep the extractor's hard-stop detection in sync with the other
+            # translation stop path. Progress restoration uses this signal to
+            # distinguish cancellation from an ordinary API failure.
+            os.environ['TRANSLATION_CANCELLED'] = '1'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+
             # ── FAST PATH (main thread): set all boolean flags instantly ──
             if glossary_stop_flag:
                 glossary_stop_flag(True)
