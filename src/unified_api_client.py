@@ -1178,6 +1178,7 @@ try:
     from antigravity_proxy import send_message_stream as _antigravity_send_stream
     from antigravity_proxy import cancel_stream as _antigravity_cancel_stream
     from antigravity_proxy import reset_cancel as _antigravity_reset_cancel
+    from antigravity_proxy import is_cancelled as _antigravity_is_cancelled
     from antigravity_proxy import check_proxy_health as _antigravity_health_check
     from antigravity_proxy import ensure_proxy_running as _antigravity_ensure_running
     from antigravity_proxy import CLAUDE_MAX_OUTPUT_TOKENS as _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS
@@ -1188,6 +1189,7 @@ except ImportError:
     _antigravity_send_stream = None
     _antigravity_cancel_stream = None
     _antigravity_reset_cancel = None
+    _antigravity_is_cancelled = None
     _antigravity_health_check = None
     _antigravity_ensure_running = None
     _ANTIGRAVITY_CLAUDE_MAX_OUTPUT_TOKENS = 64000
@@ -25168,6 +25170,41 @@ class UnifiedClient:
                 # Never clear Antigravity's process-wide cancel event from a
                 # worker. Recheck immediately before the POST so a Stop racing
                 # request setup cannot launch another retry.
+                if self._should_abort_retry():
+                    if _antigravity_cancel_stream is not None:
+                        _antigravity_cancel_stream()
+                    raise UnifiedClientError(
+                        "Antigravity: Translation stopped by user",
+                        error_type="cancelled",
+                    )
+
+                # Antigravity's adapter owns a process-wide event in addition
+                # to UnifiedClient's authoritative stop flags. A delayed
+                # cleanup from an older operation can set only that adapter
+                # event after the new run has already reset its GUI/client
+                # flags. Clear that orphaned event immediately before a fresh
+                # POST, but never clear it while any real Stop signal is set.
+                try:
+                    stale_adapter_cancel = bool(
+                        _antigravity_is_cancelled is not None
+                        and _antigravity_is_cancelled()
+                    )
+                except Exception:
+                    stale_adapter_cancel = False
+                if stale_adapter_cancel:
+                    if self._should_abort_retry():
+                        if _antigravity_cancel_stream is not None:
+                            _antigravity_cancel_stream()
+                        raise UnifiedClientError(
+                            "Antigravity: Translation stopped by user",
+                            error_type="cancelled",
+                        )
+                    if _antigravity_reset_cancel is not None:
+                        _antigravity_reset_cancel()
+
+                # Close the small race between the guarded adapter reset and
+                # the actual request. A real Stop always wins and reasserts the
+                # adapter event before returning to the caller.
                 if self._should_abort_retry():
                     if _antigravity_cancel_stream is not None:
                         _antigravity_cancel_stream()

@@ -311,6 +311,40 @@ def test_antigravity_worker_never_resets_shared_cancel_event(monkeypatch):
     assert reset_calls == []
 
 
+def test_antigravity_fresh_request_clears_orphaned_adapter_cancel(monkeypatch):
+    """An adapter-only cancel from an older run must not kill a fresh request."""
+    client = _unified_antigravity_client("antigravity/claude-opus-4-6-thinking")
+    client.request_timeout = 300
+    client._is_stop_requested = lambda: False
+    client._should_abort_retry = lambda: False
+    client._get_max_retries = lambda: 1
+    client._streaming_enabled = lambda: True
+
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+
+    send_cancel_states = []
+
+    def successful_send(**_kwargs):
+        send_cancel_states.append(antigravity_proxy.is_cancelled())
+        return {"content": "ok", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", successful_send)
+    antigravity_proxy.cancel_stream()
+    assert antigravity_proxy.is_cancelled() is True
+
+    result = client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert result.content == "ok"
+    assert send_cancel_states == [False]
+    assert antigravity_proxy.is_cancelled() is False
+
+
 def test_should_abort_retry_treats_graceful_stop_as_retry_only_cancel(monkeypatch):
     client = _unified_antigravity_client()
     client._is_stop_requested = lambda: False

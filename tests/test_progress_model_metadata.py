@@ -267,16 +267,19 @@ def test_glossary_progress_index_uses_filename_before_full_spine_row():
 def test_glossary_stop_reset_clears_unified_module_and_class_flags():
     import extract_glossary_from_epub as glossary
     import unified_api_client as unified
+    import antigravity_proxy
 
     try:
         unified.set_stop_flag(True)
         assert unified.is_stop_requested()
+        assert antigravity_proxy.is_cancelled()
 
         glossary.set_stop_flag(False)
 
         assert not glossary.is_stop_requested()
         assert not unified.is_stop_requested()
         assert not UnifiedClient.is_globally_cancelled()
+        assert not antigravity_proxy.is_cancelled()
     finally:
         glossary.set_stop_flag(False)
         unified.set_stop_flag(False)

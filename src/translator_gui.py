@@ -18954,6 +18954,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
         os.environ['GRACEFUL_STOP'] = '0'  # Reset graceful stop env var
         os.environ['GRACEFUL_STOP_COMPLETED'] = '0'  # Reset completion flag
         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'  # Reset API active flag
+        try:
+            import uuid as _uuid
+            self._glossary_run_id = f"glossary-{_uuid.uuid4().hex[:10]}"
+        except Exception:
+            self._glossary_run_id = f"glossary-{int(time.time() * 1000)}"
+        os.environ['GLOSSARION_RUN_ID'] = self._glossary_run_id
         if glossary_stop_flag:
             glossary_stop_flag(False)
         
@@ -19054,6 +19060,34 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if glossary_main is None:
                 self.append_log("❌ Glossary extraction module is not available")
                 return
+
+            # Reset again after lazy imports have completed. The first reset is
+            # issued by run_glossary_extraction_thread(), but in a frozen build
+            # the provider modules may not exist yet at that point, so their
+            # process-wide cancellation events cannot be cleared. Do not erase
+            # a genuine Stop clicked while module loading was in progress.
+            if (
+                not self.stop_requested
+                and os.environ.get('TRANSLATION_CANCELLED') != '1'
+                and os.environ.get('GRACEFUL_STOP') != '1'
+            ):
+                try:
+                    import extract_glossary_from_epub
+                    extract_glossary_from_epub.set_stop_flag(False)
+                except Exception:
+                    pass
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(False)
+                except Exception:
+                    pass
+                try:
+                    stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                    if stop_file and os.path.exists(stop_file):
+                        os.remove(stop_file)
+                except Exception:
+                    pass
 
             # Ensure streaming flags are applied to glossary runtime (mirrors translation flow)
             try:
@@ -21883,7 +21917,15 @@ Important rules:
                 pass
             
             # ── SLOW PATH (background thread): close connections, kill procs ──
+            stop_run_id = getattr(self, '_glossary_run_id', None) or os.environ.get('GLOSSARION_RUN_ID')
+
             def _stop_heavy_work():
+                # This cleanup is asynchronous. If another glossary run has
+                # already started, its lifecycle reset owns the provider now;
+                # an old cleanup must not cancel that new run's stream.
+                current_run_id = getattr(self, '_glossary_run_id', None) or os.environ.get('GLOSSARION_RUN_ID')
+                if stop_run_id and current_run_id != stop_run_id:
+                    return
                 # Hard cancel: close active HTTP sessions to abort in-flight requests
                 try:
                     import unified_api_client as _uac
