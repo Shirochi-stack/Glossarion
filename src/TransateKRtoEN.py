@@ -16632,26 +16632,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         chunk_timeout = None
 
     def _clear_watchdog_for_chapter_context() -> None:
-        """Best-effort cleanup so the GUI watchdog doesn't stay stuck when this wrapper abandons a call."""
+        """Clear only this wrapper's abandoned request from the GUI watchdog.
+
+        EPUB front matter commonly gives several different files the same
+        chapter number (usually 0), so chapter-wide cleanup can erase a sibling
+        API call that is still running.
+        """
         try:
             import unified_api_client
-            clear_fn = getattr(unified_api_client, '_api_watchdog_clear_chapter', None)
-            if not callable(clear_fn):
-                return
-            chap = None
-            merged = None
-            if isinstance(chapter_context, dict):
-                chap = chapter_context.get('chapter')
-                merged = chapter_context.get('merged_chapters')
-            if chap is not None:
-                clear_fn(chap)
-            if merged:
-                try:
-                    for mc in merged:
-                        if mc is not None:
-                            clear_fn(mc)
-                except Exception:
-                    pass
+            clear_fn = getattr(unified_api_client, '_api_watchdog_clear_request', None)
+            api_tls = api_call_state.get("tls")
+            request_id = getattr(api_tls, 'current_request_id', None) if api_tls is not None else None
+            if callable(clear_fn) and request_id:
+                clear_fn(request_id)
         except Exception:
             pass
 
@@ -22393,13 +22386,6 @@ def main(log_callback=None, stop_callback=None):
                                     if hist_user and hist_assistant:
                                         batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                                     print(f"✅ Chapter {chap_num} done")
-                                    # Clear any stale watchdog entries for this chapter
-                                    try:
-                                        import unified_api_client
-                                        if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
-                                            unified_api_client._api_watchdog_clear_chapter(chap_num)
-                                    except Exception:
-                                        pass
                                 else:
                                     failed_in_batch += 1
                                     # Error already printed by worker thread
@@ -22540,13 +22526,6 @@ def main(log_callback=None, stop_callback=None):
                                 if success:
                                     completed_in_batch += 1
                                     print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
-                                    # Clear any stale watchdog entries for this chapter
-                                    try:
-                                        import unified_api_client
-                                        if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
-                                            unified_api_client._api_watchdog_clear_chapter(chap_num)
-                                    except Exception:
-                                        pass
                                     if hist_user and hist_assistant:
                                         batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                                 else:
@@ -24864,13 +24843,6 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "completed"
 
                 progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
-                # Clear any stale watchdog entries for this chapter
-                try:
-                    import unified_api_client
-                    if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
-                        unified_api_client._api_watchdog_clear_chapter(actual_num)
-                except Exception:
-                    pass
             else:
                 # For EPUB files, keep original HTML behavior
                 output_path = os.path.join(out, fname)
@@ -24909,13 +24881,6 @@ def main(log_callback=None, stop_callback=None):
                     _write_html_sdlxliff_sidecar(out, fname, c, c.get("body", ""), cleaned)
                     _write_html_md_txt_sidecars(out, fname, cleaned)
                 progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
-                # Clear any stale watchdog entries for this chapter
-                try:
-                    import unified_api_client
-                    if hasattr(unified_api_client, '_api_watchdog_clear_chapter'):
-                        unified_api_client._api_watchdog_clear_chapter(actual_num)
-                except Exception:
-                    pass
             progress_manager.save()
             
             # After completing this chapter, check if we should stop

@@ -512,7 +512,13 @@ def _api_watchdog_reset():
         pass
 
 def _api_watchdog_clear_chapter(chapter_num) -> None:
-    """Clear all watchdog entries for a specific chapter (cleanup after chapter completes)."""
+    """Clear every watchdog entry for a chapter during legacy hard cleanup.
+
+    Chapter numbers are not unique request identifiers (several EPUB front-matter
+    files can all be chapter 0), so normal request completion must use
+    ``_api_watchdog_finished(..., request_id=...)`` or
+    ``_api_watchdog_clear_request`` instead.
+    """
     global _api_watchdog_in_flight, _api_watchdog_last_change_ts
     try:
         chap_str = str(chapter_num)
@@ -535,6 +541,12 @@ def _api_watchdog_clear_chapter(chapter_num) -> None:
             _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
         pass
+
+def _api_watchdog_clear_request(request_id: Optional[str]) -> None:
+    """Remove exactly one abandoned request without touching sibling chapters."""
+    if not request_id:
+        return
+    _api_watchdog_finished(request_id=request_id)
 
 def _api_watchdog_mark_in_flight(request_id: Optional[str], model: Optional[str] = None) -> None:
     """Transition a queued entry to in-flight and increment counter once."""
@@ -4771,7 +4783,7 @@ class UnifiedClient:
     def _mark_key_success(self):
         """Mark the current key as successful (thread-safe)"""
         # Check both instance and class-level cancellation
-        if (hasattr(self, '_cancelled') and self._cancelled) or self.__class__._global_cancelled:
+        if self._is_instance_cancel_requested() or self.__class__._global_cancelled:
             # Don't mark success if we're cancelled
             return
             
@@ -4794,7 +4806,7 @@ class UnifiedClient:
     def _mark_key_error(self, error_code: int = None):
         """Mark current key as having an error and apply cooldown if rate limited (thread-safe)"""
         # Check both instance and class-level cancellation
-        if (hasattr(self, '_cancelled') and self._cancelled) or self.__class__._global_cancelled:
+        if self._is_instance_cancel_requested() or self.__class__._global_cancelled:
             # Don't mark error if we're cancelled
             return
             
@@ -5249,7 +5261,7 @@ class UnifiedClient:
         
         # Wait with cancellation check
         for i in range(wait_time):
-            if hasattr(self, '_cancelled') and self._cancelled:
+            if self._is_instance_cancel_requested():
                 print(f"[DEBUG] Wait cancelled by user")
                 return False
             time.sleep(1)
@@ -9702,7 +9714,10 @@ class UnifiedClient:
                                 except UnifiedClientError as retry_error:
                                     # Re-raise cancellation errors immediately
                                     if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
-                                        print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled")
+                                        print(
+                                            f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled "
+                                            f"({self._cancellation_reason()}: {retry_error})"
+                                        )
                                         raise
                                     print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                                 except Exception as retry_error:
@@ -10616,7 +10631,7 @@ class UnifiedClient:
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
                             while _slept < _wait_needed:
-                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
+                                if self._is_stop_requested() or self._is_instance_cancel_requested() or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                                     # Release the reserved slot before aborting
                                     with _fallback_key_lock:
                                         _fallback_key_in_use.discard(_key_id)
@@ -11014,7 +11029,7 @@ class UnifiedClient:
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
                             while _slept < _wait_needed:
-                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
+                                if self._is_stop_requested() or self._is_instance_cancel_requested() or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                                     # Release the reserved slot before aborting
                                     with _fallback_key_lock:
                                         _fallback_key_in_use.discard(_key_id)
@@ -15644,7 +15659,7 @@ class UnifiedClient:
                 if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                     self.__class__.reset_api_call_stagger()
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
-                if self._should_abort_retry() or getattr(self, '_cancelled', False):
+                if self._should_abort_retry() or self._is_instance_cancel_requested():
                     self._cancelled = True
                     try:
                         with self._thread_submission_lock:
@@ -15781,7 +15796,7 @@ class UnifiedClient:
             return True
         slept = 0.0
         while slept < total:
-            if self._should_abort_retry() or getattr(self, '_cancelled', False):
+            if self._should_abort_retry() or self._is_instance_cancel_requested():
                 self._cancelled = True
                 return False
             step = min(interval, total - slept)
@@ -16050,7 +16065,7 @@ class UnifiedClient:
                         # Re-check during sleep so a mid-wait graceful stop cancels promptly.
                         if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                             raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
-                        if self._is_stop_requested() or getattr(self, '_cancelled', False):
+                        if self._is_stop_requested() or self._is_instance_cancel_requested():
                             self._cancelled = True
                             raise UnifiedClientError("Operation cancelled", error_type="cancelled")
                         dt = min(step, wait_seconds - slept)
@@ -16392,7 +16407,7 @@ class UnifiedClient:
             except Exception as e:
                 # Suppress noise if we are stopping/cleaning up or the SDK surfaced a cancellation
                 err_str = str(e)
-                is_cancel = getattr(self, '_cancelled', False) or ('cancelled' in err_str.lower()) or ('canceled' in err_str.lower())
+                is_cancel = self._is_instance_cancel_requested() or ('cancelled' in err_str.lower()) or ('canceled' in err_str.lower())
                 if is_cancel:
                     # Normalize and stop retry/printing
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
@@ -17677,6 +17692,39 @@ class UnifiedClient:
         except Exception:
             return False
 
+    def _is_instance_cancel_requested(self) -> bool:
+        """Return the legacy instance cancel flag only when it is request-safe.
+
+        A UnifiedClient instance is shared by concurrent batch workers. The
+        legacy ``self._cancelled`` flag is not request-scoped, so a local timeout
+        in one worker must not cancel unrelated requests. Batch requests use the
+        thread-local cancel callback and explicit global/GUI stop signals.
+        """
+        if os.getenv("BATCH_TRANSLATION", "0") == "1":
+            return False
+        return bool(getattr(self, '_cancelled', False))
+
+    def _cancellation_reason(self) -> str:
+        """Return a concise cancellation source for retry diagnostics."""
+        try:
+            if self._is_local_cancel_requested():
+                return "request-local timeout/cancel"
+            if global_stop_flag:
+                return "global Stop flag"
+            if self.is_globally_cancelled():
+                return "global hard cancel"
+            if os.environ.get('GRACEFUL_STOP') == '1':
+                return "graceful stop"
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                return "graceful stop completed"
+            if os.environ.get('TRANSLATION_CANCELLED') == '1':
+                return "translation cancel flag"
+            if self._is_instance_cancel_requested():
+                return "client cancel flag"
+        except Exception:
+            pass
+        return "provider/request cancellation"
+
     def _is_stop_requested(self) -> bool:
         """
         Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation.
@@ -17702,7 +17750,7 @@ class UnifiedClient:
             return True
 
         # Instance-level flag
-        if getattr(self, '_cancelled', False):
+        if self._is_instance_cancel_requested():
             return True
         
         # Custom stop callback (for header translation, etc.)

@@ -1052,3 +1052,55 @@ def test_write_proxy_runtime_package_json_updates_stale_version(tmp_path):
     assert data["name"] == "antigravity-proxy"
     assert data["version"] == "1.7.1"
     assert data["private"] is True
+
+
+def test_watchdog_request_cleanup_preserves_sibling_with_same_chapter_number():
+    unified_api_client._api_watchdog_reset()
+    try:
+        unified_api_client._api_watchdog_started(
+            "translation", model="gemini-3.5-flash", request_id="frontmatter-a",
+            chapter=0, label="chapter_notice0001.xhtml", queued=True,
+        )
+        unified_api_client._api_watchdog_started(
+            "translation", model="gemini-3.5-flash", request_id="frontmatter-b",
+            chapter=0, label="chapter_notice0002.xhtml", queued=True,
+        )
+        unified_api_client._api_watchdog_mark_in_flight("frontmatter-a", "gemini-3.5-flash")
+        unified_api_client._api_watchdog_mark_in_flight("frontmatter-b", "gemini-3.5-flash")
+
+        unified_api_client._api_watchdog_clear_request("frontmatter-a")
+
+        state = unified_api_client.get_api_watchdog_state()
+        assert state["in_flight"] == 1
+        assert [entry["request_id"] for entry in state["in_flight_entries"]] == ["frontmatter-b"]
+    finally:
+        unified_api_client._api_watchdog_reset()
+
+
+def test_shared_instance_cancel_does_not_cancel_sibling_batch_request(monkeypatch):
+    client = object.__new__(UnifiedClient)
+    client._cancelled = True
+    client._stop_callback = lambda: False
+    client.context = "translation"
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
+    monkeypatch.setattr(unified_api_client, "global_stop_flag", False)
+    UnifiedClient.set_global_cancellation(False)
+
+    assert client._is_instance_cancel_requested() is False
+    assert client._is_stop_requested() is False
+
+
+def test_instance_cancel_still_stops_non_batch_request(monkeypatch):
+    client = object.__new__(UnifiedClient)
+    client._cancelled = True
+    client._stop_callback = lambda: False
+    client.context = "translation"
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setattr(unified_api_client, "global_stop_flag", False)
+    UnifiedClient.set_global_cancellation(False)
+
+    assert client._is_instance_cancel_requested() is True
+    assert client._is_stop_requested() is True
