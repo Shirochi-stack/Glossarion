@@ -41,6 +41,10 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 from collections import Counter
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts, unescape_valid_html_tag_entities
+from epub_metadata_utils import (
+    extract_dc_metadata,
+    restore_truncated_repeatable_metadata,
+)
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
@@ -871,6 +875,15 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         print("📋 Loading existing metadata...")
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
+        source_metadata = _extract_epub_metadata(zf)
+        restored_fields = restore_truncated_repeatable_metadata(
+            metadata, source_metadata
+        )
+        if restored_fields:
+            print(
+                "📋 Restored truncated repeatable metadata fields: "
+                + ", ".join(sorted(restored_fields))
+            )
     else:
         print("📋 Extracting fresh metadata...")
         metadata = _extract_epub_metadata(zf)
@@ -2304,16 +2317,9 @@ def _extract_epub_metadata(zf):
                 opf_content = zf.read(name)
                 soup = BeautifulSoup(opf_content, xml_parser)
                 
-                # Extract ALL Dublin Core elements (expanded list)
-                dc_elements = ['title', 'creator', 'subject', 'description', 
-                              'publisher', 'contributor', 'date', 'type', 
-                              'format', 'identifier', 'source', 'language', 
-                              'relation', 'coverage', 'rights']
-                
-                for element in dc_elements:
-                    tag = soup.find(element)
-                    if tag and tag.get_text(strip=True):
-                        meta[element] = tag.get_text(strip=True)
+                # Preserve every value for repeatable Dublin Core fields such
+                # as dc:subject instead of silently keeping only the first.
+                meta.update(extract_dc_metadata(soup))
                 
                 # Extract ALL meta tags (not just series)
                 meta_tags = soup.find_all('meta')

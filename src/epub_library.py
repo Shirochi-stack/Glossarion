@@ -1607,38 +1607,41 @@ def _output_paths_equal(a: str, b: str) -> bool:
 _FILENAME_STRIP_CHARS = '<>:"/\\|?*'
 
 
-# Per-process cache of EPUB title strings keyed by ``path|mtime`` so a
+# Per-process cache of OPF search metadata keyed by ``path|mtime`` so a
 # repeated scan (auto-refresh, undo, organize, …) doesn't re-open the
-# zip for every library EPUB every time.
-_EPUB_TITLES_CACHE: dict[str, tuple[str, ...]] = {}
+# zip for every library EPUB every time. Each value is ``(titles, subjects)``.
+_EPUB_SEARCH_METADATA_CACHE: dict[
+    str, tuple[tuple[str, ...], tuple[str, ...]]
+] = {}
 
 
-def _extract_epub_titles(epub_path: str) -> tuple[str, ...]:
-    """Return title-like strings embedded in *epub_path*'s OPF metadata.
+def _extract_epub_search_metadata(
+    epub_path: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return title-like strings and subjects from an EPUB's OPF metadata.
 
     Reads only the OPF (no content decode), pulling ``dc:title``,
     ``dc:alternative``, and the ``calibre:original_title`` meta element
     the compiler writes at build time (see ``_create_book`` in
-    ``epub_converter.py`` where the translator stores the raw source
-    title under that field). The returned tuple deliberately keeps
-    entries raw — callers pass each through :func:`_norm_book_key`
-    before using them as match keys.
+    ``epub_converter.py``), plus every repeatable ``dc:subject`` value.
+    Returned entries deliberately stay raw: title callers normalize their
+    values for matching, while the library search uses subjects as displayed.
 
     Cached per ``(path, mtime)`` so repeat scans are cheap. Returns an
-    empty tuple on any failure — a missing title is never fatal for
-    the scanner.
+    empty pair on any failure — missing metadata is never fatal.
     """
     if not epub_path or not os.path.isfile(epub_path):
-        return ()
+        return (), ()
     try:
         mtime = os.path.getmtime(epub_path)
     except OSError:
         mtime = 0
     cache_key = f"{epub_path}|{mtime}"
-    cached = _EPUB_TITLES_CACHE.get(cache_key)
+    cached = _EPUB_SEARCH_METADATA_CACHE.get(cache_key)
     if cached is not None:
         return cached
     titles: list[str] = []
+    subjects: list[str] = []
     try:
         import zipfile
         from xml.etree import ElementTree as ET
@@ -1674,6 +1677,10 @@ def _extract_epub_titles(epub_path: str) -> tuple[str, ...]:
                         txt = (el.text or "").strip()
                         if txt:
                             titles.append(txt)
+                for el in otree.findall(f".//{{{DC}}}subject"):
+                    txt = (el.text or "").strip()
+                    if txt:
+                        subjects.append(txt)
                 # Calibre-style ``<meta name="calibre:original_title"
                 # content="…"/>`` — this is how the translator stores
                 # the raw source title when compiling, so it's the
@@ -1689,11 +1696,75 @@ def _extract_epub_titles(epub_path: str) -> tuple[str, ...]:
                         if content:
                             titles.append(content)
     except Exception:
-        logger.debug("OPF title extraction failed for %s: %s",
+        logger.debug("OPF search metadata extraction failed for %s: %s",
                      epub_path, traceback.format_exc())
-    result = tuple(dict.fromkeys(titles))  # preserve order, drop dupes
-    _EPUB_TITLES_CACHE[cache_key] = result
+    result = (
+        tuple(dict.fromkeys(titles)),
+        tuple(dict.fromkeys(subjects)),
+    )
+    _EPUB_SEARCH_METADATA_CACHE[cache_key] = result
     return result
+
+
+def _extract_epub_titles(epub_path: str) -> tuple[str, ...]:
+    """Return title-like strings embedded in *epub_path*'s OPF metadata."""
+    return _extract_epub_search_metadata(epub_path)[0]
+
+
+def _extract_epub_subjects(epub_path: str) -> tuple[str, ...]:
+    """Return every ordered, de-duplicated ``dc:subject`` value."""
+    return _extract_epub_search_metadata(epub_path)[1]
+
+
+_LIBRARY_TAG_SEARCH_KEYS = (
+    "subject",
+    "subjects",
+    "original_subject",
+    "tags",
+    "genres",
+)
+
+
+def _iter_library_search_values(value):
+    """Yield scalar strings from list-like metadata search values."""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _iter_library_search_values(item)
+        return
+    if value is None:
+        return
+    text = str(value).strip()
+    if text:
+        yield text
+
+
+def _book_library_tag_values(book: dict) -> tuple[str, ...]:
+    """Return normalized searchable tag strings carried by a book row."""
+    tag_sources = [
+        book.get("subjects"),
+        book.get("raw_subjects"),
+        book.get("tags"),
+        book.get("genres"),
+    ]
+    metadata = book.get("metadata_json") or {}
+    if isinstance(metadata, dict):
+        tag_sources.extend(metadata.get(key) for key in _LIBRARY_TAG_SEARCH_KEYS)
+
+    return tuple(dict.fromkeys(
+        value.casefold()
+        for source in tag_sources
+        for value in _iter_library_search_values(source)
+    ))
+
+
+def _book_matches_library_query(book: dict, query: str) -> bool:
+    """Match a library query against the card title and its tags/subjects."""
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return True
+    if needle in str(book.get("name", "") or "").casefold():
+        return True
+    return any(needle in value for value in _book_library_tag_values(book))
 
 
 def _norm_book_key(value: str) -> str:
@@ -2655,6 +2726,9 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 "mtime": stat.st_mtime,
                                 "in_library": True,
                                 "type": "epub",
+                                "subjects": list(
+                                    _extract_epub_subjects(entry.path)
+                                ),
                                 "raw_source_path": "",
                                 "_needs_raw_source_lookup": True,
                                 # Library-filed cards need the same
@@ -2695,9 +2769,13 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
         except Exception:
             pass
 
-        def _resolve_library_raw(row: dict) -> tuple[dict, str]:
+        def _resolve_library_raw(
+            row: dict,
+        ) -> tuple[dict, str, tuple[str, ...]]:
             raw_path = _find_raw_source_for_library_epub(row.get("path", ""))
-            return row, raw_path or ""
+            raw_path = raw_path or ""
+            raw_subjects = _extract_epub_subjects(raw_path) if raw_path else ()
+            return row, raw_path, raw_subjects
 
         workers = _library_io_worker_count(len(pending_raw_lookup), cap=8)
         if workers <= 1:
@@ -2718,9 +2796,10 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                     except Exception:
                         logger.debug("Library raw lookup failed: %s",
                                      traceback.format_exc())
-        for row, raw_counterpart in resolved_iter:
+        for row, raw_counterpart, raw_subjects in resolved_iter:
             row["raw_source_path"] = raw_counterpart
             row["missing_raw_file"] = not bool(raw_counterpart)
+            row["raw_subjects"] = list(raw_subjects)
 
     # Source 2: registered-in-place translated EPUBs. These were
     # dropped / imported onto the Completed tab but deliberately left
@@ -2750,6 +2829,7 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
             "in_library": False,
             "registered_translated": True,
             "type": "epub",
+            "subjects": list(_extract_epub_subjects(p)),
             "raw_source_path": "",
             # Registered-in-place translated imports have no raw
             # link by construction \u2014 they're drag-dropped
@@ -7125,7 +7205,7 @@ class EpubLibraryDialog(QDialog):
         header.addStretch()
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Filter…")
+        self._search.setPlaceholderText("🔍  Filter title or tag…")
         self._search.setFixedWidth(200)
         self._search.setStyleSheet(
             "background: #1e1e2e; border: 1px solid #3a3a5e; border-radius: 6px; "
@@ -9863,9 +9943,12 @@ class EpubLibraryDialog(QDialog):
         self._populate_tab(active)
 
     def _filtered(self, books: list[dict]) -> list[dict]:
-        query = self._search.text().strip().lower()
+        query = self._search.text().strip()
         if query:
-            books = [b for b in books if query in str(b.get("name", "")).lower()]
+            books = [
+                book for book in books
+                if _book_matches_library_query(book, query)
+            ]
         if self._format_filter != FORMAT_ALL:
             books = [
                 b for b in books
@@ -9915,6 +9998,7 @@ class EpubLibraryDialog(QDialog):
                     float(b.get("mtime", 0) or 0),
                     int(b.get("size", 0) or 0),
                     len(b.get("compiled_conflicts") or []),
+                    _book_library_tag_values(b),
                 )
                 for b in books
             }
@@ -9975,10 +10059,11 @@ class EpubLibraryDialog(QDialog):
         or needs to be rebuilt because the underlying book changed
         (progress advanced, missing-raw badge appeared, etc.).
 
-        Only fields that :class:`_BookCard.__init__` actually reads
-        are included — a stable signature means filter toggles can
-        reuse the existing widget without a :func:`_fit_title_text`
-        shrink loop or a fresh :class:`_CoverLoader` thread per card.
+        Includes fields rendered by :class:`_BookCard` plus searchable tag
+        metadata that must keep the cached card's ``book`` payload current.
+        A stable signature means filter toggles can reuse the existing widget
+        without a :func:`_fit_title_text` shrink loop or a fresh
+        :class:`_CoverLoader` thread per card.
         """
         return (
             book.get("path", "") or "",
@@ -9996,6 +10081,7 @@ class EpubLibraryDialog(QDialog):
             float(book.get("mtime", 0) or 0),
             int(book.get("size", 0) or 0),
             len(book.get("compiled_conflicts") or []),
+            _book_library_tag_values(book),
         )
 
     def _stop_card_stream(self, stream_key: str | None = None) -> None:

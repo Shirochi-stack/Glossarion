@@ -29,6 +29,7 @@ except ImportError:
 from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
+from epub_metadata_utils import extract_dc_metadata
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from language_options import TARGET_LANGUAGES
 import re
@@ -1740,7 +1741,7 @@ class MetadataBatchTranslatorUI:
         if hasattr(self, 'output_lang_combo'):
             self.output_lang_combo.setCurrentText('English')
     
-    def _detect_all_metadata_fields_for_epub(self, epub_path: str) -> Dict[str, str]:
+    def _detect_all_metadata_fields_for_epub(self, epub_path: str) -> Dict[str, Any]:
         """Detect ALL metadata fields in the given EPUB file"""
         metadata_fields = {}
         
@@ -1754,16 +1755,10 @@ class MetadataBatchTranslatorUI:
                         opf_content = zf.read(name)
                         soup = BeautifulSoup(opf_content, 'xml')
                         
-                        # Get Dublin Core elements
-                        dc_elements = ['title', 'creator', 'subject', 'description', 
-                                      'publisher', 'contributor', 'date', 'type', 
-                                      'format', 'identifier', 'source', 'language', 
-                                      'relation', 'coverage', 'rights']
-                        
-                        for element in dc_elements:
-                            tag = soup.find(element)
-                            if tag and tag.get_text(strip=True):
-                                metadata_fields[element] = tag.get_text(strip=True)
+                        # Keep repeatable Dublin Core fields (notably subject)
+                        # as ordered lists so the configuration preview matches
+                        # what will actually be translated.
+                        metadata_fields.update(extract_dc_metadata(soup))
                         
                         # Get ALL meta tags
                         meta_tags = soup.find_all('meta')
@@ -1785,7 +1780,7 @@ class MetadataBatchTranslatorUI:
         
         return metadata_fields
 
-    def _detect_all_metadata_fields(self) -> Dict[str, str]:
+    def _detect_all_metadata_fields(self) -> Dict[str, Any]:
         """Detect ALL metadata fields in the current EPUB"""
         # Try different possible attribute names for the file path
         epub_path = None
@@ -3101,16 +3096,21 @@ class MetadataTranslator:
         self.last_completed_fields.update(translated_fields.keys())
         for field, should_translate in fields_to_translate.items():
             value = metadata.get(field)
-            if should_translate and value and self._is_already_english(str(value)):
+            if should_translate and value and self._is_already_english(value):
                 self.last_completed_fields.add(field)
                 self._notify_field_progress(field, "completed")
             
         return translated_metadata
  
-    def _is_already_english(self, text: str) -> bool:
+    def _is_already_english(self, text: Any) -> bool:
         """Simple check if text is already in English"""
         if not text:
             return True
+
+        if isinstance(text, (list, tuple)):
+            return all(self._is_already_english(item) for item in text)
+
+        text = str(text)
         
         # Check for CJK characters - if present, needs translation
         for char in text:
@@ -3143,6 +3143,11 @@ class MetadataTranslator:
         prompt_template = self.config.get('metadata_batch_prompt',
             "Translate the following metadata fields to {target_lang}.\n"
             "Return ONLY a JSON object with the same field names as keys.")
+        if any(isinstance(value, list) for value in fields_to_send.values()):
+            prompt_template += (
+                "\nPreserve every JSON array as an array with the same number "
+                "of items in the same order. Translate each array item separately."
+            )
         
         # Handle language behavior
         lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
@@ -3298,10 +3303,16 @@ class MetadataTranslator:
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
     
-    def _translate_single_field(self, field_name: str, field_value: str) -> Optional[str]:
+    def _translate_single_field(self, field_name: str, field_value: Any) -> Optional[Any]:
         """Translate a single field using configured prompts"""
         if self._is_already_english(field_value):
             return field_value
+        is_list_value = isinstance(field_value, list)
+        field_value_text = (
+            json.dumps(field_value, ensure_ascii=False)
+            if is_list_value
+            else str(field_value)
+        )
         # Get field-specific prompts
         field_prompts = self.config.get('metadata_field_prompts', {})
         
@@ -3327,7 +3338,13 @@ class MetadataTranslator:
         
         # Replace variables
         prompt = prompt_template.replace('{target_lang}', output_lang)
-        prompt = prompt.replace('{field_value}', field_value)
+        prompt = prompt.replace('{field_value}', field_value_text)
+        if is_list_value:
+            prompt += (
+                " The input is a JSON array. Output only a JSON array with "
+                "the same number of items in the same order, translating each "
+                "item separately."
+            )
         print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
         print(f"[DEBUG] prompt AFTER replace: '{prompt[:200]}'")
         
@@ -3342,7 +3359,7 @@ class MetadataTranslator:
             if is_translation_service:
                 # For translation services, send only the field value without AI prompts
                 messages = [
-                    {"role": "user", "content": field_value}
+                    {"role": "user", "content": field_value_text}
                 ]
             else:
                 # Replace {target_lang} in prompts with output language
@@ -3354,7 +3371,7 @@ class MetadataTranslator:
                 print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
                 messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": field_value}
+                    {"role": "user", "content": field_value_text}
                 ]
             
             # Get temperature and max_tokens from environment or config
@@ -3369,6 +3386,10 @@ class MetadataTranslator:
             )
             
             if response_content:
+                if is_list_value:
+                    return self._parse_list_translation_response(
+                        response_content, field_value
+                    )
                 return response_content.strip()
             else:
                 print(f"⚠️ Empty response when translating {field_name}")
@@ -3383,22 +3404,61 @@ class MetadataTranslator:
             import traceback; traceback.print_exc()
             return None
     
-    def _parse_metadata_response(self, response: str, original_fields: Dict[str, str]) -> Dict[str, str]:
+    @staticmethod
+    def _strip_json_code_fence(response: str) -> str:
+        response = str(response).strip()
+        if not response.startswith("```"):
+            return response
+
+        lines = response.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    def _parse_list_translation_response(
+        self, response: str, original_values: List[Any]
+    ) -> Optional[List[str]]:
+        """Parse a translated JSON array without allowing subject loss."""
+        try:
+            parsed = json.loads(self._strip_json_code_fence(response))
+        except (TypeError, ValueError, json.JSONDecodeError) as e:
+            print(f"Error parsing metadata array response: {e}")
+            return None
+
+        if not isinstance(parsed, list) or len(parsed) != len(original_values):
+            print(
+                "Error parsing metadata array response: expected "
+                f"{len(original_values)} items, received "
+                f"{len(parsed) if isinstance(parsed, list) else 'a non-array value'}"
+            )
+            return None
+
+        values = [str(value).strip() for value in parsed]
+        return values if all(values) else None
+
+    def _parse_metadata_response(self, response: str, original_fields: Dict[str, Any]) -> Dict[str, Any]:
         """Parse metadata response"""
         try:
-            response = response.strip()
-            if response.startswith("```"):
-                response = response.split("```")[1]
-                if response.startswith("json"):
-                    response = response[4:]
-                response = response.split("```")[0]
-                
-            parsed = json.loads(response.strip())
+            parsed = json.loads(self._strip_json_code_fence(response))
             
             result = {}
             for field, value in parsed.items():
                 if field in original_fields and value:
-                    result[field] = str(value).strip()
+                    original_value = original_fields[field]
+                    if isinstance(original_value, list):
+                        if not isinstance(value, list) or len(value) != len(original_value):
+                            print(
+                                f"Ignoring translated {field}: expected an array "
+                                f"with {len(original_value)} items"
+                            )
+                            continue
+                        translated_values = [str(item).strip() for item in value]
+                        if all(translated_values):
+                            result[field] = translated_values
+                    else:
+                        result[field] = str(value).strip()
                     
             return result
             

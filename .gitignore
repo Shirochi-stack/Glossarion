@@ -106,5 +106,7 @@ tests/**
 !tests/test_antigravity_proxy.py
 !tests/test_epub_utils.py
 !tests/test_epub_library_layout.py
+!tests/test_metadata_subjects.py
+!tests/test_epub_library_search.py
 junktests/
 warp.md
