@@ -1104,3 +1104,23 @@ def test_instance_cancel_still_stops_non_batch_request(monkeypatch):
 
     assert client._is_instance_cancel_requested() is True
     assert client._is_stop_requested() is True
+
+
+def test_nested_retry_keeps_original_run_owner(monkeypatch):
+    client = object.__new__(UnifiedClient)
+    tls = client._get_thread_local_client()
+    monkeypatch.setattr(tls, "current_request_run_id", "old-run")
+    monkeypatch.setenv("GLOSSARION_RUN_ID", "new-run")
+
+    assert client._bind_thread_run_id_for_request() == "old-run"
+    assert unified_api_client._RUN_ID_CVAR.get("") == "old-run"
+    assert client._is_stale_request_run() is True
+
+
+def test_local_cancellation_reason_distinguishes_hard_stop_from_timeout(monkeypatch):
+    client = object.__new__(UnifiedClient)
+    tls = client._get_thread_local_client()
+    monkeypatch.setattr(tls, "local_cancel_check", lambda: True)
+    monkeypatch.setattr(tls, "local_cancel_reason", lambda: "hard stop")
+
+    assert client._cancellation_reason() == "request-local hard stop"

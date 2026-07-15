@@ -16567,7 +16567,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     result_queue = queue.Queue()
     cancel_event = threading.Event()
-    api_call_state = {"tls": None}
+    api_call_state = {"tls": None, "cancel_reason": None}
     deferred_batch_logs = pop_deferred_batch_logs()
 
     def _capture_actual_request_metadata():
@@ -16695,8 +16695,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 pass
         return closed_any
 
-    def _cancel_current_api_call(*, mark_client_cancel: bool = False) -> None:
+    def _cancel_current_api_call(*, mark_client_cancel: bool = False,
+                                 reason: str = "cancel") -> None:
         """Cancel this wrapper's API call without tearing down sibling batch workers."""
+        api_call_state["cancel_reason"] = reason
         cancel_event.set()
         closed_local = _close_api_thread_transport()
         if closed_local or not mark_client_cancel:
@@ -16713,6 +16715,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         tls_for_local_cancel = None
         had_local_cancel = False
         previous_local_cancel = None
+        had_local_cancel_reason = False
+        previous_local_cancel_reason = None
         try:
             start_time = time.time()
             extend_deferred_batch_logs(deferred_batch_logs)
@@ -16737,7 +16741,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     api_call_state["tls"] = tls_for_local_cancel
                     had_local_cancel = hasattr(tls_for_local_cancel, 'local_cancel_check')
                     previous_local_cancel = getattr(tls_for_local_cancel, 'local_cancel_check', None)
+                    had_local_cancel_reason = hasattr(tls_for_local_cancel, 'local_cancel_reason')
+                    previous_local_cancel_reason = getattr(tls_for_local_cancel, 'local_cancel_reason', None)
                     tls_for_local_cancel.local_cancel_check = cancel_event.is_set
+                    tls_for_local_cancel.local_cancel_reason = lambda: api_call_state.get("cancel_reason")
             except Exception:
                 tls_for_local_cancel = None
             
@@ -16805,6 +16812,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         tls_for_local_cancel.local_cancel_check = previous_local_cancel
                     else:
                         tls_for_local_cancel.local_cancel_check = None
+                    if had_local_cancel_reason:
+                        tls_for_local_cancel.local_cancel_reason = previous_local_cancel_reason
+                    else:
+                        tls_for_local_cancel.local_cancel_reason = None
                 except Exception:
                     pass
     
@@ -16927,8 +16938,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
-                    cancel_event.set()
-                    _cancel_current_api_call()
+                    _cancel_current_api_call(reason="chunk timeout")
                     # Clear watchdog entries for this chapter since we're abandoning the result.
                     _clear_watchdog_for_chapter_context()
                     try:
@@ -16956,7 +16966,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                _cancel_current_api_call(mark_client_cancel=True)
+                cancel_reason = "hard stop" if hard_cancelled else "stop requested"
+                _cancel_current_api_call(mark_client_cancel=True, reason=cancel_reason)
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
                 try:
@@ -16968,7 +16979,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                _cancel_current_api_call()
+                _cancel_current_api_call(reason="chunk timeout")
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
                 # Give the background thread a brief chance to unwind after transport closure

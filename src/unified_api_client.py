@@ -4049,9 +4049,11 @@ class UnifiedClient:
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
             self._thread_local.current_request_id = None
+            self._thread_local.current_request_run_id = None
             self._thread_local.current_request_label = None
             self._thread_local.chapter_context = None
             self._thread_local.local_cancel_check = None
+            self._thread_local.local_cancel_reason = None
             self._thread_local.current_stream = None
             self._thread_local.current_openai_sdk_client = None
             self._thread_local.current_httpx_client = None
@@ -6745,6 +6747,12 @@ class UnifiedClient:
         if _serialize_send:
             self._sequential_send_lock.acquire()
         try:
+            # Capture ownership before any delay. A force-stopped provider call
+            # may unwind after a newer GUI run has started; it must remain tied
+            # to the run that submitted it.
+            request_run_id = _get_current_run_id()
+            if request_run_id:
+                _RUN_ID_CVAR.set(request_run_id)
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
             self._log_pre_stagger(messages, watchdog_context)
@@ -6762,6 +6770,8 @@ class UnifiedClient:
             label = None
             try:
                 tls = self._get_thread_local_client()
+                tls.current_request_id = request_id
+                tls.current_request_run_id = request_run_id
                 ctx = getattr(tls, "chapter_context", None)
                 if isinstance(ctx, dict):
                     chapter = ctx.get("chapter")
@@ -9038,7 +9048,16 @@ class UnifiedClient:
             request_id = str(uuid.uuid4())[:8]
         try:
             tls = self._get_thread_local_client()
+            previous_request_id = getattr(tls, 'current_request_id', None)
+            if previous_request_id != request_id:
+                # Direct _send_internal callers start a new request here.
+                # Recursive retries reuse the same request id and therefore
+                # preserve the original run owner.
+                tls.current_request_run_id = _get_current_run_id()
             tls.current_request_id = request_id
+            request_run_id = getattr(tls, 'current_request_run_id', None)
+            if request_run_id:
+                _RUN_ID_CVAR.set(request_run_id)
         except Exception:
             pass
         
@@ -9682,7 +9701,8 @@ class UnifiedClient:
                             # Abort retry if graceful stop or user stop is active
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active or self._is_stop_requested():
-                                print("  ⏹️ Truncation retry skipped (graceful stop/stop requested)")
+                                if not self._is_stale_request_run():
+                                    print("  ⏹️ Truncation retry skipped (graceful stop/stop requested)")
                                 try:
                                     tls = self._get_thread_local_client()
                                     tls._truncation_retries_exhausted = True
@@ -9693,13 +9713,15 @@ class UnifiedClient:
                             for attempt_idx in range(allowed_attempts):
                                 # Check for cancellation before each retry attempt
                                 if self._is_stop_requested():
-                                    print(f"  🛑 Truncation retry cancelled by user")
+                                    if not self._is_stale_request_run():
+                                        print(f"  🛑 Truncation retry cancelled by user")
                                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 
                                 try:
                                     # Check again right before retry
                                     if self._is_stop_requested():
-                                        print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled before starting")
+                                        if not self._is_stale_request_run():
+                                            print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled before starting")
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     
                                     retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}", attempt_idx + 1)
@@ -9714,10 +9736,14 @@ class UnifiedClient:
                                 except UnifiedClientError as retry_error:
                                     # Re-raise cancellation errors immediately
                                     if retry_error.error_type == "cancelled" or "cancelled" in str(retry_error).lower():
-                                        print(
-                                            f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled "
-                                            f"({self._cancellation_reason()}: {retry_error})"
-                                        )
+                                        # A native provider can take minutes to unwind after
+                                        # force-stop. Do not inject that abandoned run's late
+                                        # cancellation message into a newer run's console.
+                                        if not self._is_stale_request_run():
+                                            print(
+                                                f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled "
+                                                f"({self._cancellation_reason()}: {retry_error})"
+                                            )
                                         raise
                                     print(f"  ❌ Truncation retry #{attempt_idx+1}/{allowed_attempts} failed: {retry_error}")
                                 except Exception as retry_error:
@@ -15902,7 +15928,7 @@ class UnifiedClient:
         - Handles cancellation, rate limits (429 with Retry-After), 5xx with backoff, and generic errors.
         - Returns the requests.Response object when a successful status is received.
         """
-        _set_thread_run_id_from_env()
+        self._bind_thread_run_id_for_request()
         api_delay = self._get_send_interval()
         provider = provider_name or "HTTP"
         
@@ -17202,7 +17228,7 @@ class UnifiedClient:
         temperature = self._effective_temperature(temperature)
 
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
-        _set_thread_run_id_from_env()
+        self._bind_thread_run_id_for_request()
         self._restore_thread_endpoint_state_if_needed()
 
         # Log NanoGPT thinking configuration BEFORE the stagger delay so it
@@ -17692,6 +17718,30 @@ class UnifiedClient:
         except Exception:
             return False
 
+    def _bind_thread_run_id_for_request(self) -> str:
+        """Bind transport logging to the run that owns the current request."""
+        try:
+            tls = self._get_thread_local_client()
+            run_id = str(getattr(tls, 'current_request_run_id', '') or '')
+            if not run_id:
+                run_id = _get_current_run_id()
+                tls.current_request_run_id = run_id
+            if run_id:
+                _RUN_ID_CVAR.set(run_id)
+            return run_id
+        except Exception:
+            return ""
+
+    def _is_stale_request_run(self) -> bool:
+        """Return True when this worker belongs to an older GUI run."""
+        try:
+            tls = self._get_thread_local_client()
+            request_run_id = str(getattr(tls, 'current_request_run_id', '') or '')
+            current_run_id = _get_current_run_id()
+            return bool(request_run_id and current_run_id and request_run_id != current_run_id)
+        except Exception:
+            return False
+
     def _is_instance_cancel_requested(self) -> bool:
         """Return the legacy instance cancel flag only when it is request-safe.
 
@@ -17708,7 +17758,15 @@ class UnifiedClient:
         """Return a concise cancellation source for retry diagnostics."""
         try:
             if self._is_local_cancel_requested():
-                return "request-local timeout/cancel"
+                try:
+                    tls = self._get_thread_local_client()
+                    reason_callback = getattr(tls, 'local_cancel_reason', None)
+                    local_reason = reason_callback() if callable(reason_callback) else reason_callback
+                    if local_reason:
+                        return f"request-local {local_reason}"
+                except Exception:
+                    pass
+                return "request-local cancel"
             if global_stop_flag:
                 return "global Stop flag"
             if self.is_globally_cancelled():
