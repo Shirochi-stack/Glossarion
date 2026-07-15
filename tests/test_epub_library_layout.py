@@ -7,10 +7,15 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEventLoop
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEventLoop, QRect
+from PySide6.QtWidgets import QApplication, QWidget
 
-from epub_library import EpubLibraryDialog, SIZE_NORMAL
+from epub_library import (
+    BookDetailsDialog,
+    EpubLibraryDialog,
+    SIZE_NORMAL,
+    _FlowLayout,
+)
 
 
 @pytest.fixture(scope="module")
@@ -139,3 +144,43 @@ def test_scrollbar_and_window_resize_do_not_repeat_full_reflow(qapp):
         dialog._auto_refresh_timer.stop()
         dialog.close()
         qapp.processEvents()
+
+
+def test_details_tags_keep_full_text_and_wrap_to_multiple_rows(qapp):
+    container = QWidget()
+    layout = _FlowLayout(container, horizontal_spacing=8, vertical_spacing=8)
+
+    class DetailsStub:
+        _tags_row = container
+
+    tags = [
+        "Modern",
+        "Apocalypse",
+        "TS",
+        "Genius",
+        "Mage",
+        "System",
+        "Growth",
+        "Gallery",
+        "Community",
+        "No Romance",
+        "Regression",
+        "Tower Master",
+        "Survival",
+        "Magic",
+        "Post-apocalyptic",
+    ]
+    BookDetailsDialog._fill_chip_row(DetailsStub(), layout, tags)
+
+    width = 380
+    height = layout.heightForWidth(width)
+    container.resize(width, height)
+    layout.setGeometry(QRect(0, 0, width, height))
+    qapp.processEvents()
+
+    chips = [layout.itemAt(i).widget() for i in range(layout.count())]
+    assert len(chips) == len(tags)
+    assert [chip.text() for chip in chips] == tags
+    assert len({chip.y() for chip in chips}) > 1
+    assert height > max(chip.height() for chip in chips)
+    assert all(chip.width() >= chip.sizeHint().width() for chip in chips)

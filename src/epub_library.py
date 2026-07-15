@@ -28,9 +28,9 @@ from PySide6.QtWidgets import (
     QScrollArea, QWidget, QLineEdit, QFrame, QSplitter, QTextBrowser,
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget, QStyledItemDelegate,
-    QStyle, QStyleOptionViewItem
+    QStyle, QStyleOptionViewItem, QLayout
 )
-from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
 try:
@@ -50,6 +50,77 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _ORPHANED_QTHREADS: set[QThread] = set()
+
+
+class _FlowLayout(QLayout):
+    """Compact wrapping layout used by metadata tag chips."""
+
+    def __init__(self, parent=None, horizontal_spacing=8, vertical_spacing=8):
+        super().__init__(parent)
+        self._items = []
+        self._horizontal_spacing = int(horizontal_spacing)
+        self._vertical_spacing = int(vertical_spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, max(0, int(width)), 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        return size + QSize(left + right, top + bottom)
+
+    def _do_layout(self, rect, test_only):
+        left, top, right, bottom = self.getContentsMargins()
+        available = rect.adjusted(left, top, -right, -bottom)
+        x = available.x()
+        y = available.y()
+        line_height = 0
+
+        for item in self._items:
+            hint = item.sizeHint().expandedTo(item.minimumSize())
+            next_x = x + hint.width()
+            if (line_height > 0
+                    and next_x > available.right() + 1):
+                x = available.x()
+                y += line_height + self._vertical_spacing
+                next_x = x + hint.width()
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x + self._horizontal_spacing
+            line_height = max(line_height, hint.height())
+
+        return max(0, y + line_height - rect.y() + bottom)
 
 
 def _disconnect_thread_signals(thread, signal_names=()) -> None:
@@ -13965,10 +14036,12 @@ class BookDetailsDialog(QDialog):
         self._tags_heading.setObjectName("section")
         meta_col.addWidget(self._tags_heading)
         self._tags_row = QWidget()
-        self._tags_layout = QHBoxLayout(self._tags_row)
-        self._tags_layout.setContentsMargins(0, 0, 0, 0)
-        self._tags_layout.setSpacing(6)
-        self._tags_layout.addStretch()
+        self._tags_row.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Preferred
+        )
+        self._tags_layout = _FlowLayout(
+            self._tags_row, horizontal_spacing=8, vertical_spacing=8
+        )
         meta_col.addWidget(self._tags_row)
         meta_col.addStretch()
 
@@ -13977,10 +14050,13 @@ class BookDetailsDialog(QDialog):
         # Wider column so long titles / author names don't wrap aggressively
         # and collide with the next metadata row. Bumped further so the
         # common CJK novel title fits on one line in the Title row.
-        meta_wrapper.setMinimumWidth(380)
-        meta_wrapper.setMaximumWidth(540)
+        meta_wrapper.setMinimumWidth(400)
+        meta_wrapper.setMaximumWidth(700)
+        meta_wrapper.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
         self._meta_wrapper = meta_wrapper
-        hero.addWidget(meta_wrapper, 0, Qt.AlignTop)
+        hero.addWidget(meta_wrapper, 1, Qt.AlignTop)
         body_layout.addLayout(hero)
 
         # ── Chapters section ──
@@ -14399,14 +14475,14 @@ class BookDetailsDialog(QDialog):
             ("\U0001f4c5 Year", year or "\u2014"),
         ]
         # Estimate the horizontal space available to the value column.
-        # ``meta_wrapper`` is between 380–540 px wide; the key column is
+        # ``meta_wrapper`` is between 400–700 px wide; the key column is
         # ~100 px ("\U0001f3db\ufe0f Publisher" is the widest) and the grid
         # has 14 px horizontal spacing. If the wrapper has already been laid
         # out we use its real width; otherwise fall back to the conservative
         # minimum so shrink-to-fit kicks in even on first paint.
         wrapper_w = self._meta_wrapper.width() if getattr(self, "_meta_wrapper", None) else 0
         if wrapper_w < 300:
-            wrapper_w = 380
+            wrapper_w = 400
         val_avail_w = max(200, wrapper_w - 100 - 14 - 4)
         for i, (key, val) in enumerate(rows):
             k_lbl = QLabel(key)
@@ -14639,30 +14715,36 @@ class BookDetailsDialog(QDialog):
             self._progress_strip.setText("\u23f3  Translation in progress")
         self._progress_strip.show()
 
-    def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
-        # Remove all but the trailing stretch
-        while layout.count() > 1:
+    def _fill_chip_row(self, layout: QLayout, values: list[str]):
+        # Flow vertically as needed instead of compressing every tag into a
+        # single row. All tags are shown; the old implementation capped the
+        # list at 12 and then squeezed those labels below their size hints.
+        while layout.count():
             item = layout.takeAt(0)
             w = item.widget()
             if w:
                 w.setParent(None)
                 w.deleteLater()
-        stretch_item = layout.takeAt(0)
-        for v in values[:12]:
+        for v in values:
             if not v:
                 continue
-            chip = QLabel(v)
+            text = str(v).strip()
+            if not text:
+                continue
+            chip = QLabel(text)
             chip.setProperty("class", "tag")
             chip.setStyleSheet(
                 "color: #c8cbe0; background: #2a2a3e; "
                 "border: 1px solid #3a3a5e; border-radius: 10px; "
-                "padding: 3px 9px; font-size: 8.5pt;"
+                "padding: 5px 11px; font-size: 9pt;"
             )
+            chip.setToolTip(text)
+            chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            chip.ensurePolished()
+            chip.setMinimumSize(chip.sizeHint())
             layout.addWidget(chip)
-        if stretch_item is not None:
-            layout.addItem(stretch_item)
-        else:
-            layout.addStretch()
+        layout.invalidate()
+        self._tags_row.updateGeometry()
 
     def _collect_tag_values(self, *sources) -> list[str]:
         tags: list[str] = []
