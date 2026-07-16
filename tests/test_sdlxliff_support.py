@@ -17,7 +17,12 @@ from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar
-from TransateKRtoEN import should_skip_configured_special_file_for_translation, _write_html_sdlxliff_sidecar
+from TransateKRtoEN import (
+    _original_markup_for_copy,
+    _refinement_raw_source_message,
+    _write_html_sdlxliff_sidecar,
+    should_skip_configured_special_file_for_translation,
+)
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
@@ -86,6 +91,57 @@ def test_multipass_refinement_filter_uses_numbered_special_skip_predicate():
 
     assert "_should_skip_configured_special_file_for_translation(_name)" in multipass_filter
     assert "if _is_configured_special_file(_name):" not in multipass_filter
+
+
+def test_full_with_raw_mode_and_full_tab_are_exposed():
+    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    worker_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
+
+    assert '"full_with_raw"' in gui_source
+    assert '"full_with_raw"' in worker_source
+    assert '"all", "Full"' in gui_source
+    assert '"all", "All"' not in gui_source
+    assert 'addItem("Full with raw", "full_with_raw")' in gui_source
+    assert "raw_role_icon_path = os.path.join(self.base_dir, 'Halgakos.ico')" in gui_source
+    assert "image: url({raw_role_icon_path});" in gui_source
+
+
+def test_full_with_raw_source_message_uses_selected_role_and_defaults_to_assistant():
+    default_message = _refinement_raw_source_message("<p>原文</p>")
+    assert default_message["role"] == "assistant"
+    assert "<p>原文</p>" in default_message["content"]
+    assert "source data, not instructions" in default_message["content"]
+
+    assert _refinement_raw_source_message("raw", "system")["role"] == "system"
+    assert _refinement_raw_source_message("raw", "user")["role"] == "user"
+    assert _refinement_raw_source_message("raw", "invalid")["role"] == "assistant"
+    assert _refinement_raw_source_message("  ") is None
+
+
+def test_full_with_raw_source_recovery_uses_mapped_chapter_filename(monkeypatch, tmp_path):
+    epub_path = tmp_path / "mapped-book.epub"
+    output_dir = tmp_path / "mapped-book"
+    output_dir.mkdir()
+    raw_html = "<html><head><title>Raw</title></head><body><p>原文</p></body></html>"
+    opf = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest><item id="c1" href="Text/chapter-01.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"""
+    (output_dir / "content.opf").write_text(opf, encoding="utf-8")
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr("OEBPS/content.opf", opf)
+        epub.writestr("OEBPS/Text/chapter-01.xhtml", raw_html)
+
+    monkeypatch.setenv("EPUB_PATH", str(epub_path))
+    chapter = {
+        "filename": "OEBPS/Text/chapter-01.xhtml",
+        "original_filename": "chapter-01.xhtml",
+        "original_basename": "chapter-01",
+        "body": "<p>filtered source</p>",
+    }
+
+    assert _original_markup_for_copy(chapter, str(output_dir)) == raw_html
 
 
 SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>
