@@ -74,6 +74,8 @@ from app_version import (
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_FAILED_USER_PROMPT,
+    DEFAULT_REFINEMENT_FULL_WITH_RAW_RAW_FOOTER,
+    DEFAULT_REFINEMENT_FULL_WITH_RAW_RAW_HEADER,
     DEFAULT_REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_FULL_WITH_RAW_USER_PROMPT,
     DEFAULT_REFINEMENT_PARTIAL_B2_SYSTEM_PROMPT,
@@ -3899,6 +3901,8 @@ Text to analyze:
         self.default_refinement_qa_issue_prompt = DEFAULT_REFINEMENT_QA_ISSUE_PROMPT
         self.default_refinement_full_with_raw_system_prompt = DEFAULT_REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT
         self.default_refinement_full_with_raw_user_prompt = DEFAULT_REFINEMENT_FULL_WITH_RAW_USER_PROMPT
+        self.default_refinement_full_with_raw_raw_header = DEFAULT_REFINEMENT_FULL_WITH_RAW_RAW_HEADER
+        self.default_refinement_full_with_raw_raw_footer = DEFAULT_REFINEMENT_FULL_WITH_RAW_RAW_FOOTER
         self.default_refinement_failed_system_prompt = DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT
         self.default_refinement_failed_user_prompt = DEFAULT_REFINEMENT_FAILED_USER_PROMPT
         self.default_refinement_partial_system_prompt = DEFAULT_REFINEMENT_PARTIAL_SYSTEM_PROMPT
@@ -4056,6 +4060,22 @@ Recent translations to summarize:
             'refinement_full_with_raw_user_prompt',
             getattr(self, 'default_refinement_full_with_raw_user_prompt', '')
         )
+        if 'refinement_full_with_raw_raw_header' in self.config:
+            self.refinement_full_with_raw_raw_header = str(
+                self.config.get('refinement_full_with_raw_raw_header', '') or ''
+            )
+        else:
+            self.refinement_full_with_raw_raw_header = getattr(
+                self, 'default_refinement_full_with_raw_raw_header', ''
+            )
+        if 'refinement_full_with_raw_raw_footer' in self.config:
+            self.refinement_full_with_raw_raw_footer = str(
+                self.config.get('refinement_full_with_raw_raw_footer', '') or ''
+            )
+        else:
+            self.refinement_full_with_raw_raw_footer = getattr(
+                self, 'default_refinement_full_with_raw_raw_footer', ''
+            )
         self.refinement_failed_system_prompt = self.config.get(
             'refinement_failed_system_prompt',
             getattr(self, 'default_refinement_failed_system_prompt', self.refinement_system_prompt)
@@ -4941,6 +4961,13 @@ Recent translations to summarize:
             str(getattr(self, attr, '') or '').strip() != str(getattr(self, default_attr, '') or '').strip()
             for attr, default_attr in prompt_pairs
         )
+        is_custom = is_custom or any(
+            str(getattr(self, attr, '') or '') != str(getattr(self, default_attr, '') or '')
+            for attr, default_attr in (
+                ('refinement_full_with_raw_raw_header', 'default_refinement_full_with_raw_raw_header'),
+                ('refinement_full_with_raw_raw_footer', 'default_refinement_full_with_raw_raw_footer'),
+            )
+        )
         raw_role = str(
             getattr(
                 self,
@@ -5188,8 +5215,8 @@ Recent translations to summarize:
             "Edit prompts sent only to refinement requests. "
             "Use {target_lang} for the selected target language. "
             "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
-            "In Full, Full with raw, Failed, Partial, Partial.b, and Partial.b2 prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
-            "Full with raw sends the matching raw source HTML as a separate prompt using the role selected on that tab. "
+            "In Full, Full + raw, Failed, Partial, Partial.b, and Partial.b2 prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
+            "Full + raw sends the matching raw source HTML as a separate prompt using the role selected on that tab. "
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
@@ -5284,7 +5311,7 @@ Recent translations to summarize:
             "default_refinement_system_prompt", "default_refinement_user_prompt",
         )
         _full_with_raw_tab, full_with_raw_layout, _, _ = _add_prompt_tab(
-            "full_with_raw", "Full with raw",
+            "full_with_raw", "Full + raw",
             "refinement_full_with_raw_system_prompt", "refinement_full_with_raw_user_prompt",
             "refinement_full_with_raw_system_prompt", "refinement_full_with_raw_user_prompt",
             "default_refinement_full_with_raw_system_prompt", "default_refinement_full_with_raw_user_prompt",
@@ -5315,7 +5342,7 @@ Recent translations to summarize:
         raw_role_index = self.refinement_full_with_raw_raw_role_combo.findData(raw_role)
         self.refinement_full_with_raw_raw_role_combo.setCurrentIndex(max(0, raw_role_index))
         self.refinement_full_with_raw_raw_role_combo.setToolTip(raw_role_label.toolTip())
-        self.refinement_full_with_raw_raw_role_combo.setFixedWidth(120)
+        self.refinement_full_with_raw_raw_role_combo.setFixedWidth(95)
         raw_role_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
         raw_role_disabled_icon_path = _get_disabled_halgakos_icon_path(raw_role_icon_path)
         self.refinement_full_with_raw_raw_role_combo.setStyleSheet(f"""
@@ -5347,6 +5374,40 @@ Recent translations to summarize:
         full_with_raw_options_layout.addWidget(self.refinement_full_with_raw_raw_role_combo)
         full_with_raw_options_layout.addStretch()
         full_with_raw_layout.insertWidget(0, full_with_raw_options)
+
+        raw_header_label = QLabel("Raw block header prompt:")
+        raw_header_label.setToolTip(
+            "Text inserted immediately before the raw source HTML. Whitespace and line breaks are preserved; "
+            "leave blank to send no header."
+        )
+        raw_header_editor = QTextEdit()
+        raw_header_editor.setAcceptRichText(False)
+        raw_header_editor.setMaximumHeight(78)
+        raw_header_editor.setPlainText(str(getattr(
+            self,
+            'refinement_full_with_raw_raw_header',
+            getattr(self, 'default_refinement_full_with_raw_raw_header', ''),
+        ) or ''))
+        raw_header_editor.setToolTip(raw_header_label.toolTip())
+        full_with_raw_layout.insertWidget(1, raw_header_label)
+        full_with_raw_layout.insertWidget(2, raw_header_editor)
+
+        raw_footer_label = QLabel("Raw block footer prompt:")
+        raw_footer_label.setToolTip(
+            "Text inserted immediately after the raw source HTML. Whitespace and line breaks are preserved; "
+            "leave blank to send no footer."
+        )
+        raw_footer_editor = QTextEdit()
+        raw_footer_editor.setAcceptRichText(False)
+        raw_footer_editor.setMaximumHeight(78)
+        raw_footer_editor.setPlainText(str(getattr(
+            self,
+            'refinement_full_with_raw_raw_footer',
+            getattr(self, 'default_refinement_full_with_raw_raw_footer', ''),
+        ) or ''))
+        raw_footer_editor.setToolTip(raw_footer_label.toolTip())
+        full_with_raw_layout.insertWidget(3, raw_footer_label)
+        full_with_raw_layout.insertWidget(4, raw_footer_editor)
         _add_prompt_tab(
             "failed", "Failed",
             "refinement_failed_system_prompt", "refinement_failed_user_prompt",
@@ -5457,6 +5518,8 @@ Recent translations to summarize:
                 self.refinement_system_prompt,
             )
             self.refinement_full_with_raw_user_prompt = full_with_raw_user.toPlainText().strip()
+            self.refinement_full_with_raw_raw_header = raw_header_editor.toPlainText()
+            self.refinement_full_with_raw_raw_footer = raw_footer_editor.toPlainText()
             self.refinement_full_with_raw_raw_role_var = str(
                 self.refinement_full_with_raw_raw_role_combo.currentData() or 'assistant'
             ).strip().lower()
@@ -5476,6 +5539,8 @@ Recent translations to summarize:
             self.config['refinement_user_prompt'] = self.refinement_user_prompt
             self.config['refinement_full_with_raw_system_prompt'] = self.refinement_full_with_raw_system_prompt
             self.config['refinement_full_with_raw_user_prompt'] = self.refinement_full_with_raw_user_prompt
+            self.config['refinement_full_with_raw_raw_header'] = self.refinement_full_with_raw_raw_header
+            self.config['refinement_full_with_raw_raw_footer'] = self.refinement_full_with_raw_raw_footer
             self.config['refinement_full_with_raw_raw_role'] = self.refinement_full_with_raw_raw_role_var
             self.config['refinement_failed_system_prompt'] = self.refinement_failed_system_prompt
             self.config['refinement_failed_user_prompt'] = self.refinement_failed_user_prompt
@@ -5499,6 +5564,8 @@ Recent translations to summarize:
             elif mode_key == "full_with_raw":
                 system_editor.setPlainText(getattr(self, 'default_refinement_full_with_raw_system_prompt', ''))
                 user_editor.setPlainText(getattr(self, 'default_refinement_full_with_raw_user_prompt', ''))
+                raw_header_editor.setPlainText(getattr(self, 'default_refinement_full_with_raw_raw_header', ''))
+                raw_footer_editor.setPlainText(getattr(self, 'default_refinement_full_with_raw_raw_footer', ''))
                 self.refinement_full_with_raw_raw_role_combo.setCurrentIndex(0)
             elif mode_key == "failed":
                 system_editor.setPlainText(getattr(self, 'default_refinement_failed_system_prompt', ''))
@@ -9914,7 +9981,7 @@ Recent translations to summarize:
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
             "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
-            "<b>Full with raw</b>: refine every translated chapter while also sending its matching raw source HTML using the configured raw prompt role.<br>"
+            "<b>Full + raw</b>: refine every translated chapter while also sending its matching raw source HTML using the configured raw prompt role.<br>"
             "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
             "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends affected HTML tag entries one request at a time.<br>"
             "<b>Partial.b</b>: batches all affected entries for each chapter into one placeholder-tagged HTML request.<br>"
@@ -9940,7 +10007,7 @@ Recent translations to summarize:
 
         self.multipass_refinement_mode_combo = QComboBox()
         self.multipass_refinement_mode_combo.addItem("Full", "full")
-        self.multipass_refinement_mode_combo.addItem("Full with raw", "full_with_raw")
+        self.multipass_refinement_mode_combo.addItem("Full + raw", "full_with_raw")
         self.multipass_refinement_mode_combo.addItem("Failed", "failed")
         self.multipass_refinement_mode_combo.addItem("Partial", "partial")
         self.multipass_refinement_mode_combo.addItem("Partial.b", "partial.b")
@@ -9955,7 +10022,7 @@ Recent translations to summarize:
         }.get(self.multipass_refinement_mode_var, 0)
         self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
         self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
-        self.multipass_refinement_mode_combo.setFixedWidth(126)
+        self.multipass_refinement_mode_combo.setFixedWidth(95)
         multipass_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
         multipass_disabled_icon_path = _get_disabled_halgakos_icon_path(multipass_icon_path)
         self.multipass_refinement_mode_combo.setStyleSheet(f"""
@@ -15555,7 +15622,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._clear_translation_run_overrides()
         try:
             multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
-            multipass_refinement_mode_label = multipass_refinement_mode.replace('_', ' ').title()
+            multipass_refinement_mode_label = (
+                'Full + raw'
+                if multipass_refinement_mode == 'full_with_raw'
+                else multipass_refinement_mode.replace('_', ' ').title()
+            )
             targeted_refinement_failures = self._prepare_multipass_qa_refinement_run(
                 multipass_enabled,
                 multipass_refinement_mode,
@@ -18797,6 +18868,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT': getattr(self, 'refinement_full_with_raw_system_prompt', None) or self.config.get('refinement_full_with_raw_system_prompt') or getattr(self, 'default_refinement_full_with_raw_system_prompt', ''),
             'REFINEMENT_FULL_WITH_RAW_USER_PROMPT': getattr(self, 'refinement_full_with_raw_user_prompt', self.config.get('refinement_full_with_raw_user_prompt', getattr(self, 'default_refinement_full_with_raw_user_prompt', ''))),
             'REFINEMENT_FULL_WITH_RAW_RAW_ROLE': str(getattr(self, 'refinement_full_with_raw_raw_role_var', self.config.get('refinement_full_with_raw_raw_role', 'assistant')) or 'assistant').strip().lower(),
+            'REFINEMENT_FULL_WITH_RAW_RAW_HEADER': _explicit_blank_prompt_value('refinement_full_with_raw_raw_header', 'refinement_full_with_raw_raw_header', 'default_refinement_full_with_raw_raw_header'),
+            'REFINEMENT_FULL_WITH_RAW_RAW_FOOTER': _explicit_blank_prompt_value('refinement_full_with_raw_raw_footer', 'refinement_full_with_raw_raw_footer', 'default_refinement_full_with_raw_raw_footer'),
             'REFINEMENT_FAILED_SYSTEM_PROMPT': getattr(self, 'refinement_failed_system_prompt', None) or self.config.get('refinement_failed_system_prompt') or getattr(self, 'default_refinement_failed_system_prompt', ''),
             'REFINEMENT_FAILED_USER_PROMPT': getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', ''))),
             'REFINEMENT_PARTIAL_SYSTEM_PROMPT': getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', ''),
@@ -28097,6 +28170,8 @@ Important rules:
                 ('refinement_full_with_raw_system_prompt', ['refinement_full_with_raw_system_prompt'], getattr(self, 'default_refinement_full_with_raw_system_prompt', ''), str),
                 ('refinement_full_with_raw_user_prompt', ['refinement_full_with_raw_user_prompt'], getattr(self, 'default_refinement_full_with_raw_user_prompt', ''), str),
                 ('refinement_full_with_raw_raw_role', ['refinement_full_with_raw_raw_role_var'], 'assistant', lambda v: str(v).strip().lower() if str(v).strip().lower() in REFINEMENT_RAW_PROMPT_ROLES else 'assistant'),
+                ('refinement_full_with_raw_raw_header', ['refinement_full_with_raw_raw_header'], getattr(self, 'default_refinement_full_with_raw_raw_header', ''), str),
+                ('refinement_full_with_raw_raw_footer', ['refinement_full_with_raw_raw_footer'], getattr(self, 'default_refinement_full_with_raw_raw_footer', ''), str),
                 ('refinement_failed_system_prompt', ['refinement_failed_system_prompt'], getattr(self, 'default_refinement_failed_system_prompt', ''), str),
                 ('refinement_failed_user_prompt', ['refinement_failed_user_prompt'], getattr(self, 'default_refinement_failed_user_prompt', ''), str),
                 ('refinement_partial_system_prompt', ['refinement_partial_system_prompt'], getattr(self, 'default_refinement_partial_system_prompt', ''), str),
@@ -29455,6 +29530,8 @@ Important rules:
                 ('REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT', getattr(self, 'refinement_full_with_raw_system_prompt', None) or self.config.get('refinement_full_with_raw_system_prompt') or getattr(self, 'default_refinement_full_with_raw_system_prompt', '')),
                 ('REFINEMENT_FULL_WITH_RAW_USER_PROMPT', getattr(self, 'refinement_full_with_raw_user_prompt', self.config.get('refinement_full_with_raw_user_prompt', getattr(self, 'default_refinement_full_with_raw_user_prompt', '')))),
                 ('REFINEMENT_FULL_WITH_RAW_RAW_ROLE', str(getattr(self, 'refinement_full_with_raw_raw_role_var', self.config.get('refinement_full_with_raw_raw_role', 'assistant')) or 'assistant').strip().lower()),
+                ('REFINEMENT_FULL_WITH_RAW_RAW_HEADER', _explicit_blank_prompt_value('refinement_full_with_raw_raw_header', 'refinement_full_with_raw_raw_header', 'default_refinement_full_with_raw_raw_header')),
+                ('REFINEMENT_FULL_WITH_RAW_RAW_FOOTER', _explicit_blank_prompt_value('refinement_full_with_raw_raw_footer', 'refinement_full_with_raw_raw_footer', 'default_refinement_full_with_raw_raw_footer')),
                 ('REFINEMENT_FAILED_SYSTEM_PROMPT', getattr(self, 'refinement_failed_system_prompt', None) or self.config.get('refinement_failed_system_prompt') or getattr(self, 'default_refinement_failed_system_prompt', '')),
                 ('REFINEMENT_FAILED_USER_PROMPT', getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', '')))),
                 ('REFINEMENT_PARTIAL_SYSTEM_PROMPT', getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', '')),

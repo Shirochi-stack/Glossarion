@@ -101,9 +101,14 @@ def test_full_with_raw_mode_and_full_tab_are_exposed():
     assert '"full_with_raw"' in worker_source
     assert '"all", "Full"' in gui_source
     assert '"all", "All"' not in gui_source
-    assert 'addItem("Full with raw", "full_with_raw")' in gui_source
+    assert 'addItem("Full + raw", "full_with_raw")' in gui_source
+    assert '"full_with_raw", "Full + raw"' in gui_source
     assert "raw_role_icon_path = os.path.join(self.base_dir, 'Halgakos.ico')" in gui_source
     assert "image: url({raw_role_icon_path});" in gui_source
+    assert 'QLabel("Raw block header prompt:")' in gui_source
+    assert 'QLabel("Raw block footer prompt:")' in gui_source
+    assert "REFINEMENT_FULL_WITH_RAW_RAW_HEADER" in gui_source
+    assert "REFINEMENT_FULL_WITH_RAW_RAW_FOOTER" in gui_source
 
 
 def test_full_with_raw_source_message_uses_selected_role_and_defaults_to_assistant():
@@ -116,6 +121,16 @@ def test_full_with_raw_source_message_uses_selected_role_and_defaults_to_assista
     assert _refinement_raw_source_message("raw", "user")["role"] == "user"
     assert _refinement_raw_source_message("raw", "invalid")["role"] == "assistant"
     assert _refinement_raw_source_message("  ") is None
+
+    custom_message = _refinement_raw_source_message(
+        "RAW",
+        "user",
+        header="<source>",
+        footer="</source>",
+    )
+    assert custom_message == {"role": "user", "content": "<source>RAW</source>"}
+    unframed_message = _refinement_raw_source_message("RAW", header="", footer="")
+    assert unframed_message["content"] == "RAW"
 
 
 def test_full_with_raw_source_recovery_uses_mapped_chapter_filename(monkeypatch, tmp_path):
