@@ -18,21 +18,16 @@ from sdlxliff_converter import convert_sdlxliff
 from sdlxliff_extractor import extract_sdlxliff_to_chapters
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar as _shared_write_html_sdlxliff_sidecar
 from TransateKRtoEN import (
-    ContentProcessor,
     _original_markup_for_copy,
     _refinement_raw_source_message,
-    _should_copy_image_only_chapter_as_is,
     _write_html_sdlxliff_sidecar,
     should_skip_configured_special_file_for_translation,
 )
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
-    _foreign_character_qa_text_for_result,
     _missing_beautifulsoup_tags_issue,
     _sdlxliff_review_tag_counts,
-    detect_non_english_content,
-    extract_text_and_header_from_html,
 )
 
 
@@ -143,18 +138,6 @@ def test_full_with_raw_source_recovery_uses_mapped_chapter_filename(monkeypatch,
     output_dir = tmp_path / "mapped-book"
     output_dir.mkdir()
     raw_html = "<html><head><title>Raw</title></head><body><p>原文</p></body></html>"
-    raw_html = (
-        "<html><head><title>Raw</title></head><body>"
-        "<h2>\ud55c\uad6d\uc5b4 \uc81c\ubaa9</h2><img src=\"images/page.png\"/>"
-        "</body></html>"
-    )
-    cover_raw_html = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/>'
-        '</head><body><div style="text-align:center">'
-        '<img alt="Cover" src="../Images/cover_img_1.png"/>'
-        '</div></body></html>'
-    )
     opf = """<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <manifest><item id="c1" href="Text/chapter-01.xhtml" media-type="application/xhtml+xml"/></manifest>
@@ -164,7 +147,6 @@ def test_full_with_raw_source_recovery_uses_mapped_chapter_filename(monkeypatch,
     with zipfile.ZipFile(epub_path, "w") as epub:
         epub.writestr("OEBPS/content.opf", opf)
         epub.writestr("OEBPS/Text/chapter-01.xhtml", raw_html)
-        epub.writestr("OEBPS/Text/cover.xhtml", cover_raw_html)
 
     monkeypatch.setenv("EPUB_PATH", str(epub_path))
     chapter = {
@@ -175,82 +157,6 @@ def test_full_with_raw_source_recovery_uses_mapped_chapter_filename(monkeypatch,
     }
 
     assert _original_markup_for_copy(chapter, str(output_dir)) == raw_html
-    mapped_image_chapter = dict(chapter, body='<img src="images/page.png"/>', has_images=True)
-    assert _should_copy_image_only_chapter_as_is(mapped_image_chapter, str(output_dir)) is False
-    stripped_cover_chapter = {
-        "filename": "OEBPS/Text/cover.xhtml",
-        "original_filename": "cover.xhtml",
-        "original_basename": "cover",
-        "body": "",
-    }
-    assert _original_markup_for_copy(stripped_cover_chapter, str(output_dir)) == cover_raw_html
-    assert _should_copy_image_only_chapter_as_is(stripped_cover_chapter, str(output_dir)) is True
-
-
-def test_image_only_copy_as_is_treats_short_headers_as_translatable(tmp_path):
-    pure_image = {
-        "body": '<img alt="Cover" src="../Images/cover_img_1.png"/>',
-    }
-    headed_image = {
-        "body": '<html><body><h2>\ud55c\uad6d\uc5b4 \uc81c\ubaa9</h2><img src="images/page.png"/></body></html>',
-        "has_images": True,
-    }
-
-    assert _should_copy_image_only_chapter_as_is(pure_image, str(tmp_path)) is True
-    assert ContentProcessor.is_meaningful_text_content(headed_image["body"]) is True
-    assert _should_copy_image_only_chapter_as_is(headed_image, str(tmp_path)) is False
-
-    worker_source = (SRC / "TransateKRtoEN.py").read_text(encoding="utf-8")
-    multipass_start = worker_source.index("multipass_chapters = []")
-    multipass_end = worker_source.index("_process_refinement_or_tts_mode(", multipass_start)
-    multipass_filter = worker_source[multipass_start:multipass_end]
-    assert "_should_copy_image_only_chapter_as_is(_chapter, out)" in multipass_filter
-    assert 'original_output_mode == "text"' not in multipass_filter
-
-
-def test_short_file_foreign_qa_still_scans_header_tags(tmp_path, monkeypatch):
-    import scan_html_folder as scanner
-
-    html_content = '<html><body><h1>\ud55c\uad6d\uc5b4 \uc81c\ubaa9</h1><img src="cover.jpg"/></body></html>'
-    html_path = tmp_path / "cover.xhtml"
-    html_path.write_text(html_content, encoding="utf-8")
-    real_beautiful_soup = scanner.BeautifulSoup
-    parse_count = {"value": 0}
-
-    def counting_beautiful_soup(*args, **kwargs):
-        parse_count["value"] += 1
-        return real_beautiful_soup(*args, **kwargs)
-
-    scanner._extract_text_from_html_cached.cache_clear()
-    monkeypatch.setattr(scanner, "BeautifulSoup", counting_beautiful_soup)
-    extracted_text, header_text = extract_text_and_header_from_html(str(html_path))
-    assert scanner.extract_text_from_html(str(html_path)) == extracted_text
-    result = {
-        "raw_text": header_text,
-        "skip_small_file_checks": True,
-        "foreign_qa_header_text": header_text,
-    }
-
-    qa_text = _foreign_character_qa_text_for_result(result)
-    has_issue, issues = detect_non_english_content(
-        qa_text,
-        {
-            "foreign_char_threshold": 0,
-            "excluded_characters": "",
-            "target_language": "english",
-        },
-    )
-
-    assert qa_text == "\ud55c\uad6d\uc5b4 \uc81c\ubaa9"
-    assert extracted_text == header_text
-    assert parse_count["value"] == 1
-    assert has_issue is True
-    assert any(issue.startswith("Korean_text_found_") for issue in issues)
-    assert _foreign_character_qa_text_for_result({
-        "raw_text": "short body",
-        "skip_small_file_checks": True,
-        "foreign_qa_header_text": "",
-    }) == ""
 
 
 SAMPLE_SDLXLIFF = """<?xml version="1.0" encoding="utf-8"?>

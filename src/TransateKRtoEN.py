@@ -5169,27 +5169,12 @@ class ContentProcessor:
         except Exception as e:
             print(f"[WARNING] Failed to create hash: {e}")
             return hashlib.sha256(html_content.encode('utf-8')).hexdigest()
-
-    @staticmethod
-    def get_translatable_header_text(html_content):
-        """Return visible heading/title text that must not be copied untranslated."""
-        try:
-            html_content = ContentProcessor.normalize_escaped_image_tags(html_content)
-            soup = BeautifulSoup(html_content or "", 'html.parser')
-            return ' '.join(
-                tag.get_text(" ", strip=True)
-                for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
-                if tag.get_text(" ", strip=True)
-            ).strip()
-        except Exception:
-            return ""
     
     @staticmethod
     def is_meaningful_text_content(html_content):
         """Check if chapter has meaningful text beyond just structure"""
         try:
             html_content = ContentProcessor.normalize_escaped_image_tags(html_content)
-            header_text = ContentProcessor.get_translatable_header_text(html_content)
             # Check if this is plain text from enhanced extraction (html2text output)
             # html2text output characteristics:
             # - Often starts with # for headers
@@ -5237,6 +5222,7 @@ class ContentProcessor:
                     tag.decompose()
 
             headers = soup_copy.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            header_text = ' '.join(h.get_text(strip=True) for h in headers)
             for header in headers:
                 header.decompose()
 
@@ -5259,10 +5245,7 @@ class ContentProcessor:
             if len(text_content.strip()) > 200:
                 return True
             
-            # Even a short chapter heading needs translation. Treating headings
-            # as meaningful also prevents an image page from taking the text-mode
-            # copy-as-is path before its heading can be translated.
-            if header_text:
+            if header_text.strip():
                 return True
 
             all_visible_text = _clean_visible_text(soup_copy.get_text(separator=' ', strip=True))
@@ -5537,40 +5520,6 @@ def _original_markup_for_copy(chapter, output_dir):
     if recovered and recovered_has_head and not cached_has_head:
         return recovered
     return cached or recovered or chapter.get("body") or ""
-
-
-def _image_only_copy_source(chapter, output_dir):
-    """Resolve the same source markup used to classify/copy image-only chapters."""
-    source = ContentProcessor.image_processing_html(chapter)
-    # Normal text chapters never need the EPUB/OPF fallback. Limit that lookup
-    # to image candidates so multipass and first-pass classification stay cheap.
-    if source and ContentProcessor.is_meaningful_text_content(source):
-        return source
-    # Do not trust an empty/short enhanced-extraction body or a missing
-    # has_images flag: image-only XHTML can be stripped down to exactly that.
-    # Resolve the raw mapped chapter before deciding it is not an image page.
-    mapped_source = _original_markup_for_copy(chapter, output_dir)
-    if mapped_source and ContentProcessor.is_mostly_image_html(mapped_source):
-        return mapped_source
-    return source or mapped_source or ""
-
-
-def _should_copy_image_only_chapter_as_is(chapter, output_dir, source=None):
-    """Return whether text mode would preserve this image-only chapter unchanged."""
-    source = source if source is not None else _image_only_copy_source(chapter, output_dir)
-    if not source:
-        return bool(chapter.get("has_images"))
-
-    mostly_images = ContentProcessor.is_mostly_image_html(source)
-    has_images = bool(chapter.get("has_images")) or mostly_images
-    if not has_images:
-        try:
-            soup = BeautifulSoup(source, 'html.parser')
-            has_images = bool(soup.find(['img', 'image', 'object', 'video', 'svg']))
-        except Exception:
-            has_images = False
-
-    return bool(has_images and not ContentProcessor.is_meaningful_text_content(source))
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -22104,7 +22053,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Check for empty or image-only chapters
             from bs4 import BeautifulSoup
-            image_source_html = _image_only_copy_source(c, out)
+            image_source_html = ContentProcessor.image_processing_html(c)
             html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
             has_images = c.get('has_images', False) or html_mostly_images
             if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
@@ -22116,7 +22065,7 @@ def main(log_callback=None, stop_callback=None):
             
             is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
             is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
-            is_image_only_chapter = _should_copy_image_only_chapter_as_is(c, out, image_source_html)
+            is_image_only_chapter = (has_images and not has_meaningful_text)
             
             # Handle empty chapters
             if is_empty_chapter:
@@ -22968,7 +22917,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Skip empty/image-only chapters from merging
                 from bs4 import BeautifulSoup
-                image_source_html = _image_only_copy_source(c, out)
+                image_source_html = ContentProcessor.image_processing_html(c)
                 html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
                 has_images = c.get('has_images', False) or html_mostly_images
                 if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
@@ -22979,7 +22928,7 @@ def main(log_callback=None, stop_callback=None):
                 text_size = c.get('file_size', 0)
                 is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
                 is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
-                is_image_only_chapter = _should_copy_image_only_chapter_as_is(c, out, image_source_html)
+                is_image_only_chapter = (has_images and not has_meaningful_text)
                 
                 if needs_translation and not is_empty_chapter and not is_image_only_chapter:
                     chapters_needing_translation.append((idx, c, actual_num, content_hash))
@@ -23148,7 +23097,7 @@ def main(log_callback=None, stop_callback=None):
             merge_info = None
             
             from bs4 import BeautifulSoup
-            image_source_html = _image_only_copy_source(c, out)
+            image_source_html = ContentProcessor.image_processing_html(c)
             html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
             has_images = c.get('has_images', False) or html_mostly_images
             if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
@@ -23160,7 +23109,7 @@ def main(log_callback=None, stop_callback=None):
 
             is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
             is_empty_chapter = (not has_images and (text_size < 1 or is_image_link_only))
-            is_image_only_chapter = _should_copy_image_only_chapter_as_is(c, out, image_source_html)
+            is_image_only_chapter = (has_images and not has_meaningful_text)
             is_mixed_content = (has_images and has_meaningful_text)
             is_text_only = (not has_images and has_meaningful_text)
             
@@ -25220,17 +25169,18 @@ def main(log_callback=None, stop_callback=None):
                     if _should_skip_configured_special_file_for_translation(_name):
                         skipped_special_refinement += 1
                         continue
-                if _should_copy_image_only_chapter_as_is(_chapter, out):
+                _image_html = ContentProcessor.image_processing_html(_chapter)
+                if (
+                    (_chapter.get('has_images', False) or ContentProcessor.is_mostly_image_html(_image_html))
+                    and not ContentProcessor.is_meaningful_text_content(_image_html)
+                ):
                     skipped_image_only_refinement += 1
                     continue
                 multipass_chapters.append(_chapter)
             if skipped_special_refinement:
                 print(f"⏭️ Skipping {skipped_special_refinement} copied-as-is special file(s) during multipass refinement")
             if skipped_image_only_refinement:
-                print(
-                    f"⏭️ Skipping {skipped_image_only_refinement} image-only chapter(s) copied as-is "
-                    "during multipass refinement"
-                )
+                print(f"⏭️ Skipping {skipped_image_only_refinement} copied-as-is image-only chapter(s) during multipass refinement")
             _process_refinement_or_tts_mode(
                 config,
                 client,
