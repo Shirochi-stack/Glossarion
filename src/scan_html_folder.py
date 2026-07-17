@@ -908,13 +908,13 @@ _count_words_normalized = _count_chars_normalized
 _count_words_cached = _count_chars_cached
     
 def extract_text_from_html(file_path):
-    """Extract text from HTML or TXT file
-    
-    Returns:
-        str OR tuple: 
-            - For backwards compatibility: just the text (if not checking HTML structure)
-            - For new functionality: (text_content, has_html_tag) tuple
-    """
+    """Extract text from an HTML or TXT file, preserving the existing string API."""
+    text, _header_text = extract_text_and_header_from_html(file_path)
+    return text
+
+
+def extract_text_and_header_from_html(file_path):
+    """Extract document text and heading text from one cached BeautifulSoup parse."""
     # Get file modification time as part of cache key
     try:
         mtime = os.path.getmtime(file_path)
@@ -925,22 +925,37 @@ def extract_text_from_html(file_path):
     return _extract_text_from_html_cached(cache_key, file_path)
 
 def _extract_text_from_html_cached(cache_key, file_path):
-    """Cached implementation of extract_text_from_html"""
+    """Cached single-parse implementation returning (all_text, header_text)."""
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
         
     # Check if it's a .txt file
     if file_path.lower().endswith('.txt'):
         # For .txt files, just return the content directly
-        return content
+        return content, ""
     
     # For HTML files, parse with BeautifulSoup
     soup = BeautifulSoup(content, "html.parser")
     text = soup.get_text(separator='\n', strip=True)
+    header_text = '\n'.join(
+        tag.get_text(" ", strip=True)
+        for tag in soup.find_all(_FOREIGN_QA_HEADER_TAGS)
+        if tag.get_text(" ", strip=True)
+    ).strip()
     
     # For backwards compatibility, we'll handle the HTML tag check separately
     # in the scan function rather than always returning a tuple
-    return text
+    return text, header_text
+
+
+_FOREIGN_QA_HEADER_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title')
+
+
+def _foreign_character_qa_text_for_result(result):
+    """Keep the small-file exemption, except for text inside heading/title tags."""
+    if not result.get('skip_small_file_checks'):
+        return result.get('raw_text', '') or ''
+    return result.get('foreign_qa_header_text', '') or ''
 
 # Configure cache size dynamically
 _extract_text_from_html_cached = lru_cache(maxsize=get_cache_size("file_extraction") or 200)(_extract_text_from_html_cached)
@@ -2947,7 +2962,6 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""
 
     log("🔍 Enhanced duplicate detection (different naming formats)...")
-    log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
 
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
@@ -2961,6 +2975,32 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         log(f"   🚀 Using ALL {max_workers} CPU cores for enhanced detection")
         if cpu_count > 8:
             log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+
+    # Resolve the configured executor once and reuse it for both the
+    # same-chapter and preview-comparison phases. Previously the preview phase
+    # hardcoded ProcessPoolExecutor and ignored the user's thread setting.
+    try:
+        _load_path = _scan_config_json_path()
+        _cfg_use_threads = False
+        if os.path.exists(_load_path):
+            with open(_load_path, 'r', encoding='utf-8') as _cf:
+                _cfg_use_threads = bool(
+                    json.load(_cf).get('qa_scanner_settings', {}).get('use_thread_executor', False)
+                )
+    except Exception:
+        _cfg_use_threads = False
+    _use_thread_pool_enh = bool(
+        _cfg_use_threads
+        or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
+    )
+    if _use_thread_pool_enh:
+        _ExecCls = concurrent.futures.ThreadPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers}
+        log("⚡ ThreadPoolExecutor enabled for enhanced duplicate detection")
+    else:
+        _ExecCls = concurrent.futures.ProcessPoolExecutor
+        _exec_kwargs = {'max_workers': max_workers, 'initializer': _init_worker_process}
+        log("⚡ ProcessPoolExecutor enabled for enhanced duplicate detection")
     
     # Pre-compute all data
     log("   📊 Pre-computing text and preview data...")
@@ -3039,30 +3079,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batch = chapter_comparisons[i:i + batch_size]
             batches.append(('chapter_comparison', batch, worker_data))
         
-        # Executor selection for enhanced duplicate detection (honours the
-        # same QA-setting toggle as the main scan).
-        try:
-            _load_path = _scan_config_json_path()
-            _cfg_use_threads = False
-            if os.path.exists(_load_path):
-                with open(_load_path, 'r', encoding='utf-8') as _cf:
-                    _cfg_use_threads = bool(
-                        json.load(_cf).get('qa_scanner_settings', {}).get('use_thread_executor', False)
-                    )
-        except Exception:
-            _cfg_use_threads = False
-        _use_thread_pool_enh = bool(
-            _cfg_use_threads
-            or os.environ.get('QA_USE_THREAD_EXECUTOR', '0') == '1'
-        )
-        if _use_thread_pool_enh:
-            _ExecCls = concurrent.futures.ThreadPoolExecutor
-            _kw = {'max_workers': max_workers}
-            log("   🧵 Using ThreadPoolExecutor for enhanced detection")
-        else:
-            _ExecCls = concurrent.futures.ProcessPoolExecutor
-            _kw = {'max_workers': max_workers, 'initializer': _init_worker_process}
-        with _ExecCls(**_kw) as executor:
+        with _ExecCls(**_exec_kwargs) as executor:
             futures = []
             
             for batch_args in batches:
@@ -3156,8 +3173,8 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
             batch = preview_comparisons[i:i + batch_size]
             batches.append(('preview_comparison', batch, worker_data))
         
-        # Process with ProcessPoolExecutor
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker_process) as executor:
+        # Use the same configured executor as the same-chapter phase.
+        with _ExecCls(**_exec_kwargs) as executor:
             futures = []
             
             for batch_args in batches:
@@ -7216,9 +7233,10 @@ def process_html_file_batch(args):
                 with open(full_path, 'r', encoding='utf-8') as f:
                     raw_text = f.read()
                 raw_file_content = raw_text
+                foreign_qa_header_text = ""
             else:
                 # For HTML, we need extracted text for most checks...
-                raw_text = extract_text_from_html(full_path)
+                raw_text, foreign_qa_header_text = extract_text_and_header_from_html(full_path)
                 
                 # ...AND raw content for structural/tag checks
                 try:
@@ -7987,7 +8005,8 @@ def process_html_file_batch(args):
             "translation_artifacts": artifacts,
             "small_file_word_count": translated_wc_hint,
             "small_file_word_threshold": small_file_word_threshold,
-            "skip_small_file_checks": skip_small_file_checks
+            "skip_small_file_checks": skip_small_file_checks,
+            "foreign_qa_header_text": foreign_qa_header_text,
         }
         
         # Add optional fields
@@ -8924,9 +8943,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         # Check other issues
         raw_text = result['raw_text']
         
-        # Non-English content
-        if not result.get('skip_small_file_checks'):
-            has_non_english, lang_issues = detect_non_english_content(raw_text, qa_settings)
+        # Non-English content. Short image/title pages retain the normal
+        # small-file exemption for body text, but headings are always checked.
+        foreign_qa_text = _foreign_character_qa_text_for_result(result)
+        if foreign_qa_text.strip():
+            has_non_english, lang_issues = detect_non_english_content(foreign_qa_text, qa_settings)
             if has_non_english:
                 issues.extend(lang_issues)
         
@@ -9601,6 +9622,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         result.pop('semantic_sig', None)
         result.pop('structural_sig', None)
         result.pop('normalized_text', None)
+        result.pop('foreign_qa_header_text', None)
     
     if should_stop():
         log("⛔ QA scan stopped before report generation.")
