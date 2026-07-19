@@ -5622,7 +5622,27 @@ Recent translations to summarize:
         # Create browse menu button with dropdown
         self.btn_browse_menu = QPushButton("🔍 Browse ▼")
         self.btn_browse_menu.setMinimumWidth(70)
-        self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")  # primary
+        self.btn_browse_menu.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: 1px solid #1688ff;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1688ff;
+                border-color: #4ca3ff;
+            }
+            QPushButton:pressed {
+                background-color: #0069d9;
+            }
+            QPushButton:disabled {
+                background-color: #30343b;
+                color: #777d87;
+                border-color: #454b55;
+            }
+        """)
         
         # Create browse menu
         self.browse_menu = QMenu(self)
