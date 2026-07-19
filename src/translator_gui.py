@@ -1394,11 +1394,14 @@ class _InputOutputDialog(QDialog):
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
         self._output_auto_scroll_disabled = False
+        self._chat_zoom_level = 0
+        self._chat_zoom_percent = 100
         self._processing_text = ""
         self._thinking_stream_text = ""
         self._processing_label_text = "Processing"
         self._processing_spinner_active = False
         self._expanded_processing_messages = set()
+        self._copied_message_key = None
         self._assistant_avatar_data_uri = ""
         self._assistant_avatar_width = 28
         self._assistant_avatar_height = 36
@@ -1810,6 +1813,22 @@ class _InputOutputDialog(QDialog):
         self._fullscreen_shortcut.setContext(Qt.WindowShortcut)
         self._fullscreen_shortcut.activated.connect(self._toggle_fullscreen)
 
+        self._zoom_shortcuts = []
+        for sequence, adjustment in (
+            ("Ctrl++", 1),
+            ("Ctrl+=", 1),
+            ("Ctrl+-", -1),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(
+                lambda amount=adjustment: self._adjust_chat_zoom(amount)
+            )
+            self._zoom_shortcuts.append(shortcut)
+        self._zoom_reset_shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
+        self._zoom_reset_shortcut.setContext(Qt.WindowShortcut)
+        self._zoom_reset_shortcut.activated.connect(self._reset_chat_zoom)
+
     def _persist_dialog_option(self, key, checked):
         """Persist a Direct Text-only checkbox without touching global modes."""
         try:
@@ -1817,6 +1836,48 @@ class _InputOutputDialog(QDialog):
             self.translator.save_config(show_message=False)
         except Exception:
             pass
+
+    def _adjust_chat_zoom(self, adjustment):
+        """Zoom conversation and composer text with browser-style limits."""
+        try:
+            adjustment = int(adjustment)
+        except (TypeError, ValueError):
+            return
+        new_level = max(-5, min(8, self._chat_zoom_level + adjustment))
+        if new_level == self._chat_zoom_level:
+            return
+        self._chat_zoom_level = new_level
+        self._apply_chat_zoom()
+
+    def _reset_chat_zoom(self):
+        """Restore Direct Text conversation text to its default size."""
+        if self._chat_zoom_level == 0:
+            return
+        self._chat_zoom_level = 0
+        self._apply_chat_zoom()
+
+    def _apply_chat_zoom(self):
+        """Apply the retained zoom level without disturbing timeline position."""
+        zoom_factor = 1.1 ** self._chat_zoom_level
+        composer_point_size = 10.5 * zoom_factor
+        self._chat_zoom_percent = int(round(zoom_factor * 100))
+        self.input_box.setStyleSheet(
+            "QPlainTextEdit#directComposer { "
+            f"font-size: {composer_point_size:.2f}pt; "
+            "}"
+        )
+        self.input_box.setToolTip(
+            f"Composer zoom: {self._chat_zoom_percent}%"
+        )
+        self.output_box.setToolTip(
+            f"Conversation zoom: {self._chat_zoom_percent}%"
+        )
+        auto_scroll_was_disabled = self._output_auto_scroll_disabled
+        self._output_auto_scroll_disabled = True
+        try:
+            self._render_output()
+        finally:
+            self._output_auto_scroll_disabled = auto_scroll_was_disabled
 
     def _build_rounded_bubble_corners(self, color, logical_radius=12):
         """Create antialiased HiDPI corner images for QTextDocument bubbles."""
@@ -2511,6 +2572,37 @@ class _InputOutputDialog(QDialog):
             target = url.toString()
         except Exception:
             target = str(url or "")
+        copy_prefix = "direct-copy:"
+        if target.startswith(copy_prefix):
+            try:
+                message_index = int(target[len(copy_prefix):])
+                if 0 <= message_index < len(self._chat_messages):
+                    message = self._chat_messages[message_index]
+                    if message[0] != "assistant":
+                        return
+                    content = str(message[1] or "")
+                elif (
+                    self._assistant_message_active
+                    and message_index == len(self._chat_messages)
+                ):
+                    content = str(self._streamed_content or "")
+                else:
+                    return
+            except (IndexError, TypeError, ValueError):
+                return
+            if not content:
+                return
+            QApplication.clipboard().setText(content)
+            session = self._current_chat_session()
+            session_id = session.get("id") if session is not None else None
+            copied_key = (session_id, message_index)
+            self._copied_message_key = copied_key
+            self._render_output()
+            QTimer.singleShot(
+                1600,
+                lambda key=copied_key: self._clear_copy_confirmation(key),
+            )
+            return
         output_prefix = "direct-output:"
         if target.startswith(output_prefix):
             try:
@@ -2535,6 +2627,13 @@ class _InputOutputDialog(QDialog):
         session = self._current_chat_session()
         if session is not None:
             session["expanded"] = set(self._expanded_processing_messages)
+        self._render_output()
+
+    def _clear_copy_confirmation(self, copied_key):
+        """Restore the clipboard action after its brief Copied confirmation."""
+        if self._copied_message_key != copied_key:
+            return
+        self._copied_message_key = None
         self._render_output()
 
     def _clear_direct_graceful_stop_window(self):
@@ -2993,6 +3092,8 @@ class _InputOutputDialog(QDialog):
                     message[3] if len(message) > 3 else "Processing"
                 )
                 output_folder = str(message[4] if len(message) > 4 else "")
+                session = self._current_chat_session()
+                session_id = session.get("id") if session is not None else None
                 is_active_message = bool(
                     self._assistant_message_active
                     and message_index == len(messages) - 1
@@ -3037,12 +3138,30 @@ class _InputOutputDialog(QDialog):
                             "<td class='processing-detail-cell'>"
                             f"{safe_processing}</td></tr></table>"
                         )
-                output_link_html = ""
+                message_actions = []
+                if str(content or ""):
+                    was_copied = self._copied_message_key == (
+                        session_id,
+                        message_index,
+                    )
+                    copy_label = "✓&nbsp;&nbsp;Copied" if was_copied else "📋&nbsp;&nbsp;Copy output"
+                    message_actions.append(
+                        f"<a class='message-action' href='direct-copy:{message_index}' "
+                        "title='Copy the complete output to the clipboard'>"
+                        f"{copy_label}</a>"
+                    )
                 if output_folder:
-                    output_link_html = (
-                        "<div class='request-output-link'>"
-                        f"<a href='direct-output:{message_index}'>"
-                        "📁&nbsp;&nbsp;Open output folder</a></div>"
+                    message_actions.append(
+                        f"<a class='message-action' href='direct-output:{message_index}' "
+                        "title='Open this conversation output folder'>"
+                        "📁&nbsp;&nbsp;Open output folder</a>"
+                    )
+                message_actions_html = ""
+                if message_actions:
+                    message_actions_html = (
+                        "<div class='message-actions'>"
+                        + "&nbsp;&nbsp;&nbsp;".join(message_actions)
+                        + "</div>"
                     )
                 message_html.append(
                     "<table class='chat-row assistant-row' width='100%' cellspacing='0' "
@@ -3056,23 +3175,25 @@ class _InputOutputDialog(QDialog):
                     "<div class='role'>GLOSSARION</div>"
                     f"{processing_html}"
                     f"<div class='message-content'>{rendered}</div>"
-                    f"{output_link_html}"
+                    f"{message_actions_html}"
                     "</td><td width='8%'></td></tr></table>"
                     "<div class='message-gap'></div>"
                 )
 
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
+        body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
         document = (
             "<html><head><style>"
             "body { background-color: #1e1e1e; color: white; line-height: 1.48; "
-            "margin: 14px 10px; font-family: 'Segoe UI', sans-serif; font-size: 10.5pt; }"
+            "margin: 14px 10px; font-family: 'Segoe UI', sans-serif; "
+            f"font-size: {body_font_point_size:.2f}pt; }}"
             ".empty-state { color: #cbd5e1; text-align: center; margin: 100px 14% 0 14%; }"
-            ".empty-state h2 { color: white; font-size: 17pt; margin: 10px 0; }"
+            ".empty-state h2 { color: white; font-size: 1.62em; margin: 10px 0; }"
             ".empty-state p { line-height: 1.55; }"
-            ".empty-icon { color: #5a9fd4; font-size: 25pt; }"
+            ".empty-icon { color: #5a9fd4; font-size: 2.38em; }"
             ".chat-row, .chat-row td, .avatar-table, .avatar-table td { border: none; }"
-            ".role { color: #cbd5e1; font-size: 8pt; font-weight: 700; "
+            ".role { color: #cbd5e1; font-size: 0.76em; font-weight: 700; "
             "letter-spacing: 0.08em; margin-bottom: 6px; }"
             ".user-role { color: #cbd5e1; }"
             ".user-bubble { background-color: #2d2d2d; color: white; "
@@ -3093,15 +3214,16 @@ class _InputOutputDialog(QDialog):
             ".processing-detail-table { background: #171a21; "
             "border: 1px solid #4a5568; margin: 4px 0 12px 0; }"
             ".processing-detail-cell { color: #aeb8c8; padding: 9px; "
-            "font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt; "
+            "font-family: 'Consolas','Menlo',monospace; font-size: 0.81em; "
             "line-height: 1.35; }"
             ".message-gap { height: 22px; }"
             ".pending { color: #cbd5e1; font-style: italic; }"
             ".message-content { color: white; }"
-            ".request-output-link { margin: 12px 0 2px 0; padding-top: 8px; "
+            ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
-            ".request-output-link a { color: #65a9ff; font-weight: 600; "
-            "text-decoration: none; }"
+            ".message-action { color: #cbd5e1; background-color: #292929; "
+            "border: 1px solid #4a5568; padding: 3px 7px; font-size: 0.81em; "
+            "font-weight: 600; text-decoration: none; }"
             "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
             "padding: 9px; white-space: pre-wrap; }"
