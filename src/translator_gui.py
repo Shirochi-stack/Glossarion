@@ -1306,6 +1306,11 @@ class _InputOutputDialog(QDialog):
         self._log_queue = deque()
         self._active = False
         self._in_thinking = False
+        self._thinking_token_count = 0
+        self._generation_token_count = 0
+        self._processing_token_count = 0
+        self._token_encoder = None
+        self._token_encoder_initialized = False
         self._streaming_text = False
         self._streamed_content = ""
         self._temp_root = ""
@@ -1482,6 +1487,68 @@ class _InputOutputDialog(QDialog):
         self.thinking_toggle.setMinimumWidth(max(190, text_width + 48))
         self.thinking_toggle.updateGeometry()
 
+    def _refresh_processing_label(self):
+        """Show the active phase and its tiktoken-counted text volume."""
+        if self._active and self._in_thinking:
+            label = "Thinking"
+            count = self._thinking_token_count
+        elif self._active and self._streaming_text:
+            label = "Generating Text"
+            count = self._generation_token_count
+        else:
+            label = "Processing"
+            count = self._processing_token_count
+        suffix = f" ({count:,} tokens)" if count else ""
+        self._set_thinking_toggle_text(label + suffix)
+
+    def _get_token_encoder(self):
+        """Resolve and cache the closest tiktoken encoder for the selected model."""
+        if self._token_encoder_initialized:
+            return self._token_encoder
+
+        self._token_encoder_initialized = True
+        try:
+            import tiktoken
+
+            model_name = str(
+                getattr(self.translator, 'model_var', '')
+                or getattr(self.translator, 'config', {}).get('model', '')
+                or os.environ.get('MODEL', '')
+            ).strip()
+            candidates = [model_name]
+            if '/' in model_name:
+                candidates.append(model_name.rsplit('/', 1)[-1])
+
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                try:
+                    self._token_encoder = tiktoken.encoding_for_model(candidate)
+                    return self._token_encoder
+                except KeyError:
+                    continue
+
+            try:
+                self._token_encoder = tiktoken.get_encoding('o200k_base')
+            except Exception:
+                self._token_encoder = tiktoken.get_encoding('cl100k_base')
+        except Exception:
+            self._token_encoder = None
+        return self._token_encoder
+
+    def _count_tokens(self, text):
+        """Count visible phase text with tiktoken; return zero if unavailable."""
+        value = str(text or "").replace('\u200b', '')
+        if not value.strip():
+            return 0
+        encoder = self._get_token_encoder()
+        if encoder is None:
+            return 0
+        try:
+            return len(encoder.encode(value, disallowed_special=()))
+        except Exception:
+            return 0
+
     def _set_thinking_spinner_active(self, active):
         active = bool(active)
         self.thinking_spinner_label.setVisible(active)
@@ -1573,6 +1640,11 @@ class _InputOutputDialog(QDialog):
         self._set_thinking_toggle_text("Processing")
         self._log_queue.clear()
         self._in_thinking = False
+        self._thinking_token_count = 0
+        self._generation_token_count = 0
+        self._processing_token_count = 0
+        self._token_encoder = None
+        self._token_encoder_initialized = False
         self._streaming_text = False
         self._streamed_content = ""
         self._preserve_temp_root = False
@@ -1669,6 +1741,7 @@ class _InputOutputDialog(QDialog):
             return "thinking"
 
         if "text streaming" in low or "first text token" in low:
+            self._in_thinking = False
             self._streaming_text = True
             return "log"
         if "stream complete" in low or "translation completed" in low:
@@ -1702,19 +1775,21 @@ class _InputOutputDialog(QDialog):
                 if kind == "content":
                     chunk = line + "\n"
                     self._streamed_content += chunk
+                    self._generation_token_count += self._count_tokens(chunk)
                     output_changed = True
                 elif kind == "thinking":
                     value = line[4:] if line.startswith("    ") else line
                     self._append_thinking(value + "\n")
+                    self._thinking_token_count += self._count_tokens(value + "\n")
                 else:
                     self._append_thinking(line + "\n")
+                    self._processing_token_count += self._count_tokens(line + "\n")
 
         if output_changed:
             self._render_output()
 
-        if drained and not self.thinking_toggle.isChecked():
-            lines = max(0, self.thinking_box.blockCount() - 1)
-            self._set_thinking_toggle_text(f"Processing ({lines})")
+        if drained:
+            self._refresh_processing_label()
 
     @staticmethod
     def _markup_to_html(source):
@@ -1965,6 +2040,8 @@ class _InputOutputDialog(QDialog):
         self._saved_gui_attrs = {}
         self._context_saved = False
         self._active = False
+        self._in_thinking = False
+        self._refresh_processing_label()
         self._set_thinking_spinner_active(False)
         self.input_box.setEnabled(True)
         self.enter_button.setText("Enter")
@@ -26174,7 +26251,7 @@ Important rules:
 
     def _show_glossary_mode_welcome(self):
         """Show a one-time welcome dialog explaining glossary modes, extraction formats,
-        model prefixes, and program guide across 4 pages with Halgakos.ico mascot.
+        model prefixes, and program guide across 5 pages with Halgakos.ico mascot.
         """
         try:
             if self.config.get('glossary_mode_dialog_shown', False):
@@ -26191,8 +26268,16 @@ Important rules:
             sw, sh = screen.width(), screen.height()
             dialog = QDialog(self)
             dialog.setWindowTitle("Welcome to Glossarion")
-            dialog.resize(int(sw * 0.40), int(sh * 0.77))
-            dialog.setMinimumSize(int(sw * 0.34), int(sh * 0.60))
+            if sh < 900:
+                compact_height_ratio = 0.76
+            elif sh <= 1200:
+                compact_height_ratio = 0.70
+            else:
+                compact_height_ratio = 0.66
+            compact_page_size = QSize(int(sw * 0.40), int(sh * compact_height_ratio))
+            regular_page_size = QSize(int(sw * 0.40), int(sh * 0.77))
+            dialog.resize(compact_page_size)
+            dialog.setMinimumSize(int(sw * 0.34), int(sh * 0.52))
             
             # ── Brighter gradient ──
             dialog.setStyleSheet("""
@@ -26290,7 +26375,7 @@ Important rules:
             main_layout.addLayout(header)
             
             # Page indicator
-            page_indicator = QLabel("Page 1 of 4")
+            page_indicator = QLabel("Page 1 of 5")
             page_indicator.setFont(QFont("Arial", 9))
             page_indicator.setStyleSheet("color: #8090a8;")
             page_indicator.setAlignment(Qt.AlignCenter)
@@ -26305,8 +26390,15 @@ Important rules:
             page1 = QWidget()
             page1.setStyleSheet("background: transparent;")
             p1_lay = QVBoxLayout(page1)
-            p1_lay.setContentsMargins(0, 2, 0, 0)
-            p1_lay.setSpacing(2)
+            p1_lay.setContentsMargins(0, 0, 0, 0)
+            p1_lay.setSpacing(1)
+
+            # Page 1 has eight cards, so use a slightly denser type scale than
+            # the later two-card pages without sacrificing readability.
+            p1_emoji_px = max(19, int(23 * ui_s))
+            p1_title_pt = max(10, int(12 * ui_s))
+            p1_sub_pt = max(8, int(9 * ui_s))
+            p1_feat_pt = max(8, int(8 * ui_s))
             
             mode_data = [
                 {
@@ -26385,7 +26477,9 @@ Important rules:
             modes_w = QWidget()
             modes_w.setStyleSheet("background: transparent;")
             modes_lay = QGridLayout(modes_w)
-            modes_lay.setSpacing(3)
+            modes_lay.setContentsMargins(0, 0, 0, 0)
+            modes_lay.setHorizontalSpacing(3)
+            modes_lay.setVerticalSpacing(2)
             for c in range(2):
                 modes_lay.setColumnStretch(c, 1)
             
@@ -26412,43 +26506,44 @@ Important rules:
                     card.setStyleSheet(f"QFrame {{ background-color: #111520; border: 1px solid rgba(255,255,255,0.12); border-radius: 5px; }} QFrame:hover {{ background-color: {mi['hover']}; border-color: {mi['accent']}; }}")
                 
                 cl = QVBoxLayout(card)
-                m = max(4, int(6 * ui_s))
-                cl.setContentsMargins(m, m, m, max(2, int(3 * ui_s)))
+                m = max(3, int(4 * ui_s))
+                cl.setContentsMargins(m, m, m, m)
+                cl.setSpacing(max(1, int(2 * ui_s)))
                 
                 el = QLabel(mi["emoji"])
-                el.setFont(QFont("Arial", emoji_px))
+                el.setFont(QFont("Arial", p1_emoji_px))
                 el.setAlignment(Qt.AlignCenter)
                 el.setStyleSheet("background:transparent; color:white; border:none;")
                 cl.addWidget(el)
                 
                 tl = QLabel(mi["title"])
-                tl.setFont(QFont("Arial", title_pt, QFont.Bold))
+                tl.setFont(QFont("Arial", p1_title_pt, QFont.Bold))
                 tl.setWordWrap(True)
                 tl.setAlignment(Qt.AlignCenter)
                 tl.setStyleSheet("background:transparent; color:white; border:none;")
                 cl.addWidget(tl)
                 
                 sl = QLabel(mi["subtitle"])
-                sl.setFont(QFont("Arial", sub_pt))
+                sl.setFont(QFont("Arial", p1_sub_pt))
                 sl.setWordWrap(True)
                 sl.setAlignment(Qt.AlignCenter)
                 sl.setStyleSheet(f"background:transparent; color:{mi['accent']}; border:none;")
                 cl.addWidget(sl)
-                cl.addSpacing(2)
+                cl.addSpacing(1)
                 
                 for feat in mi["features"]:
                     fl = QLabel(feat)
-                    fl.setFont(QFont("Arial", feat_pt))
+                    fl.setFont(QFont("Arial", p1_feat_pt))
                     fl.setWordWrap(True)
                     fl.setStyleSheet("background:transparent; color:#e8eef8; border:none;")
                     cl.addWidget(fl)
                 
                 if mi["rec"]:
-                    cl.addSpacing(6)
+                    cl.addSpacing(2)
                     rl = QLabel(mi["rec"])
-                    rl.setFont(QFont("Segoe UI Semibold", feat_pt, QFont.Bold))
+                    rl.setFont(QFont("Segoe UI Semibold", p1_feat_pt, QFont.Bold))
                     rl.setWordWrap(True)
-                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.08); color:white; border: 2px solid {mi['accent']}; padding:4px 8px; border-radius:3px;")
+                    rl.setStyleSheet(f"background-color: rgba(255,255,255,0.08); color:white; border: 1px solid {mi['accent']}; padding:2px 6px; border-radius:3px;")
                     rl.setAlignment(Qt.AlignCenter)
                     cl.addWidget(rl)
                 
@@ -26465,8 +26560,8 @@ Important rules:
             note1 = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. Full mode captures the most terms but costs more.")
             note1.setWordWrap(True)
             note1.setAlignment(Qt.AlignCenter)
-            note1.setFont(QFont("Arial", 9))
-            note1.setStyleSheet("color: #9ca3af; padding-bottom: 8px;")
+            note1.setFont(QFont("Arial", 8))
+            note1.setStyleSheet("color: #9ca3af; padding: 2px 0;")
             p1_lay.addWidget(note1)
             stack.addWidget(page1)
             
@@ -27059,6 +27154,16 @@ Important rules:
                     next_btn.setText("✅ Get Started")
                 else:
                     next_btn.setText("Next →")
+
+                # Keep the dense mode grid compact, then restore the original
+                # roomier size for the remaining information-heavy pages.
+                if not dialog.isMaximized() and not dialog.isFullScreen():
+                    target_size = compact_page_size if ci == 0 else regular_page_size
+                    old_center = dialog.frameGeometry().center()
+                    dialog.resize(target_size)
+                    resized_geo = dialog.frameGeometry()
+                    resized_geo.moveCenter(old_center)
+                    dialog.move(resized_geo.topLeft())
             
             def go_next():
                 if _nav_locked[0]:
