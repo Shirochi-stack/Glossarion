@@ -2113,6 +2113,11 @@ _EXPLICIT_QUOTATION_MARKS = frozenset(
 )
 _APOSTROPHE_LIKE_MARKS = frozenset("'‘’＇")
 _MISTYPED_HEX_APOSTROPHE_RE = re.compile(r"&(?:#x|x)39;", re.IGNORECASE)
+_STYLISTIC_SINGLE_QUOTE_RE = re.compile(r"(?<!\w)'[^'\r\n]+?'(?!\w)")
+_MISSING_ENDING_QUOTATION_RE = re.compile(
+    r'(?s)<p[^>]*>(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*'
+    r'(?:"(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*)*</p>'
+)
 
 
 def _normalize_quotation_entities(text):
@@ -2127,12 +2132,21 @@ def _normalize_quotation_entities(text):
     return html_lib.unescape(normalized)
 
 
-def _count_quotation_marks(text):
+def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
     """Count quotation delimiters while ignoring apostrophes inside words."""
     decoded = _normalize_quotation_entities(text)
+    skipped_single_quote_indexes = set()
+    if skip_stylistic_single_quotes:
+        for match in _STYLISTIC_SINGLE_QUOTE_RE.finditer(decoded):
+            skipped_single_quote_indexes.add(match.start())
+            skipped_single_quote_indexes.add(match.end() - 1)
+
     count = 0
     for index, char in enumerate(decoded):
         if char not in _EXPLICIT_QUOTATION_MARKS and unicodedata.category(char) not in ('Pi', 'Pf'):
+            continue
+
+        if char == "'" and index in skipped_single_quote_indexes:
             continue
 
         if char in _APOSTROPHE_LIKE_MARKS:
@@ -2158,7 +2172,31 @@ def _visible_text_for_quotation_check(html_content, allow_plain_text=False):
     return ''
 
 
-def extract_epub_quotation_info(epub_path, log=print):
+def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
+    """Return 1-based paragraphs with an odd number of straight double quotes."""
+    normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
+    soup = BeautifulSoup(normalized_html, 'html.parser')
+    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+        tag.decompose()
+
+    paragraph_texts = [paragraph.get_text() for paragraph in soup.find_all('p')]
+    if not paragraph_texts and allow_plain_text and soup.find() is None:
+        paragraph_texts = [soup.get_text()]
+
+    missing = []
+    for paragraph_index, paragraph_text in enumerate(paragraph_texts, start=1):
+        # Run the requested regex on a tag-free synthetic paragraph so quotes
+        # in nested HTML attributes cannot create false positives.
+        synthetic_paragraph = f"<p>{html_lib.escape(paragraph_text, quote=False)}</p>"
+        if _MISSING_ENDING_QUOTATION_RE.fullmatch(synthetic_paragraph):
+            missing.append({
+                'paragraph_index': paragraph_index,
+                'text': paragraph_text.strip(),
+            })
+    return missing
+
+
+def extract_epub_quotation_info(epub_path, log=print, skip_stylistic_single_quotes=False):
     """Extract quotation counts in EPUB spine order without changing ?! logic."""
     quotation_info = {}
     spine_files = {}
@@ -2218,7 +2256,10 @@ def extract_epub_quotation_info(epub_path, log=print):
 
                     visible_text = _visible_text_for_quotation_check(content)
                     quotation_info[spine_index] = {
-                        'quotation_marks': _count_quotation_marks(visible_text),
+                        'quotation_marks': _count_quotation_marks(
+                            visible_text,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                        ),
                         'filename': os.path.basename(file_path),
                         'spine_index': spine_index,
                     }
@@ -2236,7 +2277,10 @@ def extract_epub_quotation_info(epub_path, log=print):
                     except Exception:
                         continue
                     quotation_info[index] = {
-                        'quotation_marks': _count_quotation_marks(_visible_text_for_quotation_check(content)),
+                        'quotation_marks': _count_quotation_marks(
+                            _visible_text_for_quotation_check(content),
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                        ),
                         'filename': os.path.basename(file_path),
                         'spine_index': index,
                     }
@@ -2252,6 +2296,7 @@ def detect_quotation_mismatch(
     chapter_key,
     original_quotation_info,
     ignore_excess=False,
+    skip_stylistic_single_quotes=False,
 ):
     """Compare total source and translated quotation delimiters for one chapter."""
     try:
@@ -2259,7 +2304,10 @@ def detect_quotation_mismatch(
             return False, []
 
         original_count = int(original_quotation_info[chapter_key].get('quotation_marks', 0))
-        translated_count = _count_quotation_marks(translated_text)
+        translated_count = _count_quotation_marks(
+            translated_text,
+            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+        )
         if translated_count == original_count:
             return False, []
         if ignore_excess and translated_count > original_count:
@@ -7764,6 +7812,20 @@ def process_html_file_batch(args):
                 raw_file_content,
                 allow_plain_text=text_file_mode,
             )
+            missing_ending_quotations = _missing_ending_quotation_paragraphs(
+                raw_file_content,
+                allow_plain_text=text_file_mode,
+            )
+            for missing_ending in missing_ending_quotations:
+                paragraph_index = missing_ending['paragraph_index']
+                paragraph_example = missing_ending.get('text', '')[:160]
+                artifacts.append({
+                    'type': 'missing_ending_quotation',
+                    'count': 1,
+                    'examples': [paragraph_example],
+                    'severity': 'medium',
+                })
+                issues.append(f"missing_ending_quotation_p{paragraph_index}")
 
             search_filename = filename.lower()
             if search_filename.startswith('response_'):
@@ -7795,6 +7857,10 @@ def process_html_file_batch(args):
                     matched_quotation_key,
                     original_quotation_info,
                     ignore_excess=qa_settings.get('ignore_excess_quotation_marks', False),
+                    skip_stylistic_single_quotes=qa_settings.get(
+                        'skip_stylistic_single_quotes',
+                        False,
+                    ),
                 )
                 if has_quotation_mismatch:
                     for quotation_issue in quotation_issues:
@@ -8406,6 +8472,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ai_truncation_tail_chars': 400,
             'check_quotation_mismatch': False,
             'ignore_excess_quotation_marks': False,
+            'skip_stylistic_single_quotes': False,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -8537,6 +8604,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Extract quotations through the same already-selected raw source path.
     # This option never participates in choosing or rematching epub_path.
     if qa_settings.get('check_quotation_mismatch', False):
+        skip_stylistic_single_quotes = qa_settings.get(
+            'skip_stylistic_single_quotes',
+            False,
+        )
         if text_file_mode:
             word_count_folder = os.path.join(folder_path, 'word_count')
             if os.path.exists(word_count_folder):
@@ -8555,7 +8626,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             allow_plain_text=True,
                         )
                         original_quotation_info[chunk_file] = {
-                            'quotation_marks': _count_quotation_marks(source_text),
+                            'quotation_marks': _count_quotation_marks(
+                                source_text,
+                                skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            ),
                             'filename': chunk_file,
                         }
                     except Exception as exc:
@@ -8586,14 +8660,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         source_key = os.path.basename(epub_path)
 
                     original_quotation_info[source_key] = {
-                        'quotation_marks': _count_quotation_marks(source_content),
+                        'quotation_marks': _count_quotation_marks(
+                            source_content,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                        ),
                         'filename': source_key,
                     }
                 except Exception as exc:
                     log(f"   ⚠️ Could not extract quotations from source file: {exc}")
         elif epub_path and os.path.exists(epub_path):
             log(f"💬 Extracting quotation information from original EPUB: {os.path.basename(epub_path)}")
-            original_quotation_info = extract_epub_quotation_info(epub_path, log)
+            original_quotation_info = extract_epub_quotation_info(
+                epub_path,
+                log,
+                skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+            )
 
         if original_quotation_info:
             total_quotations = sum(
