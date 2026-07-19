@@ -1343,7 +1343,11 @@ class _InputOutputDialog(QDialog):
     def __init__(self, translator):
         super().__init__(translator)
         from collections import deque
-        from PySide6.QtWidgets import QPlainTextEdit, QTextBrowser
+        from PySide6.QtWidgets import (
+            QPlainTextEdit,
+            QTextBrowser,
+            QListWidget,
+        )
 
         self.translator = translator
         self._log_queue = deque()
@@ -1367,13 +1371,40 @@ class _InputOutputDialog(QDialog):
         self._saved_browse_enabled = True
         self._listener_attached = False
         self._context_saved = False
-        self._thinking_spinner = None
         self._last_output_folder = ""
         self._preserve_temp_root = False
         self._direct_graceful_stop_pending = False
         self._direct_graceful_stop_ts = 0.0
+        self._chat_session_counter = 1
+        self._chat_sessions = [
+            {
+                "id": self._chat_session_counter,
+                "title": "New chat",
+                "messages": [],
+                "draft": "",
+                "output_folder": "",
+                "output_folder_name": "",
+                "expanded": set(),
+            }
+        ]
+        self._current_chat_index = 0
+        self._switching_chat = False
+        self._chat_messages = self._chat_sessions[0]["messages"]
+        self._chat_sidebar_hidden = False
+        self._assistant_message_active = False
+        self._output_auto_scroll_disabled = False
+        self._processing_text = ""
+        self._thinking_stream_text = ""
+        self._processing_label_text = "Processing"
+        self._processing_spinner_active = False
+        self._expanded_processing_messages = set()
+        self._assistant_avatar_data_uri = ""
+        self._assistant_avatar_width = 28
+        self._assistant_avatar_height = 36
+        self._user_bubble_corner_data = {}
 
         self.setWindowTitle("Direct Text Translation")
+        self.setObjectName("directTextDialog")
         self.setModal(False)
         self.setWindowFlags(
             self.windowFlags()
@@ -1381,29 +1412,266 @@ class _InputOutputDialog(QDialog):
             | Qt.WindowMinMaxButtonsHint
             | Qt.WindowCloseButtonHint
         )
-        self.resize(780, 680)
-        self.setMinimumSize(560, 480)
+        self.resize(940, 760)
+        self.setMinimumSize(680, 520)
         self._restore_maximized_after_fullscreen = False
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(9)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title = QLabel("💬  Direct Text Translation")
-        title.setStyleSheet("font-size: 15pt; font-weight: bold;")
-        root.addWidget(title)
-
-        hint = QLabel(
-            "Type text below and press Enter. This uses the selected model and prompt; "
-            "the Direct Text overrides can be changed below."
+        self.setStyleSheet(
+            # Generic widgets continue to inherit TranslatorGUI's stylesheet;
+            # these rules only define the Direct Text-specific structure.
+            "QWidget#directHeader { background: transparent; "
+            "border-bottom: 1px solid #4a5568; }"
+            "QLabel#directTitle { font-size: 15pt; font-weight: 700; }"
+            "QLabel#directSubtitle, QLabel#directMuted { color: #cbd5e1; }"
+            "QPushButton#sidebarToggleButton { min-width: 34px; max-width: 34px; "
+            "min-height: 34px; max-height: 34px; padding: 0; font-size: 11pt; }"
+            "QTabWidget#directTextTabs::pane { border: none; background: transparent; }"
+            "QTabWidget#directTextTabs QTabBar::tab { background: #1e1e1e; color: #cbd5e1; "
+            "border: none; border-bottom: 2px solid transparent; min-width: 108px; "
+            "padding: 10px 18px; font-weight: 600; }"
+            "QTabWidget#directTextTabs QTabBar::tab:hover { color: white; background: #2d2d2d; }"
+            "QTabWidget#directTextTabs QTabBar::tab:selected { color: #ffffff; "
+            "border-bottom: 2px solid #5a9fd4; background: #2d2d2d; }"
+            "QFrame#chatSidebar { background: #181818; "
+            "border-right: 1px solid #4a5568; }"
+            "QLabel#chatSidebarTitle { font-size: 10pt; font-weight: 700; }"
+            "QListWidget#chatHistoryList { background: transparent; border: none; "
+            "outline: none; padding: 0; }"
+            "QListWidget#chatHistoryList::item { color: #cbd5e1; "
+            "padding: 9px 10px; margin: 2px 0; border-radius: 4px; }"
+            "QListWidget#chatHistoryList::item:hover { background: #252525; color: white; }"
+            "QListWidget#chatHistoryList::item:selected { background: #2d2d2d; color: white; }"
+            "QTextBrowser#chatTimeline { background: #1e1e1e; color: white; "
+            "border: none; padding: 0; selection-background-color: #5a9fd4; }"
+            "QFrame#directComposerCard { background: #2d2d2d; border: 1px solid #4a5568; "
+            "border-radius: 14px; }"
+            "QFrame#directComposerCard:focus-within { border-color: #666666; }"
+            "QPlainTextEdit#directComposer { background: transparent; color: white; "
+            "border: none; padding: 6px 4px; font-size: 10.5pt; "
+            "selection-background-color: #5a9fd4; }"
+            "QPushButton#directSendButton { min-width: 72px; min-height: 42px; "
+            "font-size: 10pt; font-weight: 700; padding: 0 12px; }"
+            "QPushButton#directSendButton[directState=\"running\"] { background: #d94a43; color: white; }"
+            "QPushButton#directSendButton[directState=\"running\"]:hover { background: #e25a53; }"
+            "QPushButton#directSendButton[directState=\"finishing\"] { background: #c58b32; color: white; }"
+            "QPushButton#directSendButton[directState=\"stopping\"], "
+            "QPushButton#directSendButton:disabled { background: #4a4a4a; color: #aaaaaa; }"
+            "QFrame#directSettingsCard { background: transparent; border: 1px solid #4a5568; "
+            "border-radius: 10px; }"
+            "QLabel#settingDescription { color: #cbd5e1; padding-left: 30px; }"
         )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #aeb4c2;")
-        root.addWidget(hint)
 
-        options_row = QHBoxLayout()
-        options_row.setContentsMargins(0, 0, 0, 0)
-        options_row.setSpacing(18)
+        header = QWidget()
+        header.setObjectName("directHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(22, 12, 20, 12)
+        header_layout.setSpacing(12)
+
+        self.sidebar_toggle_button = QPushButton("◀")
+        self.sidebar_toggle_button.setObjectName("sidebarToggleButton")
+        self.sidebar_toggle_button.setToolTip("Hide conversation sidebar")
+        self.sidebar_toggle_button.setAccessibleName("Hide conversation sidebar")
+        self.sidebar_toggle_button.setAutoDefault(False)
+        self.sidebar_toggle_button.clicked.connect(self._toggle_chat_sidebar)
+        header_layout.addWidget(self.sidebar_toggle_button, 0, Qt.AlignTop)
+
+        brand = QLabel("G")
+        brand.setFixedSize(36, 36)
+        brand.setAlignment(Qt.AlignCenter)
+        brand.setStyleSheet(
+            "background: transparent; color: white; border: none; "
+            "font-size: 13pt; font-weight: bold;"
+        )
+        try:
+            brand_icon_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico"
+            )
+            if os.path.isfile(brand_icon_path):
+                brand_icon = QIcon(brand_icon_path)
+                available_sizes = brand_icon.availableSizes()
+                if available_sizes:
+                    largest_size = max(
+                        available_sizes,
+                        key=lambda size: size.width() * size.height(),
+                    )
+                    source_pixmap = brand_icon.pixmap(largest_size)
+                else:
+                    source_pixmap = brand_icon.pixmap(QSize(256, 256))
+                if source_pixmap.isNull():
+                    source_pixmap = QPixmap(brand_icon_path)
+                if not source_pixmap.isNull():
+                    try:
+                        icon_dpr = max(1.0, float(self.devicePixelRatioF()))
+                    except Exception:
+                        icon_dpr = 1.0
+
+                    brand_device_px = max(1, int(round(30 * icon_dpr)))
+                    brand_pixmap = source_pixmap.scaled(
+                        QSize(brand_device_px, brand_device_px),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                    try:
+                        brand_pixmap.setDevicePixelRatio(icon_dpr)
+                    except Exception:
+                        pass
+                    brand.setPixmap(brand_pixmap)
+                    try:
+                        from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+
+                        avatar_device_px = max(1, int(round(36 * icon_dpr)))
+                        avatar_pixmap = source_pixmap.scaled(
+                            QSize(avatar_device_px, avatar_device_px),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation,
+                        )
+                        # QTextDocument does not reliably honor QPixmap DPR in
+                        # data URIs. Embed device-resolution pixels, then set
+                        # explicit logical dimensions on the HTML image.
+                        self._assistant_avatar_width = max(
+                            1, int(round(avatar_pixmap.width() / icon_dpr))
+                        )
+                        self._assistant_avatar_height = max(
+                            1, int(round(avatar_pixmap.height() / icon_dpr))
+                        )
+                        avatar_bytes = QByteArray()
+                        avatar_buffer = QBuffer(avatar_bytes)
+                        avatar_buffer.open(QIODevice.WriteOnly)
+                        avatar_pixmap.save(avatar_buffer, "PNG")
+                        avatar_buffer.close()
+                        encoded = bytes(avatar_bytes.toBase64()).decode("ascii")
+                        self._assistant_avatar_data_uri = (
+                            "data:image/png;base64," + encoded
+                        )
+                    except Exception:
+                        self._assistant_avatar_data_uri = ""
+        except Exception:
+            pass
+        header_layout.addWidget(brand, 0, Qt.AlignTop)
+
+        heading = QVBoxLayout()
+        heading.setSpacing(1)
+        title = QLabel("Direct Text")
+        title.setObjectName("directTitle")
+        subtitle = QLabel("Translate with your currently selected model and prompt")
+        subtitle.setObjectName("directSubtitle")
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        header_layout.addLayout(heading)
+        header_layout.addStretch(1)
+
+        self.new_chat_button = QPushButton("＋  New chat")
+        self.new_chat_button.setObjectName("newChatButton")
+        self.new_chat_button.setToolTip("Create a new Direct Text conversation")
+        self.new_chat_button.clicked.connect(self._new_chat)
+        header_layout.addWidget(self.new_chat_button)
+        root.addWidget(header)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("directTextTabs")
+        self.tabs.setDocumentMode(True)
+        root.addWidget(self.tabs, 1)
+
+        # The conversation is the primary surface: a message timeline above a
+        # compact composer, matching the layout users expect from chat clients.
+        self.chat_tab = QWidget()
+        chat_shell_layout = QHBoxLayout(self.chat_tab)
+        chat_shell_layout.setContentsMargins(0, 0, 0, 0)
+        chat_shell_layout.setSpacing(0)
+
+        self.chat_sidebar = QFrame()
+        self.chat_sidebar.setObjectName("chatSidebar")
+        self.chat_sidebar.setMinimumWidth(168)
+        self.chat_sidebar.setMaximumWidth(224)
+        sidebar_layout = QVBoxLayout(self.chat_sidebar)
+        sidebar_layout.setContentsMargins(10, 12, 10, 12)
+        sidebar_layout.setSpacing(8)
+
+        sidebar_title = QLabel("Chats")
+        sidebar_title.setObjectName("chatSidebarTitle")
+        sidebar_layout.addWidget(sidebar_title)
+
+        self.chat_list = QListWidget()
+        self.chat_list.setObjectName("chatHistoryList")
+        self.chat_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chat_list.setTextElideMode(Qt.ElideRight)
+        self.chat_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        sidebar_layout.addWidget(self.chat_list, 1)
+
+        self.delete_chat_button = QPushButton("Delete chat")
+        self.delete_chat_button.setToolTip("Delete the selected conversation")
+        self.delete_chat_button.clicked.connect(self._delete_current_chat)
+        sidebar_layout.addWidget(self.delete_chat_button)
+        chat_shell_layout.addWidget(self.chat_sidebar)
+
+        conversation = QWidget()
+        chat_layout = QVBoxLayout(conversation)
+        chat_layout.setContentsMargins(22, 12, 22, 16)
+        chat_layout.setSpacing(8)
+        chat_shell_layout.addWidget(conversation, 1)
+
+        self.output_box = QTextBrowser()
+        self.output_box.setObjectName("chatTimeline")
+        self.output_box.setOpenExternalLinks(False)
+        self.output_box.setOpenLinks(False)
+        self.output_box.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.output_box.customContextMenuRequested.connect(self._show_output_context_menu)
+        self.output_box.anchorClicked.connect(self._handle_output_anchor)
+        chat_layout.addWidget(self.output_box, 1)
+
+        composer = QFrame()
+        composer.setObjectName("directComposerCard")
+        composer.setMaximumHeight(112)
+        composer_layout = QHBoxLayout(composer)
+        composer_layout.setContentsMargins(12, 7, 8, 7)
+        composer_layout.setSpacing(8)
+
+        self.input_box = QPlainTextEdit()
+        self.input_box.setObjectName("directComposer")
+        self.input_box.setPlaceholderText(
+            "Message to translate…  (drop a text file here)"
+        )
+        self.input_box.setMinimumHeight(58)
+        self.input_box.setMaximumHeight(94)
+        self.input_box.setAcceptDrops(True)
+        self.input_box.dragEnterEvent = self._input_drag_enter_event
+        self.input_box.dropEvent = self._input_drop_event
+        self.input_box.installEventFilter(self)
+        self.input_box.textChanged.connect(self._on_chat_draft_changed)
+        composer_layout.addWidget(self.input_box, 1)
+
+        self.enter_button = QPushButton("Send")
+        self.enter_button.setObjectName("directSendButton")
+        self.enter_button.setMinimumSize(76, 44)
+        self.enter_button.setDefault(True)
+        self.enter_button.clicked.connect(self._on_enter_clicked)
+        self._set_enter_button_state('idle')
+        composer_layout.addWidget(self.enter_button, 0, Qt.AlignBottom)
+        chat_layout.addWidget(composer)
+
+        footer_row = QHBoxLayout()
+        footer_row.setContentsMargins(2, 0, 2, 0)
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("directMuted")
+        self.status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.status_label.setOpenExternalLinks(False)
+        self.status_label.linkActivated.connect(self._open_output_folder)
+        footer_row.addWidget(self.status_label, 1)
+        composer_hint = QLabel("Enter to send  ·  Shift+Enter for a new line")
+        composer_hint.setObjectName("directMuted")
+        footer_row.addWidget(composer_hint)
+        chat_layout.addLayout(footer_row)
+        self.tabs.addTab(self.chat_tab, "Chat")
+        self._refresh_chat_list()
+        self.chat_list.currentRowChanged.connect(self._switch_chat)
+        self.chat_list.itemDoubleClicked.connect(self._rename_chat_item)
+        self.chat_list.customContextMenuRequested.connect(
+            self._show_chat_context_menu
+        )
 
         legacy_simple_mode = bool(
             translator.config.get('direct_text_force_simple_mode', True)
@@ -1426,8 +1694,6 @@ class _InputOutputDialog(QDialog):
                 'direct_text_force_multipass_off', checked
             )
         )
-        options_row.addWidget(self.force_multipass_off_checkbox)
-
         self.force_no_glossary_checkbox = translator._create_styled_checkbox(
             "Force No Glossary"
         )
@@ -1445,8 +1711,6 @@ class _InputOutputDialog(QDialog):
                 'direct_text_force_no_glossary', checked
             )
         )
-        options_row.addWidget(self.force_no_glossary_checkbox)
-
         self.skip_thinking_checkbox = translator._create_styled_checkbox(
             "Disable all thinking"
         )
@@ -1462,114 +1726,71 @@ class _InputOutputDialog(QDialog):
                 'direct_text_disable_thinking', checked
             )
         )
-        options_row.addWidget(self.skip_thinking_checkbox)
-        options_row.addStretch(1)
-        root.addLayout(options_row)
-
-        self.input_box = QPlainTextEdit()
-        self.input_box.setPlaceholderText(
-            "Paste or type the text to translate, or drop a text file here…"
+        # _create_styled_checkbox supplies the parent's indicator styling but
+        # QCheckBox otherwise picks up QWidget's opaque background.  The cards
+        # are deliberately transparent, so keep the checkbox label area
+        # transparent as well instead of drawing a dark full-width stripe.
+        for checkbox in (
+            self.force_multipass_off_checkbox,
+            self.force_no_glossary_checkbox,
+            self.skip_thinking_checkbox,
+        ):
+            checkbox.setStyleSheet(
+                checkbox.styleSheet()
+                + "\nQCheckBox { background-color: transparent; }"
+            )
+        # Keep overrides out of the conversation itself, with enough room to
+        # explain what each persistent Direct Text-only option changes.
+        self.settings_tab = QWidget()
+        settings_layout = QVBoxLayout(self.settings_tab)
+        settings_layout.setContentsMargins(28, 24, 28, 24)
+        settings_layout.setSpacing(12)
+        settings_title = QLabel("Direct Text settings")
+        settings_title.setObjectName("directTitle")
+        settings_layout.addWidget(settings_title)
+        settings_intro = QLabel(
+            "These overrides apply only to Direct Text runs and are saved between sessions."
         )
-        self.input_box.setMinimumHeight(135)
-        self.input_box.setAcceptDrops(True)
-        self.input_box.dragEnterEvent = self._input_drag_enter_event
-        self.input_box.dropEvent = self._input_drop_event
-        root.addWidget(self.input_box, 2)
+        settings_intro.setObjectName("directMuted")
+        settings_intro.setWordWrap(True)
+        settings_layout.addWidget(settings_intro)
 
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 14, 0)
-        self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #aeb4c2;")
-        self.status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self.status_label.setOpenExternalLinks(False)
-        self.status_label.linkActivated.connect(self._open_output_folder)
-        action_row.addWidget(self.status_label, 1)
-
-        self.enter_button = QPushButton("Enter")
-        self.enter_button.setMinimumSize(150, 44)
-        self.enter_button.setDefault(True)
-        self.enter_button.setStyleSheet(
-            "QPushButton { background-color: #007bff; color: white; "
-            "font-size: 11pt; font-weight: bold; "
-            "padding: 10px 32px 10px 24px; border-radius: 5px; }"
-            "QPushButton:hover { background-color: #1688ff; }"
-            "QPushButton[directState=\"running\"] { background-color: #c0392b; }"
-            "QPushButton[directState=\"running\"]:hover { background-color: #d64a3a; }"
-            "QPushButton[directState=\"finishing\"] { background-color: #b7791f; }"
-            "QPushButton[directState=\"finishing\"]:hover { background-color: #ca8a25; }"
-            "QPushButton[directState=\"stopping\"], QPushButton:disabled { "
-            "background-color: #4b5563; color: #c0c4cc; }"
+        setting_rows = (
+            (
+                self.force_multipass_off_checkbox,
+                "Run a single translation pass even when Multipass is enabled in the main window.",
+            ),
+            (
+                self.force_no_glossary_checkbox,
+                "Ignore automatic and manually loaded glossaries for these chat translations.",
+            ),
+            (
+                self.skip_thinking_checkbox,
+                "Remove provider thinking/reasoning parameters for Direct Text requests.",
+            ),
         )
-        self.enter_button.clicked.connect(self._on_enter_clicked)
-        self._set_enter_button_state('idle')
-        action_row.addWidget(self.enter_button)
-        root.addLayout(action_row)
+        for checkbox, description in setting_rows:
+            card = QFrame()
+            card.setObjectName("directSettingsCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 13, 16, 13)
+            card_layout.setSpacing(5)
+            card_layout.addWidget(checkbox)
+            detail = QLabel(description)
+            detail.setObjectName("settingDescription")
+            detail.setWordWrap(True)
+            card_layout.addWidget(detail)
+            settings_layout.addWidget(card)
+        settings_layout.addStretch(1)
+        self.tabs.addTab(self.settings_tab, "Settings")
 
-        self.output_box = QTextBrowser()
-        self.output_box.setOpenExternalLinks(False)
-        self.output_box.setOpenLinks(False)
-        self.output_box.setPlaceholderText("The streamed translation will appear here…")
-        self.output_box.setStyleSheet(
-            "QTextBrowser { padding: 10px; }"
+        # Thinking and pipeline details are rendered inside each assistant
+        # message.  The link row is collapsed by default and expands in place,
+        # like the disclosure used by modern chat clients.
+        self._user_bubble_corner_data = self._build_rounded_bubble_corners(
+            "#2d2d2d", logical_radius=12
         )
-        root.addWidget(self.output_box, 3)
-
-        # Processing details are intentionally collapsed by default.
-        self.thinking_toggle = QToolButton()
-        self.thinking_toggle.setText("Processing")
-        self.thinking_toggle.setCheckable(True)
-        self.thinking_toggle.setChecked(False)
-        self.thinking_toggle.setArrowType(Qt.RightArrow)
-        self.thinking_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.thinking_toggle.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.thinking_toggle.setStyleSheet(
-            "QToolButton { color: #aeb4c2; border: none; padding: 4px; "
-            "font-weight: bold; } QToolButton:hover { color: white; }"
-        )
-        self.thinking_toggle.toggled.connect(self._toggle_thinking)
-        self._set_thinking_toggle_text("Processing")
-
-        thinking_header = QWidget()
-        thinking_header_layout = QHBoxLayout(thinking_header)
-        thinking_header_layout.setContentsMargins(0, 0, 0, 0)
-        thinking_header_layout.setSpacing(6)
-        thinking_header_layout.addWidget(self.thinking_toggle)
-
-        self.thinking_spinner_label = QLabel()
-        self.thinking_spinner_label.setFixedSize(28, 28)
-        self.thinking_spinner_label.setAlignment(Qt.AlignCenter)
-        self.thinking_spinner_label.setStyleSheet("background: transparent; border: none;")
-        try:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-            if os.path.isfile(icon_path):
-                dpr = max(1.0, float(self.devicePixelRatioF()))
-                logical_size = 20
-                device_size = int(logical_size * dpr)
-                pixmap = QIcon(icon_path).pixmap(QSize(device_size, device_size))
-                if not pixmap.isNull():
-                    pixmap.setDevicePixelRatio(dpr)
-                    self.thinking_spinner_label.setPixmap(pixmap)
-                    self.thinking_spinner_label._original_pixmap = pixmap
-                    self._thinking_spinner = translator._create_spinner(
-                        self.thinking_spinner_label, steps=48, interval_ms=18
-                    )
-        except Exception:
-            self._thinking_spinner = None
-        self.thinking_spinner_label.hide()
-        thinking_header_layout.addWidget(self.thinking_spinner_label)
-        thinking_header_layout.addStretch(1)
-        root.addWidget(thinking_header)
-
-        self.thinking_box = QPlainTextEdit()
-        self.thinking_box.setReadOnly(True)
-        self.thinking_box.setMaximumHeight(190)
-        self.thinking_box.setPlaceholderText("Processing messages will appear here.")
-        self.thinking_box.setStyleSheet(
-            "QPlainTextEdit { background: #131318; color: #8a8fa8; "
-            "font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt; }"
-        )
-        self.thinking_box.hide()
-        root.addWidget(self.thinking_box)
+        self._render_output()
 
         self._drain_timer = QTimer(self)
         self._drain_timer.setInterval(80)
@@ -1593,6 +1814,98 @@ class _InputOutputDialog(QDialog):
             self.translator.save_config(show_message=False)
         except Exception:
             pass
+
+    def _build_rounded_bubble_corners(self, color, logical_radius=12):
+        """Create antialiased HiDPI corner images for QTextDocument bubbles."""
+        try:
+            from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF
+            from PySide6.QtGui import QImage, QPainterPath
+
+            try:
+                dpr = max(1.0, float(self.devicePixelRatioF()))
+            except Exception:
+                dpr = 1.0
+            radius_px = max(1, int(round(int(logical_radius) * dpr)))
+            diameter_px = radius_px * 2
+            canvas = QImage(
+                diameter_px,
+                diameter_px,
+                QImage.Format_ARGB32_Premultiplied,
+            )
+            canvas.fill(Qt.transparent)
+            painter = QPainter(canvas)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            path = QPainterPath()
+            path.addRoundedRect(
+                QRectF(0, 0, diameter_px, diameter_px),
+                radius_px,
+                radius_px,
+            )
+            painter.fillPath(path, QColor(str(color)))
+            painter.end()
+
+            quadrants = {
+                "tl": (0, 0),
+                "tr": (radius_px, 0),
+                "bl": (0, radius_px),
+                "br": (radius_px, radius_px),
+            }
+            encoded_corners = {}
+            for name, (x_pos, y_pos) in quadrants.items():
+                corner = canvas.copy(x_pos, y_pos, radius_px, radius_px)
+                corner_bytes = QByteArray()
+                corner_buffer = QBuffer(corner_bytes)
+                corner_buffer.open(QIODevice.WriteOnly)
+                corner.save(corner_buffer, "PNG")
+                corner_buffer.close()
+                encoded = bytes(corner_bytes.toBase64()).decode("ascii")
+                encoded_corners[name] = "data:image/png;base64," + encoded
+            return encoded_corners
+        except Exception:
+            return {}
+
+    def _rounded_user_bubble_html(self, rendered):
+        """Wrap a user message in a genuinely rounded rich-text bubble."""
+        corners = self._user_bubble_corner_data
+        if not all(corners.get(name) for name in ("tl", "tr", "bl", "br")):
+            return (
+                "<td class='user-bubble'>"
+                "<div class='role user-role'>YOU</div>"
+                f"<div class='message-content'>{rendered}</div></td>"
+            )
+
+        import html as html_lib
+
+        radius = 12
+
+        def corner_image(name):
+            source = html_lib.escape(corners[name], quote=True)
+            return (
+                f"<img src='{source}' width='{radius}' height='{radius}'>"
+            )
+
+        return (
+            "<td class='user-bubble-shell'>"
+            "<table class='rounded-user-bubble' width='100%' cellspacing='0' "
+            "cellpadding='0'>"
+            "<tr>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('tl')}</td>"
+            f"<td class='user-bubble-edge' height='{radius}'></td>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('tr')}</td>"
+            "</tr><tr>"
+            f"<td class='user-bubble-edge' width='{radius}'></td>"
+            "<td class='user-bubble-content'>"
+            "<div class='role user-role'>YOU</div>"
+            f"<div class='message-content'>{rendered}</div>"
+            "</td>"
+            f"<td class='user-bubble-edge' width='{radius}'></td>"
+            "</tr><tr>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('bl')}</td>"
+            f"<td class='user-bubble-edge' height='{radius}'></td>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('br')}</td>"
+            "</tr></table></td>"
+        )
 
     @staticmethod
     def _is_supported_dropped_text_file(path):
@@ -1653,11 +1966,315 @@ class _InputOutputDialog(QDialog):
                 f"The dropped file could not be read:\n{path or 'Unknown file'}\n\n{exc}",
             )
 
+    def eventFilter(self, watched, event):
+        """Use chat-style Enter/Shift+Enter behavior in the composer."""
+        if watched is self.input_box and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                modifiers = event.modifiers()
+                if not (
+                    modifiers & Qt.ShiftModifier
+                    or modifiers & Qt.ControlModifier
+                    or modifiers & Qt.AltModifier
+                    or modifiers & Qt.MetaModifier
+                ):
+                    self._on_enter_clicked()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _new_chat(self):
+        """Create and switch to a retained conversation."""
+        if self._active:
+            QMessageBox.information(
+                self,
+                "Translation in progress",
+                "Stop or finish the current translation before starting a new chat.",
+            )
+            return
+
+        self._save_current_chat_state()
+        current = self._current_chat_session()
+        has_current_content = bool(
+            current
+            and (
+                current["messages"]
+                or str(current.get("draft", "")).strip()
+            )
+        )
+        if has_current_content:
+            self._chat_session_counter += 1
+            self._chat_sessions.append(
+                {
+                    "id": self._chat_session_counter,
+                    "title": "New chat",
+                    "messages": [],
+                    "draft": "",
+                    "output_folder": "",
+                    "output_folder_name": "",
+                    "expanded": set(),
+                }
+            )
+            self._current_chat_index = len(self._chat_sessions) - 1
+
+        self._load_chat_session(self._current_chat_index)
+        self._refresh_chat_list()
+        self.tabs.setCurrentWidget(self.chat_tab)
+        self.input_box.setFocus()
+
+    def _toggle_chat_sidebar(self):
+        """Hide or restore the retained-conversation sidebar."""
+        self._set_chat_sidebar_visible(self._chat_sidebar_hidden)
+
+    def _set_chat_sidebar_visible(self, visible):
+        """Apply sidebar visibility while keeping the restore control reachable."""
+        visible = bool(visible)
+        self._chat_sidebar_hidden = not visible
+        self.chat_sidebar.setVisible(visible)
+        self.sidebar_toggle_button.setText("◀" if visible else "▶")
+        action_text = "Hide" if visible else "Show"
+        tooltip = f"{action_text} conversation sidebar"
+        self.sidebar_toggle_button.setToolTip(tooltip)
+        self.sidebar_toggle_button.setAccessibleName(tooltip)
+
+    def _current_chat_session(self):
+        index = int(getattr(self, "_current_chat_index", -1))
+        if 0 <= index < len(self._chat_sessions):
+            return self._chat_sessions[index]
+        return None
+
+    def _save_current_chat_state(self):
+        session = self._current_chat_session()
+        if session is None or not hasattr(self, "input_box"):
+            return
+        session["draft"] = self.input_box.toPlainText()
+        session["output_folder"] = self._last_output_folder
+        session["expanded"] = set(self._expanded_processing_messages)
+
+    def _on_chat_draft_changed(self):
+        session = self._current_chat_session()
+        if session is None or not hasattr(self, "input_box"):
+            return
+        session["draft"] = self.input_box.toPlainText()
+        if hasattr(self, "delete_chat_button"):
+            can_delete = bool(
+                len(self._chat_sessions) > 1
+                or session["messages"]
+                or session["draft"].strip()
+            )
+            self.delete_chat_button.setEnabled(can_delete and not self._active)
+
+    def _load_chat_session(self, index):
+        if not (0 <= int(index) < len(self._chat_sessions)):
+            return
+        self._current_chat_index = int(index)
+        session = self._chat_sessions[self._current_chat_index]
+        self._chat_messages = session["messages"]
+        self._assistant_message_active = False
+        self._streamed_content = ""
+        self._last_output_folder = str(session.get("output_folder", "") or "")
+        self._log_queue.clear()
+        self._processing_text = ""
+        self._thinking_stream_text = ""
+        self._processing_label_text = "Processing"
+        self._processing_spinner_active = False
+        self._expanded_processing_messages = set(session.get("expanded", set()))
+        self.input_box.setPlainText(str(session.get("draft", "") or ""))
+        self._thinking_token_count = 0
+        self._generation_token_count = 0
+        self._processing_token_count = 0
+        self._refresh_processing_label()
+        self._set_status("Ready")
+        self._render_output()
+
+    def _refresh_chat_list(self):
+        if not hasattr(self, "chat_list"):
+            return
+        self._switching_chat = True
+        try:
+            self.chat_list.blockSignals(True)
+            self.chat_list.clear()
+            for session in self._chat_sessions:
+                title = str(session.get("title", "New chat") or "New chat")
+                self.chat_list.addItem(title)
+                item = self.chat_list.item(self.chat_list.count() - 1)
+                item.setToolTip(
+                    f"{title}\nDouble-click or right-click to rename"
+                )
+            self.chat_list.setCurrentRow(self._current_chat_index)
+        finally:
+            self.chat_list.blockSignals(False)
+            self._switching_chat = False
+        current = self._current_chat_session()
+        can_delete = bool(
+            len(self._chat_sessions) > 1
+            or (
+                current
+                and (
+                    current.get("messages")
+                    or str(current.get("draft", "")).strip()
+                )
+            )
+        )
+        self.delete_chat_button.setEnabled(can_delete and not self._active)
+
+    def _switch_chat(self, row):
+        if self._switching_chat or row < 0 or row == self._current_chat_index:
+            return
+        if self._active:
+            self._refresh_chat_list()
+            return
+        self._save_current_chat_state()
+        self._load_chat_session(row)
+        self._refresh_chat_list()
+        self.input_box.setFocus()
+
+    def _rename_chat_item(self, item):
+        """Open the rename prompt when a sidebar conversation is double-clicked."""
+        if item is None:
+            return
+        self._rename_chat(self.chat_list.row(item))
+
+    def _rename_chat(self, index=None):
+        """Rename a retained chat without changing its established output folder."""
+        if self._active:
+            return
+        if index is None:
+            index = self._current_chat_index
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return
+        if not (0 <= index < len(self._chat_sessions)):
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+
+        session = self._chat_sessions[index]
+        current_title = str(session.get("title", "New chat") or "New chat")
+        new_title, accepted = QInputDialog.getText(
+            self,
+            "Rename chat",
+            "Chat name:",
+            QLineEdit.Normal,
+            current_title,
+        )
+        if not accepted:
+            return
+        new_title = " ".join(str(new_title or "").split())[:120]
+        if not new_title:
+            return
+
+        session["title"] = new_title
+        self._refresh_chat_list()
+
+    def _show_chat_context_menu(self, position):
+        """Show sidebar actions for the conversation under the pointer."""
+        item = self.chat_list.itemAt(position)
+        if item is None:
+            return
+        index = self.chat_list.row(item)
+        if index != self._current_chat_index:
+            self.chat_list.setCurrentRow(index)
+
+        menu = QMenu(self.chat_list)
+        rename_action = menu.addAction("Rename chat")
+        delete_action = menu.addAction("Delete chat")
+        session = self._chat_sessions[index]
+        delete_action.setEnabled(
+            bool(
+                len(self._chat_sessions) > 1
+                or session.get("messages")
+                or str(session.get("draft", "")).strip()
+            )
+        )
+        selected = menu.exec(self.chat_list.viewport().mapToGlobal(position))
+        if selected is rename_action:
+            self._rename_chat(index)
+        elif selected is delete_action:
+            self._delete_current_chat()
+
+    def _delete_current_chat(self):
+        if self._active:
+            return
+        self._save_current_chat_state()
+        index = self._current_chat_index
+        if not (0 <= index < len(self._chat_sessions)):
+            return
+
+        session = self._chat_sessions[index]
+        title = str(session.get("title", "New chat") or "New chat")
+        confirmation = QMessageBox.question(
+            self,
+            "Delete chat?",
+            (
+                f'Delete "{title}"?\n\n'
+                "This removes the conversation and its messages from the sidebar. "
+                "Saved output files and the chat output folder will remain on disk."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self._chat_sessions.pop(index)
+        if not self._chat_sessions:
+            self._chat_session_counter += 1
+            self._chat_sessions.append(
+                {
+                    "id": self._chat_session_counter,
+                    "title": "New chat",
+                    "messages": [],
+                    "draft": "",
+                    "output_folder": "",
+                    "output_folder_name": "",
+                    "expanded": set(),
+                }
+            )
+        self._current_chat_index = min(index, len(self._chat_sessions) - 1)
+        self._load_chat_session(self._current_chat_index)
+        self._refresh_chat_list()
+        self.input_box.setFocus()
+
+    def _title_current_chat_from_text(self, text):
+        session = self._current_chat_session()
+        if session is None or session.get("title") != "New chat":
+            return
+        compact = " ".join(str(text or "").split())
+        if not compact:
+            return
+        max_title = 42
+        session["title"] = (
+            compact if len(compact) <= max_title else compact[:max_title - 1] + "…"
+        )
+        self._refresh_chat_list()
+
+    def _show_output_context_menu(self, position):
+        """Add the same explicit auto-scroll control offered by the main log."""
+        menu = self.output_box.createStandardContextMenu()
+        menu.addSeparator()
+        auto_scroll_action = menu.addAction(
+            "Enable Auto Scroll"
+            if self._output_auto_scroll_disabled
+            else "Disable Auto Scroll"
+        )
+        auto_scroll_action.triggered.connect(
+            lambda: self._set_output_auto_scroll_disabled(
+                not self._output_auto_scroll_disabled
+            )
+        )
+        menu.exec(self.output_box.viewport().mapToGlobal(position))
+
+    def _set_output_auto_scroll_disabled(self, disabled):
+        self._output_auto_scroll_disabled = bool(disabled)
+        if not self._output_auto_scroll_disabled:
+            scrollbar = self.output_box.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
     def _set_enter_button_state(self, state):
         """Mirror the main Run button's idle, graceful, and hard-stop states."""
         state = str(state or 'idle')
         states = {
-            'idle': ('Enter', True, 'Translate the text'),
+            'idle': ('Send', True, 'Send text for translation'),
             'running': ('Stop', True, 'Stop translation'),
             'finishing': (
                 'Finishing…',
@@ -1692,13 +2309,8 @@ class _InputOutputDialog(QDialog):
         self.showFullScreen()
 
     def _set_thinking_toggle_text(self, text):
-        """Update the label and reserve enough width to prevent Qt elision."""
-        text = str(text)
-        self.thinking_toggle.setText(text)
-        text_width = self.thinking_toggle.fontMetrics().horizontalAdvance(text)
-        # Arrow indicator + stylesheet padding + a little DPI/font variance.
-        self.thinking_toggle.setMinimumWidth(max(190, text_width + 48))
-        self.thinking_toggle.updateGeometry()
+        """Update the inline processing disclosure label."""
+        self._processing_label_text = str(text)
 
     def _refresh_processing_label(self):
         """Show the active phase and its tiktoken-counted text volume."""
@@ -1708,6 +2320,15 @@ class _InputOutputDialog(QDialog):
         elif self._active and self._streaming_text:
             label = "Generating Text"
             count = self._generation_token_count
+        elif not self._active and (
+            self._thinking_token_count or self._generation_token_count
+        ):
+            self._set_thinking_toggle_text(
+                "Token summary  ·  "
+                f"Thinking {self._thinking_token_count:,}  ·  "
+                f"Text {self._generation_token_count:,}"
+            )
+            return
         else:
             label = "Processing"
             count = self._processing_token_count
@@ -1763,36 +2384,32 @@ class _InputOutputDialog(QDialog):
             return 0
 
     def _set_thinking_spinner_active(self, active):
-        active = bool(active)
-        self.thinking_spinner_label.setVisible(active)
-        spinner = self._thinking_spinner
-        if spinner is None:
-            return
-        if active:
-            spinner.start()
-        else:
-            spinner.stop()
+        self._processing_spinner_active = bool(active)
 
     def _set_status(self, text, output_folder=""):
-        """Set plain status text or a link to the completed output folder."""
+        """Set composer status; output links belong to individual responses."""
         folder = os.path.abspath(str(output_folder)) if output_folder else ""
         if folder and os.path.isdir(folder):
-            import html
-            self._last_output_folder = folder
-            escaped = html.escape(str(text))
-            self.status_label.setText(
-                f'<a href="open-output" style="color:#65a9ff; '
-                f'text-decoration:underline;">{escaped}</a>'
-            )
-            self.status_label.setToolTip(f"Open output folder:\n{folder}")
-            self.status_label.setCursor(Qt.PointingHandCursor)
-            return
+            self._remember_output_folder(folder)
         self.status_label.setText(str(text))
         self.status_label.setToolTip("")
         self.status_label.unsetCursor()
 
+    def _remember_output_folder(self, folder):
+        folder = os.path.abspath(str(folder or "")) if folder else ""
+        if not folder or not os.path.isdir(folder):
+            return ""
+        self._last_output_folder = folder
+        session = self._current_chat_session()
+        if session is not None:
+            session["output_folder"] = folder
+        return folder
+
     def _open_output_folder(self, _link=""):
-        folder = str(self._last_output_folder or "")
+        self._open_specific_output_folder(self._last_output_folder)
+
+    def _open_specific_output_folder(self, folder):
+        folder = str(folder or "")
         if not folder or not os.path.isdir(folder):
             QMessageBox.information(
                 self, "Output folder", "No Direct Text output folder is available yet."
@@ -1813,9 +2430,37 @@ class _InputOutputDialog(QDialog):
             pass
         QMessageBox.warning(self, "Output folder", f"Could not open:\n{folder}")
 
-    def _toggle_thinking(self, checked):
-        self.thinking_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
-        self.thinking_box.setVisible(bool(checked))
+    def _handle_output_anchor(self, url):
+        """Expand/collapse a response's processing details inside the chat."""
+        try:
+            target = url.toString()
+        except Exception:
+            target = str(url or "")
+        output_prefix = "direct-output:"
+        if target.startswith(output_prefix):
+            try:
+                message_index = int(target[len(output_prefix):])
+                message = self._chat_messages[message_index]
+                folder = message[4] if len(message) > 4 else ""
+            except (IndexError, TypeError, ValueError):
+                return
+            self._open_specific_output_folder(folder)
+            return
+        prefix = "direct-processing:"
+        if not target.startswith(prefix):
+            return
+        try:
+            message_index = int(target[len(prefix):])
+        except (TypeError, ValueError):
+            return
+        if message_index in self._expanded_processing_messages:
+            self._expanded_processing_messages.remove(message_index)
+        else:
+            self._expanded_processing_messages.add(message_index)
+        session = self._current_chat_session()
+        if session is not None:
+            session["expanded"] = set(self._expanded_processing_messages)
+        self._render_output()
 
     def _clear_direct_graceful_stop_window(self):
         try:
@@ -1831,7 +2476,7 @@ class _InputOutputDialog(QDialog):
             return
         self._set_enter_button_state('idle')
         if self._last_output_folder and os.path.isdir(self._last_output_folder):
-            self._set_status("Ready — Open output folder", self._last_output_folder)
+            self._set_status("Ready")
         else:
             self._set_status("Stopped")
 
@@ -1897,9 +2542,18 @@ class _InputOutputDialog(QDialog):
         import uuid
         from datetime import datetime
 
-        self.output_box.clear()
-        self.thinking_box.clear()
-        self.thinking_toggle.setChecked(False)
+        self._title_current_chat_from_text(text)
+        self._chat_messages.append(("user", text))
+        current_session = self._current_chat_session()
+        if current_session is not None:
+            current_session["draft"] = ""
+        self._assistant_message_active = True
+        self._expanded_processing_messages.discard(len(self._chat_messages))
+        self.input_box.clear()
+        self.tabs.setCurrentWidget(self.chat_tab)
+        self._processing_text = ""
+        self._thinking_stream_text = ""
+        self._processing_spinner_active = True
         self._set_thinking_toggle_text("Processing")
         self._log_queue.clear()
         self._in_thinking = False
@@ -1910,8 +2564,12 @@ class _InputOutputDialog(QDialog):
         self._token_encoder_initialized = False
         self._streaming_text = False
         self._streamed_content = ""
+        self._last_output_folder = str(
+            current_session.get("output_folder", "") if current_session else ""
+        )
         self._preserve_temp_root = False
         self._direct_graceful_stop_pending = False
+        self._render_output()
 
         try:
             self._temp_root = tempfile.mkdtemp(prefix="glossarion_input_output_")
@@ -1981,6 +2639,9 @@ class _InputOutputDialog(QDialog):
 
             self._active = True
             self.input_box.setEnabled(False)
+            self.new_chat_button.setEnabled(False)
+            self.chat_list.setEnabled(False)
+            self.delete_chat_button.setEnabled(False)
             self.force_multipass_off_checkbox.setEnabled(False)
             self.force_no_glossary_checkbox.setEnabled(False)
             self.skip_thinking_checkbox.setEnabled(False)
@@ -1996,6 +2657,11 @@ class _InputOutputDialog(QDialog):
                 QTimer.singleShot(0, self._finish_translation)
         except Exception as exc:
             self._append_thinking(f"❌ Could not start translation: {exc}\n")
+            self._streamed_content = (
+                "**Translation could not be started.**\n\n"
+                f"`{type(exc).__name__}: {exc}`"
+            )
+            self._commit_assistant_message()
             self._set_status("Could not start")
             self._restore_run_context()
 
@@ -2070,6 +2736,7 @@ class _InputOutputDialog(QDialog):
     def _drain_log_queue(self):
         drained = 0
         output_changed = False
+        processing_changed = False
         while self._log_queue and drained < 500:
             try:
                 message = self._log_queue.popleft()
@@ -2086,17 +2753,18 @@ class _InputOutputDialog(QDialog):
                         output_changed = True
                     elif kind == "thinking":
                         value = line[4:] if line.startswith("    ") else line
-                        self._append_thinking(value + "\n")
+                        self._append_thinking(value + "\n", streamed_thinking=True)
                         self._thinking_token_count += self._count_tokens(value + "\n")
+                        processing_changed = True
                     else:
                         self._append_thinking(line + "\n")
                         self._processing_token_count += self._count_tokens(line + "\n")
-
-        if output_changed:
-            self._render_output()
+                        processing_changed = True
 
         if drained:
             self._refresh_processing_label()
+        if output_changed or processing_changed:
+            self._render_output()
 
     @staticmethod
     def _markup_to_html(source):
@@ -2187,36 +2855,232 @@ class _InputOutputDialog(QDialog):
         return rendered
 
     def _render_output(self):
-        rendered = self._markup_to_html(self._streamed_content)
+        import html as html_lib
+
+        messages = list(self._chat_messages)
+        if self._assistant_message_active:
+            messages.append(
+                (
+                    "assistant",
+                    self._streamed_content,
+                    self._thinking_stream_text,
+                    self._processing_label_text,
+                )
+            )
+
+        if self._assistant_avatar_data_uri:
+            avatar_source = html_lib.escape(
+                self._assistant_avatar_data_uri, quote=True
+            )
+            assistant_avatar = (
+                f"<img src='{avatar_source}' "
+                f"width='{self._assistant_avatar_width}' "
+                f"height='{self._assistant_avatar_height}'>"
+            )
+        else:
+            assistant_avatar = "G"
+
+        message_html = []
+        if not messages:
+            message_html.append(
+                "<div class='empty-state'>"
+                "<div class='empty-icon'>💬</div>"
+                "<h2>What would you like to translate?</h2>"
+                "<p>Paste text into the composer below, or drop a supported text file. "
+                "Translations stream into this conversation as they are generated.</p>"
+                "</div>"
+            )
+        else:
+            for message_index, message in enumerate(messages):
+                role = message[0]
+                content = message[1]
+                if role == "user":
+                    rendered = html_lib.escape(str(content or ""))
+                    rendered = rendered.replace("\n", "<br>")
+                    bubble_html = self._rounded_user_bubble_html(rendered)
+                    message_html.append(
+                        "<table class='chat-row user-row' width='100%' cellspacing='0' "
+                        "cellpadding='0'><tr><td width='17%'></td>"
+                        f"{bubble_html}"
+                        "</tr></table><div class='message-gap'></div>"
+                    )
+                    continue
+
+                if str(content or "").strip():
+                    rendered = self._markup_to_html(content)
+                else:
+                    rendered = (
+                        "<span class='pending'>Working on your translation<span> …</span></span>"
+                    )
+
+                processing_text = str(message[2] if len(message) > 2 else "")
+                processing_label = str(
+                    message[3] if len(message) > 3 else "Processing"
+                )
+                output_folder = str(message[4] if len(message) > 4 else "")
+                is_active_message = bool(
+                    self._assistant_message_active
+                    and message_index == len(messages) - 1
+                )
+                if is_active_message and self._processing_spinner_active:
+                    processing_label += "  …"
+                show_processing = bool(
+                    processing_text.strip()
+                    or is_active_message
+                    or processing_label.startswith("Token summary")
+                )
+                processing_html = ""
+                if show_processing:
+                    expanded = message_index in self._expanded_processing_messages
+                    arrow = "▼" if expanded else "▶"
+                    safe_label = html_lib.escape(processing_label)
+                    processing_html = (
+                        "<div class='processing-summary'>"
+                        f"<a href='direct-processing:{message_index}'>"
+                        f"{arrow}&nbsp;&nbsp;{safe_label}</a></div>"
+                    )
+                    if expanded:
+                        if processing_text.strip():
+                            visible_processing = processing_text[-50000:]
+                            if len(processing_text) > len(visible_processing):
+                                visible_processing = (
+                                    "… earlier thinking output omitted …\n"
+                                    + visible_processing
+                                )
+                        elif is_active_message:
+                            visible_processing = "Waiting for the thinking stream…"
+                        else:
+                            visible_processing = (
+                                "No thinking stream was emitted for this response."
+                            )
+                        safe_processing = html_lib.escape(visible_processing).replace(
+                            "\n", "<br>"
+                        )
+                        processing_html += (
+                            "<table class='processing-detail-table' width='100%' "
+                            "cellspacing='0' cellpadding='0'><tr>"
+                            "<td class='processing-detail-cell'>"
+                            f"{safe_processing}</td></tr></table>"
+                        )
+                output_link_html = ""
+                if output_folder:
+                    output_link_html = (
+                        "<div class='request-output-link'>"
+                        f"<a href='direct-output:{message_index}'>"
+                        "📁&nbsp;&nbsp;Open output folder</a></div>"
+                    )
+                message_html.append(
+                    "<table class='chat-row assistant-row' width='100%' cellspacing='0' "
+                    "cellpadding='0'><tr>"
+                    "<td class='assistant-avatar-cell' width='38' valign='top'>"
+                    f"<table class='avatar-table' width='{self._assistant_avatar_width}' "
+                    f"height='{self._assistant_avatar_height}' cellspacing='0' "
+                    "cellpadding='0'><tr><td class='assistant-avatar' align='center' "
+                    f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
+                    "<td class='assistant-bubble'>"
+                    "<div class='role'>GLOSSARION</div>"
+                    f"{processing_html}"
+                    f"<div class='message-content'>{rendered}</div>"
+                    f"{output_link_html}"
+                    "</td><td width='8%'></td></tr></table>"
+                    "<div class='message-gap'></div>"
+                )
+
+        scrollbar = self.output_box.verticalScrollBar()
+        previous_scroll = scrollbar.value()
         document = (
             "<html><head><style>"
-            "body { line-height: 1.45; margin: 6px; }"
-            "p { margin: 0 0 0.75em 0; }"
+            "body { background-color: #1e1e1e; color: white; line-height: 1.48; "
+            "margin: 14px 10px; font-family: 'Segoe UI', sans-serif; font-size: 10.5pt; }"
+            ".empty-state { color: #cbd5e1; text-align: center; margin: 100px 14% 0 14%; }"
+            ".empty-state h2 { color: white; font-size: 17pt; margin: 10px 0; }"
+            ".empty-state p { line-height: 1.55; }"
+            ".empty-icon { color: #5a9fd4; font-size: 25pt; }"
+            ".chat-row, .chat-row td, .avatar-table, .avatar-table td { border: none; }"
+            ".role { color: #cbd5e1; font-size: 8pt; font-weight: 700; "
+            "letter-spacing: 0.08em; margin-bottom: 6px; }"
+            ".user-role { color: #cbd5e1; }"
+            ".user-bubble { background-color: #2d2d2d; color: white; "
+            "padding: 13px 16px; border-radius: 12px; }"
+            ".user-bubble-shell, .rounded-user-bubble, .rounded-user-bubble td { "
+            "border: none; padding: 0; }"
+            ".user-bubble-edge, .user-bubble-content { background-color: #2d2d2d; }"
+            ".user-bubble-content { color: white; padding: 0 4px; }"
+            ".assistant-avatar-cell { padding: 2px 9px 0 0; }"
+            ".assistant-avatar { background-color: transparent; color: white; "
+            "font-weight: 700; text-align: center; }"
+            ".assistant-bubble { padding: 3px 8px 5px 3px; }"
+            ".processing-summary { margin: 1px 0 10px 0; }"
+            ".processing-summary a { color: #cbd5e1; font-weight: 600; "
+            "text-decoration: none; }"
+            ".processing-detail-table { background: #171a21; "
+            "border: 1px solid #4a5568; margin: 4px 0 12px 0; }"
+            ".processing-detail-cell { color: #aeb8c8; padding: 9px; "
+            "font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt; "
+            "line-height: 1.35; }"
+            ".message-gap { height: 22px; }"
+            ".pending { color: #cbd5e1; font-style: italic; }"
+            ".message-content { color: white; }"
+            ".request-output-link { margin: 12px 0 2px 0; padding-top: 8px; "
+            "border-top: 1px solid #3f4856; }"
+            ".request-output-link a { color: #65a9ff; font-weight: 600; "
+            "text-decoration: none; }"
+            "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
-            "padding: 8px; white-space: pre-wrap; }"
+            "padding: 9px; white-space: pre-wrap; }"
             "code { background: #20242d; padding: 1px 3px; }"
-            "blockquote { border-left: 3px solid #6c63ff; "
-            "margin-left: 4px; padding-left: 10px; color: #aeb4c2; }"
+            "blockquote { border-left: 3px solid #5a9fd4; "
+            "margin-left: 4px; padding-left: 11px; color: #cbd5e1; }"
             "table { border-collapse: collapse; }"
-            "th, td { border: 1px solid #596171; padding: 4px 7px; }"
+            ".message-content table th, .message-content table td { "
+            "border: 1px solid #596171; padding: 4px 7px; }"
             "a { color: #65a9ff; }"
-            "img { max-width: 100%; height: auto; }"
+            "img { max-width: 100%; }"
             "</style></head><body>"
-            f"{rendered}"
+            f"{''.join(message_html)}"
             "</body></html>"
         )
         self.output_box.setHtml(document)
-        cursor = self.output_box.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.output_box.setTextCursor(cursor)
-        self.output_box.ensureCursorVisible()
+        if self._output_auto_scroll_disabled:
+            scrollbar.setValue(min(previous_scroll, scrollbar.maximum()))
+        else:
+            cursor = self.output_box.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.output_box.setTextCursor(cursor)
+            self.output_box.ensureCursorVisible()
 
-    def _append_thinking(self, text):
-        cursor = self.thinking_box.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(str(text))
-        self.thinking_box.setTextCursor(cursor)
-        self.thinking_box.ensureCursorVisible()
+    def _commit_assistant_message(self):
+        """Freeze the active streamed response into the visible chat history."""
+        if not self._assistant_message_active:
+            return
+        content = str(self._streamed_content or "").strip()
+        if not content:
+            content = "*No translated output was produced for this message.*"
+        if self._thinking_token_count or self._generation_token_count:
+            final_processing_label = (
+                "Token summary  ·  "
+                f"Thinking {self._thinking_token_count:,}  ·  "
+                f"Text {self._generation_token_count:,}"
+            )
+        else:
+            final_processing_label = self._processing_label_text or "Processing"
+        self._chat_messages.append(
+            (
+                "assistant",
+                content,
+                self._thinking_stream_text,
+                final_processing_label,
+                self._last_output_folder,
+            )
+        )
+        self._assistant_message_active = False
+        self._render_output()
+
+    def _append_thinking(self, text, *, streamed_thinking=False):
+        value = str(text)
+        self._processing_text += value
+        if streamed_thinking:
+            self._thinking_stream_text += value
 
     def _poll_translation(self):
         if not self._active:
@@ -2226,35 +3090,93 @@ class _InputOutputDialog(QDialog):
             return
         self._finish_translation()
 
+    def _conversation_output_folder(self):
+        """Return this chat's single persistent Direct Text output folder."""
+        session = self._current_chat_session()
+        if session is None:
+            return ""
+
+        existing = str(session.get("output_folder", "") or "")
+        if existing:
+            existing = os.path.abspath(existing)
+            os.makedirs(existing, exist_ok=True)
+            return existing
+
+        configured_root = (
+            self._saved_env.get('OUTPUT_DIRECTORY')
+            or self._saved_env.get('OUTPUT_DIR')
+            or self.translator.config.get('output_directory')
+        )
+        if configured_root:
+            output_root = os.path.abspath(os.path.expanduser(str(configured_root)))
+        else:
+            output_root = _get_app_dir() if getattr(sys, 'frozen', False) else os.getcwd()
+
+        direct_text_root = os.path.join(output_root, 'Direct Text')
+        os.makedirs(direct_text_root, exist_ok=True)
+
+        folder_name = str(session.get("output_folder_name", "") or "")
+        if not folder_name:
+            import re
+            import uuid
+            from datetime import datetime
+
+            title = " ".join(str(session.get("title", "") or "").split())
+            if not title or title == "New chat":
+                title = f"Chat {int(session.get('id', 0) or 0):03d}"
+            safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title)
+            safe_title = safe_title.rstrip(" .")[:60] or "Chat"
+            folder_name = (
+                f"{safe_title} - {datetime.now():%Y%m%d_%H%M%S}_"
+                f"{uuid.uuid4().hex[:8]}"
+            )
+            session["output_folder_name"] = folder_name
+
+        target_folder = os.path.join(direct_text_root, folder_name)
+        os.makedirs(target_folder, exist_ok=True)
+        session["output_folder"] = target_folder
+        self._last_output_folder = target_folder
+        return target_folder
+
     def _persist_output_folder(self):
-        """Copy the completed temporary run into the user's output area."""
+        """Merge a completed run into this conversation's shared output folder."""
         source_folder = os.path.dirname(self._expected_output) if self._expected_output else ""
         if not source_folder or not os.path.isdir(source_folder):
             return ""
         try:
             import shutil
 
-            configured_root = (
-                self._saved_env.get('OUTPUT_DIRECTORY')
-                or self._saved_env.get('OUTPUT_DIR')
-                or self.translator.config.get('output_directory')
-            )
-            if configured_root:
-                output_root = os.path.abspath(os.path.expanduser(str(configured_root)))
-            else:
-                output_root = _get_app_dir() if getattr(sys, 'frozen', False) else os.getcwd()
-
-            direct_text_root = os.path.join(output_root, 'Direct Text')
-            os.makedirs(direct_text_root, exist_ok=True)
-            target_folder = os.path.join(direct_text_root, os.path.basename(source_folder))
-            shutil.copytree(source_folder, target_folder)
+            target_folder = self._conversation_output_folder()
+            if not target_folder:
+                return ""
+            shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
             return target_folder
         except Exception as exc:
-            # Keep the temporary output alive so the link still has a valid
-            # target even if the configured output location is unwritable.
-            self._preserve_temp_root = True
             self._append_thinking(f"⚠️ Could not persist Direct Text output: {exc}\n")
-            return source_folder
+            session = self._current_chat_session()
+            fallback_folder = str(
+                session.get("output_folder", "") if session is not None else ""
+            )
+            try:
+                import shutil
+
+                if not fallback_folder or not os.path.isdir(fallback_folder):
+                    fallback_folder = tempfile.mkdtemp(
+                        prefix="glossarion_direct_text_chat_"
+                    )
+                    if session is not None:
+                        session["output_folder"] = fallback_folder
+                shutil.copytree(source_folder, fallback_folder, dirs_exist_ok=True)
+                self._last_output_folder = fallback_folder
+                return fallback_folder
+            except Exception as fallback_exc:
+                # Last resort: preserve this run so its response link remains valid.
+                self._preserve_temp_root = True
+                self._append_thinking(
+                    f"⚠️ Could not create shared fallback output folder: "
+                    f"{fallback_exc}\n"
+                )
+                return source_folder
 
     def _finish_translation(self):
         if not self._active:
@@ -2270,19 +3192,17 @@ class _InputOutputDialog(QDialog):
             self._append_thinking(f"⚠️ Could not read translated output: {exc}\n")
 
         output_folder = self._persist_output_folder()
+        self._remember_output_folder(output_folder)
         if final_text.strip():
             # Replace transport fragments with the clean, assembled output file.
             self._streamed_content = final_text
-            self._render_output()
-            self._set_status("Ready — Open output folder", output_folder)
+            self._set_status("Ready")
         elif self._streamed_content.strip():
-            if output_folder:
-                self._set_status("Ready — Open output folder", output_folder)
-            else:
-                self._set_status("Run ended; showing streamed output")
+            self._set_status("Ready" if output_folder else "Run ended; showing streamed output")
         else:
             self._set_status("No translated output was produced")
 
+        self._commit_assistant_message()
         self._restore_run_context()
 
     def _restore_run_context(self):
@@ -2351,10 +3271,14 @@ class _InputOutputDialog(QDialog):
         self._refresh_processing_label()
         self._set_thinking_spinner_active(False)
         self.input_box.setEnabled(True)
+        self.new_chat_button.setEnabled(True)
+        self.chat_list.setEnabled(True)
         self.force_multipass_off_checkbox.setEnabled(True)
         self.force_no_glossary_checkbox.setEnabled(True)
         self.skip_thinking_checkbox.setEnabled(True)
         self._set_enter_button_state('idle')
+        self._save_current_chat_state()
+        self._refresh_chat_list()
         self.input_box.setFocus()
 
         if temp_root and not self._preserve_temp_root:
