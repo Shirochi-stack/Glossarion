@@ -6,11 +6,20 @@ from pathlib import Path
 import epub_converter
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
-from qa_scan_runtime import default_qa_scan_settings
+from qa_scan_runtime import (
+    active_qa_output_folder_for_source,
+    automatic_qa_output_candidates,
+    default_qa_scan_settings,
+    is_direct_text_qa_path,
+    run_qa_scan_path,
+)
 from scan_html_folder import (
     _count_quotation_marks,
+    _missing_ending_quotation_paragraphs,
     detect_quotation_mismatch,
     extract_epub_punctuation_info,
+    extract_epub_quotation_info,
+    generate_reports,
     process_html_file_batch,
 )
 
@@ -23,7 +32,10 @@ def test_html_entity_decoder_basic_entities():
 
 
 def test_quotation_check_defaults_off():
-    assert default_qa_scan_settings()["check_quotation_mismatch"] is False
+    settings = default_qa_scan_settings()
+    assert settings["check_quotation_mismatch"] is False
+    assert settings["ignore_excess_quotation_marks"] is False
+    assert settings["skip_stylistic_single_quotes"] is False
 
 
 def test_quotation_counter_handles_styles_entities_and_apostrophes():
@@ -33,11 +45,50 @@ def test_quotation_counter_handles_styles_entities_and_apostrophes():
         '&#x27;hex&#x27; '
         '&#x2018;curly&#x2019; '
         '&apos;named&apos; '
-        '「corner」 『white corner』 '
+        '&#x39;source typo&#x39; '
+        '「corner」 『white corner』 《book title》 '
         "don't"
     )
 
-    assert _count_quotation_marks(text) == 14
+    assert _count_quotation_marks(text) == 18
+
+
+def test_quotation_counter_can_skip_balanced_stylistic_single_quotes():
+    text = "Use 'Naught' here, but preserve “dialogue” and an unmatched ' mark."
+
+    assert _count_quotation_marks(text) == 5
+    assert _count_quotation_marks(text, skip_stylistic_single_quotes=True) == 3
+
+
+def test_stylistic_toggle_skips_possessives_and_balanced_double_quotes():
+    text = "A Girls' Love story highlights the protagonists' love through a \"honey\" job."
+
+    assert _count_quotation_marks(text) == 4
+    assert _count_quotation_marks(text, skip_stylistic_single_quotes=True) == 0
+
+
+def test_stylistic_toggle_skips_curly_possessive_but_keeps_curly_quote_pair():
+    text = "The ladies’ popularity increased. ‘Quoted thought’"
+
+    assert _count_quotation_marks(text) == 3
+    assert _count_quotation_marks(text, skip_stylistic_single_quotes=True) == 2
+
+
+def test_missing_ending_quotation_uses_odd_straight_quote_paragraph_check():
+    html = (
+        '<p>&quot;complete pair&quot;</p>'
+        '<p>&quot;missing ending</p>'
+        '<p>“curly missing ending.</p>'
+        '<p>「CJK complete pair」</p>'
+        '<p>『CJK missing ending.</p>'
+        '<p><span title="attribute">no text quote</span></p>'
+    )
+
+    missing = _missing_ending_quotation_paragraphs(html)
+
+    assert [item["paragraph_index"] for item in missing] == [2, 3, 5]
+    assert missing[1]["missing_marks"] == ["”"]
+    assert missing[2]["missing_marks"] == ["』"]
 
 
 def test_quotation_mismatch_allows_style_changes_and_reports_count_changes():
@@ -65,6 +116,23 @@ def test_quotation_mismatch_allows_style_changes_and_reports_count_changes():
     assert excess_issues[0]["type"] == "excess_quotation_marks"
     assert excess_issues[0]["difference"] == 2
 
+    ignored_excess, ignored_issues = detect_quotation_mismatch(
+        '“one” “two” “three”',
+        1,
+        source_info,
+        ignore_excess=True,
+    )
+    assert ignored_excess is False
+    assert ignored_issues == []
+
+    missing_still_flagged, _ = detect_quotation_mismatch(
+        '“only one pair”',
+        1,
+        source_info,
+        ignore_excess=True,
+    )
+    assert missing_still_flagged is True
+
 
 def test_epub_quotation_extraction_decodes_html_character_references(tmp_path):
     epub_path = tmp_path / "quotes.epub"
@@ -77,6 +145,9 @@ def test_epub_quotation_extraction_decodes_html_character_references(tmp_path):
     </package>
     """
     chapter = """<html><head><title>&quot;ignored&quot;</title></head><body>
+    <h1>&quot;ignored heading&quot;</h1>
+    <div>&quot;ignored div&quot;</div>
+    &quot;ignored loose text&quot;
     <p>&quot;double&quot; &#39;single&#39; 「corner」</p>
     </body></html>"""
 
@@ -84,19 +155,122 @@ def test_epub_quotation_extraction_decodes_html_character_references(tmp_path):
         epub.writestr("OEBPS/content.opf", content_opf)
         epub.writestr("OEBPS/text/chapter.xhtml", chapter)
 
-    source_info = extract_epub_punctuation_info(
-        epub_path,
-        log=lambda _message: None,
-        include_quotation_marks=True,
-    )
+    source_info = extract_epub_quotation_info(epub_path, log=lambda _message: None)
 
-    assert source_info[1]["quotation_marks"] == 6
+    assert source_info[1]["quotation_marks"] == 12
     assert source_info[1]["filename"] == "chapter.xhtml"
 
 
-def test_quotation_scan_counts_only_visible_html_text(tmp_path):
+def test_active_qa_output_folder_uses_translated_folder_not_raw_folder(tmp_path, monkeypatch):
+    raw_folder = tmp_path / "raw"
+    output_root = tmp_path / "translated"
+    source_path = raw_folder / "book.epub"
+    translated_folder = output_root / "book"
+    raw_folder.mkdir()
+    translated_folder.mkdir(parents=True)
+    source_path.write_bytes(b"source")
+    monkeypatch.setenv("EPUB_OUTPUT_DIR", str(translated_folder))
+
+    assert active_qa_output_folder_for_source(source_path) == str(translated_folder.resolve())
+
+
+def test_report_directory_is_created_inside_scanned_output_folder(tmp_path):
+    raw_folder = tmp_path / "raw" / "book"
+    translated_folder = tmp_path / "translated" / "book"
+    raw_folder.mkdir(parents=True)
+    translated_folder.mkdir(parents=True)
+    logs = []
+
+    generate_reports(
+        [],
+        str(translated_folder),
+        {},
+        log=logs.append,
+        qa_settings={"report_format": "summary", "auto_save_report": True},
+    )
+
+    expected_report_folder = translated_folder / "book_Scan Report"
+    assert (expected_report_folder / "scan_summary.txt").is_file()
+    assert not (raw_folder / "book_Scan Report").exists()
+    assert any(str(expected_report_folder) in message for message in logs)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("Direct Text") / "Chat 001",
+        Path("direct_text_20260720_000000_abcd1234"),
+        Path("glossarion_input_output_abcd") / "book",
+        Path("glossarion_direct_text_chat_abcd"),
+    ),
+)
+def test_direct_text_paths_are_excluded_from_qa(tmp_path, relative_path):
+    assert is_direct_text_qa_path(tmp_path / relative_path)
+
+
+def test_regular_output_path_is_not_excluded_from_qa(tmp_path):
+    assert not is_direct_text_qa_path(tmp_path / "Translated Books" / "book")
+
+
+def test_windows_automatic_output_discovery_never_uses_raw_epub_sibling(tmp_path, monkeypatch):
+    downloads = tmp_path / "Downloads"
+    app_dir = tmp_path / "app" / "src"
+    source_path = downloads / "book.epub"
+    raw_extraction = downloads / "book"
+    translated_output = app_dir / "book"
+    raw_extraction.mkdir(parents=True)
+    translated_output.mkdir(parents=True)
+    source_path.write_bytes(b"source")
+    monkeypatch.delenv("EPUB_OUTPUT_DIR", raising=False)
+
+    candidates = automatic_qa_output_candidates(
+        source_path,
+        current_dir=app_dir,
+        script_dir=app_dir,
+        platform_name="win32",
+    )
+
+    assert candidates[0] == str(translated_output)
+    assert str(raw_extraction) not in candidates
+
+
+def test_macos_automatic_output_discovery_can_use_epub_sibling(tmp_path, monkeypatch):
+    source_path = tmp_path / "Downloads" / "book.epub"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"source")
+    monkeypatch.delenv("EPUB_OUTPUT_DIR", raising=False)
+
+    candidates = automatic_qa_output_candidates(
+        source_path,
+        current_dir=tmp_path / "app",
+        script_dir=tmp_path / "app" / "src",
+        platform_name="darwin",
+    )
+
+    assert str(source_path.parent / "book") in candidates
+
+
+def test_automatic_qa_scan_refuses_direct_text_folder(tmp_path):
+    direct_text_folder = tmp_path / "Direct Text" / "Chat 001"
+    direct_text_folder.mkdir(parents=True)
+    logs = []
+
+    result = run_qa_scan_path(direct_text_folder, log=logs.append)
+
+    assert result is None
+    assert any("Direct Text folders" in message for message in logs)
+    assert not (direct_text_folder / "Chat 001_Scan Report").exists()
+
+
+def test_quotation_scan_counts_all_visible_html_text(tmp_path):
     chapter_path = tmp_path / "chapter.html"
-    chapter_path.write_text('<p class="dialog">&quot;one pair&quot;</p>', encoding="utf-8")
+    chapter_path.write_text(
+        '<h1>&quot;ignored heading&quot;</h1>'
+        '&quot;ignored loose text&quot;'
+        '<div>&quot;ignored div&quot;</div>'
+        '<p class="dialog">&quot;one pair&quot;</p>',
+        encoding="utf-8",
+    )
     settings = default_qa_scan_settings()
     settings.update({
         "check_quotation_mismatch": True,
@@ -112,7 +286,7 @@ def test_quotation_scan_counts_only_visible_html_text(tmp_path):
         "chapter.html": {
             "question_marks": 0,
             "exclamation_marks": 0,
-            "quotation_marks": 4,
+            "quotation_marks": 8,
             "filename": "chapter.html",
         }
     }
@@ -126,10 +300,155 @@ def test_quotation_scan_counts_only_visible_html_text(tmp_path):
         {},
         True,
         {},
+        {},
+        source_info,
+    ))
+
+    assert not any("quotation_marks" in issue for issue in results[0]["issues"])
+
+
+def test_non_epub_plain_text_quotation_scan_needs_no_html_tags(tmp_path):
+    chapter_path = tmp_path / "chapter.txt"
+    chapter_path.write_text('&quot;one translated pair&quot;', encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_quotation_mismatch": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+    source_info = {
+        "chapter.txt": {
+            "quotation_marks": 4,
+            "filename": "chapter.txt",
+        }
+    }
+
+    results = process_html_file_batch((
+        [(0, "chapter.txt")],
+        str(tmp_path),
+        settings,
+        "quick-scan",
+        {},
+        {},
+        True,
+        {},
+        {},
         source_info,
     ))
 
     assert "quotation_marks_2_missing_(2/4)" in results[0]["issues"]
+
+
+def test_quotation_scan_flags_missing_curly_quote_ending_per_paragraph(tmp_path):
+    chapter_path = tmp_path / "chapter.html"
+    chapter_path.write_text('<p>“This is insane.</p>', encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_quotation_mismatch": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+    source_info = {
+        "chapter.html": {
+            "quotation_marks": 2,
+            "filename": "chapter.html",
+        }
+    }
+
+    results = process_html_file_batch((
+        [(0, "chapter.html")], str(tmp_path), settings, "quick-scan",
+        {}, {}, True, {}, {}, source_info,
+    ))
+
+    assert "missing_ending_quotation_p1" in results[0]["issues"]
+    assert "quotation_marks_1_missing_(1/2)" in results[0]["issues"]
+
+
+def test_quotation_scan_can_skip_stylistic_single_quote_pairs(tmp_path):
+    chapter_path = tmp_path / "chapter.html"
+    chapter_path.write_text("<p>Use 'Naught' here.</p>", encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_quotation_mismatch": True,
+        "skip_stylistic_single_quotes": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+    source_info = {
+        "chapter.html": {
+            "quotation_marks": 0,
+            "filename": "chapter.html",
+        }
+    }
+
+    results = process_html_file_batch((
+        [(0, "chapter.html")], str(tmp_path), settings, "quick-scan",
+        {}, {}, True, {}, {}, source_info,
+    ))
+
+    assert not any("quotation" in issue for issue in results[0]["issues"])
+
+
+def test_quotation_option_does_not_change_punctuation_matching(tmp_path):
+    chapter_path = tmp_path / "chapter.html"
+    chapter_path.write_text("<html><body><p>plain output</p></body></html>", encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_punctuation_mismatch": True,
+        "punctuation_loss_threshold": 49,
+        "check_quotation_mismatch": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+    source_punctuation = {
+        "chapter.html": {
+            "question_marks": 2,
+            "exclamation_marks": 0,
+            "filename": "chapter.html",
+        }
+    }
+    source_quotations = {
+        "chapter.html": {
+            "quotation_marks": 0,
+            "filename": "chapter.html",
+        }
+    }
+
+    results = process_html_file_batch((
+        [(0, "chapter.html")],
+        str(tmp_path),
+        settings,
+        "quick-scan",
+        {},
+        {},
+        True,
+        {},
+        source_punctuation,
+        source_quotations,
+    ))
+
+    assert "?_punctuation_100%_lost_(0/2)" in results[0]["issues"]
+    assert not any("quotation_marks" in issue for issue in results[0]["issues"])
 
 
 def test_valid_html_tag_entities_preserve_angle_bracket_prose():

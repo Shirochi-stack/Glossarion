@@ -2116,7 +2116,7 @@ _MISTYPED_HEX_APOSTROPHE_RE = re.compile(r"&(?:#x|x)39;", re.IGNORECASE)
 _STYLISTIC_SINGLE_QUOTE_RE = re.compile(r"(?<!\w)'[^'\r\n]+?'(?!\w)")
 _STYLISTIC_DOUBLE_QUOTE_RE = re.compile(r'(?<!\w)"[^"\r\n]+?"(?!\w)')
 _TRAILING_POSSESSIVE_APOSTROPHE_RE = re.compile(
-    r"\b[A-Za-z]{2,}'(?=\s|[.,;:!?)}\]]|$)"
+    r"\b[A-Za-z]{2,}['’](?=\s|[.,;:!?)}\]]|$)"
 )
 _MISSING_ENDING_QUOTATION_RE = re.compile(
     r'(?s)<p[^>]*>(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*'
@@ -2158,7 +2158,15 @@ def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
             skipped_stylistic_indexes.add(match.start())
             skipped_stylistic_indexes.add(match.end() - 1)
         for match in _TRAILING_POSSESSIVE_APOSTROPHE_RE.finditer(decoded):
-            skipped_stylistic_indexes.add(match.end() - 1)
+            apostrophe_index = match.end() - 1
+            if decoded[apostrophe_index] == '’':
+                line_start = decoded.rfind('\n', 0, apostrophe_index) + 1
+                # If this line has a matching curly opening mark, retain the
+                # closing mark as a quotation delimiter rather than treating
+                # it as a possessive apostrophe.
+                if '‘' in decoded[line_start:apostrophe_index]:
+                    continue
+            skipped_stylistic_indexes.add(apostrophe_index)
 
     count = 0
     for index, char in enumerate(decoded):

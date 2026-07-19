@@ -3216,7 +3216,7 @@ class QAScannerMixin:
             )
             skip_stylistic_single_quotes_checkbox.setToolTip(
                 "Excludes balanced straight pairs such as 'Naught' and \"honey\", plus trailing "
-                "possessive apostrophes such as Girls' and protagonists', from both totals. "
+                "possessive apostrophes such as Girls', protagonists', and ladies’, from both totals. "
                 "Unmatched straight double quotes are still checked separately."
             )
             skip_stylistic_single_quotes_layout.addWidget(skip_stylistic_single_quotes_checkbox)
