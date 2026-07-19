@@ -492,7 +492,6 @@ class QAScannerMixin:
                     'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
                     'ai_thinking_preamble_patterns_are_regex': False,
                     'ai_thinking_preamble_sample_size': 500,
-                    'check_quotation_mismatch': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -2117,8 +2116,6 @@ class QAScannerMixin:
                         current_qa_settings.get('check_word_count_ratio', False)
                         or current_qa_settings.get('check_ai_truncation_detection', False)
                         or current_qa_settings.get('check_silent_truncation', False)
-                        or current_qa_settings.get('check_punctuation_mismatch', False)
-                        or current_qa_settings.get('check_quotation_mismatch', False)
                     )
 
                     # For bulk scanning, try to find a matching EPUB for each folder
@@ -2213,8 +2210,6 @@ class QAScannerMixin:
                                 current_qa_settings['check_word_count_ratio'] = False
                                 current_qa_settings['check_ai_truncation_detection'] = False
                                 current_qa_settings['check_silent_truncation'] = False
-                                current_qa_settings['check_punctuation_mismatch'] = False
-                                current_qa_settings['check_quotation_mismatch'] = False
 
                     # Check for EPUB/folder name mismatch
                     if current_epub_path and current_qa_settings.get('check_word_count_ratio', False) and current_qa_settings.get('warn_name_mismatch', True):
@@ -3117,16 +3112,6 @@ class QAScannerMixin:
             check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
             excess_punct_checkbox.toggled.connect(toggle_excess_threshold)
             toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
-
-            check_quotation_checkbox = self._create_styled_checkbox(
-                "Check quotation mark mismatches (compares with source file)"
-            )
-            check_quotation_checkbox.setChecked(qa_settings.get('check_quotation_mismatch', False))
-            check_quotation_checkbox.setToolTip(
-                "Compares straight, curly, angle, and CJK quotation delimiters, including "
-                "HTML character references such as &quot;, &#39;, &#x27;, and &#x2019;."
-            )
-            detection_layout.addWidget(check_quotation_checkbox)
 
             check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
             check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
@@ -4828,7 +4813,6 @@ class QAScannerMixin:
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
                         'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
-                        'check_quotation_mismatch': (check_quotation_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                         'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
                         'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
@@ -5237,7 +5221,6 @@ class QAScannerMixin:
                     ('punctuation_loss_threshold', punct_threshold_spinbox, 49),
                     ('flag_excess_punctuation', excess_punct_checkbox, False),
                     ('excess_punctuation_threshold', excess_threshold_spinbox, 49),
-                    ('check_quotation_mismatch', check_quotation_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
                     ('check_missing_images', check_missing_images_checkbox, True),
