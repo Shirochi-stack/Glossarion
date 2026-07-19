@@ -1290,6 +1290,7 @@ class _InputOutputDialog(QDialog):
         'AUTHND_STREAM_THINKING_LOGS',
     )
     _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR')
+    _DIRECT_TEXT_ENV_KEYS = ('DIRECT_TEXT_PRESERVE_MARKUP',)
     _STATUS_FIRST_CHARS = set(
         "🚀📄📃📜📋✅⚠❌📚📦🔧📊🔍💾🖼🔄📌📸🧠🛰📡⏱⏳"
         "🟢🟡🟠🔴🎯📑📖🌐⚡🧪✨🎨💡🔠🗑🧹📂📁🔁🔂📝🔑🗝"
@@ -1387,9 +1388,9 @@ class _InputOutputDialog(QDialog):
         )
         root.addWidget(self.output_box, 3)
 
-        # Thinking and pipeline details are intentionally collapsed by default.
+        # Processing details are intentionally collapsed by default.
         self.thinking_toggle = QToolButton()
-        self.thinking_toggle.setText("Thinking & process")
+        self.thinking_toggle.setText("Processing")
         self.thinking_toggle.setCheckable(True)
         self.thinking_toggle.setChecked(False)
         self.thinking_toggle.setArrowType(Qt.RightArrow)
@@ -1400,7 +1401,7 @@ class _InputOutputDialog(QDialog):
             "font-weight: bold; } QToolButton:hover { color: white; }"
         )
         self.thinking_toggle.toggled.connect(self._toggle_thinking)
-        self._set_thinking_toggle_text("Thinking & process")
+        self._set_thinking_toggle_text("Processing")
 
         thinking_header = QWidget()
         thinking_header_layout = QHBoxLayout(thinking_header)
@@ -1436,7 +1437,7 @@ class _InputOutputDialog(QDialog):
         self.thinking_box = QPlainTextEdit()
         self.thinking_box.setReadOnly(True)
         self.thinking_box.setMaximumHeight(190)
-        self.thinking_box.setPlaceholderText("Thinking and pipeline messages will appear here.")
+        self.thinking_box.setPlaceholderText("Processing messages will appear here.")
         self.thinking_box.setStyleSheet(
             "QPlainTextEdit { background: #131318; color: #8a8fa8; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt; }"
@@ -1569,7 +1570,7 @@ class _InputOutputDialog(QDialog):
         self.output_box.clear()
         self.thinking_box.clear()
         self.thinking_toggle.setChecked(False)
-        self._set_thinking_toggle_text("Thinking & process")
+        self._set_thinking_toggle_text("Processing")
         self._log_queue.clear()
         self._in_thinking = False
         self._streaming_text = False
@@ -1589,7 +1590,11 @@ class _InputOutputDialog(QDialog):
             gui = self.translator
             self._saved_selected_files = list(getattr(gui, 'selected_files', []) or [])
             self._saved_force_stream_all = bool(getattr(gui, '_force_stream_all', False))
-            env_keys = self._OUTPUT_ENV_KEYS + self._FORCED_STREAM_ENV_KEYS
+            env_keys = (
+                self._OUTPUT_ENV_KEYS
+                + self._FORCED_STREAM_ENV_KEYS
+                + self._DIRECT_TEXT_ENV_KEYS
+            )
             self._saved_env = {key: os.environ.get(key) for key in env_keys}
             self._saved_full_env = dict(os.environ)
             self._saved_gui_attrs = {}
@@ -1617,6 +1622,7 @@ class _InputOutputDialog(QDialog):
             gui._input_output_run_active = True
             os.environ['OUTPUT_DIRECTORY'] = self._temp_root
             os.environ['OUTPUT_DIR'] = self._temp_root
+            os.environ['DIRECT_TEXT_PRESERVE_MARKUP'] = '1'
             gui._apply_forced_streaming_environment()
 
             gui.add_log_listener(self._on_log_line)
@@ -1708,15 +1714,48 @@ class _InputOutputDialog(QDialog):
 
         if drained and not self.thinking_toggle.isChecked():
             lines = max(0, self.thinking_box.blockCount() - 1)
-            self._set_thinking_toggle_text(f"Thinking & process ({lines})")
+            self._set_thinking_toggle_text(f"Processing ({lines})")
 
     @staticmethod
     def _markup_to_html(source):
-        """Convert mixed Markdown/raw-HTML text to an HTML fragment."""
-        source = str(source or "")
+        """Convert mixed Markdown/raw HTML into one renderable HTML fragment."""
+        import html as html_lib
+        import re
+
+        source = str(source or "").replace("\r\n", "\n").replace("\r", "\n")
+
+        # Models frequently wrap an otherwise valid HTML document in a fenced
+        # block.  In this rich-output surface that fence is presentation noise,
+        # so unwrap it before handing the text to the Markdown converter.
+        fenced_html = re.fullmatch(
+            r"\s*```(?:html?|xhtml)\s*\n?(.*?)\n?```\s*",
+            source,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced_html:
+            source = fenced_html.group(1)
+
+        # Render escaped, known presentation tags as tags too.  The allow-list
+        # deliberately excludes script/object/embed and other active content.
+        renderable_tags = (
+            r"html|head|body|title|meta|style|h[1-6]|p|div|span|br|hr|"
+            r"ul|ol|li|blockquote|pre|code|table|thead|tbody|tfoot|tr|th|td|"
+            r"strong|b|em|i|u|s|del|a|img|figure|figcaption|details|summary"
+        )
+
+        def _unescape_known_tag(match):
+            return "<" + html_lib.unescape(match.group(1)) + ">"
+
+        source = re.sub(
+            rf"&lt;(/?(?:{renderable_tags})\b.*?/?)&gt;",
+            _unescape_known_tag,
+            source,
+            flags=re.IGNORECASE,
+        )
+
         try:
             import markdown
-            return markdown.markdown(
+            rendered = markdown.markdown(
                 source,
                 extensions=['extra', 'sane_lists', 'nl2br'],
                 output_format='html5',
@@ -1724,7 +1763,7 @@ class _InputOutputDialog(QDialog):
         except Exception:
             try:
                 import markdown2
-                return markdown2.markdown(
+                rendered = markdown2.markdown(
                     source,
                     extras=['break-on-newline', 'cuddled-lists',
                             'fenced-code-blocks', 'tables'],
@@ -1733,7 +1772,37 @@ class _InputOutputDialog(QDialog):
                 # Both converters are bundled dependencies, but preserving raw
                 # HTML remains more useful than showing literal tags if a
                 # minimal/custom installation omitted them.
-                return source.replace("\n", "<br>")
+                rendered = source.replace("\n", "<br>")
+
+        # Python-Markdown intentionally passes a complete <html> document
+        # through untouched.  Pull its body back out so it is not nested inside
+        # the QTextBrowser document assembled by _render_output.  If the body
+        # contains only inline content, retain literal newlines with <br> tags.
+        if re.search(r"<(?:!doctype\s+html|html\b|body\b)", rendered, re.IGNORECASE):
+            try:
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(rendered, 'html.parser')
+                styles = ""
+                if soup.head:
+                    styles = "".join(str(tag) for tag in soup.head.find_all('style'))
+
+                body = soup.body
+                if body is not None:
+                    fragment = body.decode_contents()
+                    block_names = (
+                        'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                        'br', 'hr', 'ul', 'ol', 'li', 'blockquote', 'pre',
+                        'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+                        'figure', 'figcaption', 'details', 'summary',
+                    )
+                    if not body.find(block_names):
+                        fragment = fragment.replace("\n", "<br>\n")
+                    rendered = styles + fragment
+            except Exception:
+                pass
+
+        return rendered
 
     def _render_output(self):
         rendered = self._markup_to_html(self._streamed_content)

@@ -42,6 +42,21 @@ _single_pass_glossary_lock = threading.Lock()
 _single_pass_glossary_active_indices = set()
 
 
+def _content_for_text_output(content):
+    """Return the payload that should be written for a translated text source.
+
+    Normal file translation keeps its long-standing plain-text behavior.  The
+    Direct Text dialog, however, is a rich-text surface: discarding tags with
+    ``get_text(strip=True)`` also discarded every paragraph boundary and joined
+    adjacent words.  Its scoped environment flag therefore keeps the model's
+    HTML/Markdown response intact for the dialog renderer.
+    """
+    content = str(content or "")
+    if os.getenv('DIRECT_TEXT_PRESERVE_MARKUP', '0') == '1':
+        return content
+    return BeautifulSoup(content, 'html.parser').get_text(strip=True)
+
+
 def _clean_actual_request_metadata_value(value):
     text = str(value or "").strip()
     return text or None
@@ -8321,10 +8336,7 @@ class BatchTranslationProcessor:
                 # For text files, save as plain text
                 fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
                 
-                # Extract text from HTML
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
-                text_content = soup.get_text(strip=True)
+                text_content = _content_for_text_output(cleaned)
                 
                 # Merge image translations back with text translation
                 if 'final_body_with_images' in locals() and image_translations:
@@ -9200,9 +9212,7 @@ class BatchTranslationProcessor:
                         # Handle text file mode
                         if getattr(self, 'is_text_file', False):
                             fname = fname.replace('.html', '.txt')
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(section_content, 'html.parser')
-                            section_content = soup.get_text(strip=True)
+                            section_content = _content_for_text_output(section_content)
                         
                         # Save the section
                         section_path = os.path.join(self.out_dir, fname)
@@ -9271,9 +9281,7 @@ class BatchTranslationProcessor:
                     if save_partial_results:
                         # User opted-in: write truncated output to disk
                         if getattr(self, 'is_text_file', False):
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                            text_content = soup.get_text(strip=True)
+                            text_content = _content_for_text_output(cleaned_to_save)
                             with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(text_content)
                         else:
@@ -9284,9 +9292,7 @@ class BatchTranslationProcessor:
                 else:
                     # Not truncated — always save
                     if getattr(self, 'is_text_file', False):
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                        text_content = soup.get_text(strip=True)
+                        text_content = _content_for_text_output(cleaned_to_save)
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                             f.write(text_content)
                     else:
@@ -24725,9 +24731,7 @@ def main(log_callback=None, stop_callback=None):
                         # Handle text file mode
                         if is_text_file:
                             split_fname = split_fname.replace('.html', '.txt')
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(section_content, 'html.parser')
-                            section_content = soup.get_text(strip=True)
+                            section_content = _content_for_text_output(section_content)
                         
                         # Save the section
                         split_output_path = os.path.join(out, split_fname)
@@ -24768,9 +24772,7 @@ def main(log_callback=None, stop_callback=None):
 
                 if is_text_file and not is_pdf_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                    text_content = soup.get_text(strip=True)
+                    text_content = _content_for_text_output(cleaned_to_save)
                     
                     parent_output_path = os.path.join(out, parent_fname)
                     with open(parent_output_path, 'w', encoding='utf-8') as f:
@@ -24890,9 +24892,7 @@ def main(log_callback=None, stop_callback=None):
                     # User opted-in: write the truncated/partial output to disk
                     if is_text_file and not is_pdf_file:
                         fname_out = fname.replace('.html', '.txt')
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(cleaned, 'html.parser')
-                        text_content = soup.get_text(strip=True)
+                        text_content = _content_for_text_output(cleaned)
                         with open(os.path.join(out, fname_out), 'w', encoding='utf-8') as f:
                             f.write(text_content)
                     else:
@@ -24915,11 +24915,8 @@ def main(log_callback=None, stop_callback=None):
             if is_text_file and not is_pdf_file:
                 # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
-                
-                # Extract text from HTML
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
-                text_content = soup.get_text(strip=True)
+
+                text_content = _content_for_text_output(cleaned)
                 
                 # Write plain text file
                 output_path = os.path.join(out, fname_txt)
@@ -25264,9 +25261,7 @@ def main(log_callback=None, stop_callback=None):
                             text = content
                         else:
                             # Extract text from HTML for text files
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(content, 'html.parser')
-                            text = soup.get_text(strip=True)
+                            text = _content_for_text_output(content)
                     
                     translated_chapters.append({
                         'num': chapter['num'],
