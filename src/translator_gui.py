@@ -1265,6 +1265,650 @@ from QA_Scanner_GUI import QAScannerMixin
 from Retranslation_GUI import RetranslationMixin
 from GlossaryManager_GUI import GlossaryManagerMixin
 
+
+class _InputOutputDialog(QDialog):
+    """Small chat-like front end for the normal text-file translation flow.
+
+    The dialog deliberately does not call an API client itself.  Each message
+    is written to a temporary ``.txt`` input and handed to
+    :meth:`TranslatorGUI.run_translation_thread`, so the selected model,
+    prompts, glossary, retry rules, and the rest of the regular Run Translation
+    behavior remain authoritative.
+    """
+
+    _FORCED_STREAM_ENV_KEYS = (
+        'ENABLE_STREAMING',
+        'ALLOW_BATCH_STREAM_LOGS',
+        'ALLOW_AUTHGPT_BATCH_STREAM_LOGS',
+        'ALLOW_AUTHZA_BATCH_STREAM_LOGS',
+        'STREAM_THINKING_LOGS',
+        'LOG_STREAM_CHUNKS',
+        'RESPONSE_STREAMING',
+        'ENABLE_THOUGHTS',
+        'AUTHND_STREAM',
+        'AUTHND_LOG_STREAM_CHUNKS',
+        'AUTHND_STREAM_THINKING_LOGS',
+    )
+    _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR')
+    _STATUS_FIRST_CHARS = set(
+        "🚀📄📃📜📋✅⚠❌📚📦🔧📊🔍💾🖼🔄📌📸🧠🛰📡⏱⏳"
+        "🟢🟡🟠🔴🎯📑📖🌐⚡🧪✨🎨💡🔠🗑🧹📂📁🔁🔂📝🔑🗝"
+        "🔒🔓🚫⛔💬🌍🌏🌎🐛📈📉🤖🆕═─=[#"
+    )
+
+    def __init__(self, translator):
+        super().__init__(translator)
+        from collections import deque
+        from PySide6.QtWidgets import QPlainTextEdit, QTextBrowser
+
+        self.translator = translator
+        self._log_queue = deque()
+        self._active = False
+        self._in_thinking = False
+        self._streaming_text = False
+        self._streamed_content = ""
+        self._temp_root = ""
+        self._temp_input = ""
+        self._expected_output = ""
+        self._saved_selected_files = []
+        self._saved_force_stream_all = False
+        self._saved_env = {}
+        self._saved_full_env = {}
+        self._saved_gui_attrs = {}
+        self._saved_browse_enabled = True
+        self._listener_attached = False
+        self._context_saved = False
+        self._thinking_spinner = None
+        self._last_output_folder = ""
+        self._preserve_temp_root = False
+
+        self.setWindowTitle("Direct Text Translation")
+        self.setModal(False)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.resize(780, 680)
+        self.setMinimumSize(560, 480)
+        self._restore_maximized_after_fullscreen = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(9)
+
+        title = QLabel("💬  Direct Text Translation")
+        title.setStyleSheet("font-size: 15pt; font-weight: bold;")
+        root.addWidget(title)
+
+        hint = QLabel(
+            "Type text below and press Enter. This uses the same model, prompts, "
+            "glossary, and translation settings as Run Translation."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aeb4c2;")
+        root.addWidget(hint)
+
+        self.input_box = QPlainTextEdit()
+        self.input_box.setPlaceholderText("Paste or type the text to translate…")
+        self.input_box.setMinimumHeight(135)
+        root.addWidget(self.input_box, 2)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 14, 0)
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: #aeb4c2;")
+        self.status_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.status_label.setOpenExternalLinks(False)
+        self.status_label.linkActivated.connect(self._open_output_folder)
+        action_row.addWidget(self.status_label, 1)
+
+        self.enter_button = QPushButton("Enter")
+        self.enter_button.setMinimumSize(150, 44)
+        self.enter_button.setDefault(True)
+        self.enter_button.setStyleSheet(
+            "QPushButton { background-color: #007bff; color: white; "
+            "font-size: 11pt; font-weight: bold; "
+            "padding: 10px 32px 10px 24px; border-radius: 5px; }"
+            "QPushButton:hover { background-color: #1688ff; }"
+            "QPushButton:disabled { background-color: #4b5563; color: #c0c4cc; }"
+        )
+        self.enter_button.clicked.connect(self._on_enter_clicked)
+        action_row.addWidget(self.enter_button)
+        root.addLayout(action_row)
+
+        self.output_box = QTextBrowser()
+        self.output_box.setOpenExternalLinks(False)
+        self.output_box.setOpenLinks(False)
+        self.output_box.setPlaceholderText("The streamed translation will appear here…")
+        self.output_box.setStyleSheet(
+            "QTextBrowser { padding: 10px; }"
+        )
+        root.addWidget(self.output_box, 3)
+
+        # Thinking and pipeline details are intentionally collapsed by default.
+        self.thinking_toggle = QToolButton()
+        self.thinking_toggle.setText("Thinking & process")
+        self.thinking_toggle.setCheckable(True)
+        self.thinking_toggle.setChecked(False)
+        self.thinking_toggle.setArrowType(Qt.RightArrow)
+        self.thinking_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.thinking_toggle.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.thinking_toggle.setStyleSheet(
+            "QToolButton { color: #aeb4c2; border: none; padding: 4px; "
+            "font-weight: bold; } QToolButton:hover { color: white; }"
+        )
+        self.thinking_toggle.toggled.connect(self._toggle_thinking)
+        self._set_thinking_toggle_text("Thinking & process")
+
+        thinking_header = QWidget()
+        thinking_header_layout = QHBoxLayout(thinking_header)
+        thinking_header_layout.setContentsMargins(0, 0, 0, 0)
+        thinking_header_layout.setSpacing(6)
+        thinking_header_layout.addWidget(self.thinking_toggle)
+
+        self.thinking_spinner_label = QLabel()
+        self.thinking_spinner_label.setFixedSize(28, 28)
+        self.thinking_spinner_label.setAlignment(Qt.AlignCenter)
+        self.thinking_spinner_label.setStyleSheet("background: transparent; border: none;")
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            if os.path.isfile(icon_path):
+                dpr = max(1.0, float(self.devicePixelRatioF()))
+                logical_size = 20
+                device_size = int(logical_size * dpr)
+                pixmap = QIcon(icon_path).pixmap(QSize(device_size, device_size))
+                if not pixmap.isNull():
+                    pixmap.setDevicePixelRatio(dpr)
+                    self.thinking_spinner_label.setPixmap(pixmap)
+                    self.thinking_spinner_label._original_pixmap = pixmap
+                    self._thinking_spinner = translator._create_spinner(
+                        self.thinking_spinner_label, steps=48, interval_ms=18
+                    )
+        except Exception:
+            self._thinking_spinner = None
+        self.thinking_spinner_label.hide()
+        thinking_header_layout.addWidget(self.thinking_spinner_label)
+        thinking_header_layout.addStretch(1)
+        root.addWidget(thinking_header)
+
+        self.thinking_box = QPlainTextEdit()
+        self.thinking_box.setReadOnly(True)
+        self.thinking_box.setMaximumHeight(190)
+        self.thinking_box.setPlaceholderText("Thinking and pipeline messages will appear here.")
+        self.thinking_box.setStyleSheet(
+            "QPlainTextEdit { background: #131318; color: #8a8fa8; "
+            "font-family: 'Consolas','Menlo',monospace; font-size: 8.5pt; }"
+        )
+        self.thinking_box.hide()
+        root.addWidget(self.thinking_box)
+
+        self._drain_timer = QTimer(self)
+        self._drain_timer.setInterval(80)
+        self._drain_timer.timeout.connect(self._drain_log_queue)
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(200)
+        self._poll_timer.timeout.connect(self._poll_translation)
+
+        self._ctrl_enter_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self._ctrl_enter_shortcut.activated.connect(self._on_enter_clicked)
+
+        self._fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self._fullscreen_shortcut.setContext(Qt.WindowShortcut)
+        self._fullscreen_shortcut.activated.connect(self._toggle_fullscreen)
+
+    def _toggle_fullscreen(self):
+        """Toggle F11 fullscreen while preserving the previous window state."""
+        if self.isFullScreen():
+            if self._restore_maximized_after_fullscreen:
+                self.showMaximized()
+            else:
+                self.showNormal()
+            self._restore_maximized_after_fullscreen = False
+            return
+
+        self._restore_maximized_after_fullscreen = self.isMaximized()
+        self.showFullScreen()
+
+    def _set_thinking_toggle_text(self, text):
+        """Update the label and reserve enough width to prevent Qt elision."""
+        text = str(text)
+        self.thinking_toggle.setText(text)
+        text_width = self.thinking_toggle.fontMetrics().horizontalAdvance(text)
+        # Arrow indicator + stylesheet padding + a little DPI/font variance.
+        self.thinking_toggle.setMinimumWidth(max(190, text_width + 48))
+        self.thinking_toggle.updateGeometry()
+
+    def _set_thinking_spinner_active(self, active):
+        active = bool(active)
+        self.thinking_spinner_label.setVisible(active)
+        spinner = self._thinking_spinner
+        if spinner is None:
+            return
+        if active:
+            spinner.start()
+        else:
+            spinner.stop()
+
+    def _set_status(self, text, output_folder=""):
+        """Set plain status text or a link to the completed output folder."""
+        folder = os.path.abspath(str(output_folder)) if output_folder else ""
+        if folder and os.path.isdir(folder):
+            import html
+            self._last_output_folder = folder
+            escaped = html.escape(str(text))
+            self.status_label.setText(
+                f'<a href="open-output" style="color:#65a9ff; '
+                f'text-decoration:underline;">{escaped}</a>'
+            )
+            self.status_label.setToolTip(f"Open output folder:\n{folder}")
+            self.status_label.setCursor(Qt.PointingHandCursor)
+            return
+        self.status_label.setText(str(text))
+        self.status_label.setToolTip("")
+        self.status_label.unsetCursor()
+
+    def _open_output_folder(self, _link=""):
+        folder = str(self._last_output_folder or "")
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(
+                self, "Output folder", "No Direct Text output folder is available yet."
+            )
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+                return
+        except Exception:
+            pass
+        try:
+            if os.name == 'nt':
+                os.startfile(folder)
+                return
+        except Exception:
+            pass
+        QMessageBox.warning(self, "Output folder", f"Could not open:\n{folder}")
+
+    def _toggle_thinking(self, checked):
+        self.thinking_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self.thinking_box.setVisible(bool(checked))
+
+    def _on_enter_clicked(self):
+        if self._active:
+            self.status_label.setText("Stopping…")
+            try:
+                self.translator.stop_translation()
+            except Exception:
+                pass
+            return
+        self._start_translation()
+
+    def _start_translation(self):
+        text = self.input_box.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "Input required", "Enter some text to translate.")
+            return
+
+        try:
+            if self.translator._is_any_process_running():
+                QMessageBox.warning(
+                    self,
+                    "Process running",
+                    "Please wait for the current Glossarion process to finish before sending text.",
+                )
+                return
+        except Exception:
+            pass
+
+        import uuid
+        from datetime import datetime
+
+        self.output_box.clear()
+        self.thinking_box.clear()
+        self.thinking_toggle.setChecked(False)
+        self._set_thinking_toggle_text("Thinking & process")
+        self._log_queue.clear()
+        self._in_thinking = False
+        self._streaming_text = False
+        self._streamed_content = ""
+        self._preserve_temp_root = False
+
+        try:
+            self._temp_root = tempfile.mkdtemp(prefix="glossarion_input_output_")
+            stem = f"direct_text_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
+            self._temp_input = os.path.join(self._temp_root, f"{stem}.txt")
+            with open(self._temp_input, 'w', encoding='utf-8') as handle:
+                handle.write(text)
+            self._expected_output = os.path.join(
+                self._temp_root, stem, f"{stem}_translated.txt"
+            )
+
+            gui = self.translator
+            self._saved_selected_files = list(getattr(gui, 'selected_files', []) or [])
+            self._saved_force_stream_all = bool(getattr(gui, '_force_stream_all', False))
+            env_keys = self._OUTPUT_ENV_KEYS + self._FORCED_STREAM_ENV_KEYS
+            self._saved_env = {key: os.environ.get(key) for key in env_keys}
+            self._saved_full_env = dict(os.environ)
+            self._saved_gui_attrs = {}
+            for attr in (
+                'manual_glossary_path',
+                'manual_glossary_manually_loaded',
+                'auto_loaded_glossary_path',
+                'auto_loaded_glossary_for_file',
+                'manual_glossary_map',
+                'file_path',
+                'current_file_index',
+                '_single_chapter_filter',
+                '_zip_inputs_resolved_for_current_run',
+            ):
+                exists = hasattr(gui, attr)
+                value = getattr(gui, attr, None)
+                if attr == 'manual_glossary_map' and isinstance(value, dict):
+                    value = dict(value)
+                self._saved_gui_attrs[attr] = (exists, value)
+            self._saved_browse_enabled = bool(gui.btn_browse_menu.isEnabled()) if hasattr(gui, 'btn_browse_menu') else True
+            self._context_saved = True
+
+            gui.selected_files = [self._temp_input]
+            gui._force_stream_all = True
+            gui._input_output_run_active = True
+            os.environ['OUTPUT_DIRECTORY'] = self._temp_root
+            os.environ['OUTPUT_DIR'] = self._temp_root
+            gui._apply_forced_streaming_environment()
+
+            gui.add_log_listener(self._on_log_line)
+            self._listener_attached = True
+            if hasattr(gui, 'btn_browse_menu'):
+                gui.btn_browse_menu.setEnabled(False)
+
+            self._active = True
+            self.input_box.setEnabled(False)
+            self.enter_button.setText("Stop")
+            self._set_status("Translating…")
+            self._set_thinking_spinner_active(True)
+            self._drain_timer.start()
+            self._poll_timer.start()
+
+            gui.run_translation_thread()
+            thread = getattr(gui, 'translation_thread', None)
+            if thread is None:
+                QTimer.singleShot(0, self._finish_translation)
+        except Exception as exc:
+            self._append_thinking(f"❌ Could not start translation: {exc}\n")
+            self._set_status("Could not start")
+            self._restore_run_context()
+
+    def _on_log_line(self, message):
+        """Worker-thread callback: queue only; widgets stay on the GUI thread."""
+        try:
+            self._log_queue.append(str(message))
+        except Exception:
+            pass
+
+    def _classify_line(self, line):
+        raw = str(line).rstrip("\n")
+        stripped = raw.strip()
+        low = stripped.lower()
+
+        if "thinking complete" in low:
+            self._in_thinking = False
+            return "log"
+        if stripped.startswith("🧠") or " thinking..." in low:
+            self._in_thinking = "thinking..." in low
+            return "log"
+        if self._in_thinking and (raw.startswith("    ") or stripped == "\u200b"):
+            return "thinking"
+
+        if "text streaming" in low or "first text token" in low:
+            self._streaming_text = True
+            return "log"
+        if "stream complete" in low or "translation completed" in low:
+            self._streaming_text = False
+            return "log"
+
+        if not stripped:
+            return "content" if self._streaming_text else "log"
+        if stripped[0] in self._STATUS_FIRST_CHARS:
+            return "log"
+        if stripped.startswith(("Traceback", "File \"", "[DEBUG]", "[INFO]", "[WARN", "[ERROR")):
+            return "log"
+        if stripped in ("TRANSLATION_COMPLETE_SIGNAL", "GLOSSARY_COMPLETE_SIGNAL"):
+            return "log"
+        if stripped.startswith("<"):
+            self._streaming_text = True
+            return "content"
+        return "content" if self._streaming_text else "log"
+
+    def _drain_log_queue(self):
+        drained = 0
+        output_changed = False
+        while self._log_queue and drained < 500:
+            try:
+                message = self._log_queue.popleft()
+            except IndexError:
+                break
+            drained += 1
+            for line in str(message).split("\n"):
+                kind = self._classify_line(line)
+                if kind == "content":
+                    chunk = line + "\n"
+                    self._streamed_content += chunk
+                    output_changed = True
+                elif kind == "thinking":
+                    value = line[4:] if line.startswith("    ") else line
+                    self._append_thinking(value + "\n")
+                else:
+                    self._append_thinking(line + "\n")
+
+        if output_changed:
+            self._render_output()
+
+        if drained and not self.thinking_toggle.isChecked():
+            lines = max(0, self.thinking_box.blockCount() - 1)
+            self._set_thinking_toggle_text(f"Thinking & process ({lines})")
+
+    @staticmethod
+    def _markup_to_html(source):
+        """Convert mixed Markdown/raw-HTML text to an HTML fragment."""
+        source = str(source or "")
+        try:
+            import markdown
+            return markdown.markdown(
+                source,
+                extensions=['extra', 'sane_lists', 'nl2br'],
+                output_format='html5',
+            )
+        except Exception:
+            try:
+                import markdown2
+                return markdown2.markdown(
+                    source,
+                    extras=['break-on-newline', 'cuddled-lists',
+                            'fenced-code-blocks', 'tables'],
+                )
+            except Exception:
+                # Both converters are bundled dependencies, but preserving raw
+                # HTML remains more useful than showing literal tags if a
+                # minimal/custom installation omitted them.
+                return source.replace("\n", "<br>")
+
+    def _render_output(self):
+        rendered = self._markup_to_html(self._streamed_content)
+        document = (
+            "<html><head><style>"
+            "body { line-height: 1.45; margin: 6px; }"
+            "p { margin: 0 0 0.75em 0; }"
+            "pre { background: #171a21; border: 1px solid #343a46; "
+            "padding: 8px; white-space: pre-wrap; }"
+            "code { background: #20242d; padding: 1px 3px; }"
+            "blockquote { border-left: 3px solid #6c63ff; "
+            "margin-left: 4px; padding-left: 10px; color: #aeb4c2; }"
+            "table { border-collapse: collapse; }"
+            "th, td { border: 1px solid #596171; padding: 4px 7px; }"
+            "a { color: #65a9ff; }"
+            "img { max-width: 100%; height: auto; }"
+            "</style></head><body>"
+            f"{rendered}"
+            "</body></html>"
+        )
+        self.output_box.setHtml(document)
+        cursor = self.output_box.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.output_box.setTextCursor(cursor)
+        self.output_box.ensureCursorVisible()
+
+    def _append_thinking(self, text):
+        cursor = self.thinking_box.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(str(text))
+        self.thinking_box.setTextCursor(cursor)
+        self.thinking_box.ensureCursorVisible()
+
+    def _poll_translation(self):
+        if not self._active:
+            return
+        thread = getattr(self.translator, 'translation_thread', None)
+        if thread is not None and thread.is_alive():
+            return
+        self._finish_translation()
+
+    def _persist_output_folder(self):
+        """Copy the completed temporary run into the user's output area."""
+        source_folder = os.path.dirname(self._expected_output) if self._expected_output else ""
+        if not source_folder or not os.path.isdir(source_folder):
+            return ""
+        try:
+            import shutil
+
+            configured_root = (
+                self._saved_env.get('OUTPUT_DIRECTORY')
+                or self._saved_env.get('OUTPUT_DIR')
+                or self.translator.config.get('output_directory')
+            )
+            if configured_root:
+                output_root = os.path.abspath(os.path.expanduser(str(configured_root)))
+            else:
+                output_root = _get_app_dir() if getattr(sys, 'frozen', False) else os.getcwd()
+
+            direct_text_root = os.path.join(output_root, 'Direct Text')
+            os.makedirs(direct_text_root, exist_ok=True)
+            target_folder = os.path.join(direct_text_root, os.path.basename(source_folder))
+            shutil.copytree(source_folder, target_folder)
+            return target_folder
+        except Exception as exc:
+            # Keep the temporary output alive so the link still has a valid
+            # target even if the configured output location is unwritable.
+            self._preserve_temp_root = True
+            self._append_thinking(f"⚠️ Could not persist Direct Text output: {exc}\n")
+            return source_folder
+
+    def _finish_translation(self):
+        if not self._active:
+            return
+        self._drain_log_queue()
+
+        final_text = ""
+        try:
+            if self._expected_output and os.path.isfile(self._expected_output):
+                with open(self._expected_output, 'r', encoding='utf-8') as handle:
+                    final_text = handle.read()
+        except Exception as exc:
+            self._append_thinking(f"⚠️ Could not read translated output: {exc}\n")
+
+        output_folder = self._persist_output_folder()
+        if final_text.strip():
+            # Replace transport fragments with the clean, assembled output file.
+            self._streamed_content = final_text
+            self._render_output()
+            self._set_status("Ready — Open output folder", output_folder)
+        elif self._streamed_content.strip():
+            if output_folder:
+                self._set_status("Ready — Open output folder", output_folder)
+            else:
+                self._set_status("Run ended; showing streamed output")
+        else:
+            self._set_status("No translated output was produced")
+
+        self._restore_run_context()
+
+    def _restore_run_context(self):
+        self._drain_timer.stop()
+        self._poll_timer.stop()
+        gui = self.translator
+
+        if self._listener_attached:
+            try:
+                gui.remove_log_listener(self._on_log_line)
+            except Exception:
+                pass
+            self._listener_attached = False
+
+        if self._context_saved:
+            try:
+                gui.selected_files = list(self._saved_selected_files)
+                gui._force_stream_all = self._saved_force_stream_all
+                gui._input_output_run_active = False
+                for attr, (existed, value) in self._saved_gui_attrs.items():
+                    if existed:
+                        setattr(gui, attr, value)
+                    elif hasattr(gui, attr):
+                        delattr(gui, attr)
+                if hasattr(gui, 'btn_browse_menu'):
+                    gui.btn_browse_menu.setEnabled(self._saved_browse_enabled)
+                if hasattr(gui, '_update_manual_glossary_status'):
+                    gui._update_manual_glossary_status()
+            except Exception:
+                pass
+
+            for key, value in self._saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+            # Translation code owns many environment variables. Restore any
+            # additional value that still points into this message's temporary
+            # workspace, without undoing unrelated runtime changes.
+            temp_norm = os.path.normcase(os.path.abspath(self._temp_root)) if self._temp_root else ""
+            if temp_norm:
+                for key, value in list(os.environ.items()):
+                    try:
+                        contains_temp = temp_norm in os.path.normcase(str(value))
+                    except Exception:
+                        contains_temp = False
+                    if not contains_temp:
+                        continue
+                    old_value = self._saved_full_env.get(key)
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+
+        temp_root = self._temp_root
+        self._temp_root = ""
+        self._temp_input = ""
+        self._expected_output = ""
+        self._saved_env = {}
+        self._saved_full_env = {}
+        self._saved_gui_attrs = {}
+        self._context_saved = False
+        self._active = False
+        self._set_thinking_spinner_active(False)
+        self.input_box.setEnabled(True)
+        self.enter_button.setText("Enter")
+        self.input_box.setFocus()
+
+        if temp_root and not self._preserve_temp_root:
+            try:
+                import shutil
+                shutil.rmtree(temp_root, ignore_errors=True)
+            except Exception:
+                pass
+
+
 class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QMainWindow):
     # Qt Signal for thread-safe logging
     log_signal = Signal(str)
@@ -4909,6 +5553,7 @@ Recent translations to summarize:
         options_frame = QWidget()
         options_layout = QHBoxLayout(options_frame)
         options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setSpacing(10)
         
         # Deep scan option for folders
         self.deep_scan_var = self.config.get('deep_scan', False)
@@ -4916,7 +5561,22 @@ Recent translations to summarize:
         self.deep_scan_check.setChecked(self.deep_scan_var)
         self.deep_scan_check.stateChanged.connect(self._on_deep_scan_changed)
         options_layout.addWidget(self.deep_scan_check)
-        options_layout.addStretch()
+
+        self.direct_text_button = QPushButton("💬 Direct Text")
+        self.direct_text_button.setCursor(Qt.PointingHandCursor)
+        self.direct_text_button.setMinimumWidth(105)
+        self.direct_text_button.setToolTip(
+            "Open a direct text input/output translator using the current model and settings."
+        )
+        self.direct_text_button.setStyleSheet(
+            "QPushButton { background-color: #6c63ff; color: white; "
+            "font-weight: bold; padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #7c73ff; }"
+            "QPushButton:pressed { background-color: #554dcf; }"
+        )
+        self.direct_text_button.clicked.connect(self.open_input_output_dialog)
+        self.direct_text_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        options_layout.addWidget(self.direct_text_button, 1)
         
         self.frame.addWidget(options_frame, 1, 4)
     
@@ -15591,13 +16251,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Record every selected raw input in the Library's raw-inputs
         # registry so the library dialog can find it later (even if the
         # file itself lives outside the Library folder).
-        try:
-            from epub_library import record_library_raw_input
-            for _p in (self.selected_files or []):
-                if _p and os.path.isfile(_p):
-                    record_library_raw_input(_p)
-        except Exception:
-            pass
+        if not getattr(self, '_input_output_run_active', False):
+            try:
+                from epub_library import record_library_raw_input
+                for _p in (self.selected_files or []):
+                    if _p and os.path.isfile(_p):
+                        record_library_raw_input(_p)
+            except Exception:
+                pass
 
         # Reset stop flags
         self.stop_requested = False
@@ -15993,8 +16654,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("✨ Skipping post-translation scanning for refinement mode")
                     elif current_run_output_mode == 'image':
                         self.append_log("🖼️ Skipping post-translation scanning for image output mode")
-                    elif (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
-                        translation_completed and not self.stop_requested):
+                    elif (not getattr(self, '_input_output_run_active', False)
+                          and hasattr(self, 'scan_phase_enabled_var')
+                          and self.scan_phase_enabled_var
+                          and translation_completed
+                          and not self.stop_requested):
                         mode = self._get_scan_phase_mode()
                         self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode...")
                         # Emit signal to trigger QA scan on main thread
@@ -16280,7 +16944,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             if _force_stream:
-                os.environ['LOG_STREAM_CHUNKS'] = '1'
+                self._apply_forced_streaming_environment()
                 self.append_log("🛰️ Live view: all streaming toggles forced ON for this run")
 
             # SET GLOSSARY IN ENVIRONMENT
@@ -18245,6 +18909,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 import large_env
                 large_env.update_env(env_vars)
+                # ``_get_environment_variables`` reflects persisted checkboxes.
+                # Live input/output and reader runs intentionally override those
+                # values, so re-assert the forced flags after the bulk export.
+                if getattr(self, '_force_stream_all', False):
+                    self._apply_forced_streaming_environment()
                 
                 # Handle chapter range
                 chap_range = self.chapter_range_entry.text().strip()
@@ -18303,11 +18972,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # _get_environment_variables exports the user's toggle
                     # values, which would otherwise override the live view.
                     if getattr(self, '_force_stream_all', False):
-                        os.environ['ENABLE_STREAMING'] = '1'
-                        os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1'
-                        os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1'
-                        os.environ['STREAM_THINKING_LOGS'] = '1'
-                        os.environ['LOG_STREAM_CHUNKS'] = '1'
+                        self._apply_forced_streaming_environment()
                     self.append_log(
                         f"🎯 Single-chapter mode: {os.path.basename(str(_sc_filter))} "
                         "(skipping full extraction, jumping to translation)")
@@ -18405,6 +19070,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception as e:
             self.append_log(f"❌ Error in text file processing: {str(e)}")
             return False
+
+    def _apply_forced_streaming_environment(self):
+        """Force every streaming/logging switch on for an interactive run."""
+        for key in _InputOutputDialog._FORCED_STREAM_ENV_KEYS:
+            os.environ[key] = '1'
 
     def _format_translation_anti_duplicate_settings(self, env_vars=None):
         """Return the translation anti-duplicate startup log line, or empty if disabled."""
@@ -19324,27 +19994,30 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     pass
 
             # Ensure streaming flags are applied to glossary runtime (mirrors translation flow)
+            _force_stream = bool(getattr(self, '_force_stream_all', False))
             try:
-                stream_on = bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
+                stream_on = _force_stream or bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
                 os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
                 self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
             except Exception:
                 pass
             try:
-                allow_batch_logs = bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
+                allow_batch_logs = _force_stream or bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
             except Exception:
                 pass
             try:
-                allow_authgpt_logs = bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
+                allow_authgpt_logs = _force_stream or bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
                 os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
             except Exception:
                 pass
             try:
-                stream_thinking = bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
+                stream_thinking = _force_stream or bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
+            if _force_stream:
+                self._apply_forced_streaming_environment()
 
             # Sync all thinking-related env vars so glossary extraction uses the same settings as translation
             try:
@@ -23836,6 +24509,22 @@ Important rules:
             self._handle_file_selection(paths)
             self.append_log(f"📂 Dropped {len(paths)} file(s)")
         event.acceptProposedAction()
+
+    def open_input_output_dialog(self):
+        """Open (or focus) the chat-like raw text translation dialog."""
+        dialog = getattr(self, '_input_output_dialog', None)
+        if dialog is None:
+            dialog = _InputOutputDialog(self)
+            self._input_output_dialog = dialog
+        try:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            dialog.input_box.setFocus()
+        except RuntimeError:
+            dialog = _InputOutputDialog(self)
+            self._input_output_dialog = dialog
+            dialog.show()
 
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
