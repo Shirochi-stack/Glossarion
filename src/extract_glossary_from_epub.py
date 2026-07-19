@@ -217,6 +217,14 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         return False
     return "graceful stop active - not starting new api call" in s
 
+
+def _graceful_stop_may_finish_after_result(result_committed: bool) -> bool:
+    """Only a result actually committed to progress may finish graceful stop."""
+    return bool(
+        result_committed
+        and os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+    )
+
 def create_client_with_multi_key_support(api_key, model, output_dir, config, context='glossary'):
     """Create a UnifiedClient with multi API key support if enabled.
     
@@ -1690,6 +1698,62 @@ def _glossary_issue_from_finish_reason(finish_reason, default_issue="EMPTY_OUTPU
     if finish_text in ("length", "max_tokens") or "max_tokens" in finish_text:
         return "TRUNCATED"
     return default_issue
+
+
+def _confirmed_merged_child_indices(group_result, submitted_indices):
+    """Return merged children only after this exact group succeeded completely."""
+    try:
+        expected = [int(idx) for idx in submitted_indices]
+    except (TypeError, ValueError):
+        return []
+    if len(expected) < 2 or len(set(expected)) != len(expected):
+        return []
+    if not isinstance(group_result, dict):
+        return []
+
+    try:
+        claimed_children = [int(idx) for idx in group_result.get("merged_indices", [])]
+    except (TypeError, ValueError):
+        return []
+    if claimed_children != expected[1:]:
+        return []
+
+    results = group_result.get("results")
+    if not isinstance(results, list) or len(results) != len(expected):
+        return []
+
+    results_by_idx = {}
+    for result in results:
+        if not isinstance(result, dict) or result.get("error"):
+            return []
+        try:
+            idx = int(result.get("idx"))
+        except (TypeError, ValueError):
+            return []
+        if idx in results_by_idx:
+            return []
+        results_by_idx[idx] = result
+    if set(results_by_idx) != set(expected):
+        return []
+
+    parent_idx = expected[0]
+    parent = results_by_idx[parent_idx]
+    parent_data = parent.get("data", [])
+    parent_response = str(parent.get("resp") or "").strip()
+    if not parent_data and (not parent_response or parent_response in ("[]", "{}")):
+        return []
+    if _glossary_issue_from_finish_reason(parent.get("finish_reason", "stop"), None):
+        return []
+
+    for child_idx in expected[1:]:
+        try:
+            merged_into = int(results_by_idx[child_idx].get("merged_into"))
+        except (TypeError, ValueError):
+            return []
+        if merged_into != parent_idx:
+            return []
+
+    return expected[1:]
 
 def _glossary_restore_in_progress_entry(info):
     """Restore the pre-in-progress chapter entry, or return None for not completed."""
@@ -6142,7 +6206,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'model_name': request_model_name, 'key_identifier': request_key_identifier, 'key_pool': request_key_pool, 'error': 'API returned None'}
                            for idx, chap in merge_group],
-                'merged_indices': [idx for idx, _ in merge_group[1:]]
+                'merged_indices': []
             }
         
         if isinstance(raw, tuple):
@@ -6237,7 +6301,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             return {
                 'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
                            for idx, chap in merge_group],
-                'merged_indices': [idx for idx, _ in merge_group[1:]]
+                'merged_indices': []
             }
     except Exception as e:
         print(f"❌ Merged group failed: {e}")
@@ -6247,7 +6311,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         return {
             'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
                        for idx, chap in merge_group],
-            'merged_indices': [idx for idx, _ in merge_group[1:]]
+            'merged_indices': []
         }
 
 
@@ -7563,12 +7627,14 @@ def main(log_callback=None, stop_callback=None):
                                         model_updates[int(u_idx)] = group_model
                                     if group_key:
                                         key_updates[int(u_idx)] = group_key
-                            new_merged_indices = group_result.get('merged_indices', [])
-                            
-                            # Add new merged indices to tracking
-                            for mi in new_merged_indices:
-                                if mi not in merged_indices:
-                                    merged_indices.append(mi)
+                            # Never trust a worker's child list until the exact
+                            # submitted group has returned a complete, usable result.
+                            # Queued graceful-stop skips used to leak their children
+                            # into merged_indices before the error was inspected.
+                            confirmed_merged_indices = _confirmed_merged_child_indices(
+                                group_result,
+                                unit_indices,
+                            )
                             
                             for result in results:
                                 idx = result.get('idx')
@@ -7582,13 +7648,12 @@ def main(log_callback=None, stop_callback=None):
                                 if error:
                                     # Suppress expected "graceful stop" pre-send cancellations.
                                     if isinstance(error, str) and _is_graceful_stop_skip_error(error):
-                                        stopped_early = True
-                                        return
+                                        return False
                                     print(f"[Chapter {display_idx}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
                                     _clear_glossary_in_progress(unit_indices)
                                     _save_progress_for_unit()
-                                    return
+                                    return True
                                 
                                 # Process entries
                                 if data and len(data) > 0:
@@ -7628,8 +7693,10 @@ def main(log_callback=None, stop_callback=None):
                                 # BUT skip this check for merged children — they intentionally have
                                 # empty data/resp because their content was processed via the parent chapter
                                 if 'merged_into' in result:
-                                    # Merged child: content was handled by parent, just mark completed
-                                    completed.append(idx)
+                                    # A child is complete only when its exact parent
+                                    # request was confirmed successful above.
+                                    if idx in confirmed_merged_indices:
+                                        completed.append(idx)
                                 else:
                                     _resp_text = resp or ''
                                     _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
@@ -7652,7 +7719,13 @@ def main(log_callback=None, stop_callback=None):
                                 if contextual_enabled and resp and chap and 'merged_into' not in result:
                                     system_prompt, user_prompt = build_prompt(chap)
                                     batch_history_map[idx] = (user_prompt, resp, raw_obj)
-                            
+
+                            # Commit the merged status only after every result in
+                            # this exact group has been processed successfully.
+                            for mi in confirmed_merged_indices:
+                                if mi not in merged_indices:
+                                    merged_indices.append(mi)
+
                             print(f"✅ Merged group done: {len(results)} chapters")
                         else:
                             # Handle single chapter result
@@ -7670,13 +7743,12 @@ def main(log_callback=None, stop_callback=None):
                             if error:
                                 # Suppress expected "graceful stop" pre-send cancellations.
                                 if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
-                                    stopped_early = True
-                                    return
+                                    return False
                                 print(f"[Chapter {display_idx}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                                 _clear_glossary_in_progress(unit_indices)
                                 _save_progress_for_unit()
-                                return
+                                return True
                             
                             # Process entries as each chapter completes
                             if data and len(data) > 0:
@@ -7734,16 +7806,16 @@ def main(log_callback=None, stop_callback=None):
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, args.output)
                         save_glossary_csv(glossary, args.output)
+                        return True
                         
                     except Exception as e:
                         # Suppress expected "graceful stop" pre-send cancellations.
                         if _is_graceful_stop_skip_error(e):
-                            stopped_early = True
-                            return
+                            return False
                         if _glossary_is_hard_stop_requested(stop_callback):
                             stopped_early = True
                             _restore_glossary_in_progress_for_hard_stop(unit_indices)
-                            return
+                            return False
                         if is_merged_mode:
                             # For merged mode, mark all chapters in the unit as failed on error
                             _err_lower = str(e).lower()
@@ -7763,6 +7835,7 @@ def main(log_callback=None, stop_callback=None):
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                         _clear_glossary_in_progress(unit_indices)
                         _save_progress_for_unit()
+                        return True
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -7810,6 +7883,9 @@ def main(log_callback=None, stop_callback=None):
                         # If active_futures is empty but there are items left, submit them now
                         # (This handles edge cases where graceful stop was briefly set then cleared)
                         if not active_futures and next_unit_idx < len(current_batch_units):
+                            if os.environ.get('GRACEFUL_STOP') == '1':
+                                stopped_early = True
+                                break
                             while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                                 pass
                             if not active_futures:
@@ -7829,11 +7905,11 @@ def main(log_callback=None, stop_callback=None):
                                 while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                                     pass
 
-                            _handle_future_result(future, unit)
+                            result_committed = _handle_future_result(future, unit)
                             if stopped_early:
                                 break
 
-                            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                            if _graceful_stop_may_finish_after_result(result_committed):
                                 print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
                                 stopped_early = True
                                 cancelled = cancel_all_futures(list(active_futures.keys()))
@@ -7867,10 +7943,10 @@ def main(log_callback=None, stop_callback=None):
                             break
 
                         unit = futures[future]
-                        _handle_future_result(future, unit)
+                        result_committed = _handle_future_result(future, unit)
                         
                         # Check for graceful stop AFTER processing result
-                        if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                        if _graceful_stop_may_finish_after_result(result_committed):
                             print("✅ Graceful stop: Chapter completed and saved, stopping...")
                             stopped_early = True
                             cancelled = cancel_all_futures(list(futures.keys()))

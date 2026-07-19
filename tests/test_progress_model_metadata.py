@@ -22,6 +22,9 @@ from Retranslation_GUI import (
 from TransateKRtoEN import ProgressManager
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
+    _confirmed_merged_child_indices,
+    _graceful_stop_may_finish_after_result,
+    _is_graceful_stop_skip_error,
     make_glossary_progress_context,
     _restore_glossary_in_progress_file,
 )
@@ -308,6 +311,75 @@ def test_glossary_explicit_user_cancel_is_not_retried_as_timeout(monkeypatch):
         send_with_interrupt([], client, 0, 10, lambda: False)
 
     assert client.calls == 1
+
+
+def test_queued_graceful_skip_cannot_finish_before_result_is_committed(monkeypatch):
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
+    skipped = "Graceful stop active - not starting new API call"
+
+    assert _is_graceful_stop_skip_error(skipped)
+    assert not _graceful_stop_may_finish_after_result(False)
+    assert _graceful_stop_may_finish_after_result(True)
+
+
+def test_merged_children_require_exact_successful_group_result():
+    submitted = [12, 13, 14, 15, 16]
+    successful = {
+        "merged_indices": submitted[1:],
+        "results": [
+            {
+                "idx": submitted[0],
+                "data": [{"raw_name": "원문"}],
+                "resp": "[result]",
+                "finish_reason": "stop",
+                "error": None,
+            },
+            *[
+                {
+                    "idx": idx,
+                    "data": [],
+                    "resp": "",
+                    "error": None,
+                    "merged_into": submitted[0],
+                }
+                for idx in submitted[1:]
+            ],
+        ],
+    }
+
+    assert _confirmed_merged_child_indices(successful, submitted) == submitted[1:]
+
+    graceful_skip = {
+        "merged_indices": submitted[1:],
+        "results": [
+            {
+                "idx": idx,
+                "data": [],
+                "resp": "",
+                "error": "Graceful stop active - not starting new API call",
+            }
+            for idx in submitted
+        ],
+    }
+    assert _confirmed_merged_child_indices(graceful_skip, submitted) == []
+
+    wrong_group = dict(successful, merged_indices=[18, 19, 20, 21])
+    assert _confirmed_merged_child_indices(wrong_group, submitted) == []
+
+
+def test_merged_children_rejected_when_parent_output_is_unusable():
+    submitted = [7, 8, 9]
+    empty_parent = {
+        "merged_indices": submitted[1:],
+        "results": [
+            {"idx": 7, "data": [], "resp": "[]", "error": None},
+            {"idx": 8, "data": [], "resp": "", "error": None, "merged_into": 7},
+            {"idx": 9, "data": [], "resp": "", "error": None, "merged_into": 7},
+        ],
+    }
+
+    assert _confirmed_merged_child_indices(empty_parent, submitted) == []
 
 
 def test_glossary_stop_restores_previous_progress_entries_atomically(tmp_path):
