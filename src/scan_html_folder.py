@@ -2114,9 +2114,23 @@ _EXPLICIT_QUOTATION_MARKS = frozenset(
 _APOSTROPHE_LIKE_MARKS = frozenset("'‘’＇")
 _MISTYPED_HEX_APOSTROPHE_RE = re.compile(r"&(?:#x|x)39;", re.IGNORECASE)
 _STYLISTIC_SINGLE_QUOTE_RE = re.compile(r"(?<!\w)'[^'\r\n]+?'(?!\w)")
+_STYLISTIC_DOUBLE_QUOTE_RE = re.compile(r'(?<!\w)"[^"\r\n]+?"(?!\w)')
+_TRAILING_POSSESSIVE_APOSTROPHE_RE = re.compile(
+    r"\b[A-Za-z]{2,}'(?=\s|[.,;:!?)}\]]|$)"
+)
 _MISSING_ENDING_QUOTATION_RE = re.compile(
     r'(?s)<p[^>]*>(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*'
     r'(?:"(?:(?!</p>)[^"])*"(?:(?!</p>)[^"])*)*</p>'
+)
+_DIRECTIONAL_QUOTATION_PAIRS = (
+    ('“', '”'),
+    ('‘', '’'),
+    ('「', '」'),
+    ('『', '』'),
+    ('«', '»'),
+    ('‹', '›'),
+    ('〈', '〉'),
+    ('《', '》'),
 )
 
 
@@ -2133,20 +2147,25 @@ def _normalize_quotation_entities(text):
 
 
 def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
-    """Count quotation delimiters while ignoring apostrophes inside words."""
+    """Count quotation delimiters while ignoring ordinary word apostrophes."""
     decoded = _normalize_quotation_entities(text)
-    skipped_single_quote_indexes = set()
+    skipped_stylistic_indexes = set()
     if skip_stylistic_single_quotes:
         for match in _STYLISTIC_SINGLE_QUOTE_RE.finditer(decoded):
-            skipped_single_quote_indexes.add(match.start())
-            skipped_single_quote_indexes.add(match.end() - 1)
+            skipped_stylistic_indexes.add(match.start())
+            skipped_stylistic_indexes.add(match.end() - 1)
+        for match in _STYLISTIC_DOUBLE_QUOTE_RE.finditer(decoded):
+            skipped_stylistic_indexes.add(match.start())
+            skipped_stylistic_indexes.add(match.end() - 1)
+        for match in _TRAILING_POSSESSIVE_APOSTROPHE_RE.finditer(decoded):
+            skipped_stylistic_indexes.add(match.end() - 1)
 
     count = 0
     for index, char in enumerate(decoded):
         if char not in _EXPLICIT_QUOTATION_MARKS and unicodedata.category(char) not in ('Pi', 'Pf'):
             continue
 
-        if char == "'" and index in skipped_single_quote_indexes:
+        if index in skipped_stylistic_indexes:
             continue
 
         if char in _APOSTROPHE_LIKE_MARKS:
@@ -2159,21 +2178,16 @@ def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
 
 
 def _visible_text_for_quotation_check(html_content, allow_plain_text=False):
-    """Extract ``<p>`` text, optionally falling back for untagged plain text."""
+    """Extract all visible text without counting quotes in markup attributes."""
     normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
     soup = BeautifulSoup(normalized_html, 'html.parser')
     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
         tag.decompose()
-    paragraphs = soup.find_all('p')
-    if paragraphs:
-        return '\n'.join(paragraph.get_text() for paragraph in paragraphs)
-    if allow_plain_text and soup.find() is None:
-        return soup.get_text()
-    return ''
+    return soup.get_text(separator='\n')
 
 
 def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
-    """Return 1-based paragraphs with an odd number of straight double quotes."""
+    """Return paragraphs missing a straight, directional, or CJK closing quote."""
     normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
     soup = BeautifulSoup(normalized_html, 'html.parser')
     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
@@ -2188,10 +2202,34 @@ def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
         # Run the requested regex on a tag-free synthetic paragraph so quotes
         # in nested HTML attributes cannot create false positives.
         synthetic_paragraph = f"<p>{html_lib.escape(paragraph_text, quote=False)}</p>"
+        missing_marks = []
         if _MISSING_ENDING_QUOTATION_RE.fullmatch(synthetic_paragraph):
+            missing_marks.append('"')
+
+        decoded_text = _normalize_quotation_entities(paragraph_text)
+        for opening_mark, closing_mark in _DIRECTIONAL_QUOTATION_PAIRS:
+            opening_count = 0
+            closing_count = 0
+            for index, char in enumerate(decoded_text):
+                if char not in (opening_mark, closing_mark):
+                    continue
+                if char in _APOSTROPHE_LIKE_MARKS:
+                    previous_char = decoded_text[index - 1] if index > 0 else ''
+                    next_char = decoded_text[index + 1] if index + 1 < len(decoded_text) else ''
+                    if previous_char.isalnum() and next_char.isalnum():
+                        continue
+                if char == opening_mark:
+                    opening_count += 1
+                else:
+                    closing_count += 1
+            if opening_count > closing_count:
+                missing_marks.extend([closing_mark] * (opening_count - closing_count))
+
+        if missing_marks:
             missing.append({
                 'paragraph_index': paragraph_index,
                 'text': paragraph_text.strip(),
+                'missing_marks': missing_marks,
             })
     return missing
 

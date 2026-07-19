@@ -3185,10 +3185,10 @@ class QAScannerMixin:
             )
             check_quotation_checkbox.setChecked(qa_settings.get('check_quotation_mismatch', False))
             check_quotation_checkbox.setToolTip(
-                "For EPUBs, compares quotation marks inside <p> tags. For non-EPUB text input, "
-                "plain text without HTML tags is also supported. Supports straight, curly, CJK, "
-                "and HTML-encoded quotation marks. Also flags paragraphs with an unmatched "
-                "straight double quote."
+                "Compares quotation marks across all visible source and translated text; HTML "
+                "attributes and non-visible tags are ignored. Plain non-EPUB text is also supported. "
+                "Supports straight, curly, CJK, and HTML-encoded marks. Paragraphs missing a closing "
+                "straight, curly, angle, or CJK quotation mark are also flagged."
             )
             detection_layout.addWidget(check_quotation_checkbox)
 
@@ -3209,14 +3209,15 @@ class QAScannerMixin:
             skip_stylistic_single_quotes_layout = QHBoxLayout(skip_stylistic_single_quotes_widget)
             skip_stylistic_single_quotes_layout.setContentsMargins(20, 0, 0, 5)
             skip_stylistic_single_quotes_checkbox = self._create_styled_checkbox(
-                "Skip stylistic single-quote pairs ('term')"
+                "Skip stylistic quotes and possessive apostrophes"
             )
             skip_stylistic_single_quotes_checkbox.setChecked(
                 qa_settings.get('skip_stylistic_single_quotes', False)
             )
             skip_stylistic_single_quotes_checkbox.setToolTip(
-                "Excludes balanced straight single-quote pairs such as 'Naught' from both source "
-                "and translated quotation totals. Unpaired single quotes are still counted."
+                "Excludes balanced straight pairs such as 'Naught' and \"honey\", plus trailing "
+                "possessive apostrophes such as Girls' and protagonists', from both totals. "
+                "Unmatched straight double quotes are still checked separately."
             )
             skip_stylistic_single_quotes_layout.addWidget(skip_stylistic_single_quotes_checkbox)
             skip_stylistic_single_quotes_layout.addStretch()
