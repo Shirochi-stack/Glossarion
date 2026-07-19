@@ -1384,6 +1384,7 @@ class _InputOutputDialog(QDialog):
                 "draft": "",
                 "output_folder": "",
                 "output_folder_name": "",
+                "next_output_index": 1,
                 "expanded": set(),
             }
         ]
@@ -1603,7 +1604,9 @@ class _InputOutputDialog(QDialog):
         sidebar_layout.addWidget(self.chat_list, 1)
 
         self.delete_chat_button = QPushButton("Delete chat")
-        self.delete_chat_button.setToolTip("Delete the selected conversation")
+        self.delete_chat_button.setToolTip(
+            "Delete the selected conversation and its saved output folder"
+        )
         self.delete_chat_button.clicked.connect(self._delete_current_chat)
         sidebar_layout.addWidget(self.delete_chat_button)
         chat_shell_layout.addWidget(self.chat_sidebar)
@@ -1882,17 +1885,21 @@ class _InputOutputDialog(QDialog):
         def corner_image(name):
             source = html_lib.escape(corners[name], quote=True)
             return (
-                f"<img src='{source}' width='{radius}' height='{radius}'>"
+                f"<img src='{source}' width='{radius}' height='{radius}' "
+                "style='vertical-align: top;'>"
             )
 
         return (
             "<td class='user-bubble-shell'>"
             "<table class='rounded-user-bubble' width='100%' cellspacing='0' "
             "cellpadding='0'>"
-            "<tr>"
-            f"<td width='{radius}' height='{radius}'>{corner_image('tl')}</td>"
-            f"<td class='user-bubble-edge' height='{radius}'></td>"
-            f"<td width='{radius}' height='{radius}'>{corner_image('tr')}</td>"
+            "<tr class='user-bubble-cap'>"
+            f"<td class='user-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('tl')}</td>"
+            f"<td class='user-bubble-edge user-bubble-cap-edge' "
+            f"height='{radius}'></td>"
+            f"<td class='user-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('tr')}</td>"
             "</tr><tr>"
             f"<td class='user-bubble-edge' width='{radius}'></td>"
             "<td class='user-bubble-content'>"
@@ -1900,10 +1907,13 @@ class _InputOutputDialog(QDialog):
             f"<div class='message-content'>{rendered}</div>"
             "</td>"
             f"<td class='user-bubble-edge' width='{radius}'></td>"
-            "</tr><tr>"
-            f"<td width='{radius}' height='{radius}'>{corner_image('bl')}</td>"
-            f"<td class='user-bubble-edge' height='{radius}'></td>"
-            f"<td width='{radius}' height='{radius}'>{corner_image('br')}</td>"
+            "</tr><tr class='user-bubble-cap'>"
+            f"<td class='user-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('bl')}</td>"
+            f"<td class='user-bubble-edge user-bubble-cap-edge' "
+            f"height='{radius}'></td>"
+            f"<td class='user-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('br')}</td>"
             "</tr></table></td>"
         )
 
@@ -2010,6 +2020,7 @@ class _InputOutputDialog(QDialog):
                     "draft": "",
                     "output_folder": "",
                     "output_folder_name": "",
+                    "next_output_index": 1,
                     "expanded": set(),
                 }
             )
@@ -2202,19 +2213,43 @@ class _InputOutputDialog(QDialog):
 
         session = self._chat_sessions[index]
         title = str(session.get("title", "New chat") or "New chat")
+        output_folder = str(session.get("output_folder", "") or "")
+        folder_notice = (
+            f"\n\nOutput folder that will also be permanently deleted:\n{output_folder}"
+            if output_folder
+            else "\n\nNo output folder has been created for this chat yet."
+        )
         confirmation = QMessageBox.question(
             self,
             "Delete chat?",
             (
                 f'Delete "{title}"?\n\n'
-                "This removes the conversation and its messages from the sidebar. "
-                "Saved output files and the chat output folder will remain on disk."
+                "This permanently removes the conversation, its messages, and every "
+                "saved output file for this chat. This cannot be undone."
+                f"{folder_notice}"
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if confirmation != QMessageBox.Yes:
             return
+
+        if output_folder and os.path.exists(output_folder):
+            try:
+                import shutil
+
+                safe_folder = self._validated_chat_output_folder(session)
+                shutil.rmtree(safe_folder)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Could not delete chat output",
+                    (
+                        "The chat was not deleted because its output folder could not "
+                        f"be safely removed.\n\n{exc}"
+                    ),
+                )
+                return
 
         self._chat_sessions.pop(index)
         if not self._chat_sessions:
@@ -2227,6 +2262,7 @@ class _InputOutputDialog(QDialog):
                     "draft": "",
                     "output_folder": "",
                     "output_folder_name": "",
+                    "next_output_index": 1,
                     "expanded": set(),
                 }
             )
@@ -2234,6 +2270,45 @@ class _InputOutputDialog(QDialog):
         self._load_chat_session(self._current_chat_index)
         self._refresh_chat_list()
         self.input_box.setFocus()
+
+    @staticmethod
+    def _validated_chat_output_folder(session):
+        """Resolve an exact, recognized conversation subfolder for deletion."""
+        folder = os.path.realpath(
+            os.path.abspath(str(session.get("output_folder", "") or ""))
+        )
+        if not folder or not os.path.isdir(folder):
+            raise ValueError("The conversation output folder no longer exists.")
+
+        parent = os.path.dirname(folder)
+        basename = os.path.basename(folder)
+        if not basename or folder == parent:
+            raise ValueError("Refusing to delete a filesystem root.")
+
+        protected_paths = {
+            os.path.normcase(os.path.realpath(os.getcwd())),
+            os.path.normcase(os.path.realpath(os.path.expanduser("~"))),
+            os.path.normcase(os.path.realpath(_get_app_dir())),
+        }
+        if os.path.normcase(folder) in protected_paths:
+            raise ValueError("Refusing to delete a protected application folder.")
+
+        expected_name = str(session.get("output_folder_name", "") or "")
+        is_direct_text_subfolder = (
+            os.path.basename(parent).casefold() == "direct text"
+            and (not expected_name or basename == expected_name)
+        )
+        temp_root = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+        is_managed_fallback = (
+            os.path.normcase(parent) == temp_root
+            and basename.startswith("glossarion_direct_text_chat_")
+        )
+        if not (is_direct_text_subfolder or is_managed_fallback):
+            raise ValueError(
+                "Refusing to delete an unrecognized folder outside the managed "
+                "Direct Text conversation area."
+            )
+        return folder
 
     def _title_current_chat_from_text(self, text):
         session = self._current_chat_session()
@@ -3004,6 +3079,8 @@ class _InputOutputDialog(QDialog):
             "padding: 13px 16px; border-radius: 12px; }"
             ".user-bubble-shell, .rounded-user-bubble, .rounded-user-bubble td { "
             "border: none; padding: 0; }"
+            ".user-bubble-cap, .user-bubble-cap td, .user-bubble-corner, "
+            ".user-bubble-cap-edge { font-size: 1px; line-height: 1px; }"
             ".user-bubble-edge, .user-bubble-content { background-color: #2d2d2d; }"
             ".user-bubble-content { color: white; padding: 0 4px; }"
             ".assistant-avatar-cell { padding: 2px 9px 0 0; }"
@@ -3138,35 +3215,67 @@ class _InputOutputDialog(QDialog):
         self._last_output_folder = target_folder
         return target_folder
 
+    def _next_indexed_output_path(self, target_folder):
+        """Return a collision-safe Direct Text N.txt path for this chat."""
+        import re
+
+        session = self._current_chat_session()
+        try:
+            next_index = max(1, int(session.get("next_output_index", 1)))
+        except (AttributeError, TypeError, ValueError):
+            next_index = 1
+
+        pattern = re.compile(r"^Direct Text (\d+)\.txt$", re.IGNORECASE)
+        try:
+            for filename in os.listdir(target_folder):
+                match = pattern.match(filename)
+                if match:
+                    next_index = max(next_index, int(match.group(1)) + 1)
+        except OSError:
+            pass
+
+        while True:
+            target_path = os.path.join(
+                target_folder, f"Direct Text {next_index}.txt"
+            )
+            if not os.path.exists(target_path):
+                return next_index, target_path
+            next_index += 1
+
+    def _copy_indexed_output_file(self, target_folder):
+        """Copy the completed translation using this conversation's next index."""
+        if not self._expected_output or not os.path.isfile(self._expected_output):
+            return ""
+        import shutil
+
+        output_index, target_path = self._next_indexed_output_path(target_folder)
+        shutil.copy2(self._expected_output, target_path)
+        session = self._current_chat_session()
+        if session is not None:
+            session["next_output_index"] = output_index + 1
+        return target_path
+
     def _persist_output_folder(self):
-        """Merge a completed run into this conversation's shared output folder."""
-        source_folder = os.path.dirname(self._expected_output) if self._expected_output else ""
-        if not source_folder or not os.path.isdir(source_folder):
+        """Save a completed run as Direct Text N.txt in the chat folder."""
+        if not self._expected_output or not os.path.isfile(self._expected_output):
             return ""
         try:
-            import shutil
-
             target_folder = self._conversation_output_folder()
             if not target_folder:
                 return ""
-            shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
+            self._copy_indexed_output_file(target_folder)
             return target_folder
         except Exception as exc:
             self._append_thinking(f"⚠️ Could not persist Direct Text output: {exc}\n")
             session = self._current_chat_session()
-            fallback_folder = str(
-                session.get("output_folder", "") if session is not None else ""
-            )
             try:
-                import shutil
-
-                if not fallback_folder or not os.path.isdir(fallback_folder):
-                    fallback_folder = tempfile.mkdtemp(
-                        prefix="glossarion_direct_text_chat_"
-                    )
-                    if session is not None:
-                        session["output_folder"] = fallback_folder
-                shutil.copytree(source_folder, fallback_folder, dirs_exist_ok=True)
+                fallback_folder = tempfile.mkdtemp(
+                    prefix="glossarion_direct_text_chat_"
+                )
+                if session is not None:
+                    session["output_folder"] = fallback_folder
+                    session["next_output_index"] = 1
+                self._copy_indexed_output_file(fallback_folder)
                 self._last_output_folder = fallback_folder
                 return fallback_folder
             except Exception as fallback_exc:
@@ -3176,7 +3285,7 @@ class _InputOutputDialog(QDialog):
                     f"⚠️ Could not create shared fallback output folder: "
                     f"{fallback_exc}\n"
                 )
-                return source_folder
+                return os.path.dirname(self._expected_output)
 
     def _finish_translation(self):
         if not self._active:
