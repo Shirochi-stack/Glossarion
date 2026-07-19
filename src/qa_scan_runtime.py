@@ -3,6 +3,7 @@
 
 import json
 import os
+import sys
 
 
 CANONICAL_WORD_COUNT_MULTIPLIERS = {
@@ -84,6 +85,8 @@ def default_qa_scan_settings():
         "ai_thinking_preamble_patterns_are_regex": False,
         "ai_thinking_preamble_sample_size": 500,
         "check_punctuation_mismatch": False,
+        "check_quotation_mismatch": False,
+        "ignore_excess_quotation_marks": False,
         "punctuation_loss_threshold": 49,
         "flag_excess_punctuation": False,
         "excess_punctuation_threshold": 49,
@@ -234,6 +237,8 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_CHECK_ALL_TEXT_IN_HEADER": "1" if settings.get("check_all_text_in_header", True) else "0",
         "QA_CHECK_INVALID_TAG_MISMATCH": "1" if settings.get("check_invalid_tag_mismatch", False) else "0",
         "QA_CHECK_PUNCTUATION_MISMATCH": "1" if settings.get("check_punctuation_mismatch", False) else "0",
+        "QA_CHECK_QUOTATION_MISMATCH": "1" if settings.get("check_quotation_mismatch", False) else "0",
+        "QA_IGNORE_EXCESS_QUOTATION_MARKS": "1" if settings.get("ignore_excess_quotation_marks", False) else "0",
         "QA_FLAG_EXCESS_PUNCTUATION": "1" if settings.get("flag_excess_punctuation", False) else "0",
         "QA_PUNCTUATION_LOSS_THRESHOLD": str(settings.get("punctuation_loss_threshold", 50)),
         "QA_EXCESS_PUNCTUATION_THRESHOLD": str(settings.get("excess_punctuation_threshold", 49)),
@@ -243,6 +248,106 @@ def apply_qa_scan_env_from_settings(qa_settings):
     for key, value in mappings.items():
         os.environ[key] = value
     return previous
+
+
+def active_qa_output_folder_for_source(source_path):
+    """Return the translator's exact active output folder for ``source_path``.
+
+    ``EPUB_OUTPUT_DIR`` points at the translated book folder itself, unlike
+    ``OUTPUT_DIRECTORY`` which points at the parent output root.  Only accept
+    it when its folder name matches the source stem so a stale value from a
+    different book cannot redirect a QA scan.
+    """
+    if not source_path or is_direct_text_qa_path(source_path):
+        return None
+
+    active_output = str(os.getenv("EPUB_OUTPUT_DIR", "") or "").strip()
+    if not active_output:
+        return None
+
+    source_stem = os.path.splitext(os.path.basename(os.path.abspath(source_path)))[0]
+    output_path = os.path.abspath(active_output)
+    if is_direct_text_qa_path(output_path):
+        return None
+    output_stem = os.path.basename(output_path.rstrip("/\\"))
+    if os.path.normcase(output_stem) != os.path.normcase(source_stem):
+        return None
+    if not os.path.isdir(output_path):
+        return None
+    return output_path
+
+
+def is_direct_text_qa_path(path):
+    """Return whether a path belongs to Direct Text's persistent or temp output."""
+    if not path:
+        return False
+
+    try:
+        normalized = os.path.abspath(os.path.expanduser(str(path))).replace('\\', '/')
+    except Exception:
+        normalized = str(path).replace('\\', '/')
+
+    for component in (part.strip().casefold() for part in normalized.split('/') if part.strip()):
+        underscored = component.replace('-', '_').replace(' ', '_')
+        if underscored == 'direct_text' or underscored.startswith('direct_text_'):
+            return True
+        if underscored.startswith('glossarion_direct_text_'):
+            return True
+        if underscored.startswith('glossarion_input_output_'):
+            return True
+    return False
+
+
+def automatic_qa_output_candidates(
+    source_path,
+    *,
+    current_dir,
+    script_dir,
+    output_root=None,
+    platform_name=None,
+):
+    """Return safe automatic output candidates in translator write priority.
+
+    On Windows/Linux, an unconfigured translation is written beneath the
+    process working directory. A same-named directory beside the input EPUB is
+    commonly the raw EPUB extraction and must not be auto-scanned. macOS is the
+    exception: the translator deliberately writes relative output beside the
+    input because frozen apps may start with ``/`` as their working directory.
+    """
+    if not source_path or is_direct_text_qa_path(source_path):
+        return []
+
+    source_path = os.path.abspath(str(source_path))
+    source_stem = os.path.splitext(os.path.basename(source_path))[0]
+    platform_name = str(platform_name or sys.platform).lower()
+    candidates = []
+
+    active_output = active_qa_output_folder_for_source(source_path)
+    if active_output:
+        candidates.append(active_output)
+
+    if output_root:
+        candidates.append(os.path.join(os.path.abspath(str(output_root)), source_stem))
+
+    if platform_name == 'darwin':
+        candidates.append(os.path.join(os.path.dirname(source_path), source_stem))
+
+    candidates.extend((
+        os.path.join(os.path.abspath(str(current_dir)), source_stem),
+        os.path.join(os.path.abspath(str(script_dir)), source_stem),
+        os.path.join(os.path.abspath(str(current_dir)), 'src', source_stem),
+    ))
+
+    safe_candidates = []
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normpath(candidate)
+        identity = os.path.normcase(os.path.abspath(normalized))
+        if identity in seen or is_direct_text_qa_path(normalized):
+            continue
+        seen.add(identity)
+        safe_candidates.append(normalized)
+    return safe_candidates
 
 
 def restore_env(previous):
@@ -390,6 +495,13 @@ def run_qa_scan_path(
     config=None,
 ):
     """Run the same configured QA scanner path for GUI and translation-worker callers."""
+    if is_direct_text_qa_path(folder_path) or is_direct_text_qa_path(epub_path):
+        log(
+            "⏭️ QA scan skipped: Direct Text folders and temporary Direct Text "
+            "outputs are excluded from automatic QA scanning."
+        )
+        return None
+
     current_settings = prepare_qa_scan_settings(qa_settings, owner=owner, config=config)
     previous_env = apply_qa_scan_env_from_settings(current_settings)
     try:

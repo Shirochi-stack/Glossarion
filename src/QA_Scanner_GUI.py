@@ -431,6 +431,8 @@ class QAScannerMixin:
     def open_latest_qa_report(self):
         """Open the most recently found QA report (validation_results.html)."""
         try:
+            from qa_scan_runtime import is_direct_text_qa_path
+
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             newest = None
             newest_mtime = -1
@@ -442,7 +444,13 @@ class QAScannerMixin:
                 search_roots.append(os.getcwd())
 
             for root_dir in search_roots:
-                for root, _, files in os.walk(root_dir):
+                if is_direct_text_qa_path(root_dir):
+                    continue
+                for root, dirs, files in os.walk(root_dir):
+                    dirs[:] = [
+                        dirname for dirname in dirs
+                        if not is_direct_text_qa_path(os.path.join(root, dirname))
+                    ]
                     for fname in files:
                         if fname.lower() == "validation_results.html":
                             candidate = os.path.join(root, fname)
@@ -492,6 +500,8 @@ class QAScannerMixin:
                     'ai_thinking_preamble_patterns': list(DEFAULT_AI_THINKING_PREAMBLE_PATTERNS),
                     'ai_thinking_preamble_patterns_are_regex': False,
                     'ai_thinking_preamble_sample_size': 500,
+                    'check_quotation_mismatch': False,
+                    'ignore_excess_quotation_marks': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -1786,6 +1796,26 @@ class QAScannerMixin:
                 epub_files_to_scan = [primary_epub_path]
                 print(f"[DEBUG] Using stored source file for auto-search")
 
+        # Direct Text owns a separate temporary/persistent output workflow and
+        # must never seed automatic QA source or output discovery.
+        try:
+            from qa_scan_runtime import is_direct_text_qa_path
+            direct_text_sources = [
+                source_path for source_path in epub_files_to_scan
+                if is_direct_text_qa_path(source_path)
+            ]
+            epub_files_to_scan = [
+                source_path for source_path in epub_files_to_scan
+                if not is_direct_text_qa_path(source_path)
+            ]
+            for skipped_source in direct_text_sources:
+                self.append_log(f"⏭️ Excluding Direct Text source from QA scan: {skipped_source}")
+            if direct_text_sources and not epub_files_to_scan:
+                self.append_log("⏭️ QA scan skipped: Direct Text cannot trigger automatic QA scanning.")
+                return
+        except Exception:
+            pass
+
         # Now handle word count specific logic if enabled
         if check_word_count:
             print("[DEBUG] Word count check is enabled, validating EPUB availability...")
@@ -1882,21 +1912,17 @@ class QAScannerMixin:
                     self.append_log(f"🔍 DEBUG: Current dir: {current_dir}")
                     self.append_log(f"🔍 DEBUG: Script dir: {script_dir}")
 
-                    # Check the most common locations in order of priority
-                    # epub_parent_dir first — the translation engine creates output
-                    # folders next to the input file
-                    candidates = [
-                        os.path.join(epub_parent_dir, epub_base),    # next to the EPUB/source file
-                        os.path.join(current_dir, epub_base),        # current working directory
-                        os.path.join(script_dir, epub_base),         # src directory
-                        os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
-                    ]
-
-                    # Add output directory override if configured
                     override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
                     if override_dir:
-                        candidates.insert(0, os.path.join(override_dir, epub_base))
                         self.append_log(f"🔍 DEBUG: Checking override dir: {override_dir}")
+
+                    from qa_scan_runtime import automatic_qa_output_candidates
+                    candidates = automatic_qa_output_candidates(
+                        epub_path,
+                        current_dir=current_dir,
+                        script_dir=script_dir,
+                        output_root=override_dir,
+                    )
 
                     folder_found = None
                     for i, candidate in enumerate(candidates):
@@ -1962,6 +1988,14 @@ class QAScannerMixin:
                 if not selected_folder:
                     self.append_log("⚠️ QA scan canceled - no folder selected.")
                     return
+
+                try:
+                    from qa_scan_runtime import is_direct_text_qa_path
+                    if is_direct_text_qa_path(selected_folder):
+                        self.append_log("⏭️ QA scan skipped: Direct Text folders are excluded.")
+                        return
+                except Exception:
+                    pass
 
                 # Verify the selected folder contains scannable files
                 try:
@@ -2039,9 +2073,36 @@ class QAScannerMixin:
                 self.append_log("⚠️ QA scan canceled - no folder selected.")
                 return
 
+            try:
+                from qa_scan_runtime import is_direct_text_qa_path
+                if is_direct_text_qa_path(selected_folder):
+                    self.append_log("⏭️ QA scan skipped: Direct Text folders are excluded.")
+                    return
+            except Exception:
+                pass
+
             folders_to_scan.append(selected_folder)
             self.append_log(f"  ✓ Selected folder: {os.path.basename(selected_folder)}")
             self.append_log(f"📁 Single folder scan mode - scanning: {os.path.basename(folders_to_scan[0])}")
+
+        # Final hard guard for every automatic/preselected folder path.
+        try:
+            from qa_scan_runtime import is_direct_text_qa_path
+            allowed_folders = []
+            for candidate_folder in folders_to_scan:
+                if is_direct_text_qa_path(candidate_folder):
+                    self.append_log(
+                        f"⏭️ Skipping Direct Text folder during QA scan: {candidate_folder}"
+                    )
+                else:
+                    allowed_folders.append(candidate_folder)
+            folders_to_scan = allowed_folders
+        except Exception:
+            pass
+
+        if not folders_to_scan:
+            self.append_log("⏭️ QA scan skipped: no non-Direct-Text output folders were selected.")
+            return
 
         mode = selected_mode_value
 
@@ -2327,7 +2388,12 @@ class QAScannerMixin:
 
                         successful_scans += 1
                         # Record last generated report path for quick access
-                        report_path = os.path.join(current_folder, "validation_results.html")
+                        report_folder_name = os.path.basename(current_folder.rstrip('/\\')) + "_Scan Report"
+                        report_path = os.path.join(
+                            current_folder,
+                            report_folder_name,
+                            "validation_results.html",
+                        )
                         if os.path.exists(report_path):
                             self.last_qa_report_path = report_path
                         if len(folders_to_scan) > 1:
@@ -3112,6 +3178,36 @@ class QAScannerMixin:
             check_punctuation_checkbox.toggled.connect(toggle_excess_punct)
             excess_punct_checkbox.toggled.connect(toggle_excess_threshold)
             toggle_excess_punct(check_punctuation_checkbox.isChecked())  # Set initial state
+
+            check_quotation_checkbox = self._create_styled_checkbox(
+                "Check quotation mark mismatches (compares with source file)"
+            )
+            check_quotation_checkbox.setChecked(qa_settings.get('check_quotation_mismatch', False))
+            check_quotation_checkbox.setToolTip(
+                "For EPUBs, compares quotation marks inside <p> tags. For non-EPUB text input, "
+                "plain text without HTML tags is also supported. Supports straight, curly, CJK, "
+                "and HTML-encoded quotation marks."
+            )
+            detection_layout.addWidget(check_quotation_checkbox)
+
+            ignore_excess_quotation_widget = QWidget()
+            ignore_excess_quotation_layout = QHBoxLayout(ignore_excess_quotation_widget)
+            ignore_excess_quotation_layout.setContentsMargins(20, 0, 0, 5)
+            ignore_excess_quotation_checkbox = self._create_styled_checkbox(
+                "Ignore excess quotation marks (only flag missing marks)"
+            )
+            ignore_excess_quotation_checkbox.setChecked(
+                qa_settings.get('ignore_excess_quotation_marks', False)
+            )
+            ignore_excess_quotation_layout.addWidget(ignore_excess_quotation_checkbox)
+            ignore_excess_quotation_layout.addStretch()
+            detection_layout.addWidget(ignore_excess_quotation_widget)
+
+            def toggle_ignore_excess_quotation(enabled):
+                ignore_excess_quotation_checkbox.setEnabled(enabled)
+
+            check_quotation_checkbox.toggled.connect(toggle_ignore_excess_quotation)
+            toggle_ignore_excess_quotation(check_quotation_checkbox.isChecked())
 
             check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
             check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
@@ -4813,6 +4909,8 @@ class QAScannerMixin:
                         'punctuation_loss_threshold': (punct_threshold_spinbox, lambda x: x.value()),
                         'flag_excess_punctuation': (excess_punct_checkbox, lambda x: x.isChecked()),
                         'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
+                        'check_quotation_mismatch': (check_quotation_checkbox, lambda x: x.isChecked()),
+                        'ignore_excess_quotation_marks': (ignore_excess_quotation_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                         'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
                         'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
@@ -5221,6 +5319,8 @@ class QAScannerMixin:
                     ('punctuation_loss_threshold', punct_threshold_spinbox, 49),
                     ('flag_excess_punctuation', excess_punct_checkbox, False),
                     ('excess_punctuation_threshold', excess_threshold_spinbox, 49),
+                    ('check_quotation_mismatch', check_quotation_checkbox, False),
+                    ('ignore_excess_quotation_marks', ignore_excess_quotation_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
                     ('check_missing_images', check_missing_images_checkbox, True),
@@ -5387,6 +5487,8 @@ class QAScannerMixin:
                     punct_threshold_spinbox.setValue(49)
                     excess_punct_checkbox.setChecked(False)
                     excess_threshold_spinbox.setValue(49)
+                    check_quotation_checkbox.setChecked(False)
+                    ignore_excess_quotation_checkbox.setChecked(False)
 
                     # Word count analysis defaults
                     check_word_count_checkbox.setChecked(True)

@@ -2102,6 +2102,186 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
     except Exception as e:
         # Silent failure - if we can't check, don't report false positives
         return False, []
+
+
+# Quotation checking intentionally has its own extraction and comparison data.
+# Do not mix this with original_punctuation_info: the established ?! matcher
+# stores only chapters containing ? or !, while quotation comparison must also
+# retain zero-quotation chapters so excess marks can be detected accurately.
+_EXPLICIT_QUOTATION_MARKS = frozenset(
+    "\"'“”„‟‘’‚‛«»‹›〈〉《》「」『』〝〞〟﹁﹂﹃﹄＂＇"
+)
+_APOSTROPHE_LIKE_MARKS = frozenset("'‘’＇")
+_MISTYPED_HEX_APOSTROPHE_RE = re.compile(r"&(?:#x|x)39;", re.IGNORECASE)
+
+
+def _normalize_quotation_entities(text):
+    """Normalize quotation entities seen in source EPUB text.
+
+    Standard HTML references are decoded by ``html.unescape``.  Some source
+    EPUBs use ``&#x39;``/``&x39;`` for an apostrophe even though hexadecimal 39
+    formally represents the digit 9, so those common source forms are handled
+    explicitly as requested by the scanner option.
+    """
+    normalized = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(text or ""))
+    return html_lib.unescape(normalized)
+
+
+def _count_quotation_marks(text):
+    """Count quotation delimiters while ignoring apostrophes inside words."""
+    decoded = _normalize_quotation_entities(text)
+    count = 0
+    for index, char in enumerate(decoded):
+        if char not in _EXPLICIT_QUOTATION_MARKS and unicodedata.category(char) not in ('Pi', 'Pf'):
+            continue
+
+        if char in _APOSTROPHE_LIKE_MARKS:
+            previous_char = decoded[index - 1] if index > 0 else ''
+            next_char = decoded[index + 1] if index + 1 < len(decoded) else ''
+            if previous_char.isalnum() and next_char.isalnum():
+                continue
+        count += 1
+    return count
+
+
+def _visible_text_for_quotation_check(html_content, allow_plain_text=False):
+    """Extract ``<p>`` text, optionally falling back for untagged plain text."""
+    normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
+    soup = BeautifulSoup(normalized_html, 'html.parser')
+    for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+        tag.decompose()
+    paragraphs = soup.find_all('p')
+    if paragraphs:
+        return '\n'.join(paragraph.get_text() for paragraph in paragraphs)
+    if allow_plain_text and soup.find() is None:
+        return soup.get_text()
+    return ''
+
+
+def extract_epub_quotation_info(epub_path, log=print):
+    """Extract quotation counts in EPUB spine order without changing ?! logic."""
+    quotation_info = {}
+    spine_files = {}
+
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}
+
+            try:
+                for filename in zf.namelist():
+                    if 'content.opf' in filename.lower():
+                        content_opf_data = zf.read(filename).decode('utf-8', errors='ignore')
+                        content_opf_path = filename
+                        break
+            except Exception as exc:
+                log(f"⚠️ Could not read content.opf for quotation extraction: {exc}")
+
+            if content_opf_data:
+                try:
+                    opf = BeautifulSoup(content_opf_data, 'xml')
+                    manifest = opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+
+                    spine = opf.find('spine')
+                    if spine:
+                        spine_index = 1
+                        for itemref in spine.find_all('itemref'):
+                            href = manifest_map.get(itemref.get('idref'))
+                            if href:
+                                spine_files[spine_index] = href
+                                spine_index += 1
+                except Exception as exc:
+                    log(f"⚠️ Could not parse content.opf for quotation extraction: {exc}")
+
+            if spine_files:
+                base_dir = os.path.dirname(content_opf_path or '')
+                if base_dir:
+                    base_dir += '/'
+
+                for spine_index, file_path in sorted(spine_files.items()):
+                    content = None
+                    for candidate in (file_path, base_dir + file_path, 'OEBPS/' + file_path, 'OPS/' + file_path):
+                        try:
+                            content = zf.read(candidate).decode('utf-8', errors='ignore')
+                            break
+                        except KeyError:
+                            continue
+                    if content is None:
+                        continue
+
+                    visible_text = _visible_text_for_quotation_check(content)
+                    quotation_info[spine_index] = {
+                        'quotation_marks': _count_quotation_marks(visible_text),
+                        'filename': os.path.basename(file_path),
+                        'spine_index': spine_index,
+                    }
+            else:
+                log("⚠️ Could not read spine order for quotation extraction; using HTML file order")
+                html_files = [
+                    filename for filename in zf.namelist()
+                    if filename.lower().endswith(('.html', '.xhtml', '.htm'))
+                    and not filename.startswith('__MACOSX')
+                    and 'cover' not in filename.lower()
+                ]
+                for index, file_path in enumerate(sorted(html_files), start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                    except Exception:
+                        continue
+                    quotation_info[index] = {
+                        'quotation_marks': _count_quotation_marks(_visible_text_for_quotation_check(content)),
+                        'filename': os.path.basename(file_path),
+                        'spine_index': index,
+                    }
+
+        return quotation_info
+    except Exception as exc:
+        log(f"❌ Error extracting quotation info from EPUB: {exc}")
+        return {}
+
+
+def detect_quotation_mismatch(
+    translated_text,
+    chapter_key,
+    original_quotation_info,
+    ignore_excess=False,
+):
+    """Compare total source and translated quotation delimiters for one chapter."""
+    try:
+        if chapter_key not in original_quotation_info:
+            return False, []
+
+        original_count = int(original_quotation_info[chapter_key].get('quotation_marks', 0))
+        translated_count = _count_quotation_marks(translated_text)
+        if translated_count == original_count:
+            return False, []
+        if ignore_excess and translated_count > original_count:
+            return False, []
+
+        missing = translated_count < original_count
+        difference = abs(original_count - translated_count)
+        issue_type = 'missing_quotation_marks' if missing else 'excess_quotation_marks'
+        direction = 'missing' if missing else 'excess'
+        return True, [{
+            'type': issue_type,
+            'severity': 'medium',
+            'original_count': original_count,
+            'translated_count': translated_count,
+            'difference': difference,
+            'description': (
+                f'{difference} quotation mark(s) {direction} '
+                f'({translated_count}/{original_count})'
+            ),
+        }]
+    except Exception:
+        return False, []
     
 def extract_semantic_fingerprint(text):
     """Extract semantic fingerprint and signature from text - CACHED VERSION"""
@@ -7182,7 +7362,23 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
 
 def process_html_file_batch(args):
     """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
-    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info = args
+    if len(args) >= 10:
+        (
+            file_batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+        ) = args[:10]
+    else:
+        # Backward-compatible worker tuple used by existing callers/tests.
+        file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info = args
+        original_quotation_info = {}
     batch_results = []
     
     # Import what we need inside the worker
@@ -7552,6 +7748,70 @@ def process_html_file_batch(args):
                     else:
                         loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
                         issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
+
+        # Quotation comparison is deliberately separate from the established
+        # ?! punctuation block above. It uses the same exact filename/spine
+        # matching rules without altering punctuation source selection.
+        if (
+            qa_settings.get('check_quotation_mismatch', False)
+            and original_quotation_info
+            and (
+                text_file_mode
+                or filename.lower().endswith(('.html', '.xhtml', '.htm'))
+            )
+        ):
+            quotation_text = _visible_text_for_quotation_check(
+                raw_file_content,
+                allow_plain_text=text_file_mode,
+            )
+
+            search_filename = filename.lower()
+            if search_filename.startswith('response_'):
+                search_filename = search_filename[9:]
+
+            matched_quotation_key = None
+            if text_file_mode:
+                if search_filename in original_quotation_info:
+                    matched_quotation_key = search_filename
+                else:
+                    search_basename = os.path.splitext(search_filename)[0]
+                    for key in original_quotation_info:
+                        key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                        if key_basename == search_basename:
+                            matched_quotation_key = key
+                            break
+            else:
+                search_basename = os.path.splitext(search_filename)[0]
+                for spine_index, quotation_source in original_quotation_info.items():
+                    source_filename = quotation_source.get('filename', '').lower()
+                    source_basename = os.path.splitext(source_filename)[0]
+                    if source_basename == search_basename:
+                        matched_quotation_key = spine_index
+                        break
+
+            if matched_quotation_key is not None:
+                has_quotation_mismatch, quotation_issues = detect_quotation_mismatch(
+                    quotation_text,
+                    matched_quotation_key,
+                    original_quotation_info,
+                    ignore_excess=qa_settings.get('ignore_excess_quotation_marks', False),
+                )
+                if has_quotation_mismatch:
+                    for quotation_issue in quotation_issues:
+                        original_count = quotation_issue.get('original_count', 0)
+                        translated_count = quotation_issue.get('translated_count', 0)
+                        difference = quotation_issue.get('difference', 0)
+                        direction = 'missing' if translated_count < original_count else 'excess'
+                        artifacts.append({
+                            'type': quotation_issue['type'],
+                            'count': difference,
+                            'examples': [f"{translated_count}/{original_count}"],
+                            'severity': quotation_issue.get('severity', 'medium'),
+                        })
+                        issues.append(
+                            f"quotation_marks_{difference}_{direction}_"
+                            f"({translated_count}/{original_count})"
+                        )
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
@@ -8144,6 +8404,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_potential_truncation': False,
             'check_ai_truncation_detection': False,
             'ai_truncation_tail_chars': 400,
+            'check_quotation_mismatch': False,
+            'ignore_excess_quotation_marks': False,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -8169,6 +8431,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     original_word_counts = {}
     original_image_info = {}  # For missing image detection
     original_punctuation_info = {}  # For punctuation mismatch detection
+    original_quotation_info = {}  # Kept separate from established ?! punctuation data
     original_html_content = {}  # For silent truncation detection
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
@@ -8270,6 +8533,78 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log(f"   Found ?! punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}!)")
             else:
                 log(f"   No ?! punctuation found in EPUB (or unable to extract)")
+
+    # Extract quotations through the same already-selected raw source path.
+    # This option never participates in choosing or rematching epub_path.
+    if qa_settings.get('check_quotation_mismatch', False):
+        if text_file_mode:
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log("💬 Extracting quotation information from word_count folder")
+                chunk_files = [
+                    filename for filename in os.listdir(word_count_folder)
+                    if filename.lower().endswith(('.html', '.htm', '.xhtml', '.txt'))
+                ]
+                for chunk_file in chunk_files:
+                    chunk_path = os.path.join(word_count_folder, chunk_file)
+                    try:
+                        with open(chunk_path, 'r', encoding='utf-8') as source_file:
+                            source_content = source_file.read()
+                        source_text = _visible_text_for_quotation_check(
+                            source_content,
+                            allow_plain_text=True,
+                        )
+                        original_quotation_info[chunk_file] = {
+                            'quotation_marks': _count_quotation_marks(source_text),
+                            'filename': chunk_file,
+                        }
+                    except Exception as exc:
+                        log(f"   ⚠️ Could not extract quotations from {chunk_file}: {exc}")
+            elif epub_path and os.path.exists(epub_path):
+                # Single-file text/PDF fallback when no word_count chunks exist.
+                try:
+                    if epub_path.lower().endswith('.pdf'):
+                        from pdf_extractor import extract_text_from_pdf
+                        source_content = extract_text_from_pdf(epub_path)
+                    else:
+                        with open(epub_path, 'r', encoding='utf-8') as source_file:
+                            source_content = source_file.read()
+
+                    translated_candidates = [
+                        filename for filename in os.listdir(folder_path)
+                        if filename.lower().endswith(('.txt', '.html', '.htm', '.xhtml'))
+                    ]
+                    preferred_candidates = [
+                        filename for filename in translated_candidates
+                        if filename.lower().endswith('_translated.txt')
+                    ]
+                    if len(preferred_candidates) == 1:
+                        source_key = preferred_candidates[0]
+                    elif len(translated_candidates) == 1:
+                        source_key = translated_candidates[0]
+                    else:
+                        source_key = os.path.basename(epub_path)
+
+                    original_quotation_info[source_key] = {
+                        'quotation_marks': _count_quotation_marks(source_content),
+                        'filename': source_key,
+                    }
+                except Exception as exc:
+                    log(f"   ⚠️ Could not extract quotations from source file: {exc}")
+        elif epub_path and os.path.exists(epub_path):
+            log(f"💬 Extracting quotation information from original EPUB: {os.path.basename(epub_path)}")
+            original_quotation_info = extract_epub_quotation_info(epub_path, log)
+
+        if original_quotation_info:
+            total_quotations = sum(
+                info.get('quotation_marks', 0) for info in original_quotation_info.values()
+            )
+            log(
+                f"   Found {total_quotations} quotation marks in "
+                f"{len(original_quotation_info)} source chapters"
+            )
+        else:
+            log("   No source chapters available for quotation comparison")
     
     # Extract HTML content from EPUB if silent truncation check OR AI truncation is enabled
     check_truncation = qa_settings.get('check_silent_truncation', False)
@@ -8651,7 +8986,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Prepare worker data
     worker_args = []
     for batch in batches:
-        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info, original_punctuation_info)
+        args = (
+            batch,
+            folder_path,
+            qa_settings,
+            mode,
+            original_word_counts,
+            merge_info,
+            text_file_mode,
+            original_image_info,
+            original_punctuation_info,
+            original_quotation_info,
+        )
         worker_args.append(args)
     
     # Executor selection: thread pool avoids the ProcessPoolExecutor spawn
