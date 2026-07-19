@@ -215,11 +215,18 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         s = str(err).lower()
     except Exception:
         return False
-    return "graceful stop active - not starting new api call" in s
+    if "graceful stop active - not starting new api call" in s:
+        return True
+    if not _glossary_is_graceful_stop_active():
+        return False
+    return (
+        "skipped before api call" in s
+        or "stopped by user during threading delay" in s
+    )
 
 
-def _graceful_stop_may_finish_after_result(result_committed: bool) -> bool:
-    """Only a result actually committed to progress may finish graceful stop."""
+def _graceful_stop_should_drain_after_result(result_committed: bool) -> bool:
+    """A committed result starts graceful draining; it must not end it early."""
     return bool(
         result_committed
         and os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
@@ -1964,10 +1971,12 @@ def _glossary_is_hard_stop_env_active():
     return os.environ.get('TRANSLATION_CANCELLED') == '1' and not _glossary_is_graceful_stop_active()
 
 def _glossary_is_hard_stop_requested(stop_callback=None):
-    if os.environ.get('TRANSLATION_CANCELLED') == '1':
-        return True
+    # First-click graceful stop leaves in-flight requests alive. Second-click
+    # force stop clears GRACEFUL_STOP before setting the hard-stop signals.
     if _glossary_is_graceful_stop_active():
         return False
+    if os.environ.get('TRANSLATION_CANCELLED') == '1':
+        return True
     try:
         if stop_callback and stop_callback():
             return True
@@ -6461,12 +6470,12 @@ def main(log_callback=None, stop_callback=None):
     
     # Set up stop checking
     def check_stop():
-        if os.environ.get('TRANSLATION_CANCELLED') == '1':
-            return True
         # During graceful stop, ALWAYS return False to let current chapter complete fully
         # The main loop will check GRACEFUL_STOP at the START of each new chapter
-        if os.environ.get('GRACEFUL_STOP') == '1':
+        if _glossary_is_graceful_stop_active():
             return False
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
         
         if stop_callback and stop_callback():
             # print("❌ Glossary extraction stopped by user request.")  # Redundant - logged elsewhere
@@ -7842,6 +7851,8 @@ def main(log_callback=None, stop_callback=None):
                     # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
                     active_futures = {}
                     next_unit_idx = 0
+                    graceful_drain_requested = False
+                    graceful_drain_announced = False
                     # Ensure batch_size is at least 1 to avoid submission loops never running
                     effective_aggressive_batch_size = max(1, batch_size)
 
@@ -7860,6 +7871,8 @@ def main(log_callback=None, stop_callback=None):
                         pass
 
                     while active_futures or next_unit_idx < len(current_batch_units):
+                        if _glossary_is_graceful_stop_active():
+                            graceful_drain_requested = True
                         if check_stop():
                             stopped_early = True
                             for active_unit in list(active_futures.values()):
@@ -7884,7 +7897,7 @@ def main(log_callback=None, stop_callback=None):
                         # (This handles edge cases where graceful stop was briefly set then cleared)
                         if not active_futures and next_unit_idx < len(current_batch_units):
                             if os.environ.get('GRACEFUL_STOP') == '1':
-                                stopped_early = True
+                                graceful_drain_requested = True
                                 break
                             while len(active_futures) < effective_aggressive_batch_size and _submit_next():
                                 pass
@@ -7909,18 +7922,21 @@ def main(log_callback=None, stop_callback=None):
                             if stopped_early:
                                 break
 
-                            if _graceful_stop_may_finish_after_result(result_committed):
-                                print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
-                                stopped_early = True
-                                cancelled = cancel_all_futures(list(active_futures.keys()))
-                                if cancelled > 0:
-                                    print(f"\u2705 Cancelled {cancelled} pending API calls")
-                                executor.shutdown(wait=False)
-                                active_futures.clear()
-                                break
+                            if _graceful_stop_should_drain_after_result(result_committed):
+                                graceful_drain_requested = True
+                                if not graceful_drain_announced:
+                                    print(
+                                        "⏳ Graceful stop: Result saved; waiting for all "
+                                        "remaining in-flight API calls to finish..."
+                                    )
+                                    graceful_drain_announced = True
 
                         if stopped_early:
                             break
+
+                    if graceful_drain_requested and not stopped_early:
+                        stopped_early = True
+                        print("✅ Graceful stop: All completed in-flight API results were saved.")
                 else:
                     # Submit all units in this batch
                     for unit in current_batch_units:
@@ -7930,7 +7946,11 @@ def main(log_callback=None, stop_callback=None):
                         _submit_unit(unit)
 
                     # Process results AS THEY COMPLETE, not all at once
+                    graceful_drain_requested = False
+                    graceful_drain_announced = False
                     for future in as_completed(futures):
+                        if _glossary_is_graceful_stop_active():
+                            graceful_drain_requested = True
                         if check_stop():
                             # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
                             stopped_early = True
@@ -7945,20 +7965,24 @@ def main(log_callback=None, stop_callback=None):
                         unit = futures[future]
                         result_committed = _handle_future_result(future, unit)
                         
-                        # Check for graceful stop AFTER processing result
-                        if _graceful_stop_may_finish_after_result(result_committed):
-                            print("✅ Graceful stop: Chapter completed and saved, stopping...")
-                            stopped_early = True
-                            cancelled = cancel_all_futures(list(futures.keys()))
-                            if cancelled > 0:
-                                print(f"✅ Cancelled {cancelled} pending API calls")
-                            executor.shutdown(wait=False)
-                            break
+                        # Graceful stop blocks new API sends, but every request that
+                        # was already in flight must still pass through the result
+                        # handler and be committed before this loop exits.
+                        if _graceful_stop_should_drain_after_result(result_committed):
+                            graceful_drain_requested = True
+                            if not graceful_drain_announced:
+                                print(
+                                    "⏳ Graceful stop: Result saved; waiting for all "
+                                    "remaining in-flight API calls to finish..."
+                                )
+                                graceful_drain_announced = True
+
+                    if graceful_drain_requested and not stopped_early:
+                        stopped_early = True
+                        print("✅ Graceful stop: All completed in-flight API results were saved.")
             
-            # The executor waits for running workers while leaving this block.
-            # Some futures are deliberately discarded on stop, so their result
-            # handlers never clear the pre-send in-progress marker. Restore all
-            # such rows only after those workers can no longer write new markers.
+            # Graceful-stop workers have now been drained. Restore only a request
+            # marker that never produced a committable result.
             if stopped_early:
                 _restore_glossary_in_progress_for_hard_stop([])
 

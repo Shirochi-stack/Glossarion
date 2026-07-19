@@ -23,8 +23,10 @@ from TransateKRtoEN import ProgressManager
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
     _confirmed_merged_child_indices,
-    _graceful_stop_may_finish_after_result,
+    _glossary_is_hard_stop_requested,
+    _graceful_stop_should_drain_after_result,
     _is_graceful_stop_skip_error,
+    main as extract_glossary_main,
     make_glossary_progress_context,
     _restore_glossary_in_progress_file,
 )
@@ -313,14 +315,58 @@ def test_glossary_explicit_user_cancel_is_not_retried_as_timeout(monkeypatch):
     assert client.calls == 1
 
 
-def test_queued_graceful_skip_cannot_finish_before_result_is_committed(monkeypatch):
+def test_graceful_stop_drains_only_after_a_result_is_committed(monkeypatch):
     monkeypatch.setenv("GRACEFUL_STOP", "1")
     monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "1")
     skipped = "Graceful stop active - not starting new API call"
 
     assert _is_graceful_stop_skip_error(skipped)
-    assert not _graceful_stop_may_finish_after_result(False)
-    assert _graceful_stop_may_finish_after_result(True)
+    assert not _graceful_stop_should_drain_after_result(False)
+    assert _graceful_stop_should_drain_after_result(True)
+
+
+def test_graceful_stop_distinguishes_queued_skips_from_force_stop(monkeypatch):
+    monkeypatch.setenv("GRACEFUL_STOP", "1")
+    monkeypatch.setenv("GRACEFUL_STOP_COMPLETED", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+
+    assert _is_graceful_stop_skip_error(
+        "Glossary extraction stopped by user (skipped before API call)"
+    )
+    assert _is_graceful_stop_skip_error(
+        "Glossary extraction stopped by user during threading delay"
+    )
+    assert not _glossary_is_hard_stop_requested(lambda: True)
+
+    # A second click changes GRACEFUL_STOP to 0 before forcing cancellation.
+    monkeypatch.setenv("GRACEFUL_STOP", "0")
+    assert _glossary_is_hard_stop_requested(lambda: False)
+
+
+def test_graceful_result_branches_do_not_cancel_or_break_remaining_futures():
+    source = textwrap.dedent(inspect.getsource(extract_glossary_main))
+    tree = ast.parse(source)
+    drain_branches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "_graceful_stop_should_drain_after_result"
+            for child in ast.walk(node.test)
+        ):
+            drain_branches.append(node)
+
+    assert len(drain_branches) == 2
+    for branch in drain_branches:
+        assert not any(isinstance(child, ast.Break) for child in ast.walk(branch))
+        assert not any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "cancel_all_futures"
+            for child in ast.walk(branch)
+        )
 
 
 def test_merged_children_require_exact_successful_group_result():
