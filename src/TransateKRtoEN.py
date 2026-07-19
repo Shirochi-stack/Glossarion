@@ -3670,6 +3670,18 @@ class ProgressManager:
                     chapter_info = dict(existing_info)
                     break
 
+        # Vision OCR reaches this method from UnifiedClient's pre-send callback,
+        # after the concrete request model/key have been selected.  Refresh the
+        # copied chapter entry here so a retry does not keep displaying the model
+        # from an older translation attempt while the new OCR request is active.
+        actual_model, actual_key = _capture_thread_actual_request_metadata()
+        if actual_model:
+            chapter_info["model_name"] = actual_model
+            if actual_key:
+                chapter_info["key_identifier"] = actual_key
+            else:
+                chapter_info.pop("key_identifier", None)
+
         chapter_info.setdefault("actual_num", actual_num)
         chapter_info.setdefault("chapter_num", actual_num)
         if output_file:

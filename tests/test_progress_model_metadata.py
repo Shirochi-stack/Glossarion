@@ -156,6 +156,37 @@ def test_progress_update_bookkeeping_can_ignore_stale_thread_model(tmp_path):
     assert entry["key_identifier"] == "MAIN KEY (gemini-3.1-flash-lite)"
 
 
+def test_vision_ocr_progress_replaces_stale_model_with_active_request(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"]["251"] = {
+        "actual_num": 251,
+        "chapter_num": 251,
+        "content_hash": "hash-251",
+        "output_file": "No00251Chapter.xhtml",
+        "status": "failed",
+        "model_name": "deepseek-v4-flash",
+        "key_identifier": "OLD KEY (deepseek-v4-flash)",
+    }
+    set_current_thread_actual_request_model(
+        "gemini-3.1-flash-lite",
+        "VISION KEY (gemini-3.1-flash-lite)",
+    )
+
+    progress.update_ocr_progress(
+        251,
+        0,
+        8,
+        output_file="No00251Chapter.xhtml",
+        content_hash="hash-251",
+    )
+
+    entry = progress.prog["chapters"]["251"]
+    assert entry["status"] == "in_progress"
+    assert entry["ocr_progress"]["label"] == "0/8"
+    assert entry["model_name"] == "gemini-3.1-flash-lite"
+    assert entry["key_identifier"] == "VISION KEY (gemini-3.1-flash-lite)"
+
+
 def test_refinement_completion_preserves_refined_status_and_model(tmp_path):
     progress = ProgressManager(str(tmp_path))
     set_current_thread_actual_request_model("deepseek-refine", "FALLBACK KEY (deepseek-refine)")
