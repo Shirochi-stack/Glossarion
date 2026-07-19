@@ -1290,11 +1290,54 @@ class _InputOutputDialog(QDialog):
         'AUTHND_STREAM_THINKING_LOGS',
     )
     _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR')
-    _DIRECT_TEXT_ENV_KEYS = ('DIRECT_TEXT_PRESERVE_MARKUP',)
+    _DIRECT_TEXT_ENV_KEYS = (
+        'DIRECT_TEXT_PRESERVE_MARKUP',
+        'MULTIPASS_MODE',
+        'AUTO_GLOSSARY_MODE',
+        'ENABLE_AUTO_GLOSSARY',
+        'SINGLE_PASS_GLOSSARY_MODE',
+        'FUZZY_AUTO_MAPPING',
+        'APPEND_GLOSSARY',
+        'MANUAL_GLOSSARY',
+        'DEFER_GLOSSARY_APPEND',
+        'ENABLE_ANTHROPIC_THINKING',
+        'ANTHROPIC_THINKING_BUDGET',
+        'ANTHROPIC_FORCE_ADAPTIVE',
+        'ENABLE_GEMINI_THINKING',
+        'ENABLE_DEEPSEEK_THINKING',
+        'ENABLE_GPT_THINKING',
+        'GPT_REASONING_TOKENS',
+        'GPT_EFFORT',
+        'PASS_THINKING_TO_OPENAI_COMPATIBLE',
+        'GEMINI_THINKING_LEVEL',
+        'THINKING_BUDGET',
+        'STREAM_THINKING_LOGS',
+        'AUTHND_STREAM_THINKING_LOGS',
+        'ENABLE_THOUGHTS',
+    )
     _STATUS_FIRST_CHARS = set(
         "🚀📄📃📜📋✅⚠❌📚📦🔧📊🔍💾🖼🔄📌📸🧠🛰📡⏱⏳"
         "🟢🟡🟠🔴🎯📑📖🌐⚡🧪✨🎨💡🔠🗑🧹📂📁🔁🔂📝🔑🗝"
-        "🔒🔓🚫⛔💬🌍🌏🌎🐛📈📉🤖🆕═─=[#"
+        "🔒🔓🚫⛔🛑⏹💬🌍🌏🌎🐛📈📉🤖🆕═─=[#"
+    )
+    _PIPELINE_LOG_PHRASES = (
+        'translation stopped',
+        'force stop requested',
+        'graceful stop',
+        'stream finished in',
+        'stream complete',
+        'received section ',
+        'fallback key ',
+        'saved text file',
+        'total translation time',
+        'chapters completed',
+        'text file translation complete',
+        'translation completed successfully',
+    )
+    _EMBEDDED_PIPELINE_MARKERS = (
+        '⏹️', '⏹', '🛑',
+        'TRANSLATION_COMPLETE_SIGNAL', 'GLOSSARY_COMPLETE_SIGNAL',
+        '✅ Text file translation complete',
     )
 
     def __init__(self, translator):
@@ -1327,6 +1370,8 @@ class _InputOutputDialog(QDialog):
         self._thinking_spinner = None
         self._last_output_folder = ""
         self._preserve_temp_root = False
+        self._direct_graceful_stop_pending = False
+        self._direct_graceful_stop_ts = 0.0
 
         self.setWindowTitle("Direct Text Translation")
         self.setModal(False)
@@ -1349,16 +1394,86 @@ class _InputOutputDialog(QDialog):
         root.addWidget(title)
 
         hint = QLabel(
-            "Type text below and press Enter. This uses the same model, prompts, "
-            "glossary, and translation settings as Run Translation."
+            "Type text below and press Enter. This uses the selected model and prompt; "
+            "the Direct Text overrides can be changed below."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #aeb4c2;")
         root.addWidget(hint)
 
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(0, 0, 0, 0)
+        options_row.setSpacing(18)
+
+        legacy_simple_mode = bool(
+            translator.config.get('direct_text_force_simple_mode', True)
+        )
+
+        self.force_multipass_off_checkbox = translator._create_styled_checkbox(
+            "Force Multipass off"
+        )
+        self.force_multipass_off_checkbox.setChecked(
+            bool(translator.config.get(
+                'direct_text_force_multipass_off', legacy_simple_mode
+            ))
+        )
+        self.force_multipass_off_checkbox.setToolTip(
+            "Disables Multipass only for Direct Text runs. Uncheck to use the main "
+            "window's current Multipass setting."
+        )
+        self.force_multipass_off_checkbox.toggled.connect(
+            lambda checked: self._persist_dialog_option(
+                'direct_text_force_multipass_off', checked
+            )
+        )
+        options_row.addWidget(self.force_multipass_off_checkbox)
+
+        self.force_no_glossary_checkbox = translator._create_styled_checkbox(
+            "Force No Glossary"
+        )
+        self.force_no_glossary_checkbox.setChecked(
+            bool(translator.config.get(
+                'direct_text_force_no_glossary', legacy_simple_mode
+            ))
+        )
+        self.force_no_glossary_checkbox.setToolTip(
+            "Ignores automatic and manually loaded glossaries only for Direct Text "
+            "runs. Uncheck to use the main window's current glossary mode."
+        )
+        self.force_no_glossary_checkbox.toggled.connect(
+            lambda checked: self._persist_dialog_option(
+                'direct_text_force_no_glossary', checked
+            )
+        )
+        options_row.addWidget(self.force_no_glossary_checkbox)
+
+        self.skip_thinking_checkbox = translator._create_styled_checkbox(
+            "Disable all thinking"
+        )
+        self.skip_thinking_checkbox.setChecked(
+            bool(translator.config.get('direct_text_disable_thinking', False))
+        )
+        self.skip_thinking_checkbox.setToolTip(
+            "Removes thinking parameters for this Direct Text request, matching "
+            "the Manga custom-API override."
+        )
+        self.skip_thinking_checkbox.toggled.connect(
+            lambda checked: self._persist_dialog_option(
+                'direct_text_disable_thinking', checked
+            )
+        )
+        options_row.addWidget(self.skip_thinking_checkbox)
+        options_row.addStretch(1)
+        root.addLayout(options_row)
+
         self.input_box = QPlainTextEdit()
-        self.input_box.setPlaceholderText("Paste or type the text to translate…")
+        self.input_box.setPlaceholderText(
+            "Paste or type the text to translate, or drop a text file here…"
+        )
         self.input_box.setMinimumHeight(135)
+        self.input_box.setAcceptDrops(True)
+        self.input_box.dragEnterEvent = self._input_drag_enter_event
+        self.input_box.dropEvent = self._input_drop_event
         root.addWidget(self.input_box, 2)
 
         action_row = QHBoxLayout()
@@ -1378,9 +1493,15 @@ class _InputOutputDialog(QDialog):
             "font-size: 11pt; font-weight: bold; "
             "padding: 10px 32px 10px 24px; border-radius: 5px; }"
             "QPushButton:hover { background-color: #1688ff; }"
-            "QPushButton:disabled { background-color: #4b5563; color: #c0c4cc; }"
+            "QPushButton[directState=\"running\"] { background-color: #c0392b; }"
+            "QPushButton[directState=\"running\"]:hover { background-color: #d64a3a; }"
+            "QPushButton[directState=\"finishing\"] { background-color: #b7791f; }"
+            "QPushButton[directState=\"finishing\"]:hover { background-color: #ca8a25; }"
+            "QPushButton[directState=\"stopping\"], QPushButton:disabled { "
+            "background-color: #4b5563; color: #c0c4cc; }"
         )
         self.enter_button.clicked.connect(self._on_enter_clicked)
+        self._set_enter_button_state('idle')
         action_row.addWidget(self.enter_button)
         root.addLayout(action_row)
 
@@ -1464,6 +1585,98 @@ class _InputOutputDialog(QDialog):
         self._fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
         self._fullscreen_shortcut.setContext(Qt.WindowShortcut)
         self._fullscreen_shortcut.activated.connect(self._toggle_fullscreen)
+
+    def _persist_dialog_option(self, key, checked):
+        """Persist a Direct Text-only checkbox without touching global modes."""
+        try:
+            self.translator.config[str(key)] = bool(checked)
+            self.translator.save_config(show_message=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_supported_dropped_text_file(path):
+        return os.path.splitext(str(path or ''))[1].lower() in {
+            '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
+            '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+        }
+
+    def _input_drag_enter_event(self, event):
+        """Accept a drag only when it contains at least one readable text file."""
+        try:
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                if (
+                    path
+                    and os.path.isfile(path)
+                    and self._is_supported_dropped_text_file(path)
+                ):
+                    event.acceptProposedAction()
+                    return
+        except Exception:
+            pass
+        event.ignore()
+
+    def _input_drop_event(self, event):
+        """Load the first dropped text file into the Direct Text editor."""
+        path = ""
+        try:
+            for url in event.mimeData().urls():
+                candidate = url.toLocalFile()
+                if (
+                    candidate
+                    and os.path.isfile(candidate)
+                    and self._is_supported_dropped_text_file(candidate)
+                ):
+                    path = candidate
+                    break
+            if not path:
+                event.ignore()
+                return
+
+            try:
+                with open(path, 'r', encoding='utf-8-sig') as handle:
+                    content = handle.read()
+            except UnicodeDecodeError:
+                with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+                    content = handle.read()
+
+            self.input_box.setPlainText(content)
+            self._set_status(f"Loaded {os.path.basename(path)}")
+            self.input_box.setFocus()
+            event.acceptProposedAction()
+        except Exception as exc:
+            event.ignore()
+            QMessageBox.warning(
+                self,
+                "Could not load text file",
+                f"The dropped file could not be read:\n{path or 'Unknown file'}\n\n{exc}",
+            )
+
+    def _set_enter_button_state(self, state):
+        """Mirror the main Run button's idle, graceful, and hard-stop states."""
+        state = str(state or 'idle')
+        states = {
+            'idle': ('Enter', True, 'Translate the text'),
+            'running': ('Stop', True, 'Stop translation'),
+            'finishing': (
+                'Finishing…',
+                True,
+                'Graceful stop requested. Click again quickly to force stop.',
+            ),
+            'stopping': ('Stopping…', False, 'Force stop requested'),
+        }
+        text, enabled, tooltip = states.get(state, states['idle'])
+        self.enter_button.setProperty('directState', state)
+        self.enter_button.setText(text)
+        self.enter_button.setEnabled(enabled)
+        self.enter_button.setToolTip(tooltip)
+        try:
+            self.enter_button.style().unpolish(self.enter_button)
+            self.enter_button.style().polish(self.enter_button)
+        except Exception:
+            pass
+        self.enter_button.update()
 
     def _toggle_fullscreen(self):
         """Toggle F11 fullscreen while preserving the previous window state."""
@@ -1604,13 +1817,63 @@ class _InputOutputDialog(QDialog):
         self.thinking_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
         self.thinking_box.setVisible(bool(checked))
 
-    def _on_enter_clicked(self):
+    def _clear_direct_graceful_stop_window(self):
+        try:
+            import time
+            if time.time() - self._direct_graceful_stop_ts >= 2.0:
+                self._direct_graceful_stop_pending = False
+        except Exception:
+            self._direct_graceful_stop_pending = False
+
+    def _restore_detached_stop_button(self):
+        """Recover the button when a post-finish second click force-cancels."""
         if self._active:
-            self.status_label.setText("Stopping…")
+            return
+        self._set_enter_button_state('idle')
+        if self._last_output_folder and os.path.isdir(self._last_output_folder):
+            self._set_status("Ready — Open output folder", self._last_output_folder)
+        else:
+            self._set_status("Stopped")
+
+    def _on_enter_clicked(self):
+        import time
+
+        now = time.time()
+        if self._direct_graceful_stop_pending:
+            if now - self._direct_graceful_stop_ts < 2.0:
+                self._direct_graceful_stop_pending = False
+                self._set_status("Force stopping…")
+                self._set_enter_button_state('stopping')
+                try:
+                    self.translator.stop_translation()
+                except Exception:
+                    pass
+                if not self._active:
+                    QTimer.singleShot(600, self._restore_detached_stop_button)
+                return
+            self._direct_graceful_stop_pending = False
+
+        if self._active:
+            if self.enter_button.property('directState') == 'stopping':
+                return
             try:
                 self.translator.stop_translation()
             except Exception:
                 pass
+
+            graceful = bool(
+                getattr(self.translator, 'graceful_stop_active', False)
+                or os.environ.get('GRACEFUL_STOP') == '1'
+            )
+            if graceful:
+                self._direct_graceful_stop_pending = True
+                self._direct_graceful_stop_ts = now
+                self._set_status("Finishing current request… Click again to force stop")
+                self._set_enter_button_state('finishing')
+                QTimer.singleShot(2100, self._clear_direct_graceful_stop_window)
+            else:
+                self._set_status("Stopping…")
+                self._set_enter_button_state('stopping')
             return
         self._start_translation()
 
@@ -1648,6 +1911,7 @@ class _InputOutputDialog(QDialog):
         self._streaming_text = False
         self._streamed_content = ""
         self._preserve_temp_root = False
+        self._direct_graceful_stop_pending = False
 
         try:
             self._temp_root = tempfile.mkdtemp(prefix="glossarion_input_output_")
@@ -1680,6 +1944,9 @@ class _InputOutputDialog(QDialog):
                 'current_file_index',
                 '_single_chapter_filter',
                 '_zip_inputs_resolved_for_current_run',
+                '_direct_text_force_multipass_off',
+                '_direct_text_force_no_glossary',
+                '_direct_text_skip_thinking',
             ):
                 exists = hasattr(gui, attr)
                 value = getattr(gui, attr, None)
@@ -1692,10 +1959,20 @@ class _InputOutputDialog(QDialog):
             gui.selected_files = [self._temp_input]
             gui._force_stream_all = True
             gui._input_output_run_active = True
+            gui._direct_text_force_multipass_off = bool(
+                self.force_multipass_off_checkbox.isChecked()
+            )
+            gui._direct_text_force_no_glossary = bool(
+                self.force_no_glossary_checkbox.isChecked()
+            )
+            gui._direct_text_skip_thinking = bool(
+                self.skip_thinking_checkbox.isChecked()
+            )
             os.environ['OUTPUT_DIRECTORY'] = self._temp_root
             os.environ['OUTPUT_DIR'] = self._temp_root
             os.environ['DIRECT_TEXT_PRESERVE_MARKUP'] = '1'
             gui._apply_forced_streaming_environment()
+            gui._apply_direct_text_runtime_environment()
 
             gui.add_log_listener(self._on_log_line)
             self._listener_attached = True
@@ -1704,7 +1981,10 @@ class _InputOutputDialog(QDialog):
 
             self._active = True
             self.input_box.setEnabled(False)
-            self.enter_button.setText("Stop")
+            self.force_multipass_off_checkbox.setEnabled(False)
+            self.force_no_glossary_checkbox.setEnabled(False)
+            self.skip_thinking_checkbox.setEnabled(False)
+            self._set_enter_button_state('running')
             self._set_status("Translating…")
             self._set_thinking_spinner_active(True)
             self._drain_timer.start()
@@ -1730,6 +2010,19 @@ class _InputOutputDialog(QDialog):
         raw = str(line).rstrip("\n")
         stripped = raw.strip()
         low = stripped.lower()
+
+        if any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
+            if any(
+                phrase in low
+                for phrase in (
+                    'translation stopped', 'force stop requested',
+                    'graceful stop', 'stream finished in', 'stream complete',
+                    'text file translation complete',
+                    'translation completed successfully',
+                )
+            ):
+                self._streaming_text = False
+            return "log"
 
         if "thinking complete" in low:
             self._in_thinking = False
@@ -1761,6 +2054,19 @@ class _InputOutputDialog(QDialog):
             return "content"
         return "content" if self._streaming_text else "log"
 
+    def _split_embedded_pipeline_log(self, line):
+        """Separate a status record appended to an unterminated text chunk."""
+        raw = str(line)
+        marker_positions = [
+            raw.find(marker)
+            for marker in self._EMBEDDED_PIPELINE_MARKERS
+            if raw.find(marker) > 0
+        ]
+        if not marker_positions:
+            return (raw,)
+        split_at = min(marker_positions)
+        return raw[:split_at], raw[split_at:]
+
     def _drain_log_queue(self):
         drained = 0
         output_changed = False
@@ -1770,20 +2076,21 @@ class _InputOutputDialog(QDialog):
             except IndexError:
                 break
             drained += 1
-            for line in str(message).split("\n"):
-                kind = self._classify_line(line)
-                if kind == "content":
-                    chunk = line + "\n"
-                    self._streamed_content += chunk
-                    self._generation_token_count += self._count_tokens(chunk)
-                    output_changed = True
-                elif kind == "thinking":
-                    value = line[4:] if line.startswith("    ") else line
-                    self._append_thinking(value + "\n")
-                    self._thinking_token_count += self._count_tokens(value + "\n")
-                else:
-                    self._append_thinking(line + "\n")
-                    self._processing_token_count += self._count_tokens(line + "\n")
+            for raw_line in str(message).split("\n"):
+                for line in self._split_embedded_pipeline_log(raw_line):
+                    kind = self._classify_line(line)
+                    if kind == "content":
+                        chunk = line + "\n"
+                        self._streamed_content += chunk
+                        self._generation_token_count += self._count_tokens(chunk)
+                        output_changed = True
+                    elif kind == "thinking":
+                        value = line[4:] if line.startswith("    ") else line
+                        self._append_thinking(value + "\n")
+                        self._thinking_token_count += self._count_tokens(value + "\n")
+                    else:
+                        self._append_thinking(line + "\n")
+                        self._processing_token_count += self._count_tokens(line + "\n")
 
         if output_changed:
             self._render_output()
@@ -2044,7 +2351,10 @@ class _InputOutputDialog(QDialog):
         self._refresh_processing_label()
         self._set_thinking_spinner_active(False)
         self.input_box.setEnabled(True)
-        self.enter_button.setText("Enter")
+        self.force_multipass_off_checkbox.setEnabled(True)
+        self.force_no_glossary_checkbox.setEnabled(True)
+        self.skip_thinking_checkbox.setEnabled(True)
+        self._set_enter_button_state('idle')
         self.input_box.setFocus()
 
         if temp_root and not self._preserve_temp_root:
@@ -5844,6 +6154,15 @@ Recent translations to summarize:
 
     def _export_multipass_runtime_env(self):
         """Capture the live multipass controls and export them for the worker."""
+        if (
+            getattr(self, '_input_output_run_active', False)
+            and getattr(self, '_direct_text_force_multipass_off', True)
+        ):
+            mode = self._get_multipass_refinement_mode()
+            os.environ['MULTIPASS_MODE'] = '0'
+            os.environ['MULTIPASS_REFINEMENT_MODE'] = mode
+            return False, mode
+
         can_read_widgets = True
         try:
             app = QApplication.instance()
@@ -12046,6 +12365,12 @@ Recent translations to summarize:
             temperature_entry.setEnabled(not disabled)
 
     def _current_auto_glossary_mode(self):
+        if (
+            getattr(self, '_input_output_run_active', False)
+            and getattr(self, '_direct_text_force_no_glossary', True)
+        ):
+            return 'no_glossary'
+
         combo = getattr(self, 'auto_glossary_mode_combo', None)
         if combo is not None and hasattr(combo, 'currentText'):
             try:
@@ -19080,6 +19405,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # values, so re-assert the forced flags after the bulk export.
                 if getattr(self, '_force_stream_all', False):
                     self._apply_forced_streaming_environment()
+                if getattr(self, '_input_output_run_active', False):
+                    self._apply_direct_text_runtime_environment()
                 
                 # Handle chapter range
                 chap_range = self.chapter_range_entry.text().strip()
@@ -19106,22 +19433,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         os.environ['MAX_INPUT_TOKENS'] = '1000000'
                 
                 # Validate glossary path
-                # Check per-file mapping first (set by the main loop before calling this method)
-                _mapped_gp = os.environ.get('MANUAL_GLOSSARY', '')
-                if _mapped_gp and os.path.exists(_mapped_gp):
-                    # Already set by the per-EPUB mapping loop – keep it
-                    pass
-                elif hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
-                    if (hasattr(self, 'auto_loaded_glossary_path') and 
-                        self.manual_glossary_path == self.auto_loaded_glossary_path):
-                        if (hasattr(self, 'auto_loaded_glossary_for_file') and 
-                            hasattr(self, 'file_path') and 
-                            self.file_path == self.auto_loaded_glossary_for_file):
+                if self._current_auto_glossary_mode() == 'no_glossary':
+                    # A manual glossary can be reattached during normal text-file
+                    # setup. Keep No Glossary authoritative for this run.
+                    os.environ.pop('MANUAL_GLOSSARY', None)
+                else:
+                    # Check per-file mapping first (set by the main loop before calling this method)
+                    _mapped_gp = os.environ.get('MANUAL_GLOSSARY', '')
+                    if _mapped_gp and os.path.exists(_mapped_gp):
+                        # Already set by the per-EPUB mapping loop – keep it
+                        pass
+                    elif hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                        if (hasattr(self, 'auto_loaded_glossary_path') and
+                            self.manual_glossary_path == self.auto_loaded_glossary_path):
+                            if (hasattr(self, 'auto_loaded_glossary_for_file') and
+                                hasattr(self, 'file_path') and
+                                self.file_path == self.auto_loaded_glossary_for_file):
+                                os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                                self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
+                        else:
                             os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                            self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-                    else:
-                        os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                        self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
+                            self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
                 
                 # ── Single-chapter mode (Library / Reader "Translate") ──
                 # Only the targeted HTML file is extracted from the EPUB and
@@ -19241,6 +19573,41 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """Force every streaming/logging switch on for an interactive run."""
         for key in _InputOutputDialog._FORCED_STREAM_ENV_KEYS:
             os.environ[key] = '1'
+
+    def _apply_direct_text_runtime_environment(self):
+        """Apply the scoped Direct Text overrides after normal GUI env export."""
+        if not getattr(self, '_input_output_run_active', False):
+            return
+
+        if getattr(self, '_direct_text_force_multipass_off', True):
+            os.environ['MULTIPASS_MODE'] = '0'
+
+        if getattr(self, '_direct_text_force_no_glossary', True):
+            os.environ['AUTO_GLOSSARY_MODE'] = 'no_glossary'
+            os.environ['ENABLE_AUTO_GLOSSARY'] = '0'
+            os.environ['SINGLE_PASS_GLOSSARY_MODE'] = '0'
+            os.environ['FUZZY_AUTO_MAPPING'] = '0'
+            os.environ['APPEND_GLOSSARY'] = '0'
+            os.environ['MANUAL_GLOSSARY'] = ''
+            os.environ['DEFER_GLOSSARY_APPEND'] = '0'
+
+        if getattr(self, '_direct_text_skip_thinking', False):
+            # Match the Manga custom-API disable-thinking override, and cover
+            # GPT/OpenAI-compatible routes as well.
+            os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+            os.environ['ANTHROPIC_THINKING_BUDGET'] = '0'
+            os.environ['ANTHROPIC_FORCE_ADAPTIVE'] = '0'
+            os.environ['ENABLE_GEMINI_THINKING'] = '0'
+            os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+            os.environ['ENABLE_GPT_THINKING'] = '0'
+            os.environ['GPT_REASONING_TOKENS'] = ''
+            os.environ['GPT_EFFORT'] = 'none'
+            os.environ['PASS_THINKING_TO_OPENAI_COMPATIBLE'] = '0'
+            os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+            os.environ.pop('THINKING_BUDGET', None)
+            os.environ['STREAM_THINKING_LOGS'] = '0'
+            os.environ['AUTHND_STREAM_THINKING_LOGS'] = '0'
+            os.environ['ENABLE_THOUGHTS'] = '0'
 
     def _format_translation_anti_duplicate_settings(self, env_vars=None):
         """Return the translation anti-duplicate startup log line, or empty if disabled."""
@@ -20211,6 +20578,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['LIGHTWEIGHT_THINKING_LEVEL'] = str(getattr(self, 'lightweight_thinking_level_var', 1))
             except Exception:
                 pass
+
+            if getattr(self, '_input_output_run_active', False):
+                self._apply_direct_text_runtime_environment()
 
             if (
                 any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or [])
