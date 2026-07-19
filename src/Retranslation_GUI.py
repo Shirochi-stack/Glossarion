@@ -13041,6 +13041,16 @@ class RetranslationMixin:
                 p_layout.addWidget(bt_label)
             else:
                 bt_label = None
+
+            missing_progress_label = QLabel(
+                "⚠️ Progress file was deleted. Waiting for a new glossary progress file…"
+            )
+            missing_progress_label.setStyleSheet(
+                "color: #f59e0b; font-size: 9pt; font-weight: bold; padding: 2px 0;"
+            )
+            missing_progress_label.setWordWrap(True)
+            missing_progress_label.hide()
+            p_layout.addWidget(missing_progress_label)
             
             # Stats row (clickable)
             _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
@@ -14539,7 +14549,9 @@ class RetranslationMixin:
             # Progress file path + open folder button + open glossary button
             path_row = QHBoxLayout()
             path_label = QLabel(f"📁 {gp_path}")
-            path_label.setStyleSheet("color: #666; font-size: 8pt;")
+            _normal_path_label_style = "color: #666; font-size: 8pt;"
+            _missing_path_label_style = "color: #f59e0b; font-size: 8pt;"
+            path_label.setStyleSheet(_normal_path_label_style)
             path_label.setWordWrap(True)
             path_row.addWidget(path_label, stretch=1)
 
@@ -14712,6 +14724,30 @@ class RetranslationMixin:
                     item.setData(Qt.UserRole + 1, ci)
                     self._add_compact_inline_list_item(gp_listbox, item)
                 _populate_gp_listbox(_d)
+
+            def _apply_missing_progress_state():
+                """Clear cached rows once when the progress file disappears."""
+                nonlocal gp_data
+                if panel_state.get('_progress_missing'):
+                    return False
+
+                _invalidate_gp_refresh()
+                panel_state['_progress_missing'] = True
+                gp_data = {}
+                missing_progress_label.show()
+                path_label.setText(f"📁 Progress file not found (waiting for recreation)\n{gp_path}")
+                path_label.setStyleSheet(_missing_path_label_style)
+                _refresh_stats_from_dict(gp_data)
+                _populate_gp_listbox(gp_data)
+                return True
+
+            def _clear_missing_progress_state(current_path):
+                if not panel_state.get('_progress_missing'):
+                    return
+                panel_state['_progress_missing'] = False
+                missing_progress_label.hide()
+                path_label.setText(f"📁 {current_path}")
+                path_label.setStyleSheet(_normal_path_label_style)
             
             def _apply_pending_gp_result():
                 """Main-thread: apply any result left by a background refresh."""
@@ -14736,6 +14772,7 @@ class RetranslationMixin:
                     gp_data = _d
                     panel_state['_last_signature'] = result_signature
                     panel_state['_last_forced_refresh'] = time.monotonic()
+                    _clear_missing_progress_state(result.get('path') or gp_path)
                     
                     if result.get('toggle_changed'):
                         panel_state['translate_special'] = result['cur_ts']
@@ -14819,12 +14856,18 @@ class RetranslationMixin:
                     # First, apply any pending result from a previous background scan
                     _apply_pending_gp_result()
 
-                    # Skip if a background scan is still in flight
-                    if panel_state.get('_gp_bg_running'):
-                        return
-
                     _rp = _find_gp_for_file(fp)
                     if not _rp or not os.path.isfile(_rp):
+                        # Missing is a real state transition, not "nothing changed".
+                        # Clear stale cached statuses and invalidate any worker that
+                        # may still be carrying a snapshot of the deleted file.
+                        _apply_missing_progress_state()
+                        return
+
+                    # Skip if a background scan is still in flight. This check is
+                    # deliberately after the missing-file check so deletion is
+                    # detected even while an old disk read is finishing.
+                    if panel_state.get('_gp_bg_running'):
                         return
                     
                     # Dirty-check: skip if file hasn't changed
