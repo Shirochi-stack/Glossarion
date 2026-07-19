@@ -1375,22 +1375,29 @@ class _InputOutputDialog(QDialog):
         self._preserve_temp_root = False
         self._direct_graceful_stop_pending = False
         self._direct_graceful_stop_ts = 0.0
-        self._chat_session_counter = 1
-        self._chat_sessions = [
-            {
-                "id": self._chat_session_counter,
-                "title": "New chat",
-                "messages": [],
-                "draft": "",
-                "output_folder": "",
-                "output_folder_name": "",
-                "next_output_index": 1,
-                "expanded": set(),
-            }
-        ]
-        self._current_chat_index = 0
+        self._chat_history_path = self._resolve_chat_history_path()
+        self._chat_sessions, current_chat_id = self._load_chat_history()
+        self._chat_session_counter = max(
+            (int(session.get("id", 0)) for session in self._chat_sessions),
+            default=0,
+        )
+        if not self._chat_sessions:
+            self._chat_session_counter = 1
+            self._chat_sessions = [self._new_chat_session(self._chat_session_counter)]
+        self._current_chat_index = next(
+            (
+                index
+                for index, session in enumerate(self._chat_sessions)
+                if session.get("id") == current_chat_id
+            ),
+            0,
+        )
         self._switching_chat = False
-        self._chat_messages = self._chat_sessions[0]["messages"]
+        self._chat_messages = self._chat_sessions[self._current_chat_index]["messages"]
+        self._chat_history_save_timer = QTimer(self)
+        self._chat_history_save_timer.setSingleShot(True)
+        self._chat_history_save_timer.setInterval(450)
+        self._chat_history_save_timer.timeout.connect(self._save_chat_history)
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
         self._output_auto_scroll_disabled = False
@@ -1678,6 +1685,8 @@ class _InputOutputDialog(QDialog):
         self.chat_list.customContextMenuRequested.connect(
             self._show_chat_context_menu
         )
+        self._load_chat_session(self._current_chat_index)
+        self._refresh_chat_list()
 
         legacy_simple_mode = bool(
             translator.config.get('direct_text_force_simple_mode', True)
@@ -1828,6 +1837,165 @@ class _InputOutputDialog(QDialog):
         self._zoom_reset_shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
         self._zoom_reset_shortcut.setContext(Qt.WindowShortcut)
         self._zoom_reset_shortcut.activated.connect(self._reset_chat_zoom)
+
+    @staticmethod
+    def _new_chat_session(session_id):
+        """Return one clean, serializable Direct Text conversation record."""
+        return {
+            "id": int(session_id),
+            "title": "New chat",
+            "messages": [],
+            "draft": "",
+            "output_folder": "",
+            "output_folder_name": "",
+            "next_output_index": 1,
+            "expanded": set(),
+        }
+
+    @staticmethod
+    def _resolve_chat_history_path():
+        """Locate the durable Direct Text history file beside app configuration."""
+        override = os.environ.get("GLOSSARION_DIRECT_TEXT_HISTORY")
+        if override:
+            return os.path.abspath(os.path.expanduser(str(override)))
+        return os.path.join(os.path.dirname(CONFIG_FILE), "direct_text_chats.json")
+
+    def _load_chat_history(self):
+        """Load and normalize saved chats without trusting malformed JSON fields."""
+        history_path = self._chat_history_path
+        if not os.path.isfile(history_path):
+            return [self._new_chat_session(1)], 1
+        try:
+            with open(history_path, 'r', encoding='utf-8') as history_file:
+                payload = json.load(history_file)
+            raw_sessions = payload.get("sessions", [])
+            current_chat_id = payload.get("current_chat_id")
+            sessions = []
+            used_ids = set()
+            next_fallback_id = 1
+            for raw_session in raw_sessions:
+                if not isinstance(raw_session, dict):
+                    continue
+                try:
+                    session_id = max(1, int(raw_session.get("id", 0)))
+                except (TypeError, ValueError):
+                    session_id = 0
+                while session_id <= 0 or session_id in used_ids:
+                    session_id = next_fallback_id
+                    next_fallback_id += 1
+                used_ids.add(session_id)
+                next_fallback_id = max(next_fallback_id, session_id + 1)
+
+                messages = []
+                for raw_message in raw_session.get("messages", []):
+                    if not isinstance(raw_message, (list, tuple)) or len(raw_message) < 2:
+                        continue
+                    role = str(raw_message[0] or "")
+                    content = str(raw_message[1] or "")
+                    if role == "user":
+                        messages.append(("user", content))
+                    elif role == "assistant":
+                        messages.append(
+                            (
+                                "assistant",
+                                content,
+                                str(raw_message[2] if len(raw_message) > 2 else ""),
+                                str(raw_message[3] if len(raw_message) > 3 else "Processing"),
+                                str(raw_message[4] if len(raw_message) > 4 else ""),
+                            )
+                        )
+
+                try:
+                    expanded = {
+                        int(value)
+                        for value in raw_session.get("expanded", [])
+                        if int(value) >= 0
+                    }
+                except (TypeError, ValueError):
+                    expanded = set()
+                try:
+                    next_output_index = max(
+                        1, int(raw_session.get("next_output_index", 1))
+                    )
+                except (TypeError, ValueError):
+                    next_output_index = 1
+                title = " ".join(
+                    str(raw_session.get("title", "New chat") or "New chat").split()
+                )[:120]
+                sessions.append(
+                    {
+                        "id": session_id,
+                        "title": title or "New chat",
+                        "messages": messages,
+                        "draft": str(raw_session.get("draft", "") or ""),
+                        "output_folder": str(
+                            raw_session.get("output_folder", "") or ""
+                        ),
+                        "output_folder_name": str(
+                            raw_session.get("output_folder_name", "") or ""
+                        ),
+                        "next_output_index": next_output_index,
+                        "expanded": expanded,
+                    }
+                )
+            if not sessions:
+                return [self._new_chat_session(1)], 1
+            try:
+                current_chat_id = int(current_chat_id)
+            except (TypeError, ValueError):
+                current_chat_id = sessions[0]["id"]
+            return sessions, current_chat_id
+        except Exception as exc:
+            print(f"[Direct Text] Could not load saved chats: {exc}")
+            return [self._new_chat_session(1)], 1
+
+    def _schedule_chat_history_save(self):
+        """Debounce draft/history writes while the user is typing."""
+        timer = getattr(self, "_chat_history_save_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _save_chat_history(self):
+        """Atomically persist all retained Direct Text conversations."""
+        try:
+            current = self._current_chat_session()
+            if current is not None and hasattr(self, "input_box"):
+                current["draft"] = self.input_box.toPlainText()
+                current["expanded"] = set(self._expanded_processing_messages)
+            sessions = []
+            for session in self._chat_sessions:
+                sessions.append(
+                    {
+                        "id": int(session.get("id", 0)),
+                        "title": str(session.get("title", "New chat") or "New chat"),
+                        "messages": [list(message) for message in session.get("messages", [])],
+                        "draft": str(session.get("draft", "") or ""),
+                        "output_folder": str(session.get("output_folder", "") or ""),
+                        "output_folder_name": str(
+                            session.get("output_folder_name", "") or ""
+                        ),
+                        "next_output_index": max(
+                            1, int(session.get("next_output_index", 1))
+                        ),
+                        "expanded": sorted(
+                            int(value) for value in session.get("expanded", set())
+                        ),
+                    }
+                )
+            current_chat_id = current.get("id") if current is not None else None
+            history_directory = os.path.dirname(self._chat_history_path)
+            if history_directory:
+                os.makedirs(history_directory, exist_ok=True)
+            _atomic_json_write(
+                self._chat_history_path,
+                {
+                    "version": 1,
+                    "current_chat_id": current_chat_id,
+                    "sessions": sessions,
+                },
+            )
+        except Exception as exc:
+            print(f"[Direct Text] Could not save chats: {exc}")
 
     def _persist_dialog_option(self, key, checked):
         """Persist a Direct Text-only checkbox without touching global modes."""
@@ -2074,16 +2242,7 @@ class _InputOutputDialog(QDialog):
         if has_current_content:
             self._chat_session_counter += 1
             self._chat_sessions.append(
-                {
-                    "id": self._chat_session_counter,
-                    "title": "New chat",
-                    "messages": [],
-                    "draft": "",
-                    "output_folder": "",
-                    "output_folder_name": "",
-                    "next_output_index": 1,
-                    "expanded": set(),
-                }
+                self._new_chat_session(self._chat_session_counter)
             )
             self._current_chat_index = len(self._chat_sessions) - 1
 
@@ -2091,6 +2250,7 @@ class _InputOutputDialog(QDialog):
         self._refresh_chat_list()
         self.tabs.setCurrentWidget(self.chat_tab)
         self.input_box.setFocus()
+        self._save_chat_history()
 
     def _toggle_chat_sidebar(self):
         """Hide or restore the retained-conversation sidebar."""
@@ -2120,6 +2280,7 @@ class _InputOutputDialog(QDialog):
         session["draft"] = self.input_box.toPlainText()
         session["output_folder"] = self._last_output_folder
         session["expanded"] = set(self._expanded_processing_messages)
+        self._schedule_chat_history_save()
 
     def _on_chat_draft_changed(self):
         session = self._current_chat_session()
@@ -2133,6 +2294,7 @@ class _InputOutputDialog(QDialog):
                 or session["draft"].strip()
             )
             self.delete_chat_button.setEnabled(can_delete and not self._active)
+        self._schedule_chat_history_save()
 
     def _load_chat_session(self, index):
         if not (0 <= int(index) < len(self._chat_sessions)):
@@ -2237,6 +2399,7 @@ class _InputOutputDialog(QDialog):
 
         session["title"] = new_title
         self._refresh_chat_list()
+        self._save_chat_history()
 
     def _show_chat_context_menu(self, position):
         """Show sidebar actions for the conversation under the pointer."""
@@ -2316,21 +2479,13 @@ class _InputOutputDialog(QDialog):
         if not self._chat_sessions:
             self._chat_session_counter += 1
             self._chat_sessions.append(
-                {
-                    "id": self._chat_session_counter,
-                    "title": "New chat",
-                    "messages": [],
-                    "draft": "",
-                    "output_folder": "",
-                    "output_folder_name": "",
-                    "next_output_index": 1,
-                    "expanded": set(),
-                }
+                self._new_chat_session(self._chat_session_counter)
             )
         self._current_chat_index = min(index, len(self._chat_sessions) - 1)
         self._load_chat_session(self._current_chat_index)
         self._refresh_chat_list()
         self.input_box.setFocus()
+        self._save_chat_history()
 
     @staticmethod
     def _validated_chat_output_folder(session):
@@ -2383,6 +2538,7 @@ class _InputOutputDialog(QDialog):
             compact if len(compact) <= max_title else compact[:max_title - 1] + "…"
         )
         self._refresh_chat_list()
+        self._schedule_chat_history_save()
 
     def _show_output_context_menu(self, position):
         """Add the same explicit auto-scroll control offered by the main log."""
@@ -2443,6 +2599,11 @@ class _InputOutputDialog(QDialog):
 
         self._restore_maximized_after_fullscreen = self.isMaximized()
         self.showFullScreen()
+
+    def closeEvent(self, event):
+        """Flush Direct Text history before the dialog or application closes."""
+        self._save_chat_history()
+        super().closeEvent(event)
 
     def _set_thinking_toggle_text(self, text):
         """Update the inline processing disclosure label."""
@@ -2539,6 +2700,7 @@ class _InputOutputDialog(QDialog):
         session = self._current_chat_session()
         if session is not None:
             session["output_folder"] = folder
+        self._schedule_chat_history_save()
         return folder
 
     def _open_output_folder(self, _link=""):
@@ -2627,6 +2789,7 @@ class _InputOutputDialog(QDialog):
         session = self._current_chat_session()
         if session is not None:
             session["expanded"] = set(self._expanded_processing_messages)
+        self._schedule_chat_history_save()
         self._render_output()
 
     def _clear_copy_confirmation(self, copied_key):
@@ -2724,6 +2887,7 @@ class _InputOutputDialog(QDialog):
         self._assistant_message_active = True
         self._expanded_processing_messages.discard(len(self._chat_messages))
         self.input_box.clear()
+        self._save_chat_history()
         self.tabs.setCurrentWidget(self.chat_tab)
         self._processing_text = ""
         self._thinking_stream_text = ""
@@ -3076,7 +3240,7 @@ class _InputOutputDialog(QDialog):
                         "<table class='chat-row user-row' width='100%' cellspacing='0' "
                         "cellpadding='0'><tr><td width='17%'></td>"
                         f"{bubble_html}"
-                        "</tr></table><div class='message-gap'></div>"
+                        "</tr></table><div class='message-gap'>&nbsp;</div>"
                     )
                     continue
 
@@ -3177,7 +3341,7 @@ class _InputOutputDialog(QDialog):
                     f"<div class='message-content'>{rendered}</div>"
                     f"{message_actions_html}"
                     "</td><td width='8%'></td></tr></table>"
-                    "<div class='message-gap'></div>"
+                    "<div class='message-gap'>&nbsp;</div>"
                 )
 
         scrollbar = self.output_box.verticalScrollBar()
@@ -3216,13 +3380,12 @@ class _InputOutputDialog(QDialog):
             ".processing-detail-cell { color: #aeb8c8; padding: 9px; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 0.81em; "
             "line-height: 1.35; }"
-            ".message-gap { height: 22px; }"
+            ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
             ".pending { color: #cbd5e1; font-style: italic; }"
             ".message-content { color: white; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
-            ".message-action { color: #cbd5e1; background-color: #292929; "
-            "border: 1px solid #4a5568; padding: 3px 7px; font-size: 0.81em; "
+            ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
             "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
@@ -3273,6 +3436,7 @@ class _InputOutputDialog(QDialog):
             )
         )
         self._assistant_message_active = False
+        self._save_chat_history()
         self._render_output()
 
     def _append_thinking(self, text, *, streamed_thinking=False):
@@ -3375,6 +3539,7 @@ class _InputOutputDialog(QDialog):
         session = self._current_chat_session()
         if session is not None:
             session["next_output_index"] = output_index + 1
+        self._schedule_chat_history_save()
         return target_path
 
     def _persist_output_folder(self):

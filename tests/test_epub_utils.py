@@ -1,10 +1,18 @@
 import pytest
 import os
+import zipfile
 from pathlib import Path
 
 import epub_converter
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
+from qa_scan_runtime import default_qa_scan_settings
+from scan_html_folder import (
+    _count_quotation_marks,
+    detect_quotation_mismatch,
+    extract_epub_punctuation_info,
+    process_html_file_batch,
+)
 
 
 def test_html_entity_decoder_basic_entities():
@@ -12,6 +20,116 @@ def test_html_entity_decoder_basic_entities():
     decoded = HTMLEntityDecoder.decode(text)
     # Expect: <Hello> & "World" '!'
     assert decoded == "<Hello> & \"World\" '!'"
+
+
+def test_quotation_check_defaults_off():
+    assert default_qa_scan_settings()["check_quotation_mismatch"] is False
+
+
+def test_quotation_counter_handles_styles_entities_and_apostrophes():
+    text = (
+        '&quot;double&quot; '
+        '&#39;single&#39; '
+        '&#x27;hex&#x27; '
+        '&#x2018;curly&#x2019; '
+        '&apos;named&apos; '
+        '「corner」 『white corner』 '
+        "don't"
+    )
+
+    assert _count_quotation_marks(text) == 14
+
+
+def test_quotation_mismatch_allows_style_changes_and_reports_count_changes():
+    source_info = {1: {"quotation_marks": 4}}
+
+    has_mismatch, issues = detect_quotation_mismatch(
+        '“double” and 「corner」',
+        1,
+        source_info,
+    )
+    assert has_mismatch is False
+    assert issues == []
+
+    has_missing, missing_issues = detect_quotation_mismatch('“only one pair”', 1, source_info)
+    assert has_missing is True
+    assert missing_issues[0]["type"] == "missing_quotation_marks"
+    assert missing_issues[0]["difference"] == 2
+
+    has_excess, excess_issues = detect_quotation_mismatch(
+        '“one” “two” “three”',
+        1,
+        source_info,
+    )
+    assert has_excess is True
+    assert excess_issues[0]["type"] == "excess_quotation_marks"
+    assert excess_issues[0]["difference"] == 2
+
+
+def test_epub_quotation_extraction_decodes_html_character_references(tmp_path):
+    epub_path = tmp_path / "quotes.epub"
+    content_opf = """<?xml version="1.0" encoding="utf-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+      <manifest>
+        <item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml" />
+      </manifest>
+      <spine><itemref idref="chapter" /></spine>
+    </package>
+    """
+    chapter = """<html><head><title>&quot;ignored&quot;</title></head><body>
+    <p>&quot;double&quot; &#39;single&#39; 「corner」</p>
+    </body></html>"""
+
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr("OEBPS/content.opf", content_opf)
+        epub.writestr("OEBPS/text/chapter.xhtml", chapter)
+
+    source_info = extract_epub_punctuation_info(
+        epub_path,
+        log=lambda _message: None,
+        include_quotation_marks=True,
+    )
+
+    assert source_info[1]["quotation_marks"] == 6
+    assert source_info[1]["filename"] == "chapter.xhtml"
+
+
+def test_quotation_scan_counts_only_visible_html_text(tmp_path):
+    chapter_path = tmp_path / "chapter.html"
+    chapter_path.write_text('<p class="dialog">&quot;one pair&quot;</p>', encoding="utf-8")
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_quotation_mismatch": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+    source_info = {
+        "chapter.html": {
+            "question_marks": 0,
+            "exclamation_marks": 0,
+            "quotation_marks": 4,
+            "filename": "chapter.html",
+        }
+    }
+
+    results = process_html_file_batch((
+        [(0, "chapter.html")],
+        str(tmp_path),
+        settings,
+        "quick-scan",
+        {},
+        {},
+        True,
+        {},
+        source_info,
+    ))
+
+    assert "quotation_marks_2_missing_(2/4)" in results[0]["issues"]
 
 
 def test_valid_html_tag_entities_preserve_angle_bracket_prose():

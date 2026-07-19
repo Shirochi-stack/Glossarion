@@ -87,6 +87,7 @@ def default_qa_scan_settings():
         "punctuation_loss_threshold": 49,
         "flag_excess_punctuation": False,
         "excess_punctuation_threshold": 49,
+        "check_quotation_mismatch": False,
         "check_glossary_leakage": True,
         "check_potential_truncation": False,
         "check_missing_images": True,
@@ -237,6 +238,7 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_FLAG_EXCESS_PUNCTUATION": "1" if settings.get("flag_excess_punctuation", False) else "0",
         "QA_PUNCTUATION_LOSS_THRESHOLD": str(settings.get("punctuation_loss_threshold", 50)),
         "QA_EXCESS_PUNCTUATION_THRESHOLD": str(settings.get("excess_punctuation_threshold", 49)),
+        "QA_CHECK_QUOTATION_MISMATCH": "1" if settings.get("check_quotation_mismatch", False) else "0",
         "QA_SOURCE_LANGUAGE": str(settings.get("source_language", "auto")),
     }
     previous = {key: os.environ.get(key) for key in mappings}

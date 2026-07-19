@@ -1816,8 +1816,47 @@ def detect_missing_images(translated_html, chapter_num, original_image_info):
         # Silent failure - if we can't check, don't report false positives
         return False, []
 
-def extract_epub_punctuation_info(epub_path, log=print):
-    """Extract question mark and exclamation mark counts for each chapter from the original EPUB.
+_EXPLICIT_QUOTATION_MARKS = frozenset(
+    "\"'"
+    "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f"
+    "\u00ab\u00bb\u2039\u203a"
+    "\u2e42\u275b\u275c\u275d\u275e\u275f\u2760"
+    "\u300c\u300d\u300e\u300f\u301d\u301e\u301f"
+    "\ufe41\ufe42\ufe43\ufe44\uff02\uff07\uff62\uff63"
+)
+
+
+def _count_quotation_marks(text):
+    """Count visible quotation delimiters, including HTML character references.
+
+    Apostrophes inside words (for example, ``don't``) are not quotation
+    delimiters. Unicode initial/final quote punctuation and common CJK corner
+    quotes are included so source and translated text may use different quote
+    styles without being treated as a mismatch.
+    """
+    decoded = html_lib.unescape(str(text or ''))
+    count = 0
+    for index, char in enumerate(decoded):
+        is_quote = (
+            char in _EXPLICIT_QUOTATION_MARKS
+            or unicodedata.category(char) in {'Pi', 'Pf'}
+        )
+        if not is_quote:
+            continue
+
+        # Straight and closing single quotes double as apostrophes. Exclude
+        # only the unambiguous word-internal form while retaining 'quoted'.
+        if char in {"'", '\u2019', '\uff07'}:
+            previous_char = decoded[index - 1] if index > 0 else ''
+            next_char = decoded[index + 1] if index + 1 < len(decoded) else ''
+            if previous_char.isalnum() and next_char.isalnum():
+                continue
+        count += 1
+    return count
+
+
+def extract_epub_punctuation_info(epub_path, log=print, include_quotation_marks=False):
+    """Extract punctuation and optional quotation counts from the original EPUB.
     
     Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
     This matches the image extraction logic.
@@ -1827,6 +1866,7 @@ def extract_epub_punctuation_info(epub_path, log=print):
         spine_index: {
             'question_marks': int,
             'exclamation_marks': int,
+            'quotation_marks': int,
             'filename': str
         }
     }
@@ -1927,15 +1967,18 @@ def extract_epub_punctuation_info(epub_path, log=print):
                             tag.decompose()
                         text = soup.get_text()
                         
-                        # Count punctuation
+                        # Count punctuation and quotation delimiters.
                         question_count = text.count('?')
                         exclamation_count = text.count('!')
+                        quotation_count = _count_quotation_marks(text)
                         
-                        # Store if chapter has any punctuation
-                        if question_count > 0 or exclamation_count > 0:
+                        # Quotation mismatch detection also needs zero-count
+                        # source chapters so it can detect added delimiters.
+                        if question_count > 0 or exclamation_count > 0 or include_quotation_marks:
                             punct_info[spine_index] = {
                                 'question_marks': question_count,
                                 'exclamation_marks': exclamation_count,
+                                'quotation_marks': quotation_count,
                                 'filename': os.path.basename(file_path),
                                 'spine_index': spine_index
                             }
@@ -1947,7 +1990,11 @@ def extract_epub_punctuation_info(epub_path, log=print):
                 if extracted_count > 0:
                     total_questions = sum(info['question_marks'] for info in punct_info.values())
                     total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
-                    log(f"   Found ?! punctuation in {extracted_count} chapters ({total_questions}? + {total_exclamations}!)")
+                    if include_quotation_marks:
+                        total_quotations = sum(info['quotation_marks'] for info in punct_info.values())
+                        log(f"   Found source punctuation in {extracted_count} chapters ({total_questions}? + {total_exclamations}! + {total_quotations} quotation marks)")
+                    else:
+                        log(f"   Found ?! punctuation in {extracted_count} chapters ({total_questions}? + {total_exclamations}!)")
             else:
                 # Fallback: No spine found, scan all HTML files
                 log("⚠️ Could not read spine order, falling back to file extraction")
@@ -1970,11 +2017,13 @@ def extract_epub_punctuation_info(epub_path, log=print):
                         
                         question_count = text.count('?')
                         exclamation_count = text.count('!')
+                        quotation_count = _count_quotation_marks(text)
                         
-                        if question_count > 0 or exclamation_count > 0:
+                        if question_count > 0 or exclamation_count > 0 or include_quotation_marks:
                             punct_info[idx] = {
                                 'question_marks': question_count,
                                 'exclamation_marks': exclamation_count,
+                                'quotation_marks': quotation_count,
                                 'filename': os.path.basename(file_path),
                                 'spine_index': idx  # Add for consistency with spine mode
                             }
@@ -1984,7 +2033,11 @@ def extract_epub_punctuation_info(epub_path, log=print):
                 if punct_info:
                     total_questions = sum(info['question_marks'] for info in punct_info.values())
                     total_exclamations = sum(info['exclamation_marks'] for info in punct_info.values())
-                    log(f"   Found ?! punctuation in {len(punct_info)} chapters (fallback mode) ({total_questions}? + {total_exclamations}!)")
+                    if include_quotation_marks:
+                        total_quotations = sum(info['quotation_marks'] for info in punct_info.values())
+                        log(f"   Found source punctuation in {len(punct_info)} chapters (fallback mode) ({total_questions}? + {total_exclamations}! + {total_quotations} quotation marks)")
+                    else:
+                        log(f"   Found ?! punctuation in {len(punct_info)} chapters (fallback mode) ({total_questions}? + {total_exclamations}!)")
         
         return punct_info
         
@@ -2101,6 +2154,41 @@ def detect_punctuation_mismatch(translated_text, chapter_num, original_punctuati
         
     except Exception as e:
         # Silent failure - if we can't check, don't report false positives
+        return False, []
+
+
+def detect_quotation_mismatch(translated_text, chapter_num, original_punctuation_info):
+    """Compare the number of visible quotation delimiters in source and output."""
+    try:
+        if chapter_num not in original_punctuation_info:
+            return False, []
+
+        original_count = original_punctuation_info[chapter_num].get('quotation_marks', 0)
+        translated_count = _count_quotation_marks(translated_text)
+        if translated_count == original_count:
+            return False, []
+
+        difference = abs(original_count - translated_count)
+        issue_type = (
+            'missing_quotation_marks'
+            if translated_count < original_count
+            else 'excess_quotation_marks'
+        )
+        direction = 'missing' if translated_count < original_count else 'excess'
+        return True, [{
+            'type': issue_type,
+            'severity': 'medium',
+            'count': difference,
+            'difference': difference,
+            'original_count': original_count,
+            'translated_count': translated_count,
+            'description': (
+                f'Quotation mark mismatch: {difference} {direction} '
+                f'({translated_count}/{original_count})'
+            ),
+        }]
+    except Exception:
+        # Silent failure - if we cannot compare, avoid a false positive.
         return False, []
     
 def extract_semantic_fingerprint(text):
@@ -7463,34 +7551,35 @@ def process_html_file_batch(args):
                 # print(traceback.format_exc())
                 pass
         
-        # Check for punctuation mismatches (if enabled)
+        # Check source/output punctuation and quotation counts (if enabled).
         check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
-        if check_punctuation and original_punctuation_info:
-            # Extract VISIBLE text for punctuation comparison (matching source extraction logic)
+        check_quotation = qa_settings.get('check_quotation_mismatch', False)
+        if (check_punctuation or check_quotation) and original_punctuation_info:
+            # Extract VISIBLE text using the same rules as source extraction.
             # Strip non-visible tags like <head>, <title>, <script>, <style> if content has HTML
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
                     file_content = f.read()
-                # Check if content looks like HTML (has any non-visible tags we care about)
+                # Parse every HTML file so quotation marks in tag attributes are
+                # never mistaken for visible dialogue delimiters.
                 content_lower = file_content.lower()
-                if any(tag in content_lower for tag in ['<head', '<title', '<script', '<style', '<meta', '<link']):
+                looks_like_html = filename.lower().endswith(('.html', '.xhtml', '.htm'))
+                if looks_like_html or any(tag in content_lower for tag in ['<head', '<title', '<script', '<style', '<meta', '<link']):
                     soup = BeautifulSoup(file_content, 'html.parser')
                     # Remove non-visible tags before extracting text (same as source extraction)
                     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
                         tag.decompose()
-                    punct_text = soup.get_text()
+                    comparison_text = soup.get_text()
                 else:
-                    punct_text = raw_text
+                    comparison_text = raw_text
             except Exception:
-                punct_text = raw_text  # Fallback to raw_text if parsing fails
+                comparison_text = raw_text  # Fallback to raw_text if parsing fails
             
             # Match logic similar to image checking
             search_filename = filename.lower()
             if search_filename.startswith('response_'):
                 search_filename = search_filename[9:]  # Remove 'response_'
             
-            has_punct_mismatch = False
-            punct_issues = []
             matched_punct_key = None
             
             # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
@@ -7507,8 +7596,6 @@ def process_html_file_batch(args):
                             matched_punct_key = key
                             break
                 
-                if matched_punct_key:
-                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, matched_punct_key, original_punctuation_info, qa_settings=qa_settings)
             else:
                 # EPUB mode: match by spine index
                 search_basename = os.path.splitext(search_filename)[0]  # Remove extension
@@ -7518,40 +7605,57 @@ def process_html_file_batch(args):
                     
                     # EXACT match only
                     if orig_basename == search_basename:
-                        has_punct_mismatch, punct_issues = detect_punctuation_mismatch(punct_text, spine_idx, original_punctuation_info, qa_settings=qa_settings)
                         matched_punct_key = spine_idx
                         break
-            
-            if has_punct_mismatch:
-                # Add to translation artifacts
-                for punct_issue in punct_issues:
-                    artifacts.append({
-                        'type': punct_issue['type'],
-                        'count': punct_issue.get('original_count', 0),
-                        'examples': [f"{punct_issue.get('translated_count', 0)}/{punct_issue.get('original_count', 0)}"],
-                        'severity': punct_issue.get('severity', 'medium')
-                    })
-                
-                # Add to issues list for reporting
-                for punct_issue in punct_issues:
-                    # Determine the exact punctuation symbol for clearer logging
-                    if 'question' in punct_issue['type']:
-                        punct_symbol = '?'
-                        punct_name = 'question_marks'
-                    else:
-                        punct_symbol = '!'
-                        punct_name = 'exclamation_marks'
-                    
-                    orig_count = punct_issue.get('original_count', 0)
-                    trans_count = punct_issue.get('translated_count', 0)
-                    
-                    # Handle both loss and excess cases
-                    if 'excess' in punct_issue['type']:
-                        excess_count = punct_issue.get('excess_count', 0)
-                        issues.append(f"{punct_symbol}_punctuation_+{excess_count}_excess_({trans_count}/{orig_count})")
-                    else:
-                        loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
-                        issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
+
+            if matched_punct_key is not None:
+                if check_punctuation:
+                    has_punct_mismatch, punct_issues = detect_punctuation_mismatch(
+                        comparison_text,
+                        matched_punct_key,
+                        original_punctuation_info,
+                        qa_settings=qa_settings,
+                    )
+                    if has_punct_mismatch:
+                        for punct_issue in punct_issues:
+                            artifacts.append({
+                                'type': punct_issue['type'],
+                                'count': punct_issue.get('original_count', 0),
+                                'examples': [f"{punct_issue.get('translated_count', 0)}/{punct_issue.get('original_count', 0)}"],
+                                'severity': punct_issue.get('severity', 'medium')
+                            })
+
+                            punct_symbol = '?' if 'question' in punct_issue['type'] else '!'
+                            orig_count = punct_issue.get('original_count', 0)
+                            trans_count = punct_issue.get('translated_count', 0)
+                            if 'excess' in punct_issue['type']:
+                                excess_count = punct_issue.get('excess_count', 0)
+                                issues.append(f"{punct_symbol}_punctuation_+{excess_count}_excess_({trans_count}/{orig_count})")
+                            else:
+                                loss_pct = int(punct_issue.get('loss_ratio', 0) * 100)
+                                issues.append(f"{punct_symbol}_punctuation_{loss_pct}%_lost_({trans_count}/{orig_count})")
+
+                if check_quotation:
+                    has_quote_mismatch, quote_issues = detect_quotation_mismatch(
+                        comparison_text,
+                        matched_punct_key,
+                        original_punctuation_info,
+                    )
+                    if has_quote_mismatch:
+                        for quote_issue in quote_issues:
+                            orig_count = quote_issue.get('original_count', 0)
+                            trans_count = quote_issue.get('translated_count', 0)
+                            difference = quote_issue.get('difference', 0)
+                            artifacts.append({
+                                'type': quote_issue['type'],
+                                'count': difference,
+                                'examples': [f"{trans_count}/{orig_count}"],
+                                'severity': quote_issue.get('severity', 'medium')
+                            })
+                            direction = 'excess' if 'excess' in quote_issue['type'] else 'missing'
+                            issues.append(
+                                f"quotation_marks_{difference}_{direction}_({trans_count}/{orig_count})"
+                            )
                     
         # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
@@ -8143,6 +8247,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_silent_truncation': False,
             'check_potential_truncation': False,
             'check_ai_truncation_detection': False,
+            'check_quotation_mismatch': False,
             'ai_truncation_tail_chars': 400,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
@@ -8168,7 +8273,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Extract word counts, image info, and punctuation from original EPUB/text file if needed
     original_word_counts = {}
     original_image_info = {}  # For missing image detection
-    original_punctuation_info = {}  # For punctuation mismatch detection
+    original_punctuation_info = {}  # For punctuation/quotation mismatch detection
     original_html_content = {}  # For silent truncation detection
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
@@ -8219,14 +8324,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log(f"   No images found in EPUB (or unable to extract)")
     
-    # Extract punctuation info from EPUB if punctuation mismatch check is enabled
+    # Extract source counts if punctuation or quotation comparison is enabled.
     check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
-    if check_punctuation:
+    check_quotation = qa_settings.get('check_quotation_mismatch', False)
+    if check_punctuation or check_quotation:
         if text_file_mode:
-            # For text file mode (PDF sources), extract punctuation from word_count folder
+            # For text file mode (PDF sources), extract counts from word_count folder.
             word_count_folder = os.path.join(folder_path, 'word_count')
             if os.path.exists(word_count_folder):
-                log(f"❗ Extracting punctuation information from word_count folder")
+                log(f"❗ Extracting punctuation/quotation information from word_count folder")
                 chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
                 if chunk_files:
                     for chunk_file in chunk_files:
@@ -8242,11 +8348,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             
                             question_count = text.count('?')
                             exclamation_count = text.count('!')
+                            quotation_count = _count_quotation_marks(text)
                             
-                            if question_count > 0 or exclamation_count > 0:
+                            if question_count > 0 or exclamation_count > 0 or check_quotation:
                                 original_punctuation_info[chunk_file] = {
                                     'question_marks': question_count,
                                     'exclamation_marks': exclamation_count,
+                                    'quotation_marks': quotation_count,
                                     'filename': chunk_file
                                 }
                         except Exception as e:
@@ -8255,21 +8363,33 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     if original_punctuation_info:
                         total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
                         total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
-                        log(f"   Found ?! punctuation in {len(original_punctuation_info)} chunks ({total_questions}? + {total_exclamations}!)")
+                        if check_quotation:
+                            total_quotations = sum(info['quotation_marks'] for info in original_punctuation_info.values())
+                            log(f"   Found source punctuation in {len(original_punctuation_info)} chunks ({total_questions}? + {total_exclamations}! + {total_quotations} quotation marks)")
+                        else:
+                            log(f"   Found ?! punctuation in {len(original_punctuation_info)} chunks ({total_questions}? + {total_exclamations}!)")
                     else:
-                        log(f"   No ?! punctuation found in word_count folder HTML files")
+                        log(f"   No source punctuation found in word_count folder HTML files")
                 else:
                     log(f"   No HTML files found in word_count folder for punctuation extraction")
         elif epub_path and os.path.exists(epub_path):
             # For EPUB mode, extract from EPUB
-            log(f"❗ Extracting punctuation information from original EPUB: {os.path.basename(epub_path)}")
-            original_punctuation_info = extract_epub_punctuation_info(epub_path, log)
+            log(f"❗ Extracting punctuation/quotation information from original EPUB: {os.path.basename(epub_path)}")
+            original_punctuation_info = extract_epub_punctuation_info(
+                epub_path,
+                log,
+                include_quotation_marks=check_quotation,
+            )
             if original_punctuation_info:
                 total_questions = sum(info['question_marks'] for info in original_punctuation_info.values())
                 total_exclamations = sum(info['exclamation_marks'] for info in original_punctuation_info.values())
-                log(f"   Found ?! punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}!)")
+                if check_quotation:
+                    total_quotations = sum(info['quotation_marks'] for info in original_punctuation_info.values())
+                    log(f"   Found source punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}! + {total_quotations} quotation marks)")
+                else:
+                    log(f"   Found ?! punctuation in {len(original_punctuation_info)} chapters ({total_questions}? + {total_exclamations}!)")
             else:
-                log(f"   No ?! punctuation found in EPUB (or unable to extract)")
+                log(f"   No source punctuation found in EPUB (or unable to extract)")
     
     # Extract HTML content from EPUB if silent truncation check OR AI truncation is enabled
     check_truncation = qa_settings.get('check_silent_truncation', False)
