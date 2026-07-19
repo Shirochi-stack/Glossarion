@@ -10791,6 +10791,32 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         print(f"✅ All translated files already use the new image format")
 
 
+def _vision_ocr_header_markdown(soup):
+    """Return visible body headings as Markdown for a combined OCR request."""
+    headings = []
+    seen = set()
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+        text = ' '.join(tag.stripped_strings).strip()
+        normalized = re.sub(r'\s+', ' ', text).casefold()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            level = max(1, min(6, int(tag.name[1:])))
+        except (TypeError, ValueError):
+            level = 2
+        headings.append(f"{'#' * level} {text}")
+
+    # Some EPUBs keep the chapter name only in <title>. Use it only when no
+    # visible body heading exists so the combined text does not duplicate it.
+    if not headings:
+        title_tag = soup.find('title')
+        title = ' '.join(title_tag.stripped_strings).strip() if title_tag else ''
+        if title:
+            headings.append(f"## {title}")
+    return '\n\n'.join(headings)
+
+
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None, chapter_obj=None, chapter_idx=None) -> Tuple[str, Dict[str, str]]:
     """Process and translate images in a chapter"""
@@ -10810,6 +10836,16 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     vision_ocr_mode = (
         os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
         and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+    )
+    combined_ocr_source_headers = (
+        list(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+        if vision_ocr_mode and len(images) == 1
+        else []
+    )
+    combined_ocr_header = (
+        _vision_ocr_header_markdown(soup)
+        if vision_ocr_mode and len(images) == 1
+        else ""
     )
     try:
         max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '-1'))
@@ -10940,7 +10976,23 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             time.sleep(delay)
 
         image_translator.current_image_index = idx
-        translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
+        image_combined_ocr_header = ""
+        if combined_ocr_header:
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(img_path) as source_image:
+                    if source_image.height > image_translator.chunk_height:
+                        image_combined_ocr_header = combined_ocr_header
+            except Exception:
+                # translate_image will report an unreadable image itself. Do not
+                # remove a source heading unless the tall-image path is certain.
+                image_combined_ocr_header = ""
+        translation_result = image_translator.translate_image(
+            img_path,
+            context,
+            check_stop_fn,
+            combined_ocr_prefix=image_combined_ocr_header,
+        )
         
         print(f"\n🔍 DEBUG: Image {idx}/{len(images)}")
         print(f"   Translation result: {'Success' if translation_result and '[Image Translation Error:' not in translation_result else 'Failed'}")
@@ -11040,6 +11092,14 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                     print(f"   ✅ Created plain text translation structure")
                 
                 translated_count += 1
+
+                # The translated combined OCR now contains these headings. Drop
+                # their source-language body tags so the final chapter does not
+                # display both the original and translated header.
+                if image_combined_ocr_header:
+                    for source_header_tag in combined_ocr_source_headers:
+                        if source_header_tag.parent is not None:
+                            source_header_tag.decompose()
                 
                 # Save image translation debug output under OCR/translations.
                 trans_filename = f"ch{actual_num:03d}_img{idx:02d}_translation.html"

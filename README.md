@@ -120,6 +120,7 @@
 | **ElectronHub** | `eh/*` | eh/gpt-5-chat-latest, eh/claude-sonnet-4-6, eh/gemini-3.1-pro-preview, eh/grok-4-fast |
 | **OpenRouter** | `or/*` | or/openai/gpt-5.4, or/google/gemini-3.1-pro-preview, or/deepseek/deepseek-v3.2 |
 | **LiteRouter** | `lr/*` | lr/deepseek-v3.2:free, lr/gpt-oss-120b:free, lr/openrouter:free:full-context |
+| **OpenCode Go** | `oc/*` | oc/kimi-k2.6, oc/glm-5.1, oc/deepseek-v4-pro, oc/mimo-v2.5-pro |
 | **Poe** | `poe/*` | poe/gpt-4.5, poe/claude-4-opus, poe/gemini-2.5-pro |
 | **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |

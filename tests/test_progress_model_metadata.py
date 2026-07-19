@@ -7,6 +7,7 @@ import textwrap
 import threading
 
 import pytest
+from bs4 import BeautifulSoup
 
 from Retranslation_GUI import (
     RetranslationMixin,
@@ -19,7 +20,8 @@ from Retranslation_GUI import (
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
 )
-from TransateKRtoEN import ProgressManager
+from TransateKRtoEN import ProgressManager, _vision_ocr_header_markdown
+from image_translator import ImageTranslator
 from unified_api_client import UnifiedClient, set_current_thread_actual_request_model
 from extract_glossary_from_epub import (
     _confirmed_merged_child_indices,
@@ -185,6 +187,83 @@ def test_vision_ocr_progress_replaces_stale_model_with_active_request(tmp_path):
     assert entry["ocr_progress"]["label"] == "0/8"
     assert entry["model_name"] == "gemini-3.1-flash-lite"
     assert entry["key_identifier"] == "VISION KEY (gemini-3.1-flash-lite)"
+
+
+def test_single_image_chapter_header_is_prepended_to_combined_ocr():
+    soup = BeautifulSoup(
+        "<html><head><title>Fallback title</title></head>"
+        "<body><h2>第四十一章 回城</h2><img src='chapter.gif'/></body></html>",
+        "html.parser",
+    )
+
+    header = _vision_ocr_header_markdown(soup)
+    combined = ImageTranslator._prepend_combined_ocr_prefix(
+        "蜜儿娜躲在丛林里更换着衣服。",
+        header,
+    )
+
+    assert header == "## 第四十一章 回城"
+    assert combined == "## 第四十一章 回城\n\n蜜儿娜躲在丛林里更换着衣服。"
+
+
+def test_combined_ocr_does_not_duplicate_header_already_seen_in_image():
+    combined = ImageTranslator._prepend_combined_ocr_prefix(
+        "第四十一章 回城\n\n蜜儿娜躲在丛林里更换着衣服。",
+        "## 第四十一章 回城",
+    )
+
+    assert combined.count("第四十一章 回城") == 1
+
+
+def test_title_is_used_when_epub_has_no_visible_body_heading():
+    soup = BeautifulSoup(
+        "<html><head><title>Chapter title</title></head><body><img src='chapter.gif'/></body></html>",
+        "html.parser",
+    )
+
+    assert _vision_ocr_header_markdown(soup) == "## Chapter title"
+
+
+def test_only_original_vision_heading_is_removed_after_translation_insert():
+    soup = BeautifulSoup(
+        "<html><body><h2>Source Header</h2><img src='chapter.gif'/></body></html>",
+        "html.parser",
+    )
+    original_headers = list(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+    soup.find('img').replace_with(
+        BeautifulSoup(
+            "<div class='translated-text-only'><h2>Chapter Forty-Three: The Silver Holy Bow</h2><p>Inside the ruins.</p></div>",
+            "html.parser",
+        ).find('div')
+    )
+
+    for source_header in original_headers:
+        if source_header.parent is not None:
+            source_header.decompose()
+
+    assert soup.find('h2').get_text(strip=True) == "Chapter Forty-Three: The Silver Holy Bow"
+
+
+def test_image_translation_formatter_preserves_html_heading_without_nested_paragraph():
+    translator = ImageTranslator.__new__(ImageTranslator)
+
+    rendered = translator._format_translation_as_html(
+        "<h2>Chapter Forty-Three: The Silver Holy Bow</h2>\n<p>Inside the ruins.</p>"
+    )
+
+    assert rendered.startswith("<h2>Chapter Forty-Three: The Silver Holy Bow</h2>")
+    assert "<p><h2>" not in rendered
+
+
+def test_image_translation_formatter_converts_markdown_heading():
+    translator = ImageTranslator.__new__(ImageTranslator)
+
+    rendered = translator._format_translation_as_html(
+        "## Chapter Forty-Three: The Silver Holy Bow\n\nInside the ruins."
+    )
+
+    assert rendered.startswith("<h2>Chapter Forty-Three: The Silver Holy Bow</h2>")
+    assert "<p>Inside the ruins.</p>" in rendered
 
 
 def test_refinement_completion_preserves_refined_status_and_model(tmp_path):

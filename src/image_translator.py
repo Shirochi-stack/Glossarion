@@ -5,6 +5,7 @@ Includes support for web novel images and watermark handling
 """
 
 import os
+import html
 import json
 import base64
 import zipfile
@@ -1848,7 +1849,8 @@ class ImageTranslator:
             logger.warning(f"Text region enhancement failed: {e}")
             return img_array
     
-    def translate_image(self, image_path: str, context: str = "", check_stop_fn=None, api_context: Optional[str] = None) -> Optional[str]:
+    def translate_image(self, image_path: str, context: str = "", check_stop_fn=None, api_context: Optional[str] = None,
+                        combined_ocr_prefix: str = "") -> Optional[str]:
         """
         Translate text in an image using vision API - with chunking for tall images and stop support
         """
@@ -1926,7 +1928,14 @@ class ImageTranslator:
                     # Check if single API mode is enabled
                     if self._use_ocr_first_pipeline():
                         print("   🔎 Vision OCR-first mode enabled; OCRing tall-image chunks, then translating combined OCR once")
-                        translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
+                        translated_text = self._process_image_chunks(
+                            img,
+                            width,
+                            height,
+                            context,
+                            check_stop_fn,
+                            combined_ocr_prefix=combined_ocr_prefix,
+                        )
                     elif os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
                         translated_text = self._process_image_chunks_single_api(img, width, height, context, check_stop_fn)
                     else:
@@ -4002,7 +4011,31 @@ class ImageTranslator:
                 combined_lines.append(line)
         return "\n".join(combined_lines).strip()
 
-    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True, image_basename=None, image_idx=None, chapter_num=None, image_path=None):
+    @staticmethod
+    def _prepend_combined_ocr_prefix(ocr_text, prefix):
+        """Prepend document text that sits outside a tall OCR image."""
+        ocr_text = str(ocr_text or '').strip()
+        prefix = str(prefix or '').strip()
+        if not prefix:
+            return ocr_text
+        if not ocr_text:
+            return prefix
+
+        def _plain_heading(value):
+            value = html.unescape(str(value or '')).strip()
+            value = re.sub(r'^#{1,6}\s*', '', value)
+            return re.sub(r'\s+', ' ', value).strip().casefold()
+
+        prefix_lines = [line for line in prefix.splitlines() if line.strip()]
+        ocr_lines = [line for line in ocr_text.splitlines() if line.strip()]
+        if prefix_lines and ocr_lines:
+            prefix_heading = _plain_heading(prefix_lines[-1])
+            first_ocr_line = _plain_heading(ocr_lines[0])
+            if prefix_heading and prefix_heading == first_ocr_line:
+                return ocr_text
+        return f"{prefix}\n\n{ocr_text}"
+
+    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True, image_basename=None, image_idx=None, chapter_num=None, image_path=None, combined_ocr_prefix=""):
         """OCR all chunks first, then translate the combined OCR text once."""
         chunk_ranges = self._image_chunk_ranges(height, img)
         num_chunks = len(chunk_ranges)
@@ -4264,6 +4297,7 @@ class ImageTranslator:
             return None
 
         combined_ocr = self._combine_vision_ocr_chunks(ordered_ocr)
+        combined_ocr = self._prepend_combined_ocr_prefix(combined_ocr, combined_ocr_prefix)
         if not combined_ocr:
             print("   Combined OCR was empty")
             return None
@@ -4342,10 +4376,17 @@ class ImageTranslator:
             return
         print(message)
 
-    def _process_image_chunks(self, img, width, height, context, check_stop_fn):
+    def _process_image_chunks(self, img, width, height, context, check_stop_fn, combined_ocr_prefix=""):
         """Process a tall image by splitting it into chunks with contextual support"""
         if self._use_ocr_first_pipeline():
-            return self._process_image_chunks_ocr_first_combined(img, width, height, context, check_stop_fn)
+            return self._process_image_chunks_ocr_first_combined(
+                img,
+                width,
+                height,
+                context,
+                check_stop_fn,
+                combined_ocr_prefix=combined_ocr_prefix,
+            )
 
         chunk_ranges = self._image_chunk_ranges(height, img)
         num_chunks = len(chunk_ranges)
@@ -5201,6 +5242,14 @@ class ImageTranslator:
             print(f"   🔧 Found literal \\n in text, converting to actual newlines")
             text = text.replace('\\n', '\n')
         
+        # Some providers return already-rendered HTML even when their streaming
+        # chunks showed Markdown. Preserve valid block markup directly; wrapping
+        # it creates invalid <p><h2>...</h2><p>...</p></p> trees that parsers can
+        # restructure or discard during chapter insertion.
+        if re.search(r'<(?:h[1-6]|p|div|ul|ol|li|blockquote|pre|table)\b', text, re.IGNORECASE):
+            fragment = BeautifulSoup(text, 'html.parser')
+            return ''.join(str(node) for node in fragment.contents).strip()
+
         # Split by double newlines for paragraphs
         paragraphs = text.split('\n\n')
         html_parts = []
@@ -5208,6 +5257,15 @@ class ImageTranslator:
         for para in paragraphs:
             para = para.strip()
             if para:
+                para_lines = para.splitlines()
+                heading_match = re.match(r'^(#{1,6})\s+(.+?)\s*$', para_lines[0]) if para_lines else None
+                if heading_match:
+                    level = len(heading_match.group(1))
+                    html_parts.append(f'<h{level}>{html.escape(heading_match.group(2).strip())}</h{level}>')
+                    remainder = '\n'.join(para_lines[1:]).strip()
+                    if remainder:
+                        html_parts.append(f'<p>{remainder}</p>')
+                    continue
                 # Check if it's dialogue (starts with quotes)
                 if para.startswith(('"', '"', '「', '『', '"')):
                     html_parts.append(f'<p class="dialogue">{para}</p>')
