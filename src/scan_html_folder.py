@@ -7848,7 +7848,10 @@ def process_html_file_batch(args):
         # matching rules without altering punctuation source selection.
         if (
             qa_settings.get('check_quotation_mismatch', False)
-            and original_quotation_info
+            and (
+                qa_settings.get('only_check_incomplete_quotations', False)
+                or original_quotation_info
+            )
             and (
                 text_file_mode
                 or filename.lower().endswith(('.html', '.xhtml', '.htm'))
@@ -7873,29 +7876,32 @@ def process_html_file_batch(args):
                 })
                 issues.append(f"missing_ending_quotation_p{paragraph_index}")
 
-            search_filename = filename.lower()
-            if search_filename.startswith('response_'):
-                search_filename = search_filename[9:]
+            if qa_settings.get('only_check_incomplete_quotations', False):
+                matched_quotation_key = None
+            else:
+                search_filename = filename.lower()
+                if search_filename.startswith('response_'):
+                    search_filename = search_filename[9:]
 
-            matched_quotation_key = None
-            if text_file_mode:
-                if search_filename in original_quotation_info:
-                    matched_quotation_key = search_filename
+                matched_quotation_key = None
+                if text_file_mode:
+                    if search_filename in original_quotation_info:
+                        matched_quotation_key = search_filename
+                    else:
+                        search_basename = os.path.splitext(search_filename)[0]
+                        for key in original_quotation_info:
+                            key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                            if key_basename == search_basename:
+                                matched_quotation_key = key
+                                break
                 else:
                     search_basename = os.path.splitext(search_filename)[0]
-                    for key in original_quotation_info:
-                        key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
-                        if key_basename == search_basename:
-                            matched_quotation_key = key
+                    for spine_index, quotation_source in original_quotation_info.items():
+                        source_filename = quotation_source.get('filename', '').lower()
+                        source_basename = os.path.splitext(source_filename)[0]
+                        if source_basename == search_basename:
+                            matched_quotation_key = spine_index
                             break
-            else:
-                search_basename = os.path.splitext(search_filename)[0]
-                for spine_index, quotation_source in original_quotation_info.items():
-                    source_filename = quotation_source.get('filename', '').lower()
-                    source_basename = os.path.splitext(source_filename)[0]
-                    if source_basename == search_basename:
-                        matched_quotation_key = spine_index
-                        break
 
             if matched_quotation_key is not None:
                 has_quotation_mismatch, quotation_issues = detect_quotation_mismatch(
@@ -8518,6 +8524,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ai_truncation_tail_chars': 400,
             'check_quotation_mismatch': False,
             'ignore_excess_quotation_marks': False,
+            'only_check_incomplete_quotations': False,
             'skip_stylistic_single_quotes': False,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
@@ -8649,7 +8656,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
     # Extract quotations through the same already-selected raw source path.
     # This option never participates in choosing or rematching epub_path.
-    if qa_settings.get('check_quotation_mismatch', False):
+    if (
+        qa_settings.get('check_quotation_mismatch', False)
+        and not qa_settings.get('only_check_incomplete_quotations', False)
+    ):
         skip_stylistic_single_quotes = qa_settings.get(
             'skip_stylistic_single_quotes',
             False,

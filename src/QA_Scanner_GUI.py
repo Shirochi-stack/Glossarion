@@ -502,6 +502,7 @@ class QAScannerMixin:
                     'ai_thinking_preamble_sample_size': 500,
                     'check_quotation_mismatch': False,
                     'ignore_excess_quotation_marks': False,
+                    'only_check_incomplete_quotations': False,
                     'skip_stylistic_single_quotes': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
@@ -3205,6 +3206,27 @@ class QAScannerMixin:
             ignore_excess_quotation_layout.addStretch()
             detection_layout.addWidget(ignore_excess_quotation_widget)
 
+            only_check_incomplete_quotations_widget = QWidget()
+            only_check_incomplete_quotations_layout = QHBoxLayout(
+                only_check_incomplete_quotations_widget
+            )
+            only_check_incomplete_quotations_layout.setContentsMargins(20, 0, 0, 5)
+            only_check_incomplete_quotations_checkbox = self._create_styled_checkbox(
+                "Only check for incomplete quotations"
+            )
+            only_check_incomplete_quotations_checkbox.setChecked(
+                qa_settings.get('only_check_incomplete_quotations', False)
+            )
+            only_check_incomplete_quotations_checkbox.setToolTip(
+                "Only flags paragraphs with an unmatched ending quotation and skips the "
+                "source/output quotation-count comparison."
+            )
+            only_check_incomplete_quotations_layout.addWidget(
+                only_check_incomplete_quotations_checkbox
+            )
+            only_check_incomplete_quotations_layout.addStretch()
+            detection_layout.addWidget(only_check_incomplete_quotations_widget)
+
             skip_stylistic_single_quotes_widget = QWidget()
             skip_stylistic_single_quotes_layout = QHBoxLayout(skip_stylistic_single_quotes_widget)
             skip_stylistic_single_quotes_layout.setContentsMargins(20, 0, 0, 5)
@@ -3223,12 +3245,20 @@ class QAScannerMixin:
             skip_stylistic_single_quotes_layout.addStretch()
             detection_layout.addWidget(skip_stylistic_single_quotes_widget)
 
-            def toggle_quotation_suboptions(enabled):
-                ignore_excess_quotation_checkbox.setEnabled(enabled)
-                skip_stylistic_single_quotes_checkbox.setEnabled(enabled)
+            def toggle_quotation_suboptions(_enabled=None):
+                enabled = check_quotation_checkbox.isChecked()
+                count_comparison_enabled = (
+                    enabled and not only_check_incomplete_quotations_checkbox.isChecked()
+                )
+                only_check_incomplete_quotations_checkbox.setEnabled(enabled)
+                ignore_excess_quotation_checkbox.setEnabled(count_comparison_enabled)
+                skip_stylistic_single_quotes_checkbox.setEnabled(count_comparison_enabled)
 
             check_quotation_checkbox.toggled.connect(toggle_quotation_suboptions)
-            toggle_quotation_suboptions(check_quotation_checkbox.isChecked())
+            only_check_incomplete_quotations_checkbox.toggled.connect(
+                toggle_quotation_suboptions
+            )
+            toggle_quotation_suboptions()
 
             check_glossary_checkbox = self._create_styled_checkbox("Check for glossary leakage (raw glossary entries in translation)")
             check_glossary_checkbox.setChecked(qa_settings.get('check_glossary_leakage', True))
@@ -4932,6 +4962,7 @@ class QAScannerMixin:
                         'excess_punctuation_threshold': (excess_threshold_spinbox, lambda x: x.value()),
                         'check_quotation_mismatch': (check_quotation_checkbox, lambda x: x.isChecked()),
                         'ignore_excess_quotation_marks': (ignore_excess_quotation_checkbox, lambda x: x.isChecked()),
+                        'only_check_incomplete_quotations': (only_check_incomplete_quotations_checkbox, lambda x: x.isChecked()),
                         'skip_stylistic_single_quotes': (skip_stylistic_single_quotes_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                         'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
@@ -5343,6 +5374,7 @@ class QAScannerMixin:
                     ('excess_punctuation_threshold', excess_threshold_spinbox, 49),
                     ('check_quotation_mismatch', check_quotation_checkbox, False),
                     ('ignore_excess_quotation_marks', ignore_excess_quotation_checkbox, False),
+                    ('only_check_incomplete_quotations', only_check_incomplete_quotations_checkbox, False),
                     ('skip_stylistic_single_quotes', skip_stylistic_single_quotes_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
@@ -5512,6 +5544,7 @@ class QAScannerMixin:
                     excess_threshold_spinbox.setValue(49)
                     check_quotation_checkbox.setChecked(False)
                     ignore_excess_quotation_checkbox.setChecked(False)
+                    only_check_incomplete_quotations_checkbox.setChecked(False)
                     skip_stylistic_single_quotes_checkbox.setChecked(False)
 
                     # Word count analysis defaults

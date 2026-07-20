@@ -1985,7 +1985,8 @@ class BatchHeaderTranslator:
     def set_stop_flag(self, flag: bool):
         self.stop_flag = flag
     
-    def _send_with_retry(self, messages, temperature, max_tokens, context=None):
+    def _send_with_retry(self, messages, temperature, max_tokens, context=None,
+                         before_dispatch_callback=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
         try:
             from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
@@ -1997,10 +1998,13 @@ class BatchHeaderTranslator:
                     max_tokens=max_tokens,
                     stop_check_fn=self.stop_check_fn,
                     context=context,
+                    before_dispatch_callback=before_dispatch_callback,
                 )
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
             print("⚠️ send_with_interrupt not available, using direct client.send()")
+            if callable(before_dispatch_callback):
+                before_dispatch_callback()
             response = self.client.send(
                 messages=messages,
                 temperature=temperature,
@@ -2241,7 +2245,11 @@ class BatchHeaderTranslator:
                 total_input_tokens = system_tokens + user_tokens
                 
                 # Debug output showing input tokens
-                type_label = 'TOC' if translation_type == 'toc' else 'header'
+                type_label = 'TOC' if translation_type == 'toc' else 'Header'
+                request_label = (
+                    f"{type_label} batch {batch_num + 1}/{total_batches}"
+                )
+                direct_text_order = 1_000_000 + batch_num
                 print(f"\n📚 Translating {type_label} batch {batch_num + 1}/{total_batches}")
                 print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
                 print(f"  - User prompt: {user_tokens} tokens")
@@ -2274,10 +2282,26 @@ class BatchHeaderTranslator:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation'
+                    context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation',
+                    before_dispatch_callback=(
+                        lambda label=request_label, order=direct_text_order: print(
+                            f"📚 {label} [spine-order:{order}] "
+                            "Direct Text dispatch"
+                        )
+                    ) if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1' else None,
                 )
-                
+
                 if response_content:
+                    if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1':
+                        payload = json.dumps(
+                            {
+                                'label': request_label,
+                                'order': direct_text_order,
+                                'content': response_content,
+                            },
+                            ensure_ascii=False,
+                        )
+                        print(f"[DIRECT_TEXT_RESPONSE_PAYLOAD] {payload}")
                     translations = self._parse_json_response(response_content, batch_headers)
                     
                     # Count output tokens for debug

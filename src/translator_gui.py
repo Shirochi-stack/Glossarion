@@ -1322,6 +1322,7 @@ class _InputOutputDialog(QDialog):
         ('refinement', '✨', 'Refine'),
     )
     _DIRECT_TEXT_ENV_KEYS = (
+        'DIRECT_TEXT_ACTIVE',
         'DIRECT_TEXT_PRESERVE_MARKUP',
         'OUTPUT_MODE',
         'VISION_OCR_FIRST',
@@ -1357,6 +1358,7 @@ class _InputOutputDialog(QDialog):
         'DIRECT_TEXT_PROFILE_USER_PROMPT',
         'DIRECT_TEXT_SKIP_PROMPT_PROFILE',
         'DIRECT_TEXT_ORDERED_BATCH',
+        'ORDER_BATCH_REQUESTS_BY_SPINE',
         'SYSTEM_PROMPT_TO_USER',
     )
     _STATUS_FIRST_CHARS = set(
@@ -1410,6 +1412,7 @@ class _InputOutputDialog(QDialog):
         '] sdk stream start (model=',
         '] sdk stream opened in ',
     )
+    _DIRECT_RESPONSE_PAYLOAD_PREFIX = '[DIRECT_TEXT_RESPONSE_PAYLOAD] '
     # QTextDocument comments/empty anchors are not searchable, so the active
     # streaming section uses tiny sentinel text.  Stream repaints replace only
     # the text between these sentinels instead of rebuilding every saved chat
@@ -4126,8 +4129,8 @@ class _InputOutputDialog(QDialog):
         if not self._is_saved_assistant_message(message_index):
             return False, False, False
         message = self._chat_messages[int(message_index)]
-        output_folder = str(message[4] if len(message) > 4 else "").strip()
-        can_open = bool(output_folder and os.path.isdir(output_folder))
+        output_folder = self._response_output_folder(message_index)
+        can_open = bool(output_folder)
 
         inline_content = str(message[1] if len(message) > 1 else "")
         storage = self._assistant_storage_for(message)
@@ -4147,6 +4150,34 @@ class _InputOutputDialog(QDialog):
             can_copy and (not content_reference or stored_content_exists)
         )
         return can_edit, can_open, can_copy
+
+    def _response_output_folder(self, message_index):
+        """Resolve the exact output folder shared by one response batch.
+
+        Older in-memory batches may only carry the folder on their final
+        response/report card.  Walk forward within the same user turn so each
+        request card can still open that shared attachment output folder.
+        """
+        try:
+            message_index = int(message_index)
+        except (TypeError, ValueError):
+            return ""
+        if not (0 <= message_index < len(self._chat_messages)):
+            return ""
+        if self._chat_messages[message_index][0] != "assistant":
+            return ""
+
+        for candidate_index in range(message_index, len(self._chat_messages)):
+            candidate = self._chat_messages[candidate_index]
+            role = str(candidate[0] if candidate else "")
+            if candidate_index > message_index and role in ("user", "user_file"):
+                break
+            if role != "assistant":
+                continue
+            folder = str(candidate[4] if len(candidate) > 4 else "").strip()
+            if folder and os.path.isdir(folder):
+                return os.path.abspath(folder)
+        return ""
 
     def _message_index_at_output_position(self, position):
         """Resolve a transcript right-click to its exact rendered message row."""
@@ -4179,10 +4210,7 @@ class _InputOutputDialog(QDialog):
                 self._open_response_editor(index)
             )
         )
-        output_folder = ""
-        if self._is_saved_assistant_message(message_index):
-            message = self._chat_messages[message_index]
-            output_folder = str(message[4] if len(message) > 4 else "")
+        output_folder = self._response_output_folder(message_index)
         open_action = menu.addAction("📁 Open output folder")
         open_action.setEnabled(bool(output_folder and os.path.isdir(output_folder)))
         open_action.triggered.connect(
@@ -5077,9 +5105,8 @@ class _InputOutputDialog(QDialog):
         if target.startswith(output_prefix):
             try:
                 message_index = int(target[len(output_prefix):])
-                message = self._chat_messages[message_index]
-                folder = message[4] if len(message) > 4 else ""
-            except (IndexError, TypeError, ValueError):
+                folder = self._response_output_folder(message_index)
+            except (TypeError, ValueError):
                 return
             self._open_specific_output_folder(folder)
             return
@@ -5503,10 +5530,13 @@ class _InputOutputDialog(QDialog):
             )
             os.environ['OUTPUT_DIRECTORY'] = self._temp_root
             os.environ['OUTPUT_DIR'] = self._temp_root
+            os.environ['DIRECT_TEXT_ACTIVE'] = '1'
             os.environ['DIRECT_TEXT_PRESERVE_MARKUP'] = '1'
             os.environ['DIRECT_TEXT_ORDERED_BATCH'] = (
                 '1' if self._run_source_is_attachment else '0'
             )
+            if self._run_source_is_attachment:
+                os.environ['ORDER_BATCH_REQUESTS_BY_SPINE'] = '1'
             gui._apply_forced_streaming_environment()
             gui._apply_direct_text_runtime_environment()
 
@@ -5557,20 +5587,131 @@ class _InputOutputDialog(QDialog):
         import re
 
         value = str(line or "")
+        metadata_match = re.search(
+            r"\b(?:header|toc)\s+batch\s+\d+\s*/\s*\d+",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if metadata_match:
+            label = " ".join(metadata_match.group(0).split())
+            return label[0].upper() + label[1:]
         chapter_match = re.search(
-            r"\b(?:chapter|section)\s+[^\s()]+(?:\s*\(chunk\s+\d+\s*/\s*\d+\))?",
+            r"\b(chapter|section)\s+([^\s(),:]+)"
+            r"(?:\s*(?:\(|,)?\s*chunk\s+(\d+)\s*/\s*(\d+)\s*\)?)?",
             value,
             flags=re.IGNORECASE,
         )
         if chapter_match:
-            label = chapter_match.group(0)
+            label = f"{chapter_match.group(1)} {chapter_match.group(2)}"
+            if chapter_match.group(3) and chapter_match.group(4):
+                label += (
+                    f" (chunk {chapter_match.group(3)}/{chapter_match.group(4)})"
+                )
             return label[0].upper() + label[1:]
         merged_match = re.search(
-            r"\b(?:merged|request)\s+[^()\[]+", value, flags=re.IGNORECASE
+            r"\b(?:merged|request)\s+.+?(?=\s+response\b|\s*[\[(]|$)",
+            value,
+            flags=re.IGNORECASE,
         )
         if merged_match:
             return " ".join(merged_match.group(0).split())[:80]
         return f"Request {int(fallback_number)}"
+
+    def _request_segment_for_completion_log(self, line, source_thread=None):
+        """Resolve a completion record to its request even across worker threads."""
+        direct = self._request_segment_for_thread(source_thread, create=False)
+        label = self._request_label_from_log(line, 1)
+        if label.startswith("Request "):
+            return direct
+
+        wanted = " ".join(label.lower().split())
+        for segment in reversed(self._active_request_segments):
+            existing = " ".join(
+                str(segment.get("label", "") or "").lower().split()
+            )
+            if existing == wanted or existing.startswith(wanted + " "):
+                return segment
+        return direct
+
+    def _apply_direct_response_payload(self, line):
+        """Install a backend response that cannot be exposed as token logs."""
+        import json as json_lib
+
+        raw = str(line or "")
+        if not raw.startswith(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):
+            return False
+        try:
+            payload = json_lib.loads(
+                raw[len(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):]
+            )
+        except (TypeError, ValueError):
+            return True
+        if not isinstance(payload, dict):
+            return True
+
+        label = str(payload.get("label", "") or "").strip()
+        content = str(payload.get("content", "") or "")
+        if not label or not content:
+            return True
+        order = payload.get("order")
+        target = None
+        normalized_order = None
+        try:
+            normalized_order = int(order)
+        except (TypeError, ValueError):
+            pass
+
+        # Dispatch order is the stable request identity.  A provider may lose
+        # chapter context at completion and call the same response ``Request
+        # 11``; bind it back to the existing spine card instead of creating a
+        # second card or overwriting the chapter label.
+        if normalized_order is not None:
+            for segment in self._active_request_segments:
+                order_key = tuple(segment.get("order_key", ()))
+                if len(order_key) > 1 and order_key[1] == normalized_order:
+                    target = segment
+                    break
+        wanted = " ".join(label.lower().split())
+        if target is None:
+            for segment in reversed(self._active_request_segments):
+                existing = " ".join(
+                    str(segment.get("label", "") or "").lower().split()
+                )
+                if existing == wanted or existing.startswith(wanted + " "):
+                    target = segment
+                    break
+        if target is None:
+            marker = ""
+            if normalized_order is not None:
+                marker = f" [spine-order:{normalized_order}]"
+            target = self._begin_request_segment(
+                f"{label}{marker} Direct Text dispatch", ""
+            )
+
+        previous_tokens = int(target.get("text_tokens", 0) or 0)
+        current_tokens = self._count_tokens(content)
+        existing_label = str(target.get("label", "") or "").strip()
+        incoming_generic = label.lower().startswith("request ")
+        existing_generic = existing_label.lower().startswith("request ")
+        incoming_has_chunk = "(chunk " in label.lower()
+        existing_has_chunk = "(chunk " in existing_label.lower()
+        if (
+            not existing_label
+            or existing_generic
+            or (
+                not incoming_generic
+                and incoming_has_chunk
+                and not existing_has_chunk
+            )
+        ):
+            target["label"] = label
+        target["content"] = content
+        target["text_tokens"] = current_tokens
+        target["phase"] = "processing"
+        target["complete"] = True
+        self._generation_token_count += current_tokens - previous_tokens
+        self._sort_active_request_segments()
+        return True
 
     @staticmethod
     def _request_order_from_log(line, fallback_number):
@@ -5657,11 +5798,21 @@ class _InputOutputDialog(QDialog):
             # Reuse the card until a response marks it complete; a later call
             # on the same thread can then open a fresh card for a real retry.
             if not existing.get("complete"):
+                incoming_order_key = self._request_order_from_log(
+                    line, existing_index + 1
+                )
+                existing_order_key = tuple(
+                    existing.get("order_key", (2, float("inf"), 0, 0))
+                )
+                order_key_improved = (
+                    incoming_order_key[0] < existing_order_key[0]
+                    or "[spine-order:" in str(line or "").lower()
+                )
                 if existing_generic and not incoming_generic:
                     existing["label"] = request_label
-                    existing["order_key"] = self._request_order_from_log(
-                        line, existing_index + 1
-                    )
+                if order_key_improved:
+                    existing["order_key"] = incoming_order_key
+                if (existing_generic and not incoming_generic) or order_key_improved:
                     self._sort_active_request_segments()
                 return existing
         segment = {
@@ -5847,6 +5998,10 @@ class _InputOutputDialog(QDialog):
             phase = channel_hint
             self._stream_phase_by_thread[thread_key] = phase
 
+        if stripped.startswith(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):
+            self._apply_direct_response_payload(stripped)
+            return "payload"
+
         # Provider transport banners are useful in the main application log,
         # but they are neither model reasoning nor generated response text.
         # Do not put them inside the chat request card.
@@ -5858,6 +6013,10 @@ class _InputOutputDialog(QDialog):
         # This is the real start of one provider request.  Register it before
         # status/thinking lines arrive so retries and repeated progress notices
         # remain inside the same request card.
+        if "[spine-order:" in low and "direct text dispatch" in low:
+            self._begin_request_segment(raw, source_thread)
+            return "ignore"
+
         if "sending api call now" in low:
             self._begin_request_segment(raw, source_thread)
             self._in_thinking = False
@@ -5883,6 +6042,7 @@ class _InputOutputDialog(QDialog):
             )
             if segment is not None:
                 segment["phase"] = phase
+                segment["complete"] = True
             return "log"
 
         if any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
@@ -5967,9 +6127,19 @@ class _InputOutputDialog(QDialog):
         if stripped in ("TRANSLATION_COMPLETE_SIGNAL", "GLOSSARY_COMPLETE_SIGNAL"):
             return "log"
         if stripped.startswith("<"):
-            self._streaming_text = True
-            self._stream_phase_by_thread[thread_key] = "text"
-            return "content"
+            # Raw HTML is valid streamed model output only while this exact
+            # request is open.  Downstream ``Translation preview`` logs also
+            # begin with ``<html>``; treating those as a new stream duplicated
+            # every chapter into a generic Request card and stole its label.
+            segment = self._request_segment_for_thread(
+                source_thread, create=False
+            )
+            if segment is not None and not segment.get("complete"):
+                self._streaming_text = True
+                self._stream_phase_by_thread[thread_key] = "text"
+                segment["phase"] = "text"
+                return "content"
+            return "log"
         return "content" if phase == "text" else "log"
 
     def _split_embedded_pipeline_log(self, line):
@@ -6037,17 +6207,39 @@ class _InputOutputDialog(QDialog):
                                 value + "\n"
                             )
                         processing_changed = True
+                    elif kind == "payload":
+                        output_changed = True
+                        processing_changed = True
                     elif kind == "ignore":
                         continue
                     else:
                         self._append_thinking(line + "\n")
                         if "received " in line.lower() and " response" in line.lower():
-                            target = self._request_segment_for_thread(
-                                source_thread, create=False
+                            target = self._request_segment_for_completion_log(
+                                line, source_thread
                             )
                             if target is not None:
+                                updated_label = self._request_label_from_log(
+                                    line,
+                                    self._active_request_segments.index(target) + 1,
+                                )
+                                existing_label = str(
+                                    target.get("label", "") or ""
+                                )
+                                if (
+                                    not updated_label.startswith("Request ")
+                                    and (
+                                        existing_label.startswith("Request ")
+                                        or (
+                                            "(chunk " in updated_label.lower()
+                                            and "(chunk " not in existing_label.lower()
+                                        )
+                                    )
+                                ):
+                                    target["label"] = updated_label
                                 target["complete"] = True
                                 target["phase"] = "processing"
+                                self._sort_active_request_segments()
                         processing_changed = True
 
         for segment, values in generation_batches.values():
@@ -6477,7 +6669,11 @@ class _InputOutputDialog(QDialog):
                 processing_label = str(
                     message[3] if len(message) > 3 else "Processing"
                 )
-                output_folder = str(message[4] if len(message) > 4 else "")
+                output_folder = (
+                    self._response_output_folder(message_index)
+                    if message_index < len(self._chat_messages)
+                    else str(message[4] if len(message) > 4 else "")
+                )
                 request_label = str(message[5] if len(message) > 5 else "")
                 session = self._current_chat_session()
                 session_id = session.get("id") if session is not None else None
@@ -6865,20 +7061,17 @@ class _InputOutputDialog(QDialog):
         if not self._assistant_message_active:
             return
         if self._active_request_segments:
-            for segment_index, segment in enumerate(self._active_request_segments):
+            for segment in self._active_request_segments:
                 segment["complete"] = True
                 segment["phase"] = "processing"
                 content = str(segment.get("content", "") or "").strip()
                 if not content:
                     content = "*No translated output was emitted for this request.*"
                     segment["content"] = content
-                output_folder = (
-                    self._last_output_folder
-                    if segment_index == len(self._active_request_segments) - 1
-                    else ""
-                )
                 self._chat_messages.append(
-                    self._request_segment_message(segment, output_folder)
+                    self._request_segment_message(
+                        segment, self._last_output_folder
+                    )
                 )
             if completion_message:
                 self._chat_messages.append(completion_message)
@@ -7349,6 +7542,87 @@ class _InputOutputDialog(QDialog):
         candidates.sort(reverse=True)
         return candidates[0][2]
 
+    def _hydrate_header_toc_response(self):
+        """Guarantee that final header/TOC API output owns a response card.
+
+        Streaming providers do not all echo structured JSON chunks through the
+        normal text channel.  The header translator nevertheless writes an
+        authoritative ``translated_headers.txt`` artifact.  Use that artifact
+        as a lossless fallback so this API request is externalized to its own
+        ``response.md`` instead of ending as an empty Request card.
+        """
+        if not self._run_source_is_attachment:
+            return
+        import json as json_lib
+        import re
+
+        headers_path = self._find_direct_run_artifact(
+            "translated_headers.txt"
+        )
+        if not headers_path:
+            return
+        try:
+            with open(headers_path, 'r', encoding='utf-8') as handle:
+                artifact_text = handle.read()
+        except OSError:
+            return
+
+        translations = {}
+        current_key = None
+        for line in artifact_text.splitlines():
+            chapter_match = re.match(r"\s*Chapter\s+([^:]+):\s*$", line)
+            if chapter_match:
+                current_key = chapter_match.group(1).strip()
+                continue
+            translated_match = re.match(r"\s*Translated:\s*(.*)$", line)
+            if current_key and translated_match:
+                translations[current_key] = translated_match.group(1).strip()
+                current_key = None
+        if not translations:
+            return
+
+        content = json_lib.dumps(translations, ensure_ascii=False, indent=2)
+        target = next(
+            (
+                segment
+                for segment in reversed(self._active_request_segments)
+                if any(
+                    token in str(segment.get("label", "") or "").lower()
+                    for token in ("header", "toc")
+                )
+            ),
+            None,
+        )
+        if target is None:
+            target = {
+                "label": "Header / TOC translation",
+                "thread": "",
+                "content": "",
+                "thinking": "",
+                "phase": "processing",
+                "thinking_tokens": 0,
+                "text_tokens": 0,
+                "complete": True,
+                "order_key": (
+                    0,
+                    1_000_000,
+                    0,
+                    len(self._active_request_segments) + 1,
+                ),
+            }
+            self._active_request_segments.append(target)
+
+        if not str(target.get("content", "") or "").strip():
+            previous_tokens = int(target.get("text_tokens", 0) or 0)
+            current_tokens = self._count_tokens(content)
+            target["content"] = content
+            target["text_tokens"] = current_tokens
+            self._generation_token_count += current_tokens - previous_tokens
+        target["label"] = "Header / TOC translation"
+        target["phase"] = "processing"
+        target["complete"] = True
+        self._sort_active_request_segments()
+
     def _build_attachment_extraction_summary(self, output_folder):
         """Build the final, persisted chat card from real extraction artifacts."""
         if not self._run_source_is_attachment:
@@ -7606,6 +7880,7 @@ class _InputOutputDialog(QDialog):
         else:
             self._set_status("No translated output was produced")
 
+        self._hydrate_header_toc_response()
         completion_message = self._build_attachment_extraction_summary(
             output_folder
         )

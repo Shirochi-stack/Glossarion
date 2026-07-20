@@ -7050,6 +7050,29 @@ class BatchTranslationProcessor:
             )
             self._ordered_dispatch_condition.notify_all()
 
+    def _announce_ordered_request_dispatch(self, request_order, label):
+        """Gate and identify a Direct Text request by its spine ticket.
+
+        Provider-specific progress records are not guaranteed to retain the
+        chapter context.  Emit one request-bound marker immediately after the
+        ordered gate so the Direct Text UI can sort cards independently of
+        worker scheduling or response completion order.
+        """
+        self._wait_for_ordered_request_dispatch(request_order)
+        if os.getenv("DIRECT_TEXT_ORDERED_BATCH", "0") != "1":
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+        import threading
+
+        request_label = " ".join(str(label or "Request").split()) or "Request"
+        print(
+            f"📚 [{threading.current_thread().name}] {request_label} "
+            f"[spine-order:{request_order}] Direct Text dispatch"
+        )
+
     def _restore_cancelled_chapter_progress(self, idx, actual_num, content_hash, chapter):
         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
         restored = False
@@ -7614,8 +7637,10 @@ class BatchTranslationProcessor:
                             chapter_context=chapter_ctx,
                             bypass_graceful_stop=True,
                             before_dispatch_callback=lambda: (
-                                self._wait_for_ordered_request_dispatch(
-                                    chapter.get('_batch_request_order')
+                                self._announce_ordered_request_dispatch(
+                                    chapter.get('_batch_request_order'),
+                                    f"Chapter {actual_num} "
+                                    f"(chunk {chunk_idx}/{total_chunks})",
                                 )
                             ),
                             before_send_callback=_mark_batch_chunk_progress_on_send,
@@ -7852,8 +7877,10 @@ class BatchTranslationProcessor:
                                     chapter_context=chapter_ctx,
                                     bypass_graceful_stop=True,
                                     before_dispatch_callback=lambda: (
-                                        self._wait_for_ordered_request_dispatch(
-                                            chapter.get('_batch_request_order')
+                                        self._announce_ordered_request_dispatch(
+                                            chapter.get('_batch_request_order'),
+                                            f"Chapter {actual_num} "
+                                            f"(chunk {chunk_idx}/{total_chunks})",
                                         )
                                     ),
                                     before_send_callback=_mark_batch_chunk_progress_on_send,
@@ -9116,8 +9143,14 @@ class BatchTranslationProcessor:
                     context='translation',
                     chapter_context=chapter_ctx,
                     before_dispatch_callback=lambda: (
-                        self._wait_for_ordered_request_dispatch(
-                            parent_chapter.get('_batch_request_order')
+                        self._announce_ordered_request_dispatch(
+                            parent_chapter.get('_batch_request_order'),
+                            (
+                                f"Merged {merged_chapter_nums_for_context[0]}-"
+                                f"{merged_chapter_nums_for_context[-1]}"
+                                if len(merged_chapter_nums_for_context) > 1
+                                else f"Merged {merged_chapter_nums_for_context[0]}"
+                            ),
                         )
                     ),
                     before_send_callback=_mark_merged_request_progress_on_send,
@@ -17086,6 +17119,76 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_call_state = {"tls": None, "cancel_reason": None}
     deferred_batch_logs = pop_deferred_batch_logs()
 
+    def _publish_direct_text_response(api_result):
+        """Send the authoritative final body to its Direct Text request card.
+
+        Stream log callbacks are intentionally lossy/coalesced for GUI
+        responsiveness.  They are suitable for live preview, but not as the
+        persisted source of truth.  Once client.send() returns, publish its
+        complete body in one request-bound record so the card can replace any
+        partial streamed fragment before ``response.md`` is written.
+        """
+        if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1":
+            return
+        if not isinstance(chapter_context, dict):
+            return
+
+        value = api_result
+        if isinstance(value, tuple):
+            value = value[0] if value else ""
+        if hasattr(value, "content"):
+            value = value.content
+        if not isinstance(value, str) or not value:
+            return
+
+        merged = chapter_context.get("merged_chapters") or []
+        chapter = chapter_context.get("chapter")
+        chunk = chapter_context.get("chunk")
+        total_chunks = chapter_context.get("total_chunks")
+        dispatch_order = chapter_context.get("dispatch_order")
+        label = ""
+        if merged:
+            try:
+                merged_numbers = sorted(
+                    int(item) for item in merged if item is not None
+                )
+            except (TypeError, ValueError):
+                merged_numbers = []
+            if merged_numbers:
+                label = (
+                    f"Merged {merged_numbers[0]}"
+                    if len(merged_numbers) == 1
+                    else f"Merged {merged_numbers[0]}-{merged_numbers[-1]}"
+                )
+        elif chapter is not None:
+            label = f"Chapter {chapter}"
+        if chunk is not None and total_chunks is not None:
+            label += f" (chunk {chunk}/{total_chunks})"
+        if not label:
+            try:
+                tls = client._get_thread_local_client()
+                label = str(
+                    getattr(tls, "current_request_label", "") or ""
+                ).strip()
+                label = re.sub(r"\s*\[spine-order:\d+\]\s*$", "", label)
+            except Exception:
+                label = ""
+        if not label:
+            try:
+                label = f"Request {int(dispatch_order) + 1}"
+            except (TypeError, ValueError):
+                label = "Request"
+
+        payload = json.dumps(
+            {
+                "label": label,
+                "order": dispatch_order,
+                "content": value,
+            },
+            ensure_ascii=False,
+        )
+        print(f"[DIRECT_TEXT_RESPONSE_PAYLOAD] {payload}")
+
     def _capture_actual_request_metadata():
         actual_model = None
         actual_key = None
@@ -17320,7 +17423,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             # If the caller has already timed out/cancelled, do not publish a stale result.
             if cancel_event.is_set():
                 return
-            
+
+            _publish_direct_text_response(result)
+
             # Capture raw response object for thought signatures (if available)
             raw_obj = None
             if hasattr(client, 'get_last_response_object'):
