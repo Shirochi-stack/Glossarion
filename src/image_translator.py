@@ -113,6 +113,15 @@ DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT = (
     "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
 )
 
+
+def _apply_direct_text_message_overrides(messages):
+    """Attach Direct Text's scoped profile/instruction to image API requests."""
+    try:
+        from TransateKRtoEN import _apply_direct_text_prompt_overrides_to_messages
+        return _apply_direct_text_prompt_overrides_to_messages(messages)
+    except Exception:
+        return messages
+
 def requires_cv2(func):
     """Decorator to skip methods that require OpenCV"""
     def wrapper(self, *args, **kwargs):
@@ -1197,6 +1206,7 @@ class ImageTranslator:
                     "role": "user",
                     "content": content_parts
                 })
+                messages = _apply_direct_text_message_overrides(messages)
                 
                 print("\n   🔄 Sending " + str(num_chunks) + " chunks to API in single call...")
                 if compression_enabled:
@@ -2260,6 +2270,7 @@ class ImageTranslator:
         else:
             user_prompt = user_prompt_template
         messages.append({"role": "user", "content": user_prompt})
+        messages = _apply_direct_text_message_overrides(messages)
 
         if _stop_new_vision_work_requested(check_stop_fn):
             raise UnifiedClientError("Vision OCR stopped by user", error_type="cancelled")
@@ -2357,6 +2368,8 @@ class ImageTranslator:
                 messages = _build_single_pass_glossary_messages(messages, ocr_text)
         except Exception as e:
             print(f"   ⚠️ Vision Single Pass Glossary setup skipped: {e}")
+
+        messages = _apply_direct_text_message_overrides(messages)
 
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
@@ -4916,6 +4929,7 @@ class ImageTranslator:
             messages.append({"role": "assistant", "content": assistant_prompt})
         # User message carries only the image payload; no empty text part
         messages.append({"role": "user"})
+        messages = _apply_direct_text_message_overrides(messages)
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
             image_idx = getattr(self, 'current_image_index', 0)

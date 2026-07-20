@@ -991,6 +991,23 @@ class TranslationConfig:
             self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_SYSTEM_PROMPT = os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_USER_PROMPT = os.getenv("REFINEMENT_USER_PROMPT", "").strip()
+        self.DIRECT_TEXT_ATTACHMENT_PROMPT = (
+            _prompt_env_raw("DIRECT_TEXT_ATTACHMENT_PROMPT") or ""
+        ).strip()
+        self.DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE = str(
+            os.getenv("DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE", "user") or "user"
+        ).strip().lower()
+        if self.DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE not in {
+            "system", "assistant", "user"
+        }:
+            self.DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE = "user"
+        self.DIRECT_TEXT_PROFILE_USER_PROMPT = (
+            _prompt_env_raw("DIRECT_TEXT_PROFILE_USER_PROMPT") or ""
+        ).strip()
+        self.DIRECT_TEXT_SKIP_PROMPT_PROFILE = (
+            str(os.getenv("DIRECT_TEXT_SKIP_PROMPT_PROFILE", "0") or "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         default_refinement_system_prompt = DEFAULT_REFINEMENT_SYSTEM_PROMPT
         default_refinement_full_with_raw_system_prompt = DEFAULT_REFINEMENT_FULL_WITH_RAW_SYSTEM_PROMPT
         default_refinement_failed_system_prompt = DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT
@@ -1318,6 +1335,18 @@ class TranslationConfig:
         Returns:
             The system prompt string, with or without split marker instruction.
         """
+        # Direct Text's skip option applies only to the selected main-window
+        # profile. A profile intentionally routed to the user role is inserted
+        # later by the scoped Direct Text message builder. Keep SYSTEM_PROMPT
+        # populated because other request builders use it as shared state;
+        # clearing that environment value accidentally suppressed unrelated
+        # system/user-role instructions as well.
+        if (
+            getattr(self, "DIRECT_TEXT_SKIP_PROMPT_PROFILE", False)
+            or bool(getattr(self, "DIRECT_TEXT_PROFILE_USER_PROMPT", ""))
+        ):
+            return ""
+
         if not self.SYSTEM_PROMPT:
             return self.SYSTEM_PROMPT
         
@@ -1341,6 +1370,128 @@ _PREVIOUS_CHUNK_MEMORY_FOOTER = "\n[END MEMORY - PREVIOUS CHUNK CONTEXT]"
 def _normalize_translation_chunk_prompt_role(role):
     role = str(role or "assistant").strip().lower()
     return role if role in _TRANSLATION_CHUNK_PROMPT_ROLES else "assistant"
+
+
+def _direct_text_prompt_value(config, attr_name, env_name):
+    """Read a scoped Direct Text prompt, including large_env-backed values."""
+    if config is not None and hasattr(config, attr_name):
+        return str(getattr(config, attr_name, "") or "").strip()
+    try:
+        import large_env
+        return str(large_env.get_env(env_name, "") or "").strip()
+    except Exception:
+        return str(os.getenv(env_name, "") or "").strip()
+
+
+def _direct_text_prompt_components(config=None):
+    profile_user_prompt = _direct_text_prompt_value(
+        config,
+        "DIRECT_TEXT_PROFILE_USER_PROMPT",
+        "DIRECT_TEXT_PROFILE_USER_PROMPT",
+    )
+    attachment_prompt = _direct_text_prompt_value(
+        config,
+        "DIRECT_TEXT_ATTACHMENT_PROMPT",
+        "DIRECT_TEXT_ATTACHMENT_PROMPT",
+    )
+    attachment_role = _normalize_translation_chunk_prompt_role(
+        getattr(config, "DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE", "user")
+        if config is not None
+        else os.getenv("DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE", "user")
+    )
+    return profile_user_prompt, attachment_prompt, attachment_role
+
+
+def _apply_direct_text_prompt_overrides_to_messages(messages, config=None):
+    """Add scoped profile/instruction content without changing source payloads."""
+    profile_user_prompt, attachment_prompt, attachment_role = (
+        _direct_text_prompt_components(config)
+    )
+    updated = []
+    for message in messages or []:
+        copied = dict(message)
+        # Skipping the selected system-role profile must remove that one
+        # message, not leave a blank system placeholder in front of an
+        # attachment instruction.  Empty system messages are malformed for
+        # some native vision providers and can trigger pointless retries.
+        if (
+            copied.get("role") == "system"
+            and not str(copied.get("content", "") or "").strip()
+            and not copied.get("_raw_content_object")
+        ):
+            continue
+        updated.append(copied)
+    if not profile_user_prompt and not attachment_prompt:
+        return updated
+
+    def _prepend_to_user(text):
+        if not text:
+            return
+        user_index = next(
+            (
+                index
+                for index in range(len(updated) - 1, -1, -1)
+                if updated[index].get("role") == "user"
+            ),
+            -1,
+        )
+        if user_index < 0:
+            updated.append({"role": "user", "content": text})
+            return
+        content = updated[user_index].get("content", "")
+        if isinstance(content, str):
+            updated[user_index]["content"] = (
+                f"{text}\n\n{content}" if content else text
+            )
+        elif isinstance(content, list):
+            updated[user_index]["content"] = [
+                {"type": "text", "text": text}
+            ] + list(content)
+        else:
+            updated[user_index]["content"] = f"{text}\n\n{content}"
+
+    user_prefixes = [profile_user_prompt] if profile_user_prompt else []
+    if attachment_role == "user":
+        if attachment_prompt:
+            user_prefixes.append(attachment_prompt)
+    if user_prefixes:
+        _prepend_to_user("\n\n".join(user_prefixes))
+    if not attachment_prompt:
+        return updated
+    if attachment_role == "user":
+        return updated
+    elif attachment_role == "assistant":
+        user_index = next(
+            (
+                index
+                for index, message in enumerate(updated)
+                if message.get("role") == "user"
+            ),
+            len(updated),
+        )
+        updated.insert(
+            user_index,
+            {"role": "assistant", "content": attachment_prompt},
+        )
+    else:
+        system_index = next(
+            (
+                index
+                for index, message in enumerate(updated)
+                if message.get("role") == "system"
+            ),
+            -1,
+        )
+        if system_index < 0:
+            updated.insert(0, {"role": "system", "content": attachment_prompt})
+        else:
+            system_content = str(updated[system_index].get("content", "") or "").rstrip()
+            updated[system_index]["content"] = (
+                f"{system_content}\n\n{attachment_prompt}"
+                if system_content
+                else attachment_prompt
+            )
+    return updated
 
 
 def _format_translation_chunk_prompt(template, chunk_idx, total_chunks):
@@ -1443,79 +1594,99 @@ def _build_translation_chunk_prompt_parts(
     """Return updated system content, optional prompt messages, and final user prompt."""
     user_prompt = chunk_html
     chunk_prompt_msgs = []
-    try:
-        has_multiple_chunks = int(total_chunks or 0) > 1
-    except Exception:
-        has_multiple_chunks = False
-    if not has_multiple_chunks:
-        return system_content, chunk_prompt_msgs, user_prompt
-
-    role = _normalize_translation_chunk_prompt_role(
-        getattr(config, "TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
-        if config is not None
-        else os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
-    )
     system_additions = []
     user_prefixes = []
     assistant_prefixes = []
 
+    profile_user_prompt, attachment_prompt, attachment_role = (
+        _direct_text_prompt_components(config)
+    )
+    if profile_user_prompt:
+        user_prefixes.append(profile_user_prompt)
+    if attachment_prompt:
+        if attachment_role == "system":
+            system_additions.append(attachment_prompt)
+        elif attachment_role == "assistant":
+            assistant_prefixes.append(attachment_prompt)
+        else:
+            user_prefixes.append(attachment_prompt)
+
     try:
-        current_chunk_idx = int(chunk_idx or 0)
+        has_multiple_chunks = int(total_chunks or 0) > 1
     except Exception:
-        current_chunk_idx = 0
-    include_previous_chunk = _translation_chunk_prompt_bool(
-        config,
-        "INCLUDE_PREVIOUS_CHUNK",
-        "INCLUDE_PREVIOUS_CHUNK",
-        False,
-    )
-    if include_previous_chunk and current_chunk_idx > 1:
-        previous_limit = _translation_chunk_prompt_int(
-            config,
-            "PREVIOUS_CHUNK_CONTEXT_LIMIT",
-            "PREVIOUS_CHUNK_CONTEXT_LIMIT",
-            3,
-        )
-        previous_context = _extract_previous_chunk_context(previous_chunk_html, previous_limit)
-        previous_memory = _wrap_previous_chunk_context_memory(previous_context)
-        if previous_memory:
-            if role == "system":
-                system_additions.append(previous_memory)
-            elif role == "user":
-                user_prefixes.append(previous_memory)
-            else:
-                assistant_prefixes.append(previous_memory)
-
-    enabled = _translation_chunk_prompt_bool(
-        config,
-        "ENABLE_TRANSLATION_CHUNK_PROMPT",
-        "ENABLE_TRANSLATION_CHUNK_PROMPT",
-        False,
-    )
-    if not enabled and not system_additions and not user_prefixes and not assistant_prefixes:
-        return system_content, chunk_prompt_msgs, user_prompt
-
-    if enabled and current_chunk_idx > 1:
-        template = (
-            getattr(config, "TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
+        has_multiple_chunks = False
+    if has_multiple_chunks:
+        role = _normalize_translation_chunk_prompt_role(
+            getattr(config, "TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
             if config is not None
-            else os.getenv("TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT)
+            else os.getenv("TRANSLATION_CHUNK_PROMPT_ROLE", "assistant")
         )
-        prompt = _format_translation_chunk_prompt(template, chunk_idx, total_chunks)
-        if prompt:
-            if role == "system":
-                system_additions.append(prompt)
-            elif role == "user":
-                user_prefixes.append(prompt)
-            else:
-                assistant_prefixes.append(prompt)
+        try:
+            current_chunk_idx = int(chunk_idx or 0)
+        except Exception:
+            current_chunk_idx = 0
+        include_previous_chunk = _translation_chunk_prompt_bool(
+            config,
+            "INCLUDE_PREVIOUS_CHUNK",
+            "INCLUDE_PREVIOUS_CHUNK",
+            False,
+        )
+        if include_previous_chunk and current_chunk_idx > 1:
+            previous_limit = _translation_chunk_prompt_int(
+                config,
+                "PREVIOUS_CHUNK_CONTEXT_LIMIT",
+                "PREVIOUS_CHUNK_CONTEXT_LIMIT",
+                3,
+            )
+            previous_context = _extract_previous_chunk_context(
+                previous_chunk_html, previous_limit
+            )
+            previous_memory = _wrap_previous_chunk_context_memory(previous_context)
+            if previous_memory:
+                if role == "system":
+                    system_additions.append(previous_memory)
+                elif role == "user":
+                    user_prefixes.append(previous_memory)
+                else:
+                    assistant_prefixes.append(previous_memory)
+
+        enabled = _translation_chunk_prompt_bool(
+            config,
+            "ENABLE_TRANSLATION_CHUNK_PROMPT",
+            "ENABLE_TRANSLATION_CHUNK_PROMPT",
+            False,
+        )
+        if enabled and current_chunk_idx > 1:
+            template = (
+                getattr(
+                    config,
+                    "TRANSLATION_CHUNK_PROMPT",
+                    DEFAULT_TRANSLATION_CHUNK_PROMPT,
+                )
+                if config is not None
+                else os.getenv(
+                    "TRANSLATION_CHUNK_PROMPT", DEFAULT_TRANSLATION_CHUNK_PROMPT
+                )
+            )
+            prompt = _format_translation_chunk_prompt(
+                template, chunk_idx, total_chunks
+            )
+            if prompt:
+                if role == "system":
+                    system_additions.append(prompt)
+                elif role == "user":
+                    user_prefixes.append(prompt)
+                else:
+                    assistant_prefixes.append(prompt)
 
     if system_additions:
         base = str(system_content or "").rstrip()
         additions = "\n\n".join(system_additions)
         system_content = f"{base}\n\n{additions}" if base else additions
     if user_prefixes:
-        user_prompt = "\n".join(user_prefixes + ([chunk_html] if chunk_html else []))
+        user_prompt = "\n".join(
+            user_prefixes + ([chunk_html] if chunk_html else [])
+        )
     if assistant_prefixes:
         chunk_prompt_msgs.append({"role": "assistant", "content": "\n".join(assistant_prefixes)})
 
@@ -8719,6 +8890,9 @@ class BatchTranslationProcessor:
                 {"role": "user", "content": merged_content}
             ]
             msgs = _build_single_pass_glossary_messages(msgs, merged_content)
+            msgs = _apply_direct_text_prompt_overrides_to_messages(
+                msgs, self.config
+            )
 
             # Prepare split-failed retry controls
             try:
@@ -15584,7 +15758,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if refine_assistant:
             messages.append({"role": "assistant", "content": refine_assistant})
         messages.append({"role": "user", "content": refine_user})
-        return messages
+        return _apply_direct_text_prompt_overrides_to_messages(messages, config)
 
     def _find_progress_entry_for_output(output_file, actual_num=None):
         if not output_file:

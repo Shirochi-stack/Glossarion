@@ -1334,6 +1334,11 @@ class _InputOutputDialog(QDialog):
         'STREAM_THINKING_LOGS',
         'AUTHND_STREAM_THINKING_LOGS',
         'ENABLE_THOUGHTS',
+        'DIRECT_TEXT_ATTACHMENT_PROMPT',
+        'DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE',
+        'DIRECT_TEXT_PROFILE_USER_PROMPT',
+        'DIRECT_TEXT_SKIP_PROMPT_PROFILE',
+        'SYSTEM_PROMPT_TO_USER',
     )
     _STATUS_FIRST_CHARS = set(
         "🚀📄📃📜📋✅⚠❌📚📦🔧📊🔍💾🖼🔄📌📸🧠🛰📡⏱⏳"
@@ -1344,8 +1349,11 @@ class _InputOutputDialog(QDialog):
         'translation stopped',
         'force stop requested',
         'graceful stop',
+        'stream finished',
         'stream finished in',
         'stream complete',
+        'sdk call finished',
+        'received translation from api',
         'received section ',
         'fallback key ',
         'saved text file',
@@ -1356,8 +1364,32 @@ class _InputOutputDialog(QDialog):
     )
     _EMBEDDED_PIPELINE_MARKERS = (
         '⏹️', '⏹', '🛑',
+        '🛰️ [gemini-native] Stream finished',
+        '🛰️ [gemini-grpc] Stream finished',
+        '🛰️ [anthropic] SSE stream complete',
+        '🛰️ [mistral] SDK stream complete',
+        '📡 AuthGPT: Stream finished',
+        '📡 AuthGem: Stream finished',
+        '📡 AuthCD: Stream finished',
+        '📡 AuthND: Stream finished',
         'TRANSLATION_COMPLETE_SIGNAL', 'GLOSSARY_COMPLETE_SIGNAL',
         '✅ Text file translation complete',
+    )
+    _STREAM_END_LOG_PHRASES = (
+        'stream finished',
+        'stream complete',
+        'sdk call finished',
+        'received translation from api',
+        'received chapter ',
+        'received section ',
+        'received merged response',
+    )
+    _HIDDEN_STREAM_START_LOG_PHRASES = (
+        '] streaming on (env=',
+        '] stream start (model=',
+        '] sse stream start (model=',
+        '] sdk stream start (model=',
+        '] sdk stream opened in ',
     )
 
     def __init__(self, translator):
@@ -1474,8 +1506,8 @@ class _InputOutputDialog(QDialog):
             | Qt.WindowMinMaxButtonsHint
             | Qt.WindowCloseButtonHint
         )
-        self.resize(940, 760)
-        self.setMinimumSize(680, 520)
+        self.resize(1040, 840)
+        self.setMinimumSize(720, 560)
         self._restore_maximized_after_fullscreen = False
 
         root = QVBoxLayout(self)
@@ -1529,12 +1561,12 @@ class _InputOutputDialog(QDialog):
             "QPushButton#directAttachmentButton, QPushButton#directAttachmentClear { "
             "min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px; padding: 0; }"
             "QPushButton#directModeButton { background: transparent; color: #aeb8c8; "
-            "border: 1px solid transparent; border-radius: 6px; min-width: 30px; "
-            "max-width: 30px; min-height: 28px; max-height: 28px; padding: 0; font-size: 11pt; }"
+            "border: 1px solid transparent; border-radius: 5px; min-width: 25px; "
+            "max-width: 25px; min-height: 23px; max-height: 23px; padding: 0; font-size: 9.5pt; }"
             "QPushButton#directModeButton:hover { background: #303641; border-color: #4a5568; }"
             "QPushButton#directModeButton[directSelected=\"true\"] { background: #344861; "
             "border-color: #5a9fd4; color: white; }"
-            "QLabel#directModeLabel { color: #aeb8c8; font-size: 8.5pt; }"
+            "QLabel#directModeLabel { color: #aeb8c8; font-size: 8pt; }"
             "QFrame#directSettingsCard { background: transparent; border: 1px solid #4a5568; "
             "border-radius: 10px; }"
             "QLabel#settingDescription { color: #cbd5e1; padding-left: 30px; }"
@@ -1710,7 +1742,7 @@ class _InputOutputDialog(QDialog):
 
         composer = QFrame()
         composer.setObjectName("directComposerCard")
-        composer.setMinimumHeight(132)
+        composer.setMinimumHeight(150)
         composer_layout = QVBoxLayout(composer)
         composer_layout.setContentsMargins(12, 7, 8, 7)
         composer_layout.setSpacing(6)
@@ -1742,7 +1774,7 @@ class _InputOutputDialog(QDialog):
 
         mode_row = QHBoxLayout()
         mode_row.setContentsMargins(2, 0, 2, 0)
-        mode_row.setSpacing(3)
+        mode_row.setSpacing(2)
         self.direct_mode_label = QLabel("Output: Text")
         self.direct_mode_label.setObjectName("directModeLabel")
         mode_row.addWidget(self.direct_mode_label)
@@ -1771,19 +1803,25 @@ class _InputOutputDialog(QDialog):
         self.input_box = QPlainTextEdit()
         self.input_box.setObjectName("directComposer")
         self.input_box.setPlaceholderText(
-            "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
+            "Message to translate…  (drop a TXT, EPUB, PDF, CBZ, or image here)"
         )
-        self.input_box.setMinimumHeight(58)
+        self.input_box.setMinimumHeight(74)
+        self.input_box.setUndoRedoEnabled(True)
         self.input_box.setAcceptDrops(True)
         self.input_box.dragEnterEvent = self._input_drag_enter_event
         self.input_box.dropEvent = self._input_drop_event
+        self.input_box.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.input_box.customContextMenuRequested.connect(
+            self._show_input_context_menu
+        )
         self.input_box.installEventFilter(self)
+        self.input_box.viewport().installEventFilter(self)
         self.input_box.textChanged.connect(self._on_chat_draft_changed)
         composer_input_row.addWidget(self.input_box, 1)
 
         self.attachment_button = QPushButton("📎")
         self.attachment_button.setObjectName("directAttachmentButton")
-        self.attachment_button.setToolTip("Attach a TXT, EPUB, PDF, or image file")
+        self.attachment_button.setToolTip("Attach a TXT, EPUB, PDF, CBZ, or image file")
         self.attachment_button.clicked.connect(self._choose_attachment)
         composer_input_row.addWidget(self.attachment_button, 0, Qt.AlignBottom)
 
@@ -1817,7 +1855,7 @@ class _InputOutputDialog(QDialog):
         self.chat_splitter.addWidget(composer_shell)
         self.chat_splitter.setStretchFactor(0, 1)
         self.chat_splitter.setStretchFactor(1, 0)
-        self.chat_splitter.setSizes([520, 168])
+        self.chat_splitter.setSizes([560, 190])
         chat_layout.addWidget(self.chat_splitter, 1)
         self.tabs.addTab(self.chat_tab, "Chat")
         self._refresh_chat_list()
@@ -1882,6 +1920,87 @@ class _InputOutputDialog(QDialog):
                 'direct_text_disable_thinking', checked
             )
         )
+        self.skip_prompt_profile_checkbox = translator._create_styled_checkbox(
+            "Skip prompt profile"
+        )
+        configured_skip_profile = translator.config.get(
+            'direct_text_skip_prompt_profile', None
+        )
+        if configured_skip_profile is None:
+            # Migrate either of the short-lived role-specific settings without
+            # requiring users to configure the replacement toggle again.
+            configured_skip_profile = bool(
+                translator.config.get(
+                    'direct_text_skip_system_prompt_profile', False
+                )
+                or translator.config.get(
+                    'direct_text_skip_user_prompt_profile', False
+                )
+            )
+        self.skip_prompt_profile_checkbox.setChecked(
+            bool(configured_skip_profile)
+        )
+        self.skip_prompt_profile_checkbox.setToolTip(
+            "Ignore the selected main-window prompt profile during Direct Text, "
+            "regardless of whether that profile uses the system or user role."
+        )
+        self.skip_prompt_profile_checkbox.toggled.connect(
+            lambda checked: self._persist_dialog_option(
+                'direct_text_skip_prompt_profile', checked
+            )
+        )
+        self.attachment_prompt_role_combo = QComboBox()
+        self.attachment_prompt_role_combo.setToolTip(
+            "Role used for text typed alongside an attached file."
+        )
+        for role_label, role_value in (
+            ("User", "user"),
+            ("System", "system"),
+            ("Assistant", "assistant"),
+        ):
+            self.attachment_prompt_role_combo.addItem(role_label, role_value)
+        role_icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'
+        ).replace('\\', '/')
+        disabled_role_icon_path = _get_disabled_halgakos_icon_path(role_icon_path)
+        self.attachment_prompt_role_combo.setStyleSheet(f"""
+            QComboBox {{ padding-right: 28px; }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 27px;
+                border-left: 1px solid #4a5568;
+            }}
+            QComboBox::down-arrow {{
+                image: url({role_icon_path});
+                width: 18px;
+                height: 18px;
+                border: none;
+            }}
+            QComboBox::down-arrow:disabled {{
+                image: url({disabled_role_icon_path});
+                width: 18px;
+                height: 18px;
+                border: none;
+            }}
+            QComboBox::down-arrow:on {{ top: 1px; }}
+        """)
+        configured_attachment_role = str(
+            translator.config.get('direct_text_attachment_prompt_role', 'user')
+            or 'user'
+        ).strip().lower()
+        role_index = self.attachment_prompt_role_combo.findData(
+            configured_attachment_role
+        )
+        self.attachment_prompt_role_combo.setCurrentIndex(
+            role_index if role_index >= 0 else 0
+        )
+        self.attachment_prompt_role_combo.currentIndexChanged.connect(
+            lambda _index: self._persist_dialog_value(
+                'direct_text_attachment_prompt_role',
+                self.attachment_prompt_role_combo.currentData() or 'user',
+            )
+        )
         # _create_styled_checkbox supplies the parent's indicator styling but
         # QCheckBox otherwise picks up QWidget's opaque background.  The cards
         # are deliberately transparent, so keep the checkbox label area
@@ -1890,6 +2009,7 @@ class _InputOutputDialog(QDialog):
             self.force_multipass_off_checkbox,
             self.force_no_glossary_checkbox,
             self.skip_thinking_checkbox,
+            self.skip_prompt_profile_checkbox,
         ):
             checkbox.setStyleSheet(
                 checkbox.styleSheet()
@@ -1911,6 +2031,26 @@ class _InputOutputDialog(QDialog):
         settings_intro.setWordWrap(True)
         settings_layout.addWidget(settings_intro)
 
+        prompt_role_card = QFrame()
+        prompt_role_card.setObjectName("directSettingsCard")
+        prompt_role_layout = QVBoxLayout(prompt_role_card)
+        prompt_role_layout.setContentsMargins(16, 13, 16, 13)
+        prompt_role_layout.setSpacing(7)
+        prompt_role_header = QHBoxLayout()
+        prompt_role_label = QLabel("Attached-text prompt role")
+        prompt_role_header.addWidget(prompt_role_label)
+        prompt_role_header.addStretch(1)
+        prompt_role_header.addWidget(self.attachment_prompt_role_combo)
+        prompt_role_layout.addLayout(prompt_role_header)
+        prompt_role_detail = QLabel(
+            "When a file is attached, composer text is added to every related API "
+            "request using this role. The attached file remains the translation source."
+        )
+        prompt_role_detail.setObjectName("settingDescription")
+        prompt_role_detail.setWordWrap(True)
+        prompt_role_layout.addWidget(prompt_role_detail)
+        settings_layout.addWidget(prompt_role_card)
+
         setting_rows = (
             (
                 self.force_multipass_off_checkbox,
@@ -1923,6 +2063,10 @@ class _InputOutputDialog(QDialog):
             (
                 self.skip_thinking_checkbox,
                 "Remove provider thinking/reasoning parameters for Direct Text requests.",
+            ),
+            (
+                self.skip_prompt_profile_checkbox,
+                "Ignore the selected main-window prompt profile in its currently configured role.",
             ),
         )
         for checkbox, description in setting_rows:
@@ -1966,6 +2110,19 @@ class _InputOutputDialog(QDialog):
 
         self._ctrl_enter_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
         self._ctrl_enter_shortcut.activated.connect(self._on_enter_clicked)
+
+        # Keep edit history local to the composer. StandardKey provides the
+        # native Ctrl/Cmd mappings on Windows, Linux, and macOS even while the
+        # dialog also has window-level zoom and send shortcuts.
+        self._composer_edit_shortcuts = []
+        for standard_key, callback in (
+            (QKeySequence.StandardKey.Undo, self.input_box.undo),
+            (QKeySequence.StandardKey.Redo, self.input_box.redo),
+        ):
+            shortcut = QShortcut(QKeySequence(standard_key), self.input_box)
+            shortcut.setContext(Qt.WidgetShortcut)
+            shortcut.activated.connect(callback)
+            self._composer_edit_shortcuts.append(shortcut)
 
         self._fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
         self._fullscreen_shortcut.setContext(Qt.WindowShortcut)
@@ -2054,8 +2211,25 @@ class _InputOutputDialog(QDialog):
                             )
                         except (TypeError, ValueError):
                             source_size = 0
+                        attachment_prompt = str(
+                            raw_message[4] if len(raw_message) > 4 else ""
+                        )
+                        attachment_prompt_role = str(
+                            raw_message[5] if len(raw_message) > 5 else "user"
+                        ).strip().lower()
+                        if attachment_prompt_role not in {
+                            'system', 'assistant', 'user'
+                        }:
+                            attachment_prompt_role = 'user'
                         messages.append(
-                            ("user_file", content, source_path, source_size)
+                            (
+                                "user_file",
+                                content,
+                                source_path,
+                                source_size,
+                                attachment_prompt,
+                                attachment_prompt_role,
+                            )
                         )
                     elif role == "assistant":
                         messages.append(
@@ -2191,8 +2365,12 @@ class _InputOutputDialog(QDialog):
 
     def _persist_dialog_option(self, key, checked):
         """Persist a Direct Text-only checkbox without touching global modes."""
+        self._persist_dialog_value(key, bool(checked))
+
+    def _persist_dialog_value(self, key, value):
+        """Persist a Direct Text-only setting without mutating main-window modes."""
         try:
-            self.translator.config[str(key)] = bool(checked)
+            self.translator.config[str(key)] = value
             self.translator.save_config(show_message=False)
         except Exception:
             pass
@@ -2462,13 +2640,8 @@ class _InputOutputDialog(QDialog):
             "extension": os.path.splitext(path)[1].lower(),
             "size": size,
         }
-        if self.input_box.toPlainText():
-            self.input_box.blockSignals(True)
-            self.input_box.clear()
-            self.input_box.blockSignals(False)
-        self.input_box.setReadOnly(True)
         self.input_box.setPlaceholderText(
-            "File attached. Remove it to type or paste text instead."
+            "Add optional instructions for the attached file…"
         )
         self.attachment_name_label.setText(self._pending_attachment["name"])
         extension_label = (
@@ -2486,7 +2659,6 @@ class _InputOutputDialog(QDialog):
         self.attachment_card.show()
         session = self._current_chat_session()
         if session is not None:
-            session["draft"] = ""
             session["attachment"] = dict(self._pending_attachment)
         if attachment_is_vision and not previous_attachment_was_vision:
             if self._direct_output_mode != 'vision':
@@ -2509,7 +2681,6 @@ class _InputOutputDialog(QDialog):
         self._pending_attachment = None
         self.attachment_card.hide()
         self.attachment_card.setToolTip("")
-        self.input_box.setReadOnly(False)
         self.input_box.setPlaceholderText(
             "Message to translate…  (drop a TXT, EPUB, PDF, CBZ, or image here)"
         )
@@ -2569,18 +2740,50 @@ class _InputOutputDialog(QDialog):
 
     def eventFilter(self, watched, event):
         """Use chat-style Enter/Shift+Enter behavior in the composer."""
-        if watched is self.input_box and event.type() == QEvent.KeyPress:
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                modifiers = event.modifiers()
-                if not (
-                    modifiers & Qt.ShiftModifier
-                    or modifiers & Qt.ControlModifier
-                    or modifiers & Qt.AltModifier
-                    or modifiers & Qt.MetaModifier
-                ):
-                    self._on_enter_clicked()
-                    return True
+        input_viewport = (
+            self.input_box.viewport() if hasattr(self, "input_box") else None
+        )
+        if watched is self.input_box or watched is input_viewport:
+            if (
+                watched is input_viewport
+                and event.type() == QEvent.MouseButtonPress
+                and event.button() == Qt.LeftButton
+                and self.input_box.isEnabled()
+                and not self.input_box.isReadOnly()
+            ):
+                # Mouse events belong to QPlainTextEdit's viewport. Position
+                # the ordinary insertion caret at the clicked character; do
+                # not add any custom focus/background/caret styling.
+                try:
+                    point = event.position().toPoint()
+                except AttributeError:
+                    point = event.pos()
+                self.input_box.setTextCursor(
+                    self.input_box.cursorForPosition(point)
+                )
+                self.input_box.setFocus(Qt.MouseFocusReason)
+                QTimer.singleShot(0, self._refresh_input_cursor_feedback)
+            elif event.type() in (QEvent.MouseButtonRelease, QEvent.FocusIn):
+                QTimer.singleShot(0, self._refresh_input_cursor_feedback)
+            if event.type() == QEvent.KeyPress:
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    modifiers = event.modifiers()
+                    if not (
+                        modifiers & Qt.ShiftModifier
+                        or modifiers & Qt.ControlModifier
+                        or modifiers & Qt.AltModifier
+                        or modifiers & Qt.MetaModifier
+                    ):
+                        self._on_enter_clicked()
+                        return True
         return super().eventFilter(watched, event)
+
+    def _refresh_input_cursor_feedback(self):
+        """Make a mouse-positioned composer caret visible without moving it."""
+        if not hasattr(self, "input_box"):
+            return
+        self.input_box.ensureCursorVisible()
+        self.input_box.viewport().update()
 
     def _new_chat(self):
         """Create and switch to a retained conversation."""
@@ -2688,9 +2891,8 @@ class _InputOutputDialog(QDialog):
             session["attachment"] = None
             self._pending_attachment = None
             self.attachment_card.hide()
-            self.input_box.setReadOnly(False)
             self.input_box.setPlaceholderText(
-                "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
+                "Message to translate…  (drop a TXT, EPUB, PDF, CBZ, or image here)"
             )
         self._thinking_token_count = 0
         self._generation_token_count = 0
@@ -2937,6 +3139,11 @@ class _InputOutputDialog(QDialog):
             )
         )
         menu.exec(self.output_box.viewport().mapToGlobal(position))
+
+    def _show_input_context_menu(self, position):
+        """Expose native Undo/Redo and editing actions for the composer."""
+        menu = self.input_box.createStandardContextMenu()
+        menu.exec(self.input_box.viewport().mapToGlobal(position))
 
     def _set_output_auto_scroll_disabled(self, disabled):
         self._output_auto_scroll_disabled = bool(disabled)
@@ -3272,7 +3479,7 @@ class _InputOutputDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Input required",
-                "Enter text or attach a TXT, EPUB, PDF, or image file to translate.",
+                "Enter text or attach a TXT, EPUB, PDF, CBZ, or image file to translate.",
             )
             return
 
@@ -3292,6 +3499,11 @@ class _InputOutputDialog(QDialog):
 
         display_input = attachment["name"] if attachment else text
         self._title_current_chat_from_text(display_input)
+        attachment_prompt_role = str(
+            self.attachment_prompt_role_combo.currentData() or 'user'
+        ).strip().lower()
+        if attachment_prompt_role not in {'system', 'assistant', 'user'}:
+            attachment_prompt_role = 'user'
         if attachment:
             self._chat_messages.append(
                 (
@@ -3299,6 +3511,8 @@ class _InputOutputDialog(QDialog):
                     attachment["name"],
                     attachment["path"],
                     attachment["size"],
+                    text,
+                    attachment_prompt_role,
                 )
             )
         else:
@@ -3316,9 +3530,8 @@ class _InputOutputDialog(QDialog):
             self._run_output_mode, persist=False, automatic=False
         )
         self.attachment_card.hide()
-        self.input_box.setReadOnly(False)
         self.input_box.setPlaceholderText(
-            "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
+            "Message to translate…  (drop a TXT, EPUB, PDF, CBZ, or image here)"
         )
         self._save_chat_history()
         self.tabs.setCurrentWidget(self.chat_tab)
@@ -3416,6 +3629,9 @@ class _InputOutputDialog(QDialog):
                 '_direct_text_force_multipass_off',
                 '_direct_text_force_no_glossary',
                 '_direct_text_skip_thinking',
+                '_direct_text_attachment_prompt',
+                '_direct_text_attachment_prompt_role',
+                '_direct_text_skip_prompt_profile',
                 '_direct_text_output_mode',
                 '_translation_run_output_mode_override',
                 'output_mode_var',
@@ -3447,6 +3663,11 @@ class _InputOutputDialog(QDialog):
             )
             gui._direct_text_skip_thinking = bool(
                 self.skip_thinking_checkbox.isChecked()
+            )
+            gui._direct_text_attachment_prompt = text if attachment else ''
+            gui._direct_text_attachment_prompt_role = attachment_prompt_role
+            gui._direct_text_skip_prompt_profile = bool(
+                self.skip_prompt_profile_checkbox.isChecked()
             )
             gui._direct_text_output_mode = self._run_output_mode
             gui._translation_run_output_mode_override = self._run_output_mode
@@ -3483,6 +3704,8 @@ class _InputOutputDialog(QDialog):
             self.force_multipass_off_checkbox.setEnabled(False)
             self.force_no_glossary_checkbox.setEnabled(False)
             self.skip_thinking_checkbox.setEnabled(False)
+            self.skip_prompt_profile_checkbox.setEnabled(False)
+            self.attachment_prompt_role_combo.setEnabled(False)
             self._set_enter_button_state('running')
             self._set_status("Translating…")
             self._set_thinking_spinner_active(True)
@@ -3548,14 +3771,12 @@ class _InputOutputDialog(QDialog):
             existing_label = str(existing.get("label", "") or "")
             existing_generic = existing_label.startswith("Request ")
             incoming_generic = request_label.startswith("Request ")
-            # Some wrapper providers emit a second generic API-start record
-            # for the same outbound call. Collapse only generic/specific pairs;
-            # identical chapter labels remain separate so retries get cards.
-            if (
-                not existing.get("content")
-                and not existing.get("thinking")
-                and existing_generic != incoming_generic
-            ):
+            # Provider/client layers can report "API call in progress" more
+            # than once for the same worker thread. Those are status updates,
+            # not new outbound requests, even after thinking has started.
+            # Reuse the card until a response marks it complete; a later call
+            # on the same thread can then open a fresh card for a real retry.
+            if not existing.get("complete"):
                 if existing_generic and not incoming_generic:
                     existing["label"] = request_label
                 return existing
@@ -3641,7 +3862,9 @@ class _InputOutputDialog(QDialog):
             # them here; status/configuration records remain in the main log.
             phase = self._listener_stream_phase_by_thread.get(thread_key, "")
             low = value.strip().lower()
-            if "thinking complete" in low:
+            if any(phrase in low for phrase in self._STREAM_END_LOG_PHRASES):
+                phase = "processing"
+            elif "thinking complete" in low:
                 phase = "processing"
             elif value.strip().startswith("🧠") and "thinking" in low:
                 phase = "thinking"
@@ -3651,9 +3874,6 @@ class _InputOutputDialog(QDialog):
                 or ("first token" in low and "streaming" in low)
             ):
                 phase = "text"
-            elif any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
-                if "stream finished" in low or "stream complete" in low:
-                    phase = "processing"
             self._listener_stream_phase_by_thread[thread_key] = phase
             if phase in ("thinking", "text"):
                 stripped = value.strip()
@@ -3686,11 +3906,14 @@ class _InputOutputDialog(QDialog):
         status_phrases = (
             "api call in progress", "http request:", "sdk call finished",
             "thinking tokens used:", "received chapter ", "received section ",
+            "received translation from api", "received merged response",
             "finish_reason:", "saved ", "temperature:", "max tokens:",
             "output token limit:", "translation time:", "chapters completed:",
             "processing as text file", "using async chapter extraction",
             "text streaming", "first text token", "thinking complete",
-            "first token in",
+            "first token in", "stream finished", "stream complete",
+            "skipping image title translation", "translation preview:",
+            "output directory:", "skipping post-translation scanning",
         )
         return any(phrase in low for phrase in status_phrases)
 
@@ -3701,10 +3924,42 @@ class _InputOutputDialog(QDialog):
         thread_key = str(source_thread or "")
         phase = self._stream_phase_by_thread.get(thread_key, "processing")
 
+        # Provider transport banners are useful in the main application log,
+        # but they are neither model reasoning nor generated response text.
+        # Do not put them inside the chat request card.
+        if any(
+            phrase in low for phrase in self._HIDDEN_STREAM_START_LOG_PHRASES
+        ):
+            return "ignore"
+
+        # This is the real start of one provider request.  Register it before
+        # status/thinking lines arrive so retries and repeated progress notices
+        # remain inside the same request card.
+        if "sending api call now" in low:
+            self._begin_request_segment(raw, source_thread)
+            self._in_thinking = False
+            self._streaming_text = False
+            return "log"
+
         if "api call in progress" in low:
             self._begin_request_segment(raw, source_thread)
             self._in_thinking = False
             self._streaming_text = False
+            return "log"
+
+        # A provider completion record is the hard boundary between streamed
+        # model text and downstream pipeline logging. Reset the per-thread
+        # phase before classifying anything that follows it.
+        if any(phrase in low for phrase in self._STREAM_END_LOG_PHRASES):
+            self._in_thinking = False
+            self._streaming_text = False
+            phase = "processing"
+            self._stream_phase_by_thread[thread_key] = phase
+            segment = self._request_segment_for_thread(
+                source_thread, create=False
+            )
+            if segment is not None:
+                segment["phase"] = phase
             return "log"
 
         if any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
@@ -3712,7 +3967,7 @@ class _InputOutputDialog(QDialog):
                 phrase in low
                 for phrase in (
                     'translation stopped', 'force stop requested',
-                    'graceful stop', 'stream finished in', 'stream complete',
+                    'graceful stop', 'stream finished', 'stream complete',
                     'text file translation complete',
                     'translation completed successfully',
                 )
@@ -3848,6 +4103,8 @@ class _InputOutputDialog(QDialog):
                                 value + "\n"
                             )
                         processing_changed = True
+                    elif kind == "ignore":
+                        continue
                     else:
                         self._append_thinking(line + "\n")
                         if "received " in line.lower() and " response" in line.lower():
@@ -3909,6 +4166,82 @@ class _InputOutputDialog(QDialog):
             flags=re.IGNORECASE,
         )
 
+        def _sanitized_fragment(value, prefer_body=False):
+            """Return chat-safe body markup without document-level styling."""
+            try:
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(str(value or ""), 'html.parser')
+                # A model response must not restyle the surrounding chat UI or
+                # inject active/external document metadata.
+                for tag in soup.find_all(
+                    ('script', 'style', 'link', 'meta', 'base', 'object',
+                     'embed', 'iframe', 'noscript')
+                ):
+                    tag.decompose()
+
+                if prefer_body:
+                    body = soup.body
+                    if body is not None:
+                        root = body
+                    else:
+                        if soup.head is not None:
+                            soup.head.decompose()
+                        root = soup.html if soup.html is not None else soup
+                else:
+                    root = soup
+
+                for tag in root.find_all(True):
+                    for attribute in list(tag.attrs):
+                        attr_low = str(attribute).lower()
+                        if (
+                            attr_low == 'style'
+                            or attr_low == 'bgcolor'
+                            or attr_low.startswith('on')
+                        ):
+                            del tag.attrs[attribute]
+
+                fragment = root.decode_contents()
+                block_names = (
+                    'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                    'br', 'hr', 'ul', 'ol', 'li', 'blockquote', 'pre',
+                    'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+                    'figure', 'figcaption', 'details', 'summary',
+                )
+                if prefer_body and not root.find(block_names):
+                    fragment = fragment.replace("\n", "<br>\n")
+                return fragment
+            except Exception:
+                cleaned = re.sub(
+                    r"<(?:script|style|head)\b[^>]*>.*?</(?:script|style|head)\s*>",
+                    "",
+                    str(value or ""),
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                cleaned = re.sub(
+                    r"</?(?:!doctype|html|body)\b[^>]*>",
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE,
+                )
+                cleaned = re.sub(
+                    r"\s(?:style|bgcolor|on\w+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                    "",
+                    cleaned,
+                    flags=re.IGNORECASE,
+                )
+                return cleaned
+
+        # Parse complete HTML before Markdown. Markdown treats indented HTML
+        # source as a code block, which exposes literal tags and creates dark
+        # code-background strips. Only the document body belongs in the chat.
+        if re.search(
+            r"<(?:!doctype\s+html|html\b|head\b|body\b)",
+            source,
+            flags=re.IGNORECASE,
+        ):
+            return _sanitized_fragment(source, prefer_body=True)
+
         try:
             import markdown
             rendered = markdown.markdown(
@@ -3930,35 +4263,7 @@ class _InputOutputDialog(QDialog):
                 # minimal/custom installation omitted them.
                 rendered = source.replace("\n", "<br>")
 
-        # Python-Markdown intentionally passes a complete <html> document
-        # through untouched.  Pull its body back out so it is not nested inside
-        # the QTextBrowser document assembled by _render_output.  If the body
-        # contains only inline content, retain literal newlines with <br> tags.
-        if re.search(r"<(?:!doctype\s+html|html\b|body\b)", rendered, re.IGNORECASE):
-            try:
-                from bs4 import BeautifulSoup
-
-                soup = BeautifulSoup(rendered, 'html.parser')
-                styles = ""
-                if soup.head:
-                    styles = "".join(str(tag) for tag in soup.head.find_all('style'))
-
-                body = soup.body
-                if body is not None:
-                    fragment = body.decode_contents()
-                    block_names = (
-                        'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                        'br', 'hr', 'ul', 'ol', 'li', 'blockquote', 'pre',
-                        'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
-                        'figure', 'figcaption', 'details', 'summary',
-                    )
-                    if not body.find(block_names):
-                        fragment = fragment.replace("\n", "<br>\n")
-                    rendered = styles + fragment
-            except Exception:
-                pass
-
-        return rendered
+        return _sanitized_fragment(rendered)
 
     def _render_output(self):
         import html as html_lib
@@ -4016,10 +4321,25 @@ class _InputOutputDialog(QDialog):
                         extension = os.path.splitext(filename or source_path)[1]
                         type_label = extension.lstrip(".").upper() or "FILE"
                         attachment_emoji = (
-                            "🖼️"
-                            if self._is_image_attachment(filename or source_path)
-                            else "📄"
+                            "📚"
+                            if extension.lower() == '.cbz'
+                            else (
+                                "🖼️"
+                                if self._is_image_attachment(filename or source_path)
+                                else "📄"
+                            )
                         )
+                        attachment_prompt = str(
+                            message[4] if len(message) > 4 else ""
+                        ).strip()
+                        attachment_prompt_role = str(
+                            message[5] if len(message) > 5 else "user"
+                        ).strip().lower()
+                        role_label = {
+                            'system': 'System instruction',
+                            'assistant': 'Assistant instruction',
+                            'user': 'User instruction',
+                        }.get(attachment_prompt_role, 'User instruction')
                         rendered = (
                             "<div class='attachment-message'>"
                             f"<span class='attachment-message-icon'>{attachment_emoji}</span>"
@@ -4028,6 +4348,15 @@ class _InputOutputDialog(QDialog):
                             f"{html_lib.escape(self._format_attachment_size(source_size))}</span>"
                             "</div>"
                         )
+                        if attachment_prompt:
+                            rendered_prompt = html_lib.escape(attachment_prompt).replace(
+                                "\n", "<br>"
+                            )
+                            rendered += (
+                                "<div class='attachment-message-prompt'>"
+                                f"<span class='attachment-message-role'>{role_label}</span><br>"
+                                f"{rendered_prompt}</div>"
+                            )
                     else:
                         rendered = html_lib.escape(str(content or ""))
                         rendered = rendered.replace("\n", "<br>")
@@ -4203,6 +4532,10 @@ class _InputOutputDialog(QDialog):
             ".attachment-message { padding: 2px 0; }"
             ".attachment-message-icon { font-size: 1.35em; padding-right: 8px; }"
             ".attachment-message-meta { color: #aeb8c8; font-size: 0.82em; }"
+            ".attachment-message-prompt { border-top: 1px solid #46505e; "
+            "margin-top: 9px; padding-top: 8px; }"
+            ".attachment-message-role { color: #aeb8c8; font-size: 0.78em; "
+            "font-weight: 600; }"
             ".assistant-avatar-cell { padding: 2px 9px 0 0; }"
             ".assistant-avatar { background-color: transparent; color: white; "
             "font-weight: 700; text-align: center; }"
@@ -4626,6 +4959,27 @@ class _InputOutputDialog(QDialog):
                 else:
                     os.environ[key] = value
 
+            # Clear any oversized scoped prompt retained by large_env and put
+            # the currently selected main-window profile back immediately.
+            try:
+                import large_env
+                for direct_key in (
+                    'DIRECT_TEXT_ATTACHMENT_PROMPT',
+                    'DIRECT_TEXT_PROFILE_USER_PROMPT',
+                ):
+                    old_value = self._saved_env.get(direct_key)
+                    large_env.set_env(direct_key, old_value or '')
+                    if old_value is None:
+                        os.environ.pop(direct_key, None)
+                large_env.set_env(
+                    'SYSTEM_PROMPT', gui.prompt_text.toPlainText().strip()
+                )
+                os.environ['SYSTEM_PROMPT_TO_USER'] = (
+                    '1' if bool(getattr(gui, 'system_prompt_to_user_var', False)) else '0'
+                )
+            except Exception:
+                pass
+
             # Translation code owns many environment variables. Restore any
             # additional value that still points into this message's temporary
             # workspace, without undoing unrelated runtime changes.
@@ -4671,6 +5025,8 @@ class _InputOutputDialog(QDialog):
         self.force_multipass_off_checkbox.setEnabled(True)
         self.force_no_glossary_checkbox.setEnabled(True)
         self.skip_thinking_checkbox.setEnabled(True)
+        self.skip_prompt_profile_checkbox.setEnabled(True)
+        self.attachment_prompt_role_combo.setEnabled(True)
         self._set_enter_button_state('idle')
         self._save_current_chat_state()
         self._refresh_chat_list()
@@ -20571,6 +20927,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Last fallback - empty string
                 system_prompt = ""
 
+            if getattr(self, '_input_output_run_active', False):
+                profile_as_user = bool(
+                    getattr(self, 'system_prompt_to_user_var', False)
+                )
+                skip_prompt_profile = bool(
+                    getattr(
+                        self,
+                        '_direct_text_skip_prompt_profile',
+                        False,
+                    )
+                )
+                if profile_as_user or skip_prompt_profile:
+                    system_prompt = ""
+
             # Replace split marker instruction placeholder
             split_instr = ""
             if getattr(self, 'request_merging_enabled_var', False):
@@ -20720,8 +21090,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         messages_to_keep = history_limit * 2
                         context_messages = context_messages[-messages_to_keep:] if len(context_messages) > messages_to_keep else context_messages
                     
-                    # Build messages with history
-                    messages = [{"role": "system", "content": system_prompt}]
+                    # Build messages with history. A skipped profile is omitted
+                    # entirely; do not send an empty system-role placeholder.
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
                     messages.extend(context_messages)
                     
                     if context_messages:
@@ -20731,12 +21104,30 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"⚠️ Failed to initialize history manager: {e}")
                     import traceback
                     self.append_log(traceback.format_exc())
-                    messages = [{"role": "system", "content": system_prompt}]
+                    messages = (
+                        [{"role": "system", "content": system_prompt}]
+                        if system_prompt else []
+                    )
             else:
                 # Build messages for vision API without history
-                messages = [
-                    {"role": "system", "content": system_prompt}
-                ]
+                messages = (
+                    [{"role": "system", "content": system_prompt}]
+                    if system_prompt else []
+                )
+
+            if getattr(self, '_input_output_run_active', False):
+                try:
+                    from TransateKRtoEN import (
+                        _apply_direct_text_prompt_overrides_to_messages,
+                    )
+                    messages = _apply_direct_text_prompt_overrides_to_messages(
+                        messages
+                    )
+                except Exception as prompt_error:
+                    self.append_log(
+                        f"⚠️ Could not apply Direct Text attachment prompt: "
+                        f"{prompt_error}"
+                    )
             
             self.append_log(f"🌐 Sending image to vision API...")
             self.append_log(f"   System prompt length: {len(system_prompt)} chars")
@@ -21903,6 +22294,52 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """Apply the scoped Direct Text overrides after normal GUI env export."""
         if not getattr(self, '_input_output_run_active', False):
             return
+
+        try:
+            import large_env
+        except Exception:
+            large_env = None
+
+        attachment_prompt = str(
+            getattr(self, '_direct_text_attachment_prompt', '') or ''
+        ).strip()
+        attachment_prompt_role = str(
+            getattr(self, '_direct_text_attachment_prompt_role', 'user') or 'user'
+        ).strip().lower()
+        if attachment_prompt_role not in {'system', 'assistant', 'user'}:
+            attachment_prompt_role = 'user'
+        skip_prompt_profile = bool(
+            getattr(self, '_direct_text_skip_prompt_profile', False)
+        )
+        os.environ['DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE'] = attachment_prompt_role
+        os.environ['DIRECT_TEXT_SKIP_PROMPT_PROFILE'] = (
+            '1' if skip_prompt_profile else '0'
+        )
+        if large_env is not None:
+            large_env.set_env('DIRECT_TEXT_ATTACHMENT_PROMPT', attachment_prompt)
+        else:
+            os.environ['DIRECT_TEXT_ATTACHMENT_PROMPT'] = attachment_prompt
+
+        # Keep the typed attachment instruction's selected role exact. When
+        # the selected profile is configured as a user prompt, route only that
+        # profile through the scoped user-prefix helper instead of applying the
+        # global transform to every system message in the request.
+        profile_as_user = bool(getattr(self, 'system_prompt_to_user_var', False))
+        profile_prompt = ''
+        try:
+            profile_prompt = self.prompt_text.toPlainText().strip()
+        except Exception:
+            profile_prompt = str(self.config.get('system_prompt', '') or '').strip()
+        direct_profile_user_prompt = (
+            profile_prompt if profile_as_user and not skip_prompt_profile else ''
+        )
+        if large_env is not None:
+            large_env.set_env(
+                'DIRECT_TEXT_PROFILE_USER_PROMPT', direct_profile_user_prompt
+            )
+        else:
+            os.environ['DIRECT_TEXT_PROFILE_USER_PROMPT'] = direct_profile_user_prompt
+        os.environ['SYSTEM_PROMPT_TO_USER'] = '0'
 
         output_mode = str(
             getattr(self, '_direct_text_output_mode', 'text') or 'text'
