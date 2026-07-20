@@ -10342,7 +10342,15 @@ def set_output_redirect(log_callback=None):
                 if text.strip():
                     # The callback (append_log) is already thread-safe - it handles QTimer internally
                     # So we can call it directly from any thread
-                    self.callback(text.strip())
+                    try:
+                        self.callback(
+                            text.strip(),
+                            source_thread=threading.current_thread().name,
+                        )
+                    except TypeError:
+                        # Standalone/legacy callbacks still use the original
+                        # one-argument contract.
+                        self.callback(text.strip())
                     
             def flush(self):
                 pass

@@ -1270,10 +1270,10 @@ class _InputOutputDialog(QDialog):
     """Small chat-like front end for the normal text-file translation flow.
 
     The dialog deliberately does not call an API client itself.  Each message
-    is written to a temporary ``.txt`` input and handed to
-    :meth:`TranslatorGUI.run_translation_thread`, so the selected model,
-    prompts, glossary, retry rules, and the rest of the regular Run Translation
-    behavior remain authoritative.
+    is handed to :meth:`TranslatorGUI.run_translation_thread`: typed text uses
+    a temporary ``.txt`` input, while attached documents and images retain
+    their original path and type. The selected model, prompts, retry rules, and the
+    rest of the regular Run Translation behavior remain authoritative.
     """
 
     _FORCED_STREAM_ENV_KEYS = (
@@ -1290,8 +1290,28 @@ class _InputOutputDialog(QDialog):
         'AUTHND_STREAM_THINKING_LOGS',
     )
     _OUTPUT_ENV_KEYS = ('OUTPUT_DIRECTORY', 'OUTPUT_DIR', 'EPUB_OUTPUT_DIR')
+    _IMAGE_ATTACHMENT_EXTENSIONS = {
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
+        '.svg', '.ico', '.heic', '.heif', '.avif', '.jxl',
+    }
+    _VISION_ARCHIVE_ATTACHMENT_EXTENSIONS = {'.cbz'}
+    _OUTPUT_MODE_CHOICES = (
+        ('text', '📝', 'Text'),
+        ('vision', '👁️', 'Vision'),
+        ('image', '🖼️', 'Image'),
+        ('video', '🎬', 'Video'),
+        ('audio', '🔊', 'Audio'),
+        ('refinement', '✨', 'Refine'),
+    )
     _DIRECT_TEXT_ENV_KEYS = (
         'DIRECT_TEXT_PRESERVE_MARKUP',
+        'OUTPUT_MODE',
+        'VISION_OCR_FIRST',
+        'ENABLE_IMAGE_TRANSLATION',
+        'ENABLE_IMAGE_OUTPUT_MODE',
+        'ENABLE_VIDEO_OUTPUT_MODE',
+        'ENABLE_AUDIO_OUTPUT_MODE',
+        'ENABLE_REFINEMENT_OUTPUT_MODE',
         'MULTIPASS_MODE',
         'AUTO_GLOSSARY_MODE',
         'ENABLE_AUTO_GLOSSARY',
@@ -1400,6 +1420,37 @@ class _InputOutputDialog(QDialog):
         self._chat_history_save_timer.timeout.connect(self._save_chat_history)
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
+        self._active_request_segments = []
+        self._request_segment_by_thread = {}
+        self._stream_phase_by_thread = {}
+        self._listener_stream_phase_by_thread = {}
+        self._pending_attachment = None
+        try:
+            parent_output_mode = translator._get_output_mode()
+        except Exception:
+            parent_output_mode = translator.config.get('output_mode', 'text')
+        configured_direct_mode = str(
+            translator.config.get('direct_text_output_mode', parent_output_mode)
+            or parent_output_mode
+            or 'text'
+        ).strip().lower()
+        if configured_direct_mode == 'refine':
+            configured_direct_mode = 'refinement'
+        valid_direct_modes = {choice[0] for choice in self._OUTPUT_MODE_CHOICES}
+        self._direct_output_mode = (
+            configured_direct_mode
+            if configured_direct_mode in valid_direct_modes
+            else 'text'
+        )
+        self._run_output_mode = self._direct_output_mode
+        self._mode_before_image_attachment = None
+        self._direct_mode_buttons = {}
+        self._run_source_path = ""
+        self._run_source_extension = ".txt"
+        self._run_source_is_attachment = False
+        self._run_started_at = 0.0
+        self._render_pending = False
+        self._rendered_message_cache = {}
         self._output_auto_scroll_disabled = False
         self._chat_zoom_level = 0
         self._chat_zoom_percent = 100
@@ -1471,6 +1522,19 @@ class _InputOutputDialog(QDialog):
             "QPushButton#directSendButton[directState=\"finishing\"] { background: #c58b32; color: white; }"
             "QPushButton#directSendButton[directState=\"stopping\"], "
             "QPushButton#directSendButton:disabled { background: #4a4a4a; color: #aaaaaa; }"
+            "QFrame#directAttachmentCard { background: #252a33; border: 1px solid #4a5568; "
+            "border-radius: 9px; }"
+            "QLabel#directAttachmentName { font-weight: 650; color: white; }"
+            "QLabel#directAttachmentMeta { color: #aeb8c8; font-size: 8.5pt; }"
+            "QPushButton#directAttachmentButton, QPushButton#directAttachmentClear { "
+            "min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px; padding: 0; }"
+            "QPushButton#directModeButton { background: transparent; color: #aeb8c8; "
+            "border: 1px solid transparent; border-radius: 6px; min-width: 30px; "
+            "max-width: 30px; min-height: 28px; max-height: 28px; padding: 0; font-size: 11pt; }"
+            "QPushButton#directModeButton:hover { background: #303641; border-color: #4a5568; }"
+            "QPushButton#directModeButton[directSelected=\"true\"] { background: #344861; "
+            "border-color: #5a9fd4; color: white; }"
+            "QLabel#directModeLabel { color: #aeb8c8; font-size: 8.5pt; }"
             "QFrame#directSettingsCard { background: transparent; border: 1px solid #4a5568; "
             "border-radius: 10px; }"
             "QLabel#settingDescription { color: #cbd5e1; padding-left: 30px; }"
@@ -1627,6 +1691,14 @@ class _InputOutputDialog(QDialog):
         chat_layout.setSpacing(8)
         chat_shell_layout.addWidget(conversation, 1)
 
+        self.chat_splitter = QSplitter(Qt.Vertical)
+        self.chat_splitter.setChildrenCollapsible(False)
+        self.chat_splitter.setHandleWidth(5)
+        self.chat_splitter.setStyleSheet(
+            "QSplitter::handle:vertical { background: #3f4856; margin: 1px 0; }"
+            "QSplitter::handle:vertical:hover { background: #5a9fd4; }"
+        )
+
         self.output_box = QTextBrowser()
         self.output_box.setObjectName("chatTimeline")
         self.output_box.setOpenExternalLinks(False)
@@ -1634,28 +1706,86 @@ class _InputOutputDialog(QDialog):
         self.output_box.setContextMenuPolicy(Qt.CustomContextMenu)
         self.output_box.customContextMenuRequested.connect(self._show_output_context_menu)
         self.output_box.anchorClicked.connect(self._handle_output_anchor)
-        chat_layout.addWidget(self.output_box, 1)
+        self.chat_splitter.addWidget(self.output_box)
 
         composer = QFrame()
         composer.setObjectName("directComposerCard")
-        composer.setMaximumHeight(112)
-        composer_layout = QHBoxLayout(composer)
+        composer.setMinimumHeight(132)
+        composer_layout = QVBoxLayout(composer)
         composer_layout.setContentsMargins(12, 7, 8, 7)
-        composer_layout.setSpacing(8)
+        composer_layout.setSpacing(6)
+
+        self.attachment_card = QFrame()
+        self.attachment_card.setObjectName("directAttachmentCard")
+        attachment_layout = QHBoxLayout(self.attachment_card)
+        attachment_layout.setContentsMargins(10, 7, 6, 7)
+        attachment_layout.setSpacing(8)
+        self.attachment_icon_label = QLabel("📄")
+        attachment_layout.addWidget(self.attachment_icon_label, 0, Qt.AlignTop)
+        attachment_text = QVBoxLayout()
+        attachment_text.setSpacing(0)
+        self.attachment_name_label = QLabel("")
+        self.attachment_name_label.setObjectName("directAttachmentName")
+        self.attachment_name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.attachment_meta_label = QLabel("")
+        self.attachment_meta_label.setObjectName("directAttachmentMeta")
+        attachment_text.addWidget(self.attachment_name_label)
+        attachment_text.addWidget(self.attachment_meta_label)
+        attachment_layout.addLayout(attachment_text, 1)
+        self.attachment_clear_button = QPushButton("×")
+        self.attachment_clear_button.setObjectName("directAttachmentClear")
+        self.attachment_clear_button.setToolTip("Remove attached file")
+        self.attachment_clear_button.clicked.connect(self._clear_attachment)
+        attachment_layout.addWidget(self.attachment_clear_button, 0, Qt.AlignTop)
+        self.attachment_card.hide()
+        composer_layout.addWidget(self.attachment_card)
+
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(2, 0, 2, 0)
+        mode_row.setSpacing(3)
+        self.direct_mode_label = QLabel("Output: Text")
+        self.direct_mode_label.setObjectName("directModeLabel")
+        mode_row.addWidget(self.direct_mode_label)
+        for mode, emoji, label in self._OUTPUT_MODE_CHOICES:
+            mode_button = QPushButton(emoji)
+            mode_button.setObjectName("directModeButton")
+            mode_button.setProperty("directSelected", False)
+            mode_button.setAutoDefault(False)
+            mode_button.setToolTip(f"Use {label} output mode for Direct Text")
+            mode_button.setAccessibleName(f"{label} output mode")
+            mode_button.clicked.connect(
+                lambda _checked=False, selected_mode=mode: self._set_direct_output_mode(
+                    selected_mode
+                )
+            )
+            self._direct_mode_buttons[mode] = mode_button
+            mode_row.addWidget(mode_button)
+        mode_row.addStretch(1)
+        composer_layout.addLayout(mode_row)
+        self._set_direct_output_mode(self._direct_output_mode, persist=False)
+
+        composer_input_row = QHBoxLayout()
+        composer_input_row.setContentsMargins(0, 0, 0, 0)
+        composer_input_row.setSpacing(8)
 
         self.input_box = QPlainTextEdit()
         self.input_box.setObjectName("directComposer")
         self.input_box.setPlaceholderText(
-            "Message to translate…  (drop a text file here)"
+            "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
         )
         self.input_box.setMinimumHeight(58)
-        self.input_box.setMaximumHeight(94)
         self.input_box.setAcceptDrops(True)
         self.input_box.dragEnterEvent = self._input_drag_enter_event
         self.input_box.dropEvent = self._input_drop_event
         self.input_box.installEventFilter(self)
         self.input_box.textChanged.connect(self._on_chat_draft_changed)
-        composer_layout.addWidget(self.input_box, 1)
+        composer_input_row.addWidget(self.input_box, 1)
+
+        self.attachment_button = QPushButton("📎")
+        self.attachment_button.setObjectName("directAttachmentButton")
+        self.attachment_button.setToolTip("Attach a TXT, EPUB, PDF, or image file")
+        self.attachment_button.clicked.connect(self._choose_attachment)
+        composer_input_row.addWidget(self.attachment_button, 0, Qt.AlignBottom)
 
         self.enter_button = QPushButton("Send")
         self.enter_button.setObjectName("directSendButton")
@@ -1663,8 +1793,14 @@ class _InputOutputDialog(QDialog):
         self.enter_button.setDefault(True)
         self.enter_button.clicked.connect(self._on_enter_clicked)
         self._set_enter_button_state('idle')
-        composer_layout.addWidget(self.enter_button, 0, Qt.AlignBottom)
-        chat_layout.addWidget(composer)
+        composer_input_row.addWidget(self.enter_button, 0, Qt.AlignBottom)
+        composer_layout.addLayout(composer_input_row, 1)
+
+        composer_shell = QWidget()
+        composer_shell_layout = QVBoxLayout(composer_shell)
+        composer_shell_layout.setContentsMargins(0, 0, 0, 0)
+        composer_shell_layout.setSpacing(6)
+        composer_shell_layout.addWidget(composer, 1)
 
         footer_row = QHBoxLayout()
         footer_row.setContentsMargins(2, 0, 2, 0)
@@ -1677,7 +1813,12 @@ class _InputOutputDialog(QDialog):
         composer_hint = QLabel("Enter to send  ·  Shift+Enter for a new line")
         composer_hint.setObjectName("directMuted")
         footer_row.addWidget(composer_hint)
-        chat_layout.addLayout(footer_row)
+        composer_shell_layout.addLayout(footer_row)
+        self.chat_splitter.addWidget(composer_shell)
+        self.chat_splitter.setStretchFactor(0, 1)
+        self.chat_splitter.setStretchFactor(1, 0)
+        self.chat_splitter.setSizes([520, 168])
+        chat_layout.addWidget(self.chat_splitter, 1)
         self.tabs.addTab(self.chat_tab, "Chat")
         self._refresh_chat_list()
         self.chat_list.currentRowChanged.connect(self._switch_chat)
@@ -1808,8 +1949,16 @@ class _InputOutputDialog(QDialog):
         self._render_output()
 
         self._drain_timer = QTimer(self)
-        self._drain_timer.setInterval(80)
+        self._drain_timer.setInterval(55)
         self._drain_timer.timeout.connect(self._drain_log_queue)
+
+        # QTextBrowser reparses the whole transcript on setHtml().  Stream
+        # bursts are coalesced so large/chunked jobs do not monopolize Qt's
+        # event loop and stall the rest of the GUI.
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(300)
+        self._render_timer.timeout.connect(self._flush_scheduled_render)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(200)
@@ -1846,6 +1995,7 @@ class _InputOutputDialog(QDialog):
             "title": "New chat",
             "messages": [],
             "draft": "",
+            "attachment": None,
             "output_folder": "",
             "output_folder_name": "",
             "next_output_index": 1,
@@ -1894,6 +2044,19 @@ class _InputOutputDialog(QDialog):
                     content = str(raw_message[1] or "")
                     if role == "user":
                         messages.append(("user", content))
+                    elif role == "user_file":
+                        source_path = str(
+                            raw_message[2] if len(raw_message) > 2 else ""
+                        )
+                        try:
+                            source_size = max(
+                                0, int(raw_message[3] if len(raw_message) > 3 else 0)
+                            )
+                        except (TypeError, ValueError):
+                            source_size = 0
+                        messages.append(
+                            ("user_file", content, source_path, source_size)
+                        )
                     elif role == "assistant":
                         messages.append(
                             (
@@ -1902,6 +2065,7 @@ class _InputOutputDialog(QDialog):
                                 str(raw_message[2] if len(raw_message) > 2 else ""),
                                 str(raw_message[3] if len(raw_message) > 3 else "Processing"),
                                 str(raw_message[4] if len(raw_message) > 4 else ""),
+                                str(raw_message[5] if len(raw_message) > 5 else ""),
                             )
                         )
 
@@ -1928,6 +2092,9 @@ class _InputOutputDialog(QDialog):
                         "title": title or "New chat",
                         "messages": messages,
                         "draft": str(raw_session.get("draft", "") or ""),
+                        "attachment": self._normalize_attachment_record(
+                            raw_session.get("attachment")
+                        ),
                         "output_folder": str(
                             raw_session.get("output_folder", "") or ""
                         ),
@@ -1961,6 +2128,7 @@ class _InputOutputDialog(QDialog):
             current = self._current_chat_session()
             if current is not None and hasattr(self, "input_box"):
                 current["draft"] = self.input_box.toPlainText()
+                current["attachment"] = self._pending_attachment
                 current["expanded"] = set(self._expanded_processing_messages)
             sessions = []
             for session in self._chat_sessions:
@@ -1970,6 +2138,9 @@ class _InputOutputDialog(QDialog):
                         "title": str(session.get("title", "New chat") or "New chat"),
                         "messages": [list(message) for message in session.get("messages", [])],
                         "draft": str(session.get("draft", "") or ""),
+                        "attachment": self._normalize_attachment_record(
+                            session.get("attachment")
+                        ),
                         "output_folder": str(session.get("output_folder", "") or ""),
                         "output_folder_name": str(
                             session.get("output_folder_name", "") or ""
@@ -1996,6 +2167,27 @@ class _InputOutputDialog(QDialog):
             )
         except Exception as exc:
             print(f"[Direct Text] Could not save chats: {exc}")
+
+    @staticmethod
+    def _normalize_attachment_record(record):
+        """Return a portable JSON-safe attachment record, or ``None``."""
+        if not isinstance(record, dict):
+            return None
+        path = os.path.abspath(os.path.expanduser(str(record.get("path", "") or "")))
+        if not path:
+            return None
+        name = str(record.get("name", "") or os.path.basename(path))
+        extension = os.path.splitext(name or path)[1].lower()
+        try:
+            size = max(0, int(record.get("size", 0) or 0))
+        except (TypeError, ValueError):
+            size = 0
+        return {
+            "path": path,
+            "name": name or os.path.basename(path),
+            "extension": extension,
+            "size": size,
+        }
 
     def _persist_dialog_option(self, key, checked):
         """Persist a Direct Text-only checkbox without touching global modes."""
@@ -2148,13 +2340,190 @@ class _InputOutputDialog(QDialog):
 
     @staticmethod
     def _is_supported_dropped_text_file(path):
-        return os.path.splitext(str(path or ''))[1].lower() in {
-            '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
-            '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+        extension = os.path.splitext(str(path or ''))[1].lower()
+        return extension in {
+            '.txt', '.epub', '.pdf', '.md', '.markdown', '.html', '.htm',
+            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+        } or extension in (
+            _InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS
+            | _InputOutputDialog._VISION_ARCHIVE_ATTACHMENT_EXTENSIONS
+        )
+
+    @classmethod
+    def _is_image_attachment(cls, path):
+        return (
+            os.path.splitext(str(path or ''))[1].lower()
+            in cls._IMAGE_ATTACHMENT_EXTENSIONS
+        )
+
+    @classmethod
+    def _is_vision_attachment(cls, path):
+        extension = os.path.splitext(str(path or ''))[1].lower()
+        return extension in (
+            cls._IMAGE_ATTACHMENT_EXTENSIONS
+            | cls._VISION_ARCHIVE_ATTACHMENT_EXTENSIONS
+        )
+
+    def _set_direct_output_mode(self, mode, persist=True, automatic=False):
+        """Select the scoped Direct Text output mode without mutating the parent."""
+        mode = str(mode or 'text').strip().lower()
+        if mode == 'refine':
+            mode = 'refinement'
+        labels = {choice[0]: choice[2] for choice in self._OUTPUT_MODE_CHOICES}
+        if mode not in labels:
+            mode = 'text'
+        self._direct_output_mode = mode
+        if not automatic:
+            self._mode_before_image_attachment = None
+        for button_mode, button in self._direct_mode_buttons.items():
+            selected = button_mode == mode
+            button.setProperty("directSelected", selected)
+            try:
+                button.style().unpolish(button)
+                button.style().polish(button)
+            except Exception:
+                pass
+            button.update()
+        if hasattr(self, 'direct_mode_label'):
+            suffix = " · automatic for visual attachment" if automatic else ""
+            self.direct_mode_label.setText(f"Output: {labels[mode]}{suffix}")
+        if persist:
+            try:
+                self.translator.config['direct_text_output_mode'] = mode
+                self.translator.save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _restore_mode_after_image_attachment(self):
+        previous_mode = self._mode_before_image_attachment
+        self._mode_before_image_attachment = None
+        self._set_direct_output_mode(
+            previous_mode or self._direct_output_mode,
+            persist=False,
+            automatic=False,
+        )
+
+    @staticmethod
+    def _format_attachment_size(size):
+        try:
+            value = max(0, int(size))
+        except (TypeError, ValueError):
+            value = 0
+        if value < 1024:
+            return f"{value} B"
+        if value < 1024 * 1024:
+            return f"{value / 1024:.1f} KB"
+        return f"{value / (1024 * 1024):.1f} MB"
+
+    def _choose_attachment(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Attach a file for Direct Text translation",
+            "",
+            (
+                "Supported files (*.txt *.epub *.pdf *.cbz *.md *.markdown *.html *.htm "
+                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.vtt *.log *.png *.jpg "
+                "*.jpeg *.gif *.bmp *.webp *.tif *.tiff *.svg *.ico *.heic *.heif "
+                "*.avif *.jxl);;"
+                "Text files (*.txt *.md *.markdown *.html *.htm *.xhtml *.xml *.json "
+                "*.csv *.tsv *.srt *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
+                "Comic Book archives (*.cbz);;"
+                "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff "
+                "*.svg *.ico *.heic *.heif *.avif *.jxl)"
+            ),
+        )
+        if path:
+            self._set_attachment(path)
+
+    def _set_attachment(self, path):
+        """Retain a file reference and show it as an attachment, not pasted text."""
+        path = os.path.abspath(os.path.expanduser(str(path or "")))
+        if not os.path.isfile(path) or not self._is_supported_dropped_text_file(path):
+            QMessageBox.warning(
+                self,
+                "Unsupported attachment",
+                "Choose a readable TXT, EPUB, PDF, CBZ, image, or supported text/markup file.",
+            )
+            return False
+        previous_attachment_was_vision = self._is_vision_attachment(
+            (self._pending_attachment or {}).get("path", "")
+        )
+        attachment_is_image = self._is_image_attachment(path)
+        attachment_is_vision = self._is_vision_attachment(path)
+        if previous_attachment_was_vision and not attachment_is_vision:
+            self._restore_mode_after_image_attachment()
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        self._pending_attachment = {
+            "path": path,
+            "name": os.path.basename(path),
+            "extension": os.path.splitext(path)[1].lower(),
+            "size": size,
         }
+        if self.input_box.toPlainText():
+            self.input_box.blockSignals(True)
+            self.input_box.clear()
+            self.input_box.blockSignals(False)
+        self.input_box.setReadOnly(True)
+        self.input_box.setPlaceholderText(
+            "File attached. Remove it to type or paste text instead."
+        )
+        self.attachment_name_label.setText(self._pending_attachment["name"])
+        extension_label = (
+            self._pending_attachment["extension"].lstrip(".").upper() or "FILE"
+        )
+        if self._pending_attachment["extension"] == '.cbz':
+            attachment_icon = "📚"
+        else:
+            attachment_icon = "🖼️" if attachment_is_image else "📄"
+        self.attachment_icon_label.setText(attachment_icon)
+        self.attachment_meta_label.setText(
+            f"{extension_label}  ·  {self._format_attachment_size(size)}"
+        )
+        self.attachment_card.setToolTip(path)
+        self.attachment_card.show()
+        session = self._current_chat_session()
+        if session is not None:
+            session["draft"] = ""
+            session["attachment"] = dict(self._pending_attachment)
+        if attachment_is_vision and not previous_attachment_was_vision:
+            if self._direct_output_mode != 'vision':
+                self._mode_before_image_attachment = self._direct_output_mode
+            self._set_direct_output_mode(
+                'vision', persist=False, automatic=True
+            )
+            self._set_status(
+                f"Attached {os.path.basename(path)} · Vision enabled"
+            )
+        else:
+            self._set_status(f"Attached {os.path.basename(path)}")
+        self._schedule_chat_history_save()
+        return True
+
+    def _clear_attachment(self):
+        removed_image = self._is_vision_attachment(
+            (self._pending_attachment or {}).get("path", "")
+        )
+        self._pending_attachment = None
+        self.attachment_card.hide()
+        self.attachment_card.setToolTip("")
+        self.input_box.setReadOnly(False)
+        self.input_box.setPlaceholderText(
+            "Message to translate…  (drop a TXT, EPUB, PDF, CBZ, or image here)"
+        )
+        session = self._current_chat_session()
+        if session is not None:
+            session["attachment"] = None
+        if removed_image:
+            self._restore_mode_after_image_attachment()
+        self._set_status("Ready")
+        self._schedule_chat_history_save()
+        self.input_box.setFocus()
 
     def _input_drag_enter_event(self, event):
-        """Accept a drag only when it contains at least one readable text file."""
+        """Accept a drag containing a supported document or image attachment."""
         try:
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
@@ -2170,7 +2539,7 @@ class _InputOutputDialog(QDialog):
         event.ignore()
 
     def _input_drop_event(self, event):
-        """Load the first dropped text file into the Direct Text editor."""
+        """Attach the first dropped file without copying its contents into the editor."""
         path = ""
         try:
             for url in event.mimeData().urls():
@@ -2186,23 +2555,16 @@ class _InputOutputDialog(QDialog):
                 event.ignore()
                 return
 
-            try:
-                with open(path, 'r', encoding='utf-8-sig') as handle:
-                    content = handle.read()
-            except UnicodeDecodeError:
-                with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-                    content = handle.read()
-
-            self.input_box.setPlainText(content)
-            self._set_status(f"Loaded {os.path.basename(path)}")
-            self.input_box.setFocus()
-            event.acceptProposedAction()
+            if self._set_attachment(path):
+                event.acceptProposedAction()
+            else:
+                event.ignore()
         except Exception as exc:
             event.ignore()
             QMessageBox.warning(
                 self,
-                "Could not load text file",
-                f"The dropped file could not be read:\n{path or 'Unknown file'}\n\n{exc}",
+                "Could not attach file",
+                f"The dropped file could not be attached:\n{path or 'Unknown file'}\n\n{exc}",
             )
 
     def eventFilter(self, watched, event):
@@ -2237,6 +2599,7 @@ class _InputOutputDialog(QDialog):
             and (
                 current["messages"]
                 or str(current.get("draft", "")).strip()
+                or current.get("attachment")
             )
         )
         if has_current_content:
@@ -2278,6 +2641,7 @@ class _InputOutputDialog(QDialog):
         if session is None or not hasattr(self, "input_box"):
             return
         session["draft"] = self.input_box.toPlainText()
+        session["attachment"] = self._pending_attachment
         session["output_folder"] = self._last_output_folder
         session["expanded"] = set(self._expanded_processing_messages)
         self._schedule_chat_history_save()
@@ -2292,6 +2656,7 @@ class _InputOutputDialog(QDialog):
                 len(self._chat_sessions) > 1
                 or session["messages"]
                 or session["draft"].strip()
+                or session.get("attachment")
             )
             self.delete_chat_button.setEnabled(can_delete and not self._active)
         self._schedule_chat_history_save()
@@ -2303,6 +2668,10 @@ class _InputOutputDialog(QDialog):
         session = self._chat_sessions[self._current_chat_index]
         self._chat_messages = session["messages"]
         self._assistant_message_active = False
+        self._active_request_segments = []
+        self._request_segment_by_thread = {}
+        self._stream_phase_by_thread = {}
+        self._listener_stream_phase_by_thread = {}
         self._streamed_content = ""
         self._last_output_folder = str(session.get("output_folder", "") or "")
         self._log_queue.clear()
@@ -2312,6 +2681,17 @@ class _InputOutputDialog(QDialog):
         self._processing_spinner_active = False
         self._expanded_processing_messages = set(session.get("expanded", set()))
         self.input_box.setPlainText(str(session.get("draft", "") or ""))
+        attachment = self._normalize_attachment_record(session.get("attachment"))
+        if attachment and os.path.isfile(attachment["path"]):
+            self._set_attachment(attachment["path"])
+        else:
+            session["attachment"] = None
+            self._pending_attachment = None
+            self.attachment_card.hide()
+            self.input_box.setReadOnly(False)
+            self.input_box.setPlaceholderText(
+                "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
+            )
         self._thinking_token_count = 0
         self._generation_token_count = 0
         self._processing_token_count = 0
@@ -2345,6 +2725,7 @@ class _InputOutputDialog(QDialog):
                 and (
                     current.get("messages")
                     or str(current.get("draft", "")).strip()
+                    or current.get("attachment")
                 )
             )
         )
@@ -2419,6 +2800,7 @@ class _InputOutputDialog(QDialog):
                 len(self._chat_sessions) > 1
                 or session.get("messages")
                 or str(session.get("draft", "")).strip()
+                or session.get("attachment")
             )
         )
         selected = menu.exec(self.chat_list.viewport().mapToGlobal(position))
@@ -2628,7 +3010,7 @@ class _InputOutputDialog(QDialog):
             return
         else:
             label = "Processing"
-            count = self._processing_token_count
+            count = 0
         suffix = f" ({count:,} tokens)" if count else ""
         self._set_thinking_toggle_text(label + suffix)
 
@@ -2745,9 +3127,24 @@ class _InputOutputDialog(QDialog):
                     content = str(message[1] or "")
                 elif (
                     self._assistant_message_active
-                    and message_index == len(self._chat_messages)
+                    and message_index >= len(self._chat_messages)
                 ):
-                    content = str(self._streamed_content or "")
+                    active_index = message_index - len(self._chat_messages)
+                    if self._active_request_segments:
+                        if not (
+                            0 <= active_index < len(self._active_request_segments)
+                        ):
+                            return
+                        content = str(
+                            self._active_request_segments[active_index].get(
+                                "content", ""
+                            )
+                            or ""
+                        )
+                    elif active_index == 0:
+                        content = str(self._streamed_content or "")
+                    else:
+                        return
                 else:
                     return
             except (IndexError, TypeError, ValueError):
@@ -2861,8 +3258,22 @@ class _InputOutputDialog(QDialog):
 
     def _start_translation(self):
         text = self.input_box.toPlainText().strip()
-        if not text:
-            QMessageBox.information(self, "Input required", "Enter some text to translate.")
+        attachment = self._normalize_attachment_record(self._pending_attachment)
+        self._run_output_mode = self._direct_output_mode
+        if attachment and not os.path.isfile(attachment["path"]):
+            QMessageBox.warning(
+                self,
+                "Attachment missing",
+                f"The attached file no longer exists:\n{attachment['path']}",
+            )
+            self._clear_attachment()
+            return
+        if not text and not attachment:
+            QMessageBox.information(
+                self,
+                "Input required",
+                "Enter text or attach a TXT, EPUB, PDF, or image file to translate.",
+            )
             return
 
         try:
@@ -2879,14 +3290,36 @@ class _InputOutputDialog(QDialog):
         import uuid
         from datetime import datetime
 
-        self._title_current_chat_from_text(text)
-        self._chat_messages.append(("user", text))
+        display_input = attachment["name"] if attachment else text
+        self._title_current_chat_from_text(display_input)
+        if attachment:
+            self._chat_messages.append(
+                (
+                    "user_file",
+                    attachment["name"],
+                    attachment["path"],
+                    attachment["size"],
+                )
+            )
+        else:
+            self._chat_messages.append(("user", text))
         current_session = self._current_chat_session()
         if current_session is not None:
             current_session["draft"] = ""
+            current_session["attachment"] = None
         self._assistant_message_active = True
         self._expanded_processing_messages.discard(len(self._chat_messages))
         self.input_box.clear()
+        self._pending_attachment = None
+        self._mode_before_image_attachment = None
+        self._set_direct_output_mode(
+            self._run_output_mode, persist=False, automatic=False
+        )
+        self.attachment_card.hide()
+        self.input_box.setReadOnly(False)
+        self.input_box.setPlaceholderText(
+            "Message to translate…  (drop a TXT, EPUB, PDF, or image here)"
+        )
         self._save_chat_history()
         self.tabs.setCurrentWidget(self.chat_tab)
         self._processing_text = ""
@@ -2902,6 +3335,10 @@ class _InputOutputDialog(QDialog):
         self._token_encoder_initialized = False
         self._streaming_text = False
         self._streamed_content = ""
+        self._active_request_segments = []
+        self._request_segment_by_thread = {}
+        self._stream_phase_by_thread = {}
+        self._listener_stream_phase_by_thread = {}
         self._last_output_folder = str(
             current_session.get("output_folder", "") if current_session else ""
         )
@@ -2911,10 +3348,45 @@ class _InputOutputDialog(QDialog):
 
         try:
             self._temp_root = tempfile.mkdtemp(prefix="glossarion_input_output_")
-            stem = f"direct_text_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
-            self._temp_input = os.path.join(self._temp_root, f"{stem}.txt")
-            with open(self._temp_input, 'w', encoding='utf-8') as handle:
-                handle.write(text)
+            if attachment:
+                attached_path = attachment["path"]
+                attached_extension = os.path.splitext(attached_path)[1].lower()
+                stem = os.path.splitext(os.path.basename(attached_path))[0]
+                if (
+                    attached_extension in {
+                        '.txt', '.epub', '.pdf', '.cbz', '.csv', '.json'
+                    }
+                    or attached_extension in self._IMAGE_ATTACHMENT_EXTENSIONS
+                ):
+                    self._temp_input = attached_path
+                else:
+                    # Preserve legacy support for markup/subtitle/log files by
+                    # adapting them to the regular text pipeline internally,
+                    # while the composer/history still displays a file card.
+                    try:
+                        with open(attached_path, 'r', encoding='utf-8-sig') as handle:
+                            attached_text = handle.read()
+                    except UnicodeDecodeError:
+                        with open(
+                            attached_path, 'r', encoding='utf-8', errors='replace'
+                        ) as handle:
+                            attached_text = handle.read()
+                    self._temp_input = os.path.join(self._temp_root, f"{stem}.txt")
+                    with open(self._temp_input, 'w', encoding='utf-8') as handle:
+                        handle.write(attached_text)
+                self._run_source_is_attachment = True
+            else:
+                stem = f"direct_text_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
+                self._temp_input = os.path.join(self._temp_root, f"{stem}.txt")
+                with open(self._temp_input, 'w', encoding='utf-8') as handle:
+                    handle.write(text)
+                self._run_source_is_attachment = False
+            self._run_source_path = self._temp_input
+            self._run_source_extension = (
+                os.path.splitext(self._temp_input)[1].lower() or ".txt"
+            )
+            import time as _time
+            self._run_started_at = _time.time()
             self._expected_output = os.path.join(
                 self._temp_root, stem, f"{stem}_translated.txt"
             )
@@ -2940,9 +3412,18 @@ class _InputOutputDialog(QDialog):
                 'current_file_index',
                 '_single_chapter_filter',
                 '_zip_inputs_resolved_for_current_run',
+                '_direct_text_archive_conversion_dir',
                 '_direct_text_force_multipass_off',
                 '_direct_text_force_no_glossary',
                 '_direct_text_skip_thinking',
+                '_direct_text_output_mode',
+                '_translation_run_output_mode_override',
+                'output_mode_var',
+                'enable_image_translation_var',
+                'enable_image_output_mode_var',
+                'enable_video_output_mode_var',
+                'enable_audio_output_mode_var',
+                'enable_refinement_output_mode_var',
             ):
                 exists = hasattr(gui, attr)
                 value = getattr(gui, attr, None)
@@ -2955,6 +3436,9 @@ class _InputOutputDialog(QDialog):
             gui.selected_files = [self._temp_input]
             gui._force_stream_all = True
             gui._input_output_run_active = True
+            gui._direct_text_archive_conversion_dir = os.path.join(
+                self._temp_root, '_archive_input'
+            )
             gui._direct_text_force_multipass_off = bool(
                 self.force_multipass_off_checkbox.isChecked()
             )
@@ -2963,6 +3447,18 @@ class _InputOutputDialog(QDialog):
             )
             gui._direct_text_skip_thinking = bool(
                 self.skip_thinking_checkbox.isChecked()
+            )
+            gui._direct_text_output_mode = self._run_output_mode
+            gui._translation_run_output_mode_override = self._run_output_mode
+            gui.output_mode_var = self._run_output_mode
+            gui.enable_image_translation_var = self._run_output_mode in {
+                'vision', 'image', 'video'
+            }
+            gui.enable_image_output_mode_var = self._run_output_mode == 'image'
+            gui.enable_video_output_mode_var = self._run_output_mode == 'video'
+            gui.enable_audio_output_mode_var = self._run_output_mode == 'audio'
+            gui.enable_refinement_output_mode_var = (
+                self._run_output_mode == 'refinement'
             )
             os.environ['OUTPUT_DIRECTORY'] = self._temp_root
             os.environ['OUTPUT_DIR'] = self._temp_root
@@ -2977,6 +3473,10 @@ class _InputOutputDialog(QDialog):
 
             self._active = True
             self.input_box.setEnabled(False)
+            self.attachment_button.setEnabled(False)
+            self.attachment_clear_button.setEnabled(False)
+            for mode_button in self._direct_mode_buttons.values():
+                mode_button.setEnabled(False)
             self.new_chat_button.setEnabled(False)
             self.chat_list.setEnabled(False)
             self.delete_chat_button.setEnabled(False)
@@ -3003,17 +3503,209 @@ class _InputOutputDialog(QDialog):
             self._set_status("Could not start")
             self._restore_run_context()
 
-    def _on_log_line(self, message):
-        """Worker-thread callback: queue only; widgets stay on the GUI thread."""
+    @staticmethod
+    def _request_label_from_log(line, fallback_number):
+        """Extract the friendly chapter/chunk label from an API-start record."""
+        import re
+
+        value = str(line or "")
+        chapter_match = re.search(
+            r"\b(?:chapter|section)\s+[^\s()]+(?:\s*\(chunk\s+\d+\s*/\s*\d+\))?",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if chapter_match:
+            label = chapter_match.group(0)
+            return label[0].upper() + label[1:]
+        merged_match = re.search(
+            r"\b(?:merged|request)\s+[^()\[]+", value, flags=re.IGNORECASE
+        )
+        if merged_match:
+            return " ".join(merged_match.group(0).split())[:80]
+        return f"Request {int(fallback_number)}"
+
+    @staticmethod
+    def _thread_key_from_log(line, source_thread=None):
+        import re
+
+        if source_thread:
+            return str(source_thread)
+        match = re.search(r"\[([^\]]+)\]", str(line or ""))
+        return match.group(1).strip() if match else ""
+
+    def _begin_request_segment(self, line, source_thread=None):
+        """Create one independently rendered response for an outbound API call."""
+        thread_key = self._thread_key_from_log(line, source_thread)
+        segment_number = len(self._active_request_segments) + 1
+        request_label = self._request_label_from_log(line, segment_number)
+        existing_index = self._request_segment_by_thread.get(thread_key)
+        if (
+            thread_key
+            and existing_index is not None
+            and 0 <= existing_index < len(self._active_request_segments)
+        ):
+            existing = self._active_request_segments[existing_index]
+            existing_label = str(existing.get("label", "") or "")
+            existing_generic = existing_label.startswith("Request ")
+            incoming_generic = request_label.startswith("Request ")
+            # Some wrapper providers emit a second generic API-start record
+            # for the same outbound call. Collapse only generic/specific pairs;
+            # identical chapter labels remain separate so retries get cards.
+            if (
+                not existing.get("content")
+                and not existing.get("thinking")
+                and existing_generic != incoming_generic
+            ):
+                if existing_generic and not incoming_generic:
+                    existing["label"] = request_label
+                return existing
+        segment = {
+            "label": request_label,
+            "thread": thread_key,
+            "content": "",
+            "thinking": "",
+            "phase": "processing",
+            "thinking_tokens": 0,
+            "text_tokens": 0,
+            "complete": False,
+        }
+        self._active_request_segments.append(segment)
+        segment_index = len(self._active_request_segments) - 1
+        if thread_key:
+            self._request_segment_by_thread[thread_key] = segment_index
+            self._stream_phase_by_thread[thread_key] = "processing"
+        return segment
+
+    def _request_segment_for_thread(self, source_thread=None, create=True):
+        thread_key = str(source_thread or "")
+        segment_index = self._request_segment_by_thread.get(thread_key)
+        if segment_index is not None and 0 <= segment_index < len(self._active_request_segments):
+            return self._active_request_segments[segment_index]
+        if self._active_request_segments and not thread_key:
+            return self._active_request_segments[-1]
+        if not create:
+            return None
+        return self._begin_request_segment("", source_thread)
+
+    @staticmethod
+    def _request_segment_message(segment, output_folder=""):
+        thinking_tokens = int(segment.get("thinking_tokens", 0) or 0)
+        text_tokens = int(segment.get("text_tokens", 0) or 0)
+        phase = str(segment.get("phase", "processing") or "processing")
+        if segment.get("complete"):
+            processing_label = (
+                "Token summary  ·  "
+                f"Thinking {thinking_tokens:,}  ·  Text {text_tokens:,}"
+            )
+        elif phase == "thinking":
+            processing_label = f"Thinking ({thinking_tokens:,} tokens)"
+        elif phase == "text":
+            processing_label = f"Generating Text ({text_tokens:,} tokens)"
+        else:
+            processing_label = "Processing"
+        return (
+            "assistant",
+            str(segment.get("content", "") or ""),
+            str(segment.get("thinking", "") or ""),
+            processing_label,
+            str(output_folder or ""),
+            str(segment.get("label", "") or ""),
+        )
+
+    def _schedule_stream_render(self, immediate=False):
+        """Coalesce streaming repaints to keep the Qt event loop responsive."""
+        if immediate:
+            self._render_pending = False
+            self._render_timer.stop()
+            self._render_output()
+            return
+        self._render_pending = True
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _flush_scheduled_render(self):
+        if not self._render_pending:
+            return
+        self._render_pending = False
+        self._render_output()
+
+    def _on_log_line(self, message, source_thread=None):
+        """Worker callback: queue data plus thread identity, never touch widgets."""
         try:
-            self._log_queue.append(str(message))
+            value = str(message)
+            thread_key = str(source_thread or "")
+            self._log_queue.append((value, thread_key))
+
+            # Tell append_log not to duplicate high-volume token payloads in
+            # the main-window QTextEdit. Direct Text still receives and renders
+            # them here; status/configuration records remain in the main log.
+            phase = self._listener_stream_phase_by_thread.get(thread_key, "")
+            low = value.strip().lower()
+            if "thinking complete" in low:
+                phase = "processing"
+            elif value.strip().startswith("🧠") and "thinking" in low:
+                phase = "thinking"
+            elif (
+                "text streaming" in low
+                or "first text token" in low
+                or ("first token" in low and "streaming" in low)
+            ):
+                phase = "text"
+            elif any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
+                if "stream finished" in low or "stream complete" in low:
+                    phase = "processing"
+            self._listener_stream_phase_by_thread[thread_key] = phase
+            if phase in ("thinking", "text"):
+                stripped = value.strip()
+                is_control = (
+                    not stripped
+                    or self._looks_like_pipeline_status(stripped)
+                    or "thinking" in low
+                    or "streaming" in low
+                    or "stream complete" in low
+                )
+                if not is_control:
+                    return "suppress-main-log"
         except Exception:
             pass
+        return None
 
-    def _classify_line(self, line):
+    @classmethod
+    def _looks_like_pipeline_status(cls, line):
+        """Identify transport/status records without swallowing translated Markdown."""
+        value = str(line or "").strip()
+        low = value.lower()
+        if not value:
+            return False
+        if any(phrase in low for phrase in cls._PIPELINE_LOG_PHRASES):
+            return True
+        if value.startswith(("Traceback", "File \"", "[DEBUG]", "[INFO]", "[WARN", "[ERROR")):
+            return True
+        if value in ("TRANSLATION_COMPLETE_SIGNAL", "GLOSSARY_COMPLETE_SIGNAL"):
+            return True
+        status_phrases = (
+            "api call in progress", "http request:", "sdk call finished",
+            "thinking tokens used:", "received chapter ", "received section ",
+            "finish_reason:", "saved ", "temperature:", "max tokens:",
+            "output token limit:", "translation time:", "chapters completed:",
+            "processing as text file", "using async chapter extraction",
+            "text streaming", "first text token", "thinking complete",
+            "first token in",
+        )
+        return any(phrase in low for phrase in status_phrases)
+
+    def _classify_line(self, line, source_thread=None):
         raw = str(line).rstrip("\n")
         stripped = raw.strip()
         low = stripped.lower()
+        thread_key = str(source_thread or "")
+        phase = self._stream_phase_by_thread.get(thread_key, "processing")
+
+        if "api call in progress" in low:
+            self._begin_request_segment(raw, source_thread)
+            self._in_thinking = False
+            self._streaming_text = False
+            return "log"
 
         if any(phrase in low for phrase in self._PIPELINE_LOG_PHRASES):
             if any(
@@ -3025,28 +3717,68 @@ class _InputOutputDialog(QDialog):
                     'translation completed successfully',
                 )
             ):
-                self._streaming_text = False
+                phase = "processing"
+                self._stream_phase_by_thread[thread_key] = phase
+                segment = self._request_segment_for_thread(source_thread, create=False)
+                if segment is not None and (
+                    "stream finished" in low or "stream complete" in low
+                ):
+                    segment["phase"] = "processing"
             return "log"
 
         if "thinking complete" in low:
             self._in_thinking = False
+            phase = "processing"
+            self._stream_phase_by_thread[thread_key] = phase
+            segment = self._request_segment_for_thread(source_thread, create=False)
+            if segment is not None:
+                segment["phase"] = phase
             return "log"
-        if stripped.startswith("🧠") or " thinking..." in low:
-            self._in_thinking = "thinking..." in low
+        if phase != "text" and (
+            stripped.startswith("🧠")
+            or " thinking..." in low
+            or low.endswith("thinking...")
+        ):
+            self._in_thinking = True
+            phase = "thinking"
+            self._stream_phase_by_thread[thread_key] = phase
+            segment = self._request_segment_for_thread(source_thread)
+            segment["phase"] = phase
             return "log"
-        if self._in_thinking and (raw.startswith("    ") or stripped == "\u200b"):
+        if phase == "thinking" and (
+            not stripped
+            or stripped == "\u200b"
+            or not self._looks_like_pipeline_status(stripped)
+        ):
             return "thinking"
 
-        if "text streaming" in low or "first text token" in low:
+        if (
+            "text streaming" in low
+            or "first text token" in low
+            or ("first token" in low and "streaming" in low)
+        ):
             self._in_thinking = False
             self._streaming_text = True
+            phase = "text"
+            self._stream_phase_by_thread[thread_key] = phase
+            segment = self._request_segment_for_thread(source_thread)
+            segment["phase"] = phase
             return "log"
         if "stream complete" in low or "translation completed" in low:
             self._streaming_text = False
+            phase = "processing"
+            self._stream_phase_by_thread[thread_key] = phase
             return "log"
 
         if not stripped:
-            return "content" if self._streaming_text else "log"
+            return "content" if phase == "text" else "log"
+        if phase == "text" and not self._looks_like_pipeline_status(stripped):
+            # Once the provider announces text streaming, Markdown headings,
+            # HTML, emoji and other content-looking status characters are all
+            # valid model output. Only explicit transport records are removed.
+            return "content"
+        if self._looks_like_pipeline_status(stripped):
+            return "log"
         if stripped[0] in self._STATUS_FIRST_CHARS:
             return "log"
         if stripped.startswith(("Traceback", "File \"", "[DEBUG]", "[INFO]", "[WARN", "[ERROR")):
@@ -3055,8 +3787,9 @@ class _InputOutputDialog(QDialog):
             return "log"
         if stripped.startswith("<"):
             self._streaming_text = True
+            self._stream_phase_by_thread[thread_key] = "text"
             return "content"
-        return "content" if self._streaming_text else "log"
+        return "content" if phase == "text" else "log"
 
     def _split_embedded_pipeline_log(self, line):
         """Separate a status record appended to an unterminated text chunk."""
@@ -3071,38 +3804,73 @@ class _InputOutputDialog(QDialog):
         split_at = min(marker_positions)
         return raw[:split_at], raw[split_at:]
 
-    def _drain_log_queue(self):
+    def _drain_log_queue(self, final=False):
+        import time
+
         drained = 0
         output_changed = False
         processing_changed = False
-        while self._log_queue and drained < 500:
+        generation_batches = {}
+        thinking_batches = {}
+        deadline = float("inf") if final else time.monotonic() + 0.012
+        drain_limit = 100000 if final else 1200
+        while self._log_queue and drained < drain_limit and time.monotonic() < deadline:
             try:
-                message = self._log_queue.popleft()
+                queued = self._log_queue.popleft()
             except IndexError:
                 break
+            if isinstance(queued, tuple) and len(queued) == 2:
+                message, source_thread = queued
+            else:
+                message, source_thread = queued, ""
             drained += 1
             for raw_line in str(message).split("\n"):
                 for line in self._split_embedded_pipeline_log(raw_line):
-                    kind = self._classify_line(line)
+                    kind = self._classify_line(line, source_thread)
+                    segment = self._request_segment_for_thread(
+                        source_thread, create=kind in ("content", "thinking")
+                    )
                     if kind == "content":
                         chunk = line + "\n"
                         self._streamed_content += chunk
-                        self._generation_token_count += self._count_tokens(chunk)
+                        if segment is not None:
+                            segment["content"] += chunk
+                            segment["phase"] = "text"
+                            generation_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
                         output_changed = True
                     elif kind == "thinking":
                         value = line[4:] if line.startswith("    ") else line
                         self._append_thinking(value + "\n", streamed_thinking=True)
-                        self._thinking_token_count += self._count_tokens(value + "\n")
+                        if segment is not None:
+                            segment["thinking"] += value + "\n"
+                            segment["phase"] = "thinking"
+                            thinking_batches.setdefault(id(segment), [segment, []])[1].append(
+                                value + "\n"
+                            )
                         processing_changed = True
                     else:
                         self._append_thinking(line + "\n")
-                        self._processing_token_count += self._count_tokens(line + "\n")
+                        if "received " in line.lower() and " response" in line.lower():
+                            target = self._request_segment_for_thread(
+                                source_thread, create=False
+                            )
+                            if target is not None:
+                                target["complete"] = True
+                                target["phase"] = "processing"
                         processing_changed = True
 
+        for segment, values in generation_batches.values():
+            count = self._count_tokens("".join(values))
+            segment["text_tokens"] += count
+            self._generation_token_count += count
+        for segment, values in thinking_batches.values():
+            count = self._count_tokens("".join(values))
+            segment["thinking_tokens"] += count
+            self._thinking_token_count += count
         if drained:
             self._refresh_processing_label()
         if output_changed or processing_changed:
-            self._render_output()
+            self._schedule_stream_render()
 
     @staticmethod
     def _markup_to_html(source):
@@ -3197,14 +3965,22 @@ class _InputOutputDialog(QDialog):
 
         messages = list(self._chat_messages)
         if self._assistant_message_active:
-            messages.append(
-                (
-                    "assistant",
-                    self._streamed_content,
-                    self._thinking_stream_text,
-                    self._processing_label_text,
+            if self._active_request_segments:
+                messages.extend(
+                    self._request_segment_message(segment)
+                    for segment in self._active_request_segments
                 )
-            )
+            else:
+                messages.append(
+                    (
+                        "assistant",
+                        self._streamed_content,
+                        self._thinking_stream_text,
+                        self._processing_label_text,
+                        "",
+                        "Request 1",
+                    )
+                )
 
         if self._assistant_avatar_data_uri:
             avatar_source = html_lib.escape(
@@ -3232,9 +4008,29 @@ class _InputOutputDialog(QDialog):
             for message_index, message in enumerate(messages):
                 role = message[0]
                 content = message[1]
-                if role == "user":
-                    rendered = html_lib.escape(str(content or ""))
-                    rendered = rendered.replace("\n", "<br>")
+                if role in ("user", "user_file"):
+                    if role == "user_file":
+                        filename = str(content or "Attached file")
+                        source_path = str(message[2] if len(message) > 2 else "")
+                        source_size = message[3] if len(message) > 3 else 0
+                        extension = os.path.splitext(filename or source_path)[1]
+                        type_label = extension.lstrip(".").upper() or "FILE"
+                        attachment_emoji = (
+                            "🖼️"
+                            if self._is_image_attachment(filename or source_path)
+                            else "📄"
+                        )
+                        rendered = (
+                            "<div class='attachment-message'>"
+                            f"<span class='attachment-message-icon'>{attachment_emoji}</span>"
+                            f"<b>{html_lib.escape(filename)}</b><br>"
+                            f"<span class='attachment-message-meta'>{type_label} · "
+                            f"{html_lib.escape(self._format_attachment_size(source_size))}</span>"
+                            "</div>"
+                        )
+                    else:
+                        rendered = html_lib.escape(str(content or ""))
+                        rendered = rendered.replace("\n", "<br>")
                     bubble_html = self._rounded_user_bubble_html(rendered)
                     message_html.append(
                         "<table class='chat-row user-row' width='100%' cellspacing='0' "
@@ -3245,7 +4041,24 @@ class _InputOutputDialog(QDialog):
                     continue
 
                 if str(content or "").strip():
-                    rendered = self._markup_to_html(content)
+                    current_session = self._current_chat_session()
+                    current_session_id = (
+                        current_session.get("id")
+                        if current_session is not None
+                        else None
+                    )
+                    cache_key = (
+                        current_session_id,
+                        message_index,
+                        str(content),
+                    )
+                    rendered = self._rendered_message_cache.get(cache_key)
+                    if rendered is None:
+                        rendered = self._markup_to_html(content)
+                        if message_index < len(self._chat_messages):
+                            if len(self._rendered_message_cache) >= 384:
+                                self._rendered_message_cache.clear()
+                            self._rendered_message_cache[cache_key] = rendered
                 else:
                     rendered = (
                         "<span class='pending'>Working on your translation<span> …</span></span>"
@@ -3256,13 +4069,25 @@ class _InputOutputDialog(QDialog):
                     message[3] if len(message) > 3 else "Processing"
                 )
                 output_folder = str(message[4] if len(message) > 4 else "")
+                request_label = str(message[5] if len(message) > 5 else "")
                 session = self._current_chat_session()
                 session_id = session.get("id") if session is not None else None
                 is_active_message = bool(
                     self._assistant_message_active
-                    and message_index == len(messages) - 1
+                    and message_index >= len(self._chat_messages)
                 )
-                if is_active_message and self._processing_spinner_active:
+                active_segment_pending = True
+                if is_active_message and self._active_request_segments:
+                    active_index = message_index - len(self._chat_messages)
+                    if 0 <= active_index < len(self._active_request_segments):
+                        active_segment_pending = not bool(
+                            self._active_request_segments[active_index].get("complete")
+                        )
+                if (
+                    is_active_message
+                    and active_segment_pending
+                    and self._processing_spinner_active
+                ):
                     processing_label += "  …"
                 show_processing = bool(
                     processing_text.strip()
@@ -3336,7 +4161,13 @@ class _InputOutputDialog(QDialog):
                     "cellpadding='0'><tr><td class='assistant-avatar' align='center' "
                     f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
                     "<td class='assistant-bubble'>"
-                    "<div class='role'>GLOSSARION</div>"
+                    "<div class='role'>GLOSSARION"
+                    + (
+                        f" <span class='request-label'>· {html_lib.escape(request_label)}</span>"
+                        if request_label
+                        else ""
+                    )
+                    + "</div>"
                     f"{processing_html}"
                     f"<div class='message-content'>{rendered}</div>"
                     f"{message_actions_html}"
@@ -3359,6 +4190,7 @@ class _InputOutputDialog(QDialog):
             ".chat-row, .chat-row td, .avatar-table, .avatar-table td { border: none; }"
             ".role { color: #cbd5e1; font-size: 0.76em; font-weight: 700; "
             "letter-spacing: 0.08em; margin-bottom: 6px; }"
+            ".request-label { color: #8fa2ba; font-weight: 600; letter-spacing: 0; }"
             ".user-role { color: #cbd5e1; }"
             ".user-bubble { background-color: #2d2d2d; color: white; "
             "padding: 13px 16px; border-radius: 12px; }"
@@ -3368,10 +4200,14 @@ class _InputOutputDialog(QDialog):
             ".user-bubble-cap-edge { font-size: 1px; line-height: 1px; }"
             ".user-bubble-edge, .user-bubble-content { background-color: #2d2d2d; }"
             ".user-bubble-content { color: white; padding: 0 4px; }"
+            ".attachment-message { padding: 2px 0; }"
+            ".attachment-message-icon { font-size: 1.35em; padding-right: 8px; }"
+            ".attachment-message-meta { color: #aeb8c8; font-size: 0.82em; }"
             ".assistant-avatar-cell { padding: 2px 9px 0 0; }"
             ".assistant-avatar { background-color: transparent; color: white; "
             "font-weight: 700; text-align: center; }"
-            ".assistant-bubble { padding: 3px 8px 5px 3px; }"
+            ".assistant-bubble { background-color: #242424; border: 1px solid #3f4856; "
+            "border-radius: 10px; padding: 11px 13px; }"
             ".processing-summary { margin: 1px 0 10px 0; }"
             ".processing-summary a { color: #cbd5e1; font-weight: 600; "
             "text-decoration: none; }"
@@ -3415,6 +4251,29 @@ class _InputOutputDialog(QDialog):
         """Freeze the active streamed response into the visible chat history."""
         if not self._assistant_message_active:
             return
+        if self._active_request_segments:
+            for segment_index, segment in enumerate(self._active_request_segments):
+                segment["complete"] = True
+                segment["phase"] = "processing"
+                content = str(segment.get("content", "") or "").strip()
+                if not content:
+                    content = "*No translated output was emitted for this request.*"
+                    segment["content"] = content
+                output_folder = (
+                    self._last_output_folder
+                    if segment_index == len(self._active_request_segments) - 1
+                    else ""
+                )
+                self._chat_messages.append(
+                    self._request_segment_message(segment, output_folder)
+                )
+            self._assistant_message_active = False
+            self._active_request_segments = []
+            self._request_segment_by_thread = {}
+            self._stream_phase_by_thread = {}
+            self._save_chat_history()
+            self._schedule_stream_render(immediate=True)
+            return
         content = str(self._streamed_content or "").strip()
         if not content:
             content = "*No translated output was produced for this message.*"
@@ -3433,6 +4292,7 @@ class _InputOutputDialog(QDialog):
                 self._thinking_stream_text,
                 final_processing_label,
                 self._last_output_folder,
+                "Request 1",
             )
         )
         self._assistant_message_active = False
@@ -3442,6 +4302,8 @@ class _InputOutputDialog(QDialog):
     def _append_thinking(self, text, *, streamed_thinking=False):
         value = str(text)
         self._processing_text += value
+        if len(self._processing_text) > 20000:
+            self._processing_text = self._processing_text[-20000:]
         if streamed_thinking:
             self._thinking_stream_text += value
 
@@ -3501,9 +4363,15 @@ class _InputOutputDialog(QDialog):
         self._last_output_folder = target_folder
         return target_folder
 
-    def _next_indexed_output_path(self, target_folder):
-        """Return a collision-safe Direct Text N.txt path for this chat."""
+    def _next_indexed_output_path(self, target_folder, extension=".txt"):
+        """Return a collision-safe ``Direct Text N`` path for any output type."""
         import re
+
+        extension = str(extension or ".txt").lower()
+        if not extension.startswith(".") or any(
+            char in extension for char in ('/', '\\', ':')
+        ):
+            extension = ".txt"
 
         session = self._current_chat_session()
         try:
@@ -3511,7 +4379,7 @@ class _InputOutputDialog(QDialog):
         except (AttributeError, TypeError, ValueError):
             next_index = 1
 
-        pattern = re.compile(r"^Direct Text (\d+)\.txt$", re.IGNORECASE)
+        pattern = re.compile(r"^Direct Text (\d+)\.[^.]+$", re.IGNORECASE)
         try:
             for filename in os.listdir(target_folder):
                 match = pattern.match(filename)
@@ -3522,7 +4390,7 @@ class _InputOutputDialog(QDialog):
 
         while True:
             target_path = os.path.join(
-                target_folder, f"Direct Text {next_index}.txt"
+                target_folder, f"Direct Text {next_index}{extension}"
             )
             if not os.path.exists(target_path):
                 return next_index, target_path
@@ -3534,7 +4402,10 @@ class _InputOutputDialog(QDialog):
             return ""
         import shutil
 
-        output_index, target_path = self._next_indexed_output_path(target_folder)
+        output_extension = os.path.splitext(self._expected_output)[1].lower() or ".txt"
+        output_index, target_path = self._next_indexed_output_path(
+            target_folder, output_extension
+        )
         shutil.copy2(self._expected_output, target_path)
         session = self._current_chat_session()
         if session is not None:
@@ -3542,8 +4413,98 @@ class _InputOutputDialog(QDialog):
         self._schedule_chat_history_save()
         return target_path
 
+    def _discover_generated_output(self):
+        """Find the final translated artifact created inside the scoped temp root."""
+        if self._expected_output and os.path.isfile(self._expected_output):
+            return self._expected_output
+        if not self._temp_root or not os.path.isdir(self._temp_root):
+            return ""
+
+        source_ext = str(self._run_source_extension or ".txt").lower()
+        generated_image_scores = {
+            extension: 125 for extension in self._IMAGE_ATTACHMENT_EXTENSIONS
+        }
+        generated_media_scores = {
+            '.mp4': 140, '.mov': 135, '.webm': 135, '.mkv': 130,
+            '.wav': 140, '.mp3': 135, '.m4a': 130, '.flac': 130,
+        }
+        preferred_by_source = {
+            ".epub": {".epub": 140, ".pdf": 100, ".txt": 80, ".html": 60},
+            ".cbz": {".epub": 140, ".pdf": 100, ".txt": 90, ".html": 60},
+            ".pdf": {".pdf": 140, ".epub": 130, ".txt": 100, ".html": 70},
+        }
+        if self._run_output_mode == 'image':
+            preferred = dict(generated_image_scores)
+            preferred.update({'.txt': 60, '.html': 55})
+        elif self._run_output_mode == 'video':
+            preferred = dict(generated_media_scores)
+            preferred.update(generated_image_scores)
+        elif self._run_output_mode == 'audio':
+            preferred = dict(generated_media_scores)
+            preferred.update({'.txt': 70})
+        elif source_ext in self._IMAGE_ATTACHMENT_EXTENSIONS:
+            preferred = {'.txt': 150, '.html': 135, '.xhtml': 130}
+            preferred.update(generated_image_scores)
+        else:
+            preferred = preferred_by_source.get(
+                source_ext,
+                {".txt": 140, ".html": 100, ".xhtml": 95, ".epub": 80, ".pdf": 80},
+            )
+        candidates = []
+        for root, _dirs, filenames in os.walk(self._temp_root):
+            for filename in filenames:
+                path = os.path.join(root, filename)
+                extension = os.path.splitext(filename)[1].lower()
+                if extension not in preferred:
+                    continue
+                normalized = path.replace('\\', '/').lower()
+                if '/_archive_input/' in normalized:
+                    continue
+                score = preferred[extension]
+                low_name = filename.lower()
+                if "translated" in low_name:
+                    score += 55
+                if "direct text" in low_name:
+                    score += 20
+                if any(
+                    marker in normalized
+                    for marker in ("/chunks/", "/responses/", "/payloads/", "/ocr/chunks/")
+                ):
+                    score -= 120
+                if low_name in ("source_epub.txt", "toc.txt"):
+                    score -= 200
+                try:
+                    modified = os.path.getmtime(path)
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                if modified >= self._run_started_at - 2.0:
+                    score += 10
+                if size > 0:
+                    score += min(20, int(size).bit_length())
+                candidates.append((score, modified, size, path))
+        if not candidates:
+            return ""
+        candidates.sort(reverse=True)
+        self._expected_output = candidates[0][3]
+        return self._expected_output
+
     def _persist_output_folder(self):
-        """Save a completed run as Direct Text N.txt in the chat folder."""
+        """Save a completed run as an indexed artifact in the chat folder."""
+        self._discover_generated_output()
+        if (
+            (not self._expected_output or not os.path.isfile(self._expected_output))
+            and self._streamed_content.strip()
+            and self._temp_root
+        ):
+            self._expected_output = os.path.join(
+                self._temp_root, "direct_text_stream_translated.txt"
+            )
+            try:
+                with open(self._expected_output, 'w', encoding='utf-8') as handle:
+                    handle.write(self._streamed_content)
+            except OSError:
+                self._expected_output = ""
         if not self._expected_output or not os.path.isfile(self._expected_output):
             return ""
         try:
@@ -3577,11 +4538,21 @@ class _InputOutputDialog(QDialog):
     def _finish_translation(self):
         if not self._active:
             return
-        self._drain_log_queue()
+        self._drain_log_queue(final=True)
 
         final_text = ""
+        self._discover_generated_output()
         try:
-            if self._expected_output and os.path.isfile(self._expected_output):
+            readable_extensions = {
+                '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
+                '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+            }
+            if (
+                self._expected_output
+                and os.path.isfile(self._expected_output)
+                and os.path.splitext(self._expected_output)[1].lower()
+                in readable_extensions
+            ):
                 with open(self._expected_output, 'r', encoding='utf-8') as handle:
                     final_text = handle.read()
         except Exception as exc:
@@ -3592,9 +4563,26 @@ class _InputOutputDialog(QDialog):
         if final_text.strip():
             # Replace transport fragments with the clean, assembled output file.
             self._streamed_content = final_text
+            if len(self._active_request_segments) == 1:
+                self._active_request_segments[0]["content"] = final_text
+            elif not self._active_request_segments:
+                segment = self._begin_request_segment("", "")
+                segment["content"] = final_text
+                segment["text_tokens"] = self._count_tokens(final_text)
             self._set_status("Ready")
         elif self._streamed_content.strip():
             self._set_status("Ready" if output_folder else "Run ended; showing streamed output")
+        elif self._expected_output and os.path.isfile(self._expected_output):
+            segment = self._request_segment_for_thread("", create=True)
+            artifact_type = (
+                os.path.splitext(self._expected_output)[1].lstrip('.').upper()
+                or "file"
+            )
+            segment["content"] = (
+                f"**Translation completed.** The translated {artifact_type} file is "
+                "available from the output-folder link below."
+            )
+            self._set_status("Ready")
         else:
             self._set_status("No translated output was produced")
 
@@ -3604,6 +4592,8 @@ class _InputOutputDialog(QDialog):
     def _restore_run_context(self):
         self._drain_timer.stop()
         self._poll_timer.stop()
+        self._render_timer.stop()
+        self._render_pending = False
         gui = self.translator
 
         if self._listener_attached:
@@ -3658,6 +4648,11 @@ class _InputOutputDialog(QDialog):
         self._temp_root = ""
         self._temp_input = ""
         self._expected_output = ""
+        self._run_source_path = ""
+        self._run_source_extension = ".txt"
+        self._run_source_is_attachment = False
+        self._run_started_at = 0.0
+        self._run_output_mode = self._direct_output_mode
         self._saved_env = {}
         self._saved_full_env = {}
         self._saved_gui_attrs = {}
@@ -3667,6 +4662,10 @@ class _InputOutputDialog(QDialog):
         self._refresh_processing_label()
         self._set_thinking_spinner_active(False)
         self.input_box.setEnabled(True)
+        self.attachment_button.setEnabled(True)
+        self.attachment_clear_button.setEnabled(True)
+        for mode_button in self._direct_mode_buttons.values():
+            mode_button.setEnabled(True)
         self.new_chat_button.setEnabled(True)
         self.chat_list.setEnabled(True)
         self.force_multipass_off_checkbox.setEnabled(True)
@@ -14109,6 +15108,10 @@ Recent translations to summarize:
         override = getattr(self, '_translation_run_output_mode_override', None)
         if override:
             return str(override).lower().strip()
+        if getattr(self, '_input_output_run_active', False):
+            direct_mode = getattr(self, '_direct_text_output_mode', None)
+            if direct_mode:
+                return str(direct_mode).lower().strip()
         return self._get_output_mode()
 
     def _translation_qa_failure_key(self, failure):
@@ -14171,6 +15174,8 @@ Recent translations to summarize:
             os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
         except Exception:
             pass
+        if getattr(self, '_input_output_run_active', False):
+            self._apply_direct_text_runtime_environment()
 
     def _format_chapter_list(self, chapters):
         def _sort_key(value):
@@ -18224,8 +19229,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         return
                     self.append_log("✅ Modules loaded")
 
-                if any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or []):
-                    self.append_log("📦 Preparing ZIP input(s) in translation worker...")
+                if any(str(f).lower().endswith(('.zip', '.cbz')) for f in getattr(self, 'selected_files', []) or []):
+                    self.append_log("📦 Preparing image archive input(s) in translation worker...")
                     self._resolve_zip_inputs_for_translation()
                     if self.stop_requested:
                         return
@@ -18785,10 +19790,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # ========== NEW: APPLY OPF-BASED SORTING ==========
             if (
-                any(str(f).lower().endswith('.zip') for f in getattr(self, 'selected_files', []) or [])
+                any(str(f).lower().endswith(('.zip', '.cbz')) for f in getattr(self, 'selected_files', []) or [])
                 and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
             ):
-                self.append_log("📦 Preparing ZIP input(s) before file processing...")
+                self.append_log("📦 Preparing image archive input(s) before file processing...")
                 self._resolve_zip_inputs_for_translation()
                 if self.stop_requested:
                     return False
@@ -18834,7 +19839,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"⚠️ Could not apply OUTPUT_DIRECTORY override: {e}")
             
             # Check if we're processing multiple images - if so, create a combined output folder
-            image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            image_extensions = set(_InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS)
             video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
             media_extensions = image_extensions | video_extensions
             image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in media_extensions]
@@ -18901,7 +19906,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"{'='*60}")
 
                 if (
-                    str(file_path).lower().endswith('.zip')
+                    str(file_path).lower().endswith(('.zip', '.cbz'))
                     and not getattr(self, '_zip_inputs_resolved_for_current_run', False)
                 ):
                     old_file_path = file_path
@@ -20898,6 +21903,33 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """Apply the scoped Direct Text overrides after normal GUI env export."""
         if not getattr(self, '_input_output_run_active', False):
             return
+
+        output_mode = str(
+            getattr(self, '_direct_text_output_mode', 'text') or 'text'
+        ).strip().lower()
+        if output_mode == 'refine':
+            output_mode = 'refinement'
+        if output_mode not in {
+            'text', 'vision', 'image', 'video', 'audio', 'refinement'
+        }:
+            output_mode = 'text'
+        os.environ['OUTPUT_MODE'] = output_mode
+        os.environ['VISION_OCR_FIRST'] = '1' if output_mode == 'vision' else '0'
+        os.environ['ENABLE_IMAGE_TRANSLATION'] = (
+            '1' if output_mode in {'vision', 'image', 'video'} else '0'
+        )
+        os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = (
+            '1' if output_mode == 'image' else '0'
+        )
+        os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = (
+            '1' if output_mode == 'video' else '0'
+        )
+        os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = (
+            '1' if output_mode == 'audio' else '0'
+        )
+        os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = (
+            '1' if output_mode == 'refinement' else '0'
+        )
 
         if getattr(self, '_direct_text_force_multipass_off', True):
             os.environ['MULTIPASS_MODE'] = '0'
@@ -25882,18 +26914,28 @@ Important rules:
         except Exception:
             pass
 
-    def append_log(self, message):
+    def append_log(self, message, source_thread=None):
        """Append message to log with safety checks (fallback to print if GUI is gone).
        Also suppresses repeated stop/cancel notices once a stop has been requested.
        """
        # Broadcast the raw line to any external listeners (EPUB Reader live
        # streaming view, etc.) before GUI-side filtering. Exceptions in a
        # listener must never break the main log path.
+       _suppress_main_log = False
        for _listener in list(getattr(self, '_extra_log_listeners', []) or []):
            try:
-               _listener(message)
+               try:
+                   _listener_result = _listener(
+                       message, source_thread=source_thread
+                   )
+               except TypeError:
+                   _listener_result = _listener(message)
+               if _listener_result == 'suppress-main-log':
+                   _suppress_main_log = True
            except Exception:
                pass
+       if _suppress_main_log and getattr(self, '_input_output_run_active', False):
+           return
        def _append():
            try:
                # Suppress expected graceful-stop pre-send cancellations (avoid noisy per-chapter lines)
@@ -26528,11 +27570,21 @@ Important rules:
         self.append_log("🗑️ Cleared file selection")
 
     def _convert_zip_input_to_epub_if_needed(self, path):
-        """Resolve a selected .zip input to an EPUB path in a worker-safe way."""
-        if not path or not str(path).lower().endswith('.zip'):
+        """Resolve a selected ZIP/CBZ image archive to EPUB in a worker-safe way."""
+        if not path or not str(path).lower().endswith(('.zip', '.cbz')):
             return path
 
-        epub_path = os.path.splitext(path)[0] + '.epub'
+        conversion_dir = str(
+            getattr(self, '_direct_text_archive_conversion_dir', '') or ''
+        ).strip()
+        if conversion_dir:
+            os.makedirs(conversion_dir, exist_ok=True)
+            epub_path = os.path.join(
+                conversion_dir,
+                os.path.splitext(os.path.basename(path))[0] + '.epub',
+            )
+        else:
+            epub_path = os.path.splitext(path)[0] + '.epub'
         should_stop = lambda: bool(getattr(self, 'stop_requested', False))
         try:
             import shutil
