@@ -1338,6 +1338,7 @@ class _InputOutputDialog(QDialog):
         'DIRECT_TEXT_ATTACHMENT_PROMPT_ROLE',
         'DIRECT_TEXT_PROFILE_USER_PROMPT',
         'DIRECT_TEXT_SKIP_PROMPT_PROFILE',
+        'DIRECT_TEXT_ORDERED_BATCH',
         'SYSTEM_PROMPT_TO_USER',
     )
     _STATUS_FIRST_CHARS = set(
@@ -1527,6 +1528,8 @@ class _InputOutputDialog(QDialog):
             "border-bottom: 1px solid #4a5568; }"
             "QLabel#directTitle { font-size: 15pt; font-weight: 700; }"
             "QLabel#directSubtitle, QLabel#directMuted { color: #cbd5e1; }"
+            "QLabel#directZoomIndicator { color: #94a3b8; font-size: 8.5pt; "
+            "padding: 0 3px 1px 3px; background: transparent; }"
             "QPushButton#sidebarToggleButton { min-width: 34px; max-width: 34px; "
             "min-height: 34px; max-height: 34px; padding: 0; font-size: 11pt; }"
             "QTabWidget#directTextTabs::pane { border: none; background: transparent; }"
@@ -1737,6 +1740,20 @@ class _InputOutputDialog(QDialog):
             "QSplitter::handle:vertical:hover { background: #5a9fd4; }"
         )
 
+        timeline_shell = QWidget()
+        timeline_layout = QVBoxLayout(timeline_shell)
+        timeline_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_layout.setSpacing(2)
+        zoom_row = QHBoxLayout()
+        zoom_row.setContentsMargins(0, 0, 2, 0)
+        zoom_row.setSpacing(0)
+        zoom_row.addStretch(1)
+        self.zoom_indicator = QLabel("Zoom 100%")
+        self.zoom_indicator.setObjectName("directZoomIndicator")
+        self.zoom_indicator.setAccessibleName("Conversation zoom: 100 percent")
+        zoom_row.addWidget(self.zoom_indicator, 0, Qt.AlignRight)
+        timeline_layout.addLayout(zoom_row)
+
         self.output_box = QTextBrowser()
         self.output_box.setObjectName("chatTimeline")
         self.output_box.setOpenExternalLinks(False)
@@ -1744,7 +1761,10 @@ class _InputOutputDialog(QDialog):
         self.output_box.setContextMenuPolicy(Qt.CustomContextMenu)
         self.output_box.customContextMenuRequested.connect(self._show_output_context_menu)
         self.output_box.anchorClicked.connect(self._handle_output_anchor)
-        self.chat_splitter.addWidget(self.output_box)
+        self.output_box.installEventFilter(self)
+        self.output_box.viewport().installEventFilter(self)
+        timeline_layout.addWidget(self.output_box, 1)
+        self.chat_splitter.addWidget(timeline_shell)
 
         composer = QFrame()
         composer.setObjectName("directComposerCard")
@@ -2446,8 +2466,10 @@ class _InputOutputDialog(QDialog):
         self.input_box.setToolTip(
             f"Composer zoom: {self._chat_zoom_percent}%"
         )
-        self.output_box.setToolTip(
-            f"Conversation zoom: {self._chat_zoom_percent}%"
+        self.output_box.setToolTip("")
+        self.zoom_indicator.setText(f"Zoom {self._chat_zoom_percent}%")
+        self.zoom_indicator.setAccessibleName(
+            f"Conversation zoom: {self._chat_zoom_percent} percent"
         )
         auto_scroll_was_disabled = self._output_auto_scroll_disabled
         self._output_auto_scroll_disabled = True
@@ -2859,6 +2881,23 @@ class _InputOutputDialog(QDialog):
         input_viewport = (
             self.input_box.viewport() if hasattr(self, "input_box") else None
         )
+        output_viewport = (
+            self.output_box.viewport() if hasattr(self, "output_box") else None
+        )
+        if watched in (
+            getattr(self, "input_box", None),
+            input_viewport,
+            getattr(self, "output_box", None),
+            output_viewport,
+        ) and event.type() == QEvent.Wheel:
+            if event.modifiers() & Qt.ControlModifier:
+                wheel_delta = event.angleDelta().y()
+                if not wheel_delta:
+                    wheel_delta = event.pixelDelta().y()
+                if wheel_delta:
+                    self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
+                    event.accept()
+                    return True
         if watched is self.input_box or watched is input_viewport:
             if (
                 watched is input_viewport
@@ -3407,13 +3446,13 @@ class _InputOutputDialog(QDialog):
         self.status_label.setToolTip("")
         self.status_label.unsetCursor()
 
-    def _remember_output_folder(self, folder):
+    def _remember_output_folder(self, folder, *, update_conversation_root=True):
         folder = os.path.abspath(str(folder or "")) if folder else ""
         if not folder or not os.path.isdir(folder):
             return ""
         self._last_output_folder = folder
         session = self._current_chat_session()
-        if session is not None:
+        if session is not None and update_conversation_root:
             session["output_folder"] = folder
         self._schedule_chat_history_save()
         return folder
@@ -3810,6 +3849,9 @@ class _InputOutputDialog(QDialog):
             os.environ['OUTPUT_DIRECTORY'] = self._temp_root
             os.environ['OUTPUT_DIR'] = self._temp_root
             os.environ['DIRECT_TEXT_PRESERVE_MARKUP'] = '1'
+            os.environ['DIRECT_TEXT_ORDERED_BATCH'] = (
+                '1' if self._run_source_is_attachment else '0'
+            )
             gui._apply_forced_streaming_environment()
             gui._apply_direct_text_runtime_environment()
 
@@ -3874,6 +3916,54 @@ class _InputOutputDialog(QDialog):
         return f"Request {int(fallback_number)}"
 
     @staticmethod
+    def _request_order_from_log(line, fallback_number):
+        """Return a stable spine/chapter/chunk sort key for a request card."""
+        import re
+
+        value = str(line or "")
+        dispatch_match = re.search(
+            r"\[spine-order:(\d+)\]", value, flags=re.IGNORECASE
+        )
+        if dispatch_match:
+            primary = int(dispatch_match.group(1))
+            source_rank = 0
+        else:
+            chapter_match = re.search(
+                r"\b(?:chapter|section|merged)\s+(-?\d+(?:\.\d+)?)",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if chapter_match:
+                try:
+                    primary = float(chapter_match.group(1))
+                except ValueError:
+                    primary = int(fallback_number)
+                source_rank = 1
+            else:
+                primary = int(fallback_number)
+                source_rank = 2
+        chunk_match = re.search(
+            r"\bchunk\s+(\d+)\s*/\s*(\d+)",
+            value,
+            flags=re.IGNORECASE,
+        )
+        chunk = int(chunk_match.group(1)) if chunk_match else 0
+        return (source_rank, primary, chunk, int(fallback_number))
+
+    def _sort_active_request_segments(self):
+        """Keep cards deterministic without losing their thread lookup."""
+        self._active_request_segments.sort(
+            key=lambda segment: tuple(
+                segment.get("order_key", (2, float("inf"), 0, 0))
+            )
+        )
+        self._request_segment_by_thread = {
+            str(segment.get("thread", "")): index
+            for index, segment in enumerate(self._active_request_segments)
+            if str(segment.get("thread", ""))
+        }
+
+    @staticmethod
     def _thread_key_from_log(line, source_thread=None):
         import re
 
@@ -3912,6 +4002,10 @@ class _InputOutputDialog(QDialog):
             if not existing.get("complete"):
                 if existing_generic and not incoming_generic:
                     existing["label"] = request_label
+                    existing["order_key"] = self._request_order_from_log(
+                        line, existing_index + 1
+                    )
+                    self._sort_active_request_segments()
                 return existing
         segment = {
             "label": request_label,
@@ -3922,9 +4016,13 @@ class _InputOutputDialog(QDialog):
             "thinking_tokens": 0,
             "text_tokens": 0,
             "complete": False,
+            "order_key": self._request_order_from_log(
+                line, segment_number
+            ),
         }
         self._active_request_segments.append(segment)
-        segment_index = len(self._active_request_segments) - 1
+        self._sort_active_request_segments()
+        segment_index = self._active_request_segments.index(segment)
         if thread_key:
             self._request_segment_by_thread[thread_key] = segment_index
             self._stream_phase_by_thread[thread_key] = "processing"
@@ -4967,6 +5065,59 @@ class _InputOutputDialog(QDialog):
         self._schedule_chat_history_save()
         return target_path
 
+    def _attachment_output_subfolder(self, conversation_folder):
+        """Return the run-style output folder for the current attachment."""
+        if not self._run_source_is_attachment or not self._run_source_path:
+            return ""
+        import re
+
+        source_stem = os.path.splitext(
+            os.path.basename(self._run_source_path)
+        )[0]
+        safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', source_stem)
+        safe_stem = safe_stem.rstrip(" .")[:120] or "Attachment"
+        target_folder = os.path.join(conversation_folder, safe_stem)
+        os.makedirs(target_folder, exist_ok=True)
+        return target_folder
+
+    def _copy_attachment_output_tree(self, target_folder):
+        """Preserve the complete regular-run folder for an attached source."""
+        import shutil
+
+        source_stem = os.path.splitext(
+            os.path.basename(self._run_source_path)
+        )[0]
+        generated_folder = os.path.join(self._temp_root, source_stem)
+        copied_any = False
+        if os.path.isdir(generated_folder):
+            shutil.copytree(
+                generated_folder,
+                target_folder,
+                dirs_exist_ok=True,
+            )
+            copied_any = True
+
+        # Some output modes place their final artifact directly under the
+        # override root. Keep that artifact too without flattening a normal
+        # generated book folder.
+        if self._expected_output and os.path.isfile(self._expected_output):
+            expected_abs = os.path.abspath(self._expected_output)
+            generated_abs = os.path.abspath(generated_folder)
+            try:
+                already_in_tree = (
+                    os.path.commonpath([expected_abs, generated_abs])
+                    == generated_abs
+                )
+            except ValueError:
+                already_in_tree = False
+            if not already_in_tree or not copied_any:
+                shutil.copy2(
+                    expected_abs,
+                    os.path.join(target_folder, os.path.basename(expected_abs)),
+                )
+                copied_any = True
+        return target_folder if copied_any else ""
+
     def _discover_generated_output(self):
         """Find the final translated artifact created inside the scoped temp root."""
         if self._expected_output and os.path.isfile(self._expected_output):
@@ -5062,11 +5213,21 @@ class _InputOutputDialog(QDialog):
         if not self._expected_output or not os.path.isfile(self._expected_output):
             return ""
         try:
-            target_folder = self._conversation_output_folder()
-            if not target_folder:
+            conversation_folder = self._conversation_output_folder()
+            if not conversation_folder:
                 return ""
-            self._copy_indexed_output_file(target_folder)
-            return target_folder
+            if self._run_source_is_attachment:
+                attachment_folder = self._attachment_output_subfolder(
+                    conversation_folder
+                )
+                if attachment_folder:
+                    copied_folder = self._copy_attachment_output_tree(
+                        attachment_folder
+                    )
+                    if copied_folder:
+                        return copied_folder
+            self._copy_indexed_output_file(conversation_folder)
+            return conversation_folder
         except Exception as exc:
             self._append_thinking(f"⚠️ Could not persist Direct Text output: {exc}\n")
             session = self._current_chat_session()
@@ -5113,7 +5274,10 @@ class _InputOutputDialog(QDialog):
             self._append_thinking(f"⚠️ Could not read translated output: {exc}\n")
 
         output_folder = self._persist_output_folder()
-        self._remember_output_folder(output_folder)
+        self._remember_output_folder(
+            output_folder,
+            update_conversation_root=not self._run_source_is_attachment,
+        )
         if final_text.strip():
             # Replace transport fragments with the clean, assembled output file.
             self._streamed_content = final_text

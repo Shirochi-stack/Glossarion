@@ -6893,6 +6893,32 @@ class TranslationProcessor:
 # =====================================================
 # BATCH TRANSLATION PROCESSOR
 # =====================================================
+def _batch_spine_order_key(chapter_data):
+    """Sort a batch item by true book reading order when it is available."""
+    try:
+        original_index, chapter = chapter_data
+    except (TypeError, ValueError):
+        return (float("inf"), float("inf"))
+
+    spine_order = None
+    if isinstance(chapter, dict):
+        spine_order = chapter.get("spine_order")
+        if spine_order is None:
+            spine_order = chapter.get("opf_spine_position")
+    try:
+        reading_order = float(spine_order)
+    except (TypeError, ValueError):
+        try:
+            reading_order = float(original_index)
+        except (TypeError, ValueError):
+            reading_order = float("inf")
+    try:
+        stable_index = float(original_index)
+    except (TypeError, ValueError):
+        stable_index = float("inf")
+    return (reading_order, stable_index)
+
+
 class BatchTranslationProcessor:
     """Handles batch/parallel translation processing"""
     
@@ -6921,6 +6947,13 @@ class BatchTranslationProcessor:
         import threading
         self._batch_rolling_summary_lock = threading.Lock()
         self._batch_rolling_summary_text = ""  # exact rolling_summary.txt contents for current batch
+        self._ordered_request_dispatch = (
+            os.getenv("ORDER_BATCH_REQUESTS_BY_SPINE", "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+        self._ordered_dispatch_condition = threading.Condition()
+        self._ordered_dispatch_next = 0
+        self._ordered_dispatch_released = set()
         
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
@@ -6941,6 +6974,57 @@ class BatchTranslationProcessor:
         """Get the rolling summary snapshot (thread-safe)."""
         with self._batch_rolling_summary_lock:
             return self._batch_rolling_summary_text
+
+    def _wait_for_ordered_request_dispatch(self, request_order):
+        """Release each batch unit's first API call in reading-order sequence.
+
+        Calls remain concurrent after this very small pre-send gate. Retries and
+        later chunks from an already released unit pass through immediately.
+        """
+        if not self._ordered_request_dispatch or request_order is None:
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+
+        timeout = 120.0
+        try:
+            timeout = max(
+                5.0,
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
+            )
+        except (TypeError, ValueError):
+            pass
+        deadline = time.monotonic() + timeout
+
+        with self._ordered_dispatch_condition:
+            if (
+                request_order in self._ordered_dispatch_released
+                or request_order < self._ordered_dispatch_next
+            ):
+                return
+            while request_order != self._ordered_dispatch_next:
+                if self.check_stop_fn():
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    print(
+                        "⚠️ Ordered batch dispatch timed out waiting for an "
+                        "earlier spine item; releasing the ready request"
+                    )
+                    self._ordered_dispatch_next = request_order
+                    break
+                self._ordered_dispatch_condition.wait(
+                    timeout=min(0.1, remaining)
+                )
+
+            self._ordered_dispatch_released.add(request_order)
+            self._ordered_dispatch_next = max(
+                self._ordered_dispatch_next,
+                request_order + 1,
+            )
+            self._ordered_dispatch_condition.notify_all()
 
     def _restore_cancelled_chapter_progress(self, idx, actual_num, content_hash, chapter):
         fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -7470,6 +7554,7 @@ class BatchTranslationProcessor:
                     'chapter': actual_num,
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
+                    'dispatch_order': chapter.get('_batch_request_order'),
                 }
                 
                 # Get chunk timeout from environment
@@ -7486,6 +7571,9 @@ class BatchTranslationProcessor:
                 while True:
                     try:
                         def _mark_batch_chunk_progress_on_send():
+                            self._wait_for_ordered_request_dispatch(
+                                chapter.get('_batch_request_order')
+                            )
                             _mark_batch_chapter_progress_on_send()
                             if _single_pass_glossary_mode():
                                 _mark_single_pass_glossary_in_progress(
@@ -8974,9 +9062,15 @@ class BatchTranslationProcessor:
                     'chunk': 1,
                     'total_chunks': 1,
                     'merged_chapters': merged_chapter_nums_for_context,
+                    'dispatch_order': parent_chapter.get(
+                        '_batch_request_order'
+                    ),
                 }
 
                 def _mark_merged_request_progress_on_send():
+                    self._wait_for_ordered_request_dispatch(
+                        parent_chapter.get('_batch_request_order')
+                    )
                     _mark_merged_progress_on_send()
                     if _single_pass_glossary_mode():
                         _mark_single_pass_glossary_in_progress(
@@ -16924,7 +17018,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
-    chapter_context (dict) may contain "chapter", "chunk", "total_chunks", and "merged_chapters".
+    chapter_context (dict) may contain "chapter", "chunk", "total_chunks",
+    "merged_chapters", and "dispatch_order".
     When provided and the client supports set_chapter_context, it will be applied
     inside the API thread so that thread-local payload metadata is accurate.
     """
@@ -17093,12 +17188,22 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             # thread-local chapter_info is visible to payload saving.
             if chapter_context and hasattr(client, 'set_chapter_context'):
                 try:
-                    client.set_chapter_context(
+                    context_kwargs = dict(
                         chapter=chapter_context.get('chapter'),
                         chunk=chapter_context.get('chunk'),
                         total_chunks=chapter_context.get('total_chunks'),
                         merged_chapters=chapter_context.get('merged_chapters'),
                     )
+                    dispatch_order = chapter_context.get('dispatch_order')
+                    if dispatch_order is not None:
+                        context_kwargs['dispatch_order'] = dispatch_order
+                    try:
+                        client.set_chapter_context(**context_kwargs)
+                    except TypeError:
+                        # Compatibility for third-party/legacy clients that
+                        # implement the older chapter-context signature.
+                        context_kwargs.pop('dispatch_order', None)
+                        client.set_chapter_context(**context_kwargs)
                 except Exception:
                     # Context is best-effort and should never break the call
                     pass
@@ -22377,6 +22482,10 @@ def main(log_callback=None, stop_callback=None):
         # Flush the one coalesced progress write for the whole scan.
         progress_manager.end_deferred_save()
 
+        # Thread scheduling must not redefine book order. EPUB items use their
+        # OPF spine position; PDF/text items retain their extracted list order.
+        chapters_to_translate.sort(key=_batch_spine_order_key)
+
         # Print skip summary for batch mode
         if hasattr(config, '_batch_skipped_chapters') and config._batch_skipped_chapters:
             skipped = config._batch_skipped_chapters
@@ -22662,6 +22771,13 @@ def main(log_callback=None, stop_callback=None):
         else:
             units_to_process = [[ch] for ch in chapters_to_translate]  # Wrap each chapter as single-item group
             is_merged_mode = False
+
+        # Assign a contiguous ticket after request merging. A merged group may
+        # span several chapter indices, so chapter numbers themselves are not a
+        # safe synchronization key for ordered dispatch.
+        for request_order, unit in enumerate(units_to_process):
+            for _chapter_index, chapter in unit:
+                chapter['_batch_request_order'] = request_order
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
             if batching_mode == 'aggressive':

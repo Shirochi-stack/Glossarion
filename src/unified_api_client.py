@@ -10466,6 +10466,7 @@ class UnifiedClient:
                     chunk=source_chapter_context.get('chunk'),
                     total_chunks=source_chapter_context.get('total_chunks'),
                     merged_chapters=source_chapter_context.get('merged_chapters'),
+                    dispatch_order=source_chapter_context.get('dispatch_order'),
                 )
             except Exception:
                 try:
@@ -11430,7 +11431,12 @@ class UnifiedClient:
                         src_ctx = getattr(self._get_thread_local_client(), 'chapter_context', None)
                         if src_ctx:
                             temp_client.set_chapter_context(
-                                chapter=src_ctx.get('chapter'), chunk=src_ctx.get('chunk'), total_chunks=src_ctx.get('total_chunks'))
+                                chapter=src_ctx.get('chapter'),
+                                chunk=src_ctx.get('chunk'),
+                                total_chunks=src_ctx.get('total_chunks'),
+                                merged_chapters=src_ctx.get('merged_chapters'),
+                                dispatch_order=src_ctx.get('dispatch_order'),
+                            )
                     except Exception:
                         pass
                     
@@ -17611,7 +17617,8 @@ class UnifiedClient:
             pass
         return "request"
 
-    def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None, merged_chapters=None):
+    def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None,
+                            merged_chapters=None, dispatch_order=None):
         """Store chapter/chunk context on thread-local state for logging and payload metadata."""
         try:
             tls = self._get_thread_local_client()
@@ -17620,6 +17627,7 @@ class UnifiedClient:
                 "chunk": chunk,
                 "total_chunks": total_chunks,
                 "merged_chapters": merged_chapters,
+                "dispatch_order": dispatch_order,
             }
             tls.chapter_context = context
 
@@ -17639,6 +17647,8 @@ class UnifiedClient:
                         info["merged_chapters"] = list(merged_chapters)
                     except Exception:
                         info["merged_chapters"] = merged_chapters
+                if dispatch_order is not None:
+                    info["dispatch_order"] = int(dispatch_order)
                 self._thread_chapter_info[thread_id] = info
             except Exception:
                 pass
@@ -17663,6 +17673,15 @@ class UnifiedClient:
                     tls.current_request_label = f"{_chapter_term()} {chapter} (chunk {chunk}/{total_chunks})"
                 else:
                     tls.current_request_label = f"{_chapter_term()} {chapter}"
+            if (
+                dispatch_order is not None
+                and os.getenv("DIRECT_TEXT_ORDERED_BATCH", "0") == "1"
+            ):
+                marker = f" [spine-order:{int(dispatch_order)}]"
+                if marker not in getattr(tls, 'current_request_label', ''):
+                    tls.current_request_label = (
+                        getattr(tls, 'current_request_label', 'request') + marker
+                    )
         except Exception:
             pass
 
@@ -17671,6 +17690,19 @@ class UnifiedClient:
         try:
             tls = self._get_thread_local_client()
             label = self._extract_chapter_label(messages)
+            chapter_context = getattr(tls, 'chapter_context', {})
+            dispatch_order = (
+                chapter_context.get('dispatch_order')
+                if isinstance(chapter_context, dict)
+                else None
+            )
+            if (
+                dispatch_order is not None
+                and os.getenv("DIRECT_TEXT_ORDERED_BATCH", "0") == "1"
+            ):
+                marker = f" [spine-order:{int(dispatch_order)}]"
+                if marker not in label:
+                    label = f"{label}{marker}"
             tls.current_request_label = label
             tls.current_request_context = context or 'translation'
         except Exception:
