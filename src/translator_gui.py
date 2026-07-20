@@ -5633,7 +5633,7 @@ class _InputOutputDialog(QDialog):
                 return segment
         return direct
 
-    def _apply_direct_response_payload(self, line):
+    def _apply_direct_response_payload(self, line, source_thread=None):
         """Install a backend response that cannot be exposed as token logs."""
         import json as json_lib
         import re
@@ -5674,6 +5674,10 @@ class _InputOutputDialog(QDialog):
                 int(request_match.group(1)) if request_match else None
             )
 
+        thread_target = self._request_segment_for_thread(
+            source_thread, create=False
+        )
+
         # Dispatch order is the stable request identity.  A provider may lose
         # chapter context at completion and call the same response ``Request
         # 11``; bind it back to the existing spine card instead of creating a
@@ -5693,6 +5697,8 @@ class _InputOutputDialog(QDialog):
                 if existing == wanted or existing.startswith(wanted + " "):
                     target = segment
                     break
+        if target is None and thread_target is not None:
+            target = thread_target
         if target is None:
             marker = ""
             if normalized_order is not None:
@@ -5700,6 +5706,43 @@ class _InputOutputDialog(QDialog):
             target = self._begin_request_segment(
                 f"{label}{marker} Direct Text dispatch", ""
             )
+
+        # Older/provider retry paths can momentarily open a generic card on
+        # the API worker after the ordered chapter card already exists.  The
+        # final payload supplies both identities, so fold that transient card
+        # into the spine card instead of persisting a second ``Request N``.
+        if (
+            thread_target is not None
+            and thread_target is not target
+            and str(thread_target.get("label", "") or "")
+            .strip().lower().startswith("request ")
+        ):
+            redundant_text_tokens = int(
+                thread_target.get("text_tokens", 0) or 0
+            )
+            redundant_thinking = str(
+                thread_target.get("thinking", "") or ""
+            )
+            if redundant_thinking:
+                existing_thinking = str(target.get("thinking", "") or "")
+                if redundant_thinking not in existing_thinking:
+                    target["thinking"] = existing_thinking + redundant_thinking
+                    target["thinking_tokens"] = int(
+                        target.get("thinking_tokens", 0) or 0
+                    ) + int(thread_target.get("thinking_tokens", 0) or 0)
+            aliases = list(target.get("thread_aliases", []) or [])
+            for alias in (
+                thread_target.get("thread", ""),
+                *(thread_target.get("thread_aliases", []) or []),
+            ):
+                alias = str(alias or "").strip()
+                if alias and alias not in aliases:
+                    aliases.append(alias)
+            target["thread_aliases"] = aliases
+            self._generation_token_count = max(
+                0, self._generation_token_count - redundant_text_tokens
+            )
+            self._active_request_segments.remove(thread_target)
 
         previous_tokens = int(target.get("text_tokens", 0) or 0)
         current_tokens = self._count_tokens(content)
@@ -5773,11 +5816,14 @@ class _InputOutputDialog(QDialog):
                 segment.get("order_key", (2, float("inf"), 0, 0))
             )
         )
-        self._request_segment_by_thread = {
-            str(segment.get("thread", "")): index
-            for index, segment in enumerate(self._active_request_segments)
-            if str(segment.get("thread", ""))
-        }
+        self._request_segment_by_thread = {}
+        for index, segment in enumerate(self._active_request_segments):
+            thread_keys = [segment.get("thread", "")]
+            thread_keys.extend(segment.get("thread_aliases", []) or [])
+            for thread_key in thread_keys:
+                thread_key = str(thread_key or "").strip()
+                if thread_key:
+                    self._request_segment_by_thread[thread_key] = index
 
     @staticmethod
     def _thread_key_from_log(line, source_thread=None):
@@ -5800,6 +5846,7 @@ class _InputOutputDialog(QDialog):
         thread_key = self._thread_key_from_log(line, source_thread)
         segment_number = len(self._active_request_segments) + 1
         request_label = self._request_label_from_log(line, segment_number)
+        incoming_generic = request_label.lower().startswith("request ")
         existing_index = self._request_segment_by_thread.get(thread_key)
         if (
             thread_key
@@ -5808,14 +5855,14 @@ class _InputOutputDialog(QDialog):
         ):
             existing = self._active_request_segments[existing_index]
             existing_label = str(existing.get("label", "") or "")
-            existing_generic = existing_label.startswith("Request ")
-            incoming_generic = request_label.startswith("Request ")
+            existing_generic = existing_label.lower().startswith("request ")
             # Provider/client layers can report "API call in progress" more
             # than once for the same worker thread. Those are status updates,
             # not new outbound requests, even after thinking has started.
-            # Reuse the card until a response marks it complete; a later call
-            # on the same thread can then open a fresh card for a real retry.
-            if not existing.get("complete"):
+            # Generic retry/status records stay on the same request even after
+            # a provider has emitted an early stream-complete boundary.  A
+            # genuinely new request supplies a new detailed dispatch label.
+            if not existing.get("complete") or incoming_generic:
                 incoming_order_key = self._request_order_from_log(
                     line, existing_index + 1
                 )
@@ -6032,7 +6079,7 @@ class _InputOutputDialog(QDialog):
             self._stream_phase_by_thread[thread_key] = phase
 
         if stripped.startswith(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):
-            self._apply_direct_response_payload(stripped)
+            self._apply_direct_response_payload(stripped, source_thread)
             return "payload"
 
         # Provider transport banners are useful in the main application log,
@@ -6228,6 +6275,7 @@ class _InputOutputDialog(QDialog):
                         if segment is not None:
                             segment["content"] += chunk
                             segment["phase"] = "text"
+                            segment["complete"] = False
                             generation_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
                         output_changed = True
                     elif kind == "thinking":
@@ -6236,6 +6284,7 @@ class _InputOutputDialog(QDialog):
                         if segment is not None:
                             segment["thinking"] += value + "\n"
                             segment["phase"] = "thinking"
+                            segment["complete"] = False
                             thinking_batches.setdefault(id(segment), [segment, []])[1].append(
                                 value + "\n"
                             )
