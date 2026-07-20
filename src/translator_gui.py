@@ -1980,11 +1980,9 @@ class _InputOutputDialog(QDialog):
         if configured_glossary_override not in {
             'none', 'no_glossary', 'manual'
         }:
-            # The three-way setting defaults to inheriting the parent
-            # translator. Legacy booleans are intentionally not promoted into
-            # an override until the user explicitly selects one of the new
-            # radio options.
-            configured_glossary_override = 'none'
+            # Preserve Direct Text's safe default: do not use or generate a
+            # glossary unless the user explicitly chooses another mode.
+            configured_glossary_override = 'no_glossary'
         self.no_glossary_override_radio.setChecked(
             configured_glossary_override == 'none'
         )
