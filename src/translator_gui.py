@@ -1484,11 +1484,10 @@ class _InputOutputDialog(QDialog):
         self._run_started_at = 0.0
         self._render_pending = False
         self._rendered_message_cache = {}
-        # Direct Text reparses a rich transcript while streams are active.
-        # Default to a stable viewport; users can opt back into follow-tail
-        # behavior from Settings or the transcript context menu.
+        # Follow newly streamed text by default. Users can opt into a fixed
+        # viewport from Settings or the transcript context menu.
         self._output_auto_scroll_disabled = bool(
-            translator.config.get('direct_text_disable_auto_scroll', True)
+            translator.config.get('direct_text_disable_auto_scroll', False)
         )
         self._chat_zoom_level = 0
         self._chat_zoom_percent = 100
@@ -1541,7 +1540,6 @@ class _InputOutputDialog(QDialog):
             "border-bottom: 2px solid #5a9fd4; background: #2d2d2d; }"
             "QFrame#chatSidebar { background: #181818; "
             "border-right: 1px solid #4a5568; }"
-            "QLabel#chatSidebarTitle { font-size: 10pt; font-weight: 700; }"
             "QListWidget#chatHistoryList { background: transparent; border: none; "
             "outline: none; padding: 0; }"
             "QListWidget#chatHistoryList::item { color: #cbd5e1; "
@@ -1706,10 +1704,6 @@ class _InputOutputDialog(QDialog):
         sidebar_layout = QVBoxLayout(self.chat_sidebar)
         sidebar_layout.setContentsMargins(10, 12, 10, 12)
         sidebar_layout.setSpacing(8)
-
-        sidebar_title = QLabel("Chats")
-        sidebar_title.setObjectName("chatSidebarTitle")
-        sidebar_layout.addWidget(sidebar_title)
 
         self.chat_list = QListWidget()
         self.chat_list.setObjectName("chatHistoryList")
@@ -1984,7 +1978,7 @@ class _InputOutputDialog(QDialog):
         )
         self.disable_auto_scroll_checkbox.setToolTip(
             "Keep the Direct Text transcript at its current position while "
-            "requests stream. This is enabled by default."
+            "requests stream."
         )
         self.disable_auto_scroll_checkbox.toggled.connect(
             self._set_output_auto_scroll_disabled
@@ -3020,7 +3014,10 @@ class _InputOutputDialog(QDialog):
             return
         session["draft"] = self.input_box.toPlainText()
         session["attachment"] = self._pending_attachment
-        session["output_folder"] = self._last_output_folder
+        # ``_last_output_folder`` is the link for the most recent response. For
+        # attachment requests that points at the attachment-specific output
+        # tree, not at the persistent conversation root. The root is assigned
+        # only by _conversation_output_folder/_remember_output_folder.
         session["expanded"] = set(self._expanded_processing_messages)
         self._schedule_chat_history_save()
 
@@ -5029,6 +5026,22 @@ class _InputOutputDialog(QDialog):
         existing = str(session.get("output_folder", "") or "")
         if existing:
             existing = os.path.abspath(existing)
+            # Repair histories saved by the old attachment behavior, which
+            # could replace the conversation root with a descendant attachment
+            # directory. A managed conversation root is always directly below
+            # the ``Direct Text`` directory.
+            candidate = existing
+            while True:
+                parent = os.path.dirname(candidate)
+                if os.path.basename(parent).casefold() == "direct text":
+                    if candidate != existing:
+                        existing = candidate
+                        session["output_folder"] = existing
+                        self._schedule_chat_history_save()
+                    break
+                if not parent or parent == candidate:
+                    break
+                candidate = parent
             os.makedirs(existing, exist_ok=True)
             return existing
 
@@ -5129,7 +5142,12 @@ class _InputOutputDialog(QDialog):
         )[0]
         safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', source_stem)
         safe_stem = safe_stem.rstrip(" .")[:120] or "Attachment"
-        target_folder = os.path.join(conversation_folder, safe_stem)
+        # Keep run-style attachment trees in their own namespace so an
+        # attachment can never become the destination for ``Direct Text N``
+        # files created by ordinary composer-only messages.
+        target_folder = os.path.join(
+            conversation_folder, "Attachments", safe_stem
+        )
         os.makedirs(target_folder, exist_ok=True)
         return target_folder
 
