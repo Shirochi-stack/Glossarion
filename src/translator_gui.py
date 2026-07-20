@@ -5595,6 +5595,11 @@ class _InputOutputDialog(QDialog):
         if metadata_match:
             label = " ".join(metadata_match.group(0).split())
             return label[0].upper() + label[1:]
+        if re.search(r"\brequest\s*\(\s*metadata\s*\)", value, re.IGNORECASE):
+            # This is a provider lifecycle label, not generated response text.
+            # Keep its temporary in-flight card readable; finalization removes
+            # it if the provider never emits model content for this channel.
+            return "Metadata translation"
         chapter_match = re.search(
             r"\b(chapter|section)\s+([^\s(),:]+)"
             r"(?:\s*(?:\(|,)?\s*chunk\s+(\d+)\s*/\s*(\d+)\s*\)?)?",
@@ -5768,6 +5773,7 @@ class _InputOutputDialog(QDialog):
             target["request_number"] = request_number
         target["content"] = content
         target["text_tokens"] = current_tokens
+        target["status_only"] = False
         target["phase"] = "processing"
         target["complete"] = True
         self._generation_token_count += current_tokens - previous_tokens
@@ -5889,6 +5895,10 @@ class _InputOutputDialog(QDialog):
             "phase": "processing",
             "thinking_tokens": 0,
             "text_tokens": 0,
+            # Dispatch/progress records create the card before model output is
+            # available.  Content, reasoning, or a structured response payload
+            # promotes it to a real response card.
+            "status_only": True,
             "complete": False,
             "order_key": self._request_order_from_log(
                 line, segment_number
@@ -6274,6 +6284,7 @@ class _InputOutputDialog(QDialog):
                         self._streamed_content += chunk
                         if segment is not None:
                             segment["content"] += chunk
+                            segment["status_only"] = False
                             segment["phase"] = "text"
                             segment["complete"] = False
                             generation_batches.setdefault(id(segment), [segment, []])[1].append(chunk)
@@ -6283,6 +6294,7 @@ class _InputOutputDialog(QDialog):
                         self._append_thinking(value + "\n", streamed_thinking=True)
                         if segment is not None:
                             segment["thinking"] += value + "\n"
+                            segment["status_only"] = False
                             segment["phase"] = "thinking"
                             segment["complete"] = False
                             thinking_batches.setdefault(id(segment), [segment, []])[1].append(
@@ -7143,7 +7155,24 @@ class _InputOutputDialog(QDialog):
         if not self._assistant_message_active:
             return
         if self._active_request_segments:
-            for segment in self._active_request_segments:
+            segments_to_commit = list(self._active_request_segments)
+            if len(segments_to_commit) > 1 or completion_message:
+                # API clients emit lifecycle-only requests for bookkeeping
+                # channels such as EPUB metadata.  If that channel produced no
+                # model stream at all, it is not a second response and must not
+                # become a fabricated "No translated output" card beside the
+                # real chapter/header responses.
+                segments_to_commit = [
+                    segment for segment in segments_to_commit
+                    if not (
+                        segment.get("status_only", False)
+                        and not str(segment.get("content", "") or "").strip()
+                        and not str(segment.get("thinking", "") or "").strip()
+                        and int(segment.get("thinking_tokens", 0) or 0) == 0
+                        and int(segment.get("text_tokens", 0) or 0) == 0
+                    )
+                ]
+            for segment in segments_to_commit:
                 segment["complete"] = True
                 segment["phase"] = "processing"
                 content = str(segment.get("content", "") or "").strip()
@@ -7685,6 +7714,7 @@ class _InputOutputDialog(QDialog):
                 "phase": "processing",
                 "thinking_tokens": 0,
                 "text_tokens": 0,
+                "status_only": False,
                 "complete": True,
                 "order_key": (
                     0,
