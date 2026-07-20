@@ -1416,11 +1416,6 @@ class _InputOutputDialog(QDialog):
     # message on the GUI thread.
     _ACTIVE_STREAM_START_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_START_7F31"
     _ACTIVE_STREAM_END_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_END_7F31"
-    _INLINE_RESPONSE_SPACER_DATA_URI = (
-        "data:image/gif;base64,"
-        "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-    )
-
     def __init__(self, translator):
         super().__init__(translator)
         from collections import deque
@@ -3595,6 +3590,41 @@ class _InputOutputDialog(QDialog):
         except RuntimeError:
             output_box = None
             output_viewport = None
+        inline_editor = getattr(self, "_inline_response_editor_box", None)
+        try:
+            inline_editor_viewport = (
+                inline_editor.viewport() if inline_editor is not None else None
+            )
+        except RuntimeError:
+            inline_editor = None
+            inline_editor_viewport = None
+        if watched in (
+            inline_editor,
+            inline_editor_viewport,
+        ) and event.type() == QEvent.Wheel:
+            wheel_delta = event.angleDelta().y()
+            pixel_delta = event.pixelDelta().y()
+            if not wheel_delta:
+                wheel_delta = pixel_delta
+            if wheel_delta:
+                if event.modifiers() & Qt.ControlModifier:
+                    self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
+                elif output_box is not None:
+                    # The inline editor is fitted to its document height, so it
+                    # has no useful independent scrolling. Route an ordinary
+                    # wheel gesture to the conversation viewport instead.
+                    scrollbar = output_box.verticalScrollBar()
+                    if pixel_delta:
+                        scroll_amount = pixel_delta
+                    else:
+                        scroll_amount = int(
+                            (wheel_delta / 120.0)
+                            * max(1, scrollbar.singleStep())
+                            * 3
+                        )
+                    scrollbar.setValue(scrollbar.value() - scroll_amount)
+                event.accept()
+                return True
         if watched in (
             input_box,
             input_viewport,
@@ -4037,8 +4067,37 @@ class _InputOutputDialog(QDialog):
         self._schedule_chat_history_save()
 
     def _show_output_context_menu(self, position):
-        """Add the same explicit auto-scroll control offered by the main log."""
+        """Offer response actions plus the main log's auto-scroll control."""
         menu = self.output_box.createStandardContextMenu()
+        message_index = self._message_index_at_output_position(position)
+        if self._is_saved_assistant_message(message_index):
+            menu.addSeparator()
+            can_edit, can_open, can_copy = (
+                self._response_context_action_availability(message_index)
+            )
+            edit_action = menu.addAction("✏️ Edit output")
+            edit_action.setEnabled(can_edit)
+            edit_action.triggered.connect(
+                lambda _checked=False, index=message_index: (
+                    self._handle_output_anchor(f"direct-edit:{index}")
+                )
+            )
+            message = self._chat_messages[message_index]
+            output_folder = str(message[4] if len(message) > 4 else "")
+            open_action = menu.addAction("📁 Open output folder")
+            open_action.setEnabled(can_open)
+            open_action.triggered.connect(
+                lambda _checked=False, index=message_index: (
+                    self._handle_output_anchor(f"direct-output:{index}")
+                )
+            )
+            copy_action = menu.addAction("📋 Copy output")
+            copy_action.setEnabled(can_copy)
+            copy_action.triggered.connect(
+                lambda _checked=False, index=message_index: (
+                    self._handle_output_anchor(f"direct-copy:{index}")
+                )
+            )
         menu.addSeparator()
         auto_scroll_action = menu.addAction(
             "Enable Auto Scroll"
@@ -4051,6 +4110,94 @@ class _InputOutputDialog(QDialog):
             )
         )
         menu.exec(self.output_box.viewport().mapToGlobal(position))
+
+    def _is_saved_assistant_message(self, message_index):
+        """Return whether an index identifies a persisted assistant response."""
+        try:
+            return (
+                0 <= int(message_index) < len(self._chat_messages)
+                and self._chat_messages[int(message_index)][0] == "assistant"
+            )
+        except (IndexError, TypeError, ValueError):
+            return False
+
+    def _response_context_action_availability(self, message_index):
+        """Return edit, folder, and copy availability for a saved response."""
+        if not self._is_saved_assistant_message(message_index):
+            return False, False, False
+        message = self._chat_messages[int(message_index)]
+        output_folder = str(message[4] if len(message) > 4 else "").strip()
+        can_open = bool(output_folder and os.path.isdir(output_folder))
+
+        inline_content = str(message[1] if len(message) > 1 else "")
+        storage = self._assistant_storage_for(message)
+        content_reference = str(storage.get("content_path", "") or "").strip()
+        content_path = (
+            self._resolve_history_file_reference(content_reference)
+            if content_reference
+            else ""
+        )
+        stored_content_exists = bool(
+            content_path and os.path.isfile(content_path)
+        )
+        can_copy = bool(inline_content.strip() or stored_content_exists)
+        # Responses without a file-backed reference can still be edited and
+        # receive their managed files on save. A stale reference cannot.
+        can_edit = bool(
+            can_copy and (not content_reference or stored_content_exists)
+        )
+        return can_edit, can_open, can_copy
+
+    def _message_index_at_output_position(self, position):
+        """Resolve a transcript right-click to its exact rendered message row."""
+        try:
+            document_position = self.output_box.cursorForPosition(position).position()
+            document = self.output_box.document()
+        except (AttributeError, RuntimeError):
+            return -1
+        for message_index in range(len(self._chat_messages)):
+            start = document.find(self._message_row_start_marker(message_index))
+            end = document.find(self._message_row_end_marker(message_index))
+            if start.isNull() or end.isNull():
+                continue
+            if start.selectionStart() <= document_position <= end.selectionEnd():
+                return message_index
+        return -1
+
+    def _show_inline_response_context_menu(self, position):
+        """Extend the active response editor menu with whole-output actions."""
+        editor = getattr(self, "_inline_response_editor_box", None)
+        message_index = int(getattr(self, "_inline_response_edit_index", -1))
+        if editor is None:
+            return
+        menu = editor.createStandardContextMenu()
+        menu.addSeparator()
+        edit_action = menu.addAction("✏️ Edit output")
+        edit_action.setEnabled(self._is_saved_assistant_message(message_index))
+        edit_action.triggered.connect(
+            lambda _checked=False, index=message_index: (
+                self._open_response_editor(index)
+            )
+        )
+        output_folder = ""
+        if self._is_saved_assistant_message(message_index):
+            message = self._chat_messages[message_index]
+            output_folder = str(message[4] if len(message) > 4 else "")
+        open_action = menu.addAction("📁 Open output folder")
+        open_action.setEnabled(bool(output_folder and os.path.isdir(output_folder)))
+        open_action.triggered.connect(
+            lambda _checked=False, index=message_index: (
+                self._handle_output_anchor(f"direct-output:{index}")
+            )
+        )
+        copy_action = menu.addAction("📋 Copy output")
+        copy_action.setEnabled(bool(editor.toPlainText().strip()))
+        copy_action.triggered.connect(
+            lambda _checked=False, text_editor=editor: (
+                QApplication.clipboard().setText(text_editor.toPlainText())
+            )
+        )
+        menu.exec(editor.viewport().mapToGlobal(position))
 
     def _show_input_context_menu(self, position):
         """Expose native Undo/Redo and editing actions for the composer."""
@@ -4337,7 +4484,7 @@ class _InputOutputDialog(QDialog):
         self._message_text_cache.clear()
         self._rendered_message_cache.clear()
         self._save_chat_history()
-        self._render_output()
+        self._render_output(preserve_viewport=True)
         return markdown_path, html_path
 
     @staticmethod
@@ -4349,6 +4496,18 @@ class _InputOutputDialog(QDialog):
     @staticmethod
     def _inline_response_editor_end_marker(message_index):
         return f"DIRECT_TEXT_RESPONSE_CONTENT_END_{int(message_index)}_7F31"
+
+    @staticmethod
+    def _inline_response_spacer_marker(message_index):
+        return f"DIRECT_TEXT_RESPONSE_SPACER_{int(message_index)}_7F31"
+
+    @staticmethod
+    def _message_row_start_marker(message_index):
+        return f"DIRECT_TEXT_MESSAGE_ROW_START_{int(message_index)}_7F31"
+
+    @staticmethod
+    def _message_row_end_marker(message_index):
+        return f"DIRECT_TEXT_MESSAGE_ROW_END_{int(message_index)}_7F31"
 
     @staticmethod
     def _response_layout_marker_html(marker):
@@ -4388,22 +4547,50 @@ class _InputOutputDialog(QDialog):
         return max(260, min(520, int(viewport_height * 0.58)))
 
     def _rich_response_editor_content_height(self, source_editor=None):
-        """Return the rich document's natural height at its current editor width."""
+        """Return the rich document height without trailing empty editor space."""
         source_editor = source_editor or self._inline_response_editor_box
         if source_editor is None:
             return 0
         try:
-            document_height = float(
-                source_editor.document().documentLayout().documentSize().height()
-            )
-            return max(180, min(12000, int(document_height + 8)))
+            document = source_editor.document()
+            layout = document.documentLayout()
+            document_height = float(layout.documentSize().height())
+
+            # QTextDocument can retain trailing empty blocks (and, depending on
+            # the imported HTML, an editor-sized layout tail). The final
+            # meaningful block is the real visual bottom of the response.
+            block = document.lastBlock()
+            content_bottom = 0.0
+            while block.isValid():
+                block_rect = layout.blockBoundingRect(block)
+                if block.text().strip() or not block.previous().isValid():
+                    content_bottom = float(block_rect.bottom())
+                    break
+                block = block.previous()
+            if content_bottom > 0:
+                document_height = min(
+                    document_height,
+                    content_bottom + float(document.documentMargin()) + 4.0,
+                )
+            return max(96, min(12000, int(document_height + 4)))
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return 0
 
     def _set_inline_response_placeholder_height(self, height):
-        """Resize only the transparent spacer in the existing chat document."""
+        """Give the editor placeholder an exact device-independent height."""
+        from PySide6.QtGui import QTextBlockFormat
+
         try:
             document = self.output_box.document()
+            scrollbar = self.output_box.verticalScrollBar()
+            previous_scroll = scrollbar.value()
+            previous_bottom_gap = max(
+                0, scrollbar.maximum() - previous_scroll
+            )
+            bottom_threshold = max(
+                32, min(180, int(scrollbar.pageStep() * 0.12))
+            )
+            preserve_from_bottom = previous_bottom_gap <= bottom_threshold
             message_index = int(self._inline_response_edit_index)
             start = document.find(self._inline_response_editor_marker(message_index))
             end = document.find(
@@ -4411,14 +4598,36 @@ class _InputOutputDialog(QDialog):
             )
             if start.isNull() or end.isNull():
                 return False
-            cursor = QTextCursor(document)
-            cursor.setPosition(start.selectionEnd())
-            cursor.setPosition(end.selectionStart(), QTextCursor.KeepAnchor)
-            cursor.insertHtml(
-                "<img src='"
-                + self._INLINE_RESPONSE_SPACER_DATA_URI
-                + f"' width='1' height='{int(height)}'>"
+            spacer_marker = self._inline_response_spacer_marker(message_index)
+            spacer_cursor = document.find(spacer_marker)
+            if spacer_cursor.isNull():
+                cursor = QTextCursor(document)
+                cursor.setPosition(start.selectionEnd())
+                cursor.setPosition(end.selectionStart(), QTextCursor.KeepAnchor)
+                cursor.insertHtml(
+                    "<div>"
+                    + self._response_layout_marker_html(spacer_marker)
+                    + "</div>"
+                )
+                spacer_cursor = document.find(spacer_marker)
+            if spacer_cursor.isNull():
+                return False
+            block_format = spacer_cursor.blockFormat()
+            block_format.setTopMargin(0)
+            block_format.setBottomMargin(0)
+            block_format.setLineHeight(
+                float(max(1, int(height))),
+                QTextBlockFormat.FixedHeight.value,
             )
+            spacer_cursor.setBlockFormat(block_format)
+            if preserve_from_bottom:
+                scrollbar.setSliderPosition(
+                    max(0, scrollbar.maximum() - previous_bottom_gap)
+                )
+            else:
+                scrollbar.setSliderPosition(
+                    min(previous_scroll, scrollbar.maximum())
+                )
             return True
         except (AttributeError, RuntimeError):
             return False
@@ -4499,12 +4708,8 @@ class _InputOutputDialog(QDialog):
             return
 
     def _focus_inline_response_editor(self, message_index):
-        """Reveal the edited card, place its overlay, and focus its text area."""
+        """Place and focus the editor without moving the conversation viewport."""
         if int(self._inline_response_edit_index) != int(message_index):
-            return
-        try:
-            self.output_box.scrollToAnchor(f"direct-message-{int(message_index)}")
-        except RuntimeError:
             return
         self._position_inline_response_editor()
         source_editor = self._inline_response_editor_box
@@ -4515,16 +4720,8 @@ class _InputOutputDialog(QDialog):
 
     def _cancel_inline_response_editor(self):
         """Leave edit mode and restore the rendered response card."""
-        message_index = int(self._inline_response_edit_index)
         self._destroy_inline_response_editor()
-        self._render_output()
-        if message_index >= 0:
-            QTimer.singleShot(
-                0,
-                lambda index=message_index: self.output_box.scrollToAnchor(
-                    f"direct-message-{index}"
-                ),
-            )
+        self._render_output(preserve_viewport=True)
 
     @staticmethod
     def _response_edit_source_kind(source):
@@ -4691,12 +4888,6 @@ class _InputOutputDialog(QDialog):
             )
             self._open_response_editor(message_index, initial_source=reopen_source)
             return
-        QTimer.singleShot(
-            0,
-            lambda index=message_index: self.output_box.scrollToAnchor(
-                f"direct-message-{index}"
-            ),
-        )
 
     def _open_response_editor(self, message_index, initial_source=None):
         """Edit one completed response directly inside its conversation card."""
@@ -4744,8 +4935,16 @@ class _InputOutputDialog(QDialog):
         source_editor.setObjectName("directInlineResponseEditorBox")
         source_editor.setFrameShape(QFrame.NoFrame)
         source_editor.setLineWrapMode(QTextEdit.WidgetWidth)
+        source_editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        source_editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         source_editor.setUndoRedoEnabled(True)
         source_editor.setFont(self.output_box.font())
+        source_editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        source_editor.customContextMenuRequested.connect(
+            self._show_inline_response_context_menu
+        )
+        source_editor.installEventFilter(self)
+        source_editor.viewport().installEventFilter(self)
         estimated_width = max(
             320, int(self.output_box.viewport().width() * 0.79)
         )
@@ -4757,13 +4956,15 @@ class _InputOutputDialog(QDialog):
         source_editor.document().setTextWidth(max(300, estimated_width - 4))
         natural_height = self._rich_response_editor_content_height(source_editor)
         if natural_height > 0:
-            reserved_height = (
-                min(reserved_height, natural_height)
-                if reserved_height > 0
-                else natural_height
-            )
+            # The rendered card measurement is only a bootstrap size. Once the
+            # rich editor has laid out the parsed response, its content height
+            # is authoritative and must replace that estimate completely.
+            reserved_height = natural_height
         source_editor.textChanged.connect(
             self._schedule_inline_response_editor_resize
+        )
+        source_editor.document().documentLayout().documentSizeChanged.connect(
+            lambda _size: self._schedule_inline_response_editor_resize()
         )
 
         save_shortcut = QShortcut(
@@ -4781,7 +4982,7 @@ class _InputOutputDialog(QDialog):
         self._inline_response_source_kind = self._response_edit_source_kind(source)
         self._inline_response_reserved_height = reserved_height
         source_editor.hide()
-        self._render_output()
+        self._render_output(preserve_viewport=True)
         QTimer.singleShot(
             0,
             lambda index=message_index: self._focus_inline_response_editor(index),
@@ -6061,7 +6262,7 @@ class _InputOutputDialog(QDialog):
             QTimer.singleShot(0, self._position_inline_response_editor)
         return True
 
-    def _render_output(self, active_only=False):
+    def _render_output(self, active_only=False, preserve_viewport=False):
         import html as html_lib
 
         current_session = self._current_chat_session()
@@ -6154,7 +6355,15 @@ class _InputOutputDialog(QDialog):
                         )
                     )
                     active_marker_added = True
-                row_anchor = f"<a name='direct-message-{message_index}'></a>"
+                row_anchor = (
+                    f"<a name='direct-message-{message_index}'></a>"
+                    + self._active_stream_marker_html(
+                        self._message_row_start_marker(message_index)
+                    )
+                )
+                row_end_html = self._active_stream_marker_html(
+                    self._message_row_end_marker(message_index)
+                )
                 role = message[0]
                 content = message[1]
                 if role in ("user", "user_file"):
@@ -6211,7 +6420,9 @@ class _InputOutputDialog(QDialog):
                         "<table class='chat-row user-row' width='100%' cellspacing='0' "
                         "cellpadding='0'><tr><td width='17%'></td>"
                         f"{bubble_html}"
-                        "</tr></table><div class='message-gap'>&nbsp;</div>"
+                        "</tr></table>"
+                        + row_end_html
+                        + "<div class='message-gap'>&nbsp;</div>"
                     )
                     continue
 
@@ -6225,10 +6436,8 @@ class _InputOutputDialog(QDialog):
                 )
                 if inline_editing:
                     editor_height = self._inline_response_editor_height()
-                    rendered = (
-                        "<img class='inline-response-editor-placeholder' "
-                        f"src='{self._INLINE_RESPONSE_SPACER_DATA_URI}' "
-                        f"width='1' height='{editor_height}'>"
+                    rendered = self._response_layout_marker_html(
+                        self._inline_response_spacer_marker(message_index)
                     )
                 elif str(content or "").strip():
                     current_session = self._current_chat_session()
@@ -6405,7 +6614,8 @@ class _InputOutputDialog(QDialog):
                     f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
                     f"{assistant_bubble_html}"
                     "<td width='8%'></td></tr></table>"
-                    "<div class='message-gap'>&nbsp;</div>"
+                    + row_end_html
+                    + "<div class='message-gap'>&nbsp;</div>"
                 )
 
             if not active_only and self._assistant_message_active:
@@ -6474,10 +6684,20 @@ class _InputOutputDialog(QDialog):
             # The first active update can race the initial full render.  Fall
             # back once so the sentinels are installed, then later updates are
             # localized.
-            return self._render_output(active_only=False)
+            return self._render_output(
+                active_only=False,
+                preserve_viewport=preserve_viewport,
+            )
 
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
+        previous_bottom_gap = max(
+            0, scrollbar.maximum() - previous_scroll
+        )
+        bottom_threshold = max(
+            32, min(180, int(scrollbar.pageStep() * 0.12))
+        )
+        preserve_from_bottom = previous_bottom_gap <= bottom_threshold
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
         previous_horizontal_scroll = horizontal_scrollbar.value()
         body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
@@ -6552,8 +6772,6 @@ class _InputOutputDialog(QDialog):
             f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
-            ".inline-response-editor-placeholder { border: none; padding: 0; "
-            "margin: 0; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
             ".glossary-request-row, .glossary-request-row td { border: none; }"
@@ -6598,9 +6816,11 @@ class _InputOutputDialog(QDialog):
         # setHtml() temporarily resets the viewport before layout completes.
         # Suppress that intermediate repaint when follow-tail is disabled, then
         # restore both axes before presenting the new document in one frame.
+        keep_viewport = bool(
+            self._output_auto_scroll_disabled or preserve_viewport
+        )
         freeze_viewport = bool(
-            self._output_auto_scroll_disabled
-            and self.output_box.updatesEnabled()
+            keep_viewport and self.output_box.updatesEnabled()
         )
         if freeze_viewport:
             self.output_box.setUpdatesEnabled(False)
@@ -6612,10 +6832,19 @@ class _InputOutputDialog(QDialog):
             # default stylesheet when localized streaming updates are inserted.
             self.output_box.document().setDefaultStyleSheet(style_sheet)
             self.output_box.setHtml(document)
-            if self._output_auto_scroll_disabled:
-                scrollbar.setSliderPosition(
-                    min(previous_scroll, scrollbar.maximum())
+            if self._inline_response_editor_frame is not None:
+                self._set_inline_response_placeholder_height(
+                    self._inline_response_editor_height()
                 )
+            if keep_viewport:
+                if preserve_from_bottom:
+                    scrollbar.setSliderPosition(
+                        max(0, scrollbar.maximum() - previous_bottom_gap)
+                    )
+                else:
+                    scrollbar.setSliderPosition(
+                        min(previous_scroll, scrollbar.maximum())
+                    )
                 horizontal_scrollbar.setSliderPosition(
                     min(previous_horizontal_scroll, horizontal_scrollbar.maximum())
                 )
