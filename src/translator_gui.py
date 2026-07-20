@@ -2476,7 +2476,13 @@ class _InputOutputDialog(QDialog):
         if not isinstance(storage, dict):
             return {}
         normalized = {}
-        for key in ("content_path", "thinking_path"):
+        for key in (
+            "content_path",
+            "content_text_path",
+            "content_html_path",
+            "content_xhtml_path",
+            "thinking_path",
+        ):
             value = str(storage.get(key, "") or "").strip()
             if value:
                 normalized[key] = value
@@ -2567,6 +2573,103 @@ class _InputOutputDialog(QDialog):
         self._message_text_cache[cache_key] = value
         return value
 
+    def _response_html_document(self, source):
+        """Return a standalone HTML document matching one editable response."""
+        import re
+
+        value = str(source or "").replace("\r\n", "\n").replace("\r", "\n")
+        if re.search(
+            r"<(?:!doctype\s+html|html\b|head\b|body\b)",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            return value
+        rendered = self._markup_to_html(value)
+        return (
+            "<!DOCTYPE html>\n"
+            "<html><head><meta charset=\"utf-8\"></head><body>\n"
+            f"{rendered}\n"
+            "</body></html>\n"
+        )
+
+    def _response_xhtml_document(self, source):
+        """Return an XML-serialized XHTML counterpart for one response."""
+        html_document = self._response_html_document(source)
+        try:
+            from lxml import etree
+            from lxml import html as lxml_html
+
+            root = lxml_html.document_fromstring(html_document)
+            root.set("xmlns", "http://www.w3.org/1999/xhtml")
+            serialized = etree.tostring(
+                root,
+                encoding="unicode",
+                method="xml",
+                pretty_print=True,
+            )
+            return (
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<!DOCTYPE html>\n'
+                f"{serialized}\n"
+            )
+        except Exception:
+            import re
+
+            namespaced = re.sub(
+                r"<html(\s|>)",
+                r'<html xmlns="http://www.w3.org/1999/xhtml"\1',
+                html_document,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            return '<?xml version="1.0" encoding="utf-8"?>\n' + namespaced
+
+    def _write_response_files(self, markdown_path, source):
+        """Update an editable response's Markdown, text, HTML, and XHTML files."""
+        markdown_path = os.path.abspath(str(markdown_path or ""))
+        response_stem = os.path.splitext(markdown_path)[0]
+        text_path = response_stem + ".txt"
+        html_path = response_stem + ".html"
+        xhtml_path = response_stem + ".xhtml"
+        html_document = self._response_html_document(source)
+        xhtml_document = self._response_xhtml_document(source)
+
+        targets = (
+            (markdown_path, str(source or "")),
+            (text_path, str(source or "")),
+            (html_path, html_document),
+            (xhtml_path, xhtml_document),
+        )
+        previous = {}
+        for path, _value in targets:
+            existed = os.path.isfile(path)
+            old_value = None
+            if existed:
+                try:
+                    with open(path, 'r', encoding='utf-8') as handle:
+                        old_value = handle.read()
+                except OSError:
+                    old_value = None
+            previous[path] = (existed, old_value)
+
+        try:
+            for path, value in targets:
+                _atomic_text_write(path, value)
+        except Exception:
+            # Best-effort rollback keeps all four representations synchronized
+            # if one target cannot be replaced.
+            for path, _value in targets:
+                existed, old_value = previous[path]
+                try:
+                    if existed and old_value is not None:
+                        _atomic_text_write(path, old_value)
+                    elif not existed and os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+            raise
+        return text_path, html_path, xhtml_path
+
     def _externalize_session_messages(self, session):
         """Move assistant bodies into files and return their compact JSON records."""
         messages = list(session.get("messages", []))
@@ -2618,7 +2721,21 @@ class _InputOutputDialog(QDialog):
                         message_directory,
                         f"{message_index + 1:06d}-{suffix}",
                     )
-                    _atomic_text_write(target_path, inline_text)
+                    if kind == "content":
+                        text_path, html_path, xhtml_path = self._write_response_files(
+                            target_path, inline_text
+                        )
+                        storage["content_text_path"] = (
+                            self._history_file_reference(text_path)
+                        )
+                        storage["content_html_path"] = (
+                            self._history_file_reference(html_path)
+                        )
+                        storage["content_xhtml_path"] = (
+                            self._history_file_reference(xhtml_path)
+                        )
+                    else:
+                        _atomic_text_write(target_path, inline_text)
                     storage[path_key] = self._history_file_reference(target_path)
                     storage[f"{kind}_chars"] = len(inline_text)
                     values[inline_index] = ""
@@ -4110,6 +4227,162 @@ class _InputOutputDialog(QDialog):
             pass
         QMessageBox.warning(self, "Output folder", f"Could not open:\n{folder}")
 
+    def _editable_response_paths(self, message_index):
+        """Return the managed Markdown/text/HTML/XHTML files for one response."""
+        session = self._current_chat_session()
+        if session is None:
+            return "", "", "", ""
+        conversation_folder = self._ensure_conversation_output_folder_for_session(
+            session
+        )
+        if not conversation_folder:
+            return "", "", "", ""
+        message_directory = os.path.join(conversation_folder, "Chat Messages")
+        markdown_path = os.path.join(
+            message_directory, f"{int(message_index) + 1:06d}-response.md"
+        )
+        response_stem = os.path.splitext(markdown_path)[0]
+        return (
+            markdown_path,
+            response_stem + ".txt",
+            response_stem + ".html",
+            response_stem + ".xhtml",
+        )
+
+    def _save_response_output_edit(self, message_index, edited_source):
+        """Persist an edited card to both formats and refresh its lazy caches."""
+        if not (0 <= int(message_index) < len(self._chat_messages)):
+            raise IndexError("Response message is no longer available")
+        message = self._chat_messages[int(message_index)]
+        if not message or message[0] != "assistant":
+            raise ValueError("Only assistant responses can be edited")
+
+        (
+            markdown_path,
+            _text_path,
+            _html_path,
+            _xhtml_path,
+        ) = self._editable_response_paths(message_index)
+        if not markdown_path:
+            raise OSError("The conversation output folder is unavailable")
+        text_path, html_path, xhtml_path = self._write_response_files(
+            markdown_path, edited_source
+        )
+
+        values = list(message[:6])
+        while len(values) < 6:
+            values.append("")
+        values[1] = ""
+        storage = self._normalize_message_storage(
+            message[6] if len(message) > 6 else None
+        )
+        storage["content_path"] = self._history_file_reference(markdown_path)
+        storage["content_text_path"] = self._history_file_reference(text_path)
+        storage["content_html_path"] = self._history_file_reference(html_path)
+        storage["content_xhtml_path"] = self._history_file_reference(xhtml_path)
+        storage["content_chars"] = len(str(edited_source or ""))
+        self._chat_messages[int(message_index)] = tuple(values + [storage])
+
+        self._message_text_cache.clear()
+        self._rendered_message_cache.clear()
+        self._save_chat_history()
+        self._reset_history_window()
+        self._render_output()
+        return markdown_path, html_path
+
+    def _open_response_editor(self, message_index):
+        """Open a plain-source editor for one completed response card."""
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        try:
+            message_index = int(message_index)
+            message = self._chat_messages[message_index]
+            if message[0] != "assistant":
+                return
+            source = self._assistant_message_text(
+                message, "content", message_index
+            )
+        except (IndexError, TypeError, ValueError):
+            return
+
+        storage = self._assistant_storage_for(message)
+        content_reference = str(storage.get("content_path", "") or "")
+        content_path = self._resolve_history_file_reference(content_reference)
+        if content_reference and not os.path.isfile(content_path):
+            QMessageBox.warning(
+                self,
+                "Response file unavailable",
+                "This response cannot be edited because its saved Markdown file "
+                "is missing or unreadable.",
+            )
+            return
+
+        request_label = str(message[5] if len(message) > 5 else "")
+        editor = QDialog(self)
+        editor.setWindowTitle(
+            f"Edit Direct Text Response{f' — {request_label}' if request_label else ''}"
+        )
+        editor.setWindowFlags(
+            editor.windowFlags()
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        editor.resize(980, 720)
+        editor.setMinimumSize(620, 440)
+        layout = QVBoxLayout(editor)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        heading = QLabel(
+            f"Edit response{f' · {request_label}' if request_label else ''}"
+        )
+        heading.setStyleSheet("font-size: 14pt; font-weight: 700;")
+        layout.addWidget(heading)
+        detail = QLabel(
+            "Saving updates this response's Markdown, plain-text, HTML, and XHTML files."
+        )
+        detail.setWordWrap(True)
+        detail.setStyleSheet("color: #cbd5e1;")
+        layout.addWidget(detail)
+
+        source_editor = QPlainTextEdit()
+        source_editor.setPlainText(source)
+        source_editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        source_editor.setUndoRedoEnabled(True)
+        layout.addWidget(source_editor, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save changes")
+        save_button.setDefault(True)
+        cancel_button.clicked.connect(editor.reject)
+        save_button.clicked.connect(editor.accept)
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(save_button)
+        layout.addLayout(buttons)
+
+        save_shortcut = QShortcut(
+            QKeySequence(QKeySequence.StandardKey.Save), editor
+        )
+        save_shortcut.activated.connect(editor.accept)
+        source_editor.setFocus()
+        source_editor.moveCursor(QTextCursor.Start)
+        if editor.exec() != QDialog.Accepted:
+            return
+
+        try:
+            self._save_response_output_edit(
+                message_index, source_editor.toPlainText()
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Could not save response",
+                f"The response files could not be updated.\n\n{exc}",
+            )
+
     def _handle_output_anchor(self, url):
         """Expand/collapse a response's processing details inside the chat."""
         try:
@@ -4178,6 +4451,14 @@ class _InputOutputDialog(QDialog):
                 1600,
                 lambda key=copied_key: self._clear_copy_confirmation(key),
             )
+            return
+        edit_prefix = "direct-edit:"
+        if target.startswith(edit_prefix):
+            try:
+                message_index = int(target[len(edit_prefix):])
+            except (TypeError, ValueError):
+                return
+            self._open_response_editor(message_index)
             return
         output_prefix = "direct-output:"
         if target.startswith(output_prefix):
@@ -5625,6 +5906,12 @@ class _InputOutputDialog(QDialog):
                         "title='Copy the complete output to the clipboard'>"
                         f"{copy_label}</a>"
                     )
+                    if message_index < len(self._chat_messages):
+                        message_actions.append(
+                            f"<a class='message-action' href='direct-edit:{message_index}' "
+                            "title='Edit this saved response'>"
+                            "✏️&nbsp;&nbsp;Edit output</a>"
+                        )
                 if output_folder:
                     message_actions.append(
                         f"<a class='message-action' href='direct-output:{message_index}' "
@@ -6517,7 +6804,7 @@ class _InputOutputDialog(QDialog):
         lines = [
             "## Extraction report summary",
             "",
-            f"**Source:** `{source_name}`",
+            f"**Source:** {source_name}",
             "",
             f"- **Extraction:** {ready_label} · {extraction_mode} mode · "
             f"{language}",
@@ -6538,7 +6825,7 @@ class _InputOutputDialog(QDialog):
             lines.extend(
                 (
                     "",
-                    "The complete `extraction_report.txt` and extracted metadata "
+                    "The complete extraction_report.txt and extracted metadata "
                     "are saved in the attachment output folder.",
                 )
             )
@@ -29641,18 +29928,112 @@ Important rules:
     def open_input_output_dialog(self):
         """Open (or focus) the chat-like raw text translation dialog."""
         dialog = getattr(self, '_input_output_dialog', None)
-        if dialog is None:
+        if dialog is not None:
+            try:
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                dialog.input_box.setFocus()
+                return
+            except RuntimeError:
+                self._input_output_dialog = None
+
+        loading_dialog = getattr(self, '_input_output_loading_dialog', None)
+        if loading_dialog is not None:
+            try:
+                loading_dialog.show()
+                loading_dialog.raise_()
+                loading_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._input_output_loading_dialog = None
+
+        # Constructing the complete chat UI includes parsing its history and
+        # rendering the recent transcript. Show a real window first so clicking
+        # Direct Text always receives immediate visual feedback.
+        loading_dialog = QDialog(self)
+        loading_dialog.setWindowTitle("Direct Text Translation")
+        loading_dialog.setObjectName("directTextLoadingDialog")
+        loading_dialog.setModal(False)
+        loading_dialog.setWindowFlags(
+            loading_dialog.windowFlags()
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        loading_dialog.resize(1040, 840)
+        loading_dialog.setMinimumSize(720, 560)
+        loading_dialog.setWindowIcon(self.windowIcon())
+
+        loading_layout = QVBoxLayout(loading_dialog)
+        loading_layout.setContentsMargins(48, 48, 48, 48)
+        loading_layout.addStretch(1)
+        loading_title = QLabel("💬  Loading Direct Text…")
+        loading_title.setAlignment(Qt.AlignCenter)
+        loading_title.setStyleSheet("font-size: 18pt; font-weight: 700;")
+        loading_layout.addWidget(loading_title)
+        loading_status = QLabel(
+            "Loading conversations from direct_text_chats.json and preparing "
+            "the chat interface."
+        )
+        loading_status.setObjectName("directTextLoadingStatus")
+        loading_status.setAlignment(Qt.AlignCenter)
+        loading_status.setWordWrap(True)
+        loading_status.setStyleSheet("color: #cbd5e1; font-size: 10.5pt;")
+        loading_layout.addSpacing(12)
+        loading_layout.addWidget(loading_status)
+        loading_progress = QProgressBar()
+        loading_progress.setRange(0, 0)
+        loading_progress.setTextVisible(False)
+        loading_progress.setMaximumWidth(380)
+        loading_layout.addSpacing(18)
+        loading_layout.addWidget(loading_progress, 0, Qt.AlignHCenter)
+        loading_layout.addStretch(1)
+
+        self._input_output_loading_dialog = loading_dialog
+        loading_dialog.show()
+        loading_dialog.raise_()
+        loading_dialog.activateWindow()
+        # Paint the shell now; build the expensive dialog on the next event-loop
+        # turn so this click handler returns without appearing unresponsive.
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        QTimer.singleShot(25, self._finish_open_input_output_dialog)
+
+    def _finish_open_input_output_dialog(self):
+        """Replace the responsive loading shell with the complete Direct Text UI."""
+        loading_dialog = getattr(self, '_input_output_loading_dialog', None)
+        if loading_dialog is None:
+            return
+        try:
+            if not loading_dialog.isVisible():
+                loading_dialog.deleteLater()
+                self._input_output_loading_dialog = None
+                return
+        except RuntimeError:
+            self._input_output_loading_dialog = None
+            return
+
+        try:
             dialog = _InputOutputDialog(self)
             self._input_output_dialog = dialog
-        try:
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()
             dialog.input_box.setFocus()
-        except RuntimeError:
-            dialog = _InputOutputDialog(self)
-            self._input_output_dialog = dialog
-            dialog.show()
+        except Exception as exc:
+            self._input_output_dialog = None
+            QMessageBox.critical(
+                self,
+                "Could not open Direct Text",
+                f"Direct Text could not be initialized.\n\n{exc}",
+            )
+        finally:
+            try:
+                loading_dialog.close()
+                loading_dialog.deleteLater()
+            except RuntimeError:
+                pass
+            self._input_output_loading_dialog = None
 
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
