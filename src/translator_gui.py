@@ -1530,6 +1530,10 @@ class _InputOutputDialog(QDialog):
         self._processing_spinner_active = False
         self._expanded_processing_messages = set()
         self._copied_message_key = None
+        self._inline_response_editor_frame = None
+        self._inline_response_editor_box = None
+        self._inline_response_edit_index = -1
+        self._inline_response_edit_session_id = None
         self._assistant_avatar_data_uri = ""
         self._assistant_avatar_width = 28
         self._assistant_avatar_height = 36
@@ -1581,6 +1585,15 @@ class _InputOutputDialog(QDialog):
             "QListWidget#chatHistoryList::item:selected { background: #2d2d2d; color: white; }"
             "QTextBrowser#chatTimeline { background: #1e1e1e; color: white; "
             "border: none; padding: 0; selection-background-color: #5a9fd4; }"
+            "QFrame#directInlineResponseEditor { background: #242424; border: none; }"
+            "QLabel#directInlineResponseEditorTitle { color: #cbd5e1; "
+            "font-size: 9pt; font-weight: 700; }"
+            "QLabel#directInlineResponseEditorDetail { color: #8fa2ba; font-size: 8pt; }"
+            "QPlainTextEdit#directInlineResponseEditorBox { background: #1e1e1e; "
+            "color: white; border: 1px solid #4a5568; border-radius: 8px; "
+            "padding: 9px; selection-background-color: #5a9fd4; }"
+            "QPushButton#directInlineResponseCancel, "
+            "QPushButton#directInlineResponseSave { min-height: 30px; padding: 0 13px; }"
             "QFrame#directComposerCard { background: #2d2d2d; border: 1px solid #4a5568; "
             "border-radius: 14px; }"
             "QFrame#directComposerCard:focus-within { border-color: #666666; }"
@@ -1793,6 +1806,12 @@ class _InputOutputDialog(QDialog):
         self.output_box.setContextMenuPolicy(Qt.CustomContextMenu)
         self.output_box.customContextMenuRequested.connect(self._show_output_context_menu)
         self.output_box.anchorClicked.connect(self._handle_output_anchor)
+        self.output_box.verticalScrollBar().valueChanged.connect(
+            self._position_inline_response_editor
+        )
+        self.output_box.horizontalScrollBar().valueChanged.connect(
+            self._position_inline_response_editor
+        )
         timeline_layout.addWidget(self.output_box, 1)
         self.chat_splitter.addWidget(timeline_shell)
 
@@ -3570,6 +3589,8 @@ class _InputOutputDialog(QDialog):
                     self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
                     event.accept()
                     return True
+        if watched is output_viewport and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._position_inline_response_editor)
         if watched is input_box or watched is input_viewport:
             if (
                 watched is input_viewport
@@ -4250,7 +4271,7 @@ class _InputOutputDialog(QDialog):
         )
 
     def _save_response_output_edit(self, message_index, edited_source):
-        """Persist an edited card to both formats and refresh its lazy caches."""
+        """Persist an edited card to every managed format and refresh its caches."""
         if not (0 <= int(message_index) < len(self._chat_messages)):
             raise IndexError("Response message is no longer available")
         message = self._chat_messages[int(message_index)]
@@ -4286,12 +4307,117 @@ class _InputOutputDialog(QDialog):
         self._message_text_cache.clear()
         self._rendered_message_cache.clear()
         self._save_chat_history()
-        self._reset_history_window()
         self._render_output()
         return markdown_path, html_path
 
-    def _open_response_editor(self, message_index):
-        """Open a plain-source editor for one completed response card."""
+    @staticmethod
+    def _inline_response_editor_marker(message_index):
+        return f"DIRECT_TEXT_INLINE_RESPONSE_EDITOR_{int(message_index)}_7F31"
+
+    def _inline_response_editor_height(self):
+        """Choose a useful in-card editor height without swallowing the timeline."""
+        try:
+            viewport_height = int(self.output_box.viewport().height())
+        except (AttributeError, RuntimeError):
+            viewport_height = 640
+        return max(260, min(520, int(viewport_height * 0.58)))
+
+    def _destroy_inline_response_editor(self):
+        """Remove the native overlay without rebuilding the transcript."""
+        frame = self._inline_response_editor_frame
+        self._inline_response_editor_frame = None
+        self._inline_response_editor_box = None
+        self._inline_response_edit_index = -1
+        self._inline_response_edit_session_id = None
+        if frame is not None:
+            try:
+                frame.hide()
+                frame.deleteLater()
+            except RuntimeError:
+                pass
+
+    def _position_inline_response_editor(self, *_args):
+        """Keep the native editor aligned with its placeholder while scrolling."""
+        frame = self._inline_response_editor_frame
+        message_index = int(self._inline_response_edit_index)
+        if frame is None or message_index < 0:
+            return
+        try:
+            viewport = self.output_box.viewport()
+            marker = self._inline_response_editor_marker(message_index)
+            marker_cursor = self.output_box.document().find(marker)
+            if marker_cursor.isNull():
+                frame.hide()
+                return
+            marker_rect = self.output_box.cursorRect(marker_cursor)
+            editor_height = self._inline_response_editor_height()
+            x_pos = max(8, marker_rect.x())
+            right_margin = max(12, int(viewport.width() * 0.085))
+            editor_width = max(300, viewport.width() - x_pos - right_margin)
+            y_pos = marker_rect.y() + max(1, marker_rect.height())
+            if y_pos >= viewport.height() or y_pos + editor_height <= 0:
+                frame.hide()
+                return
+            frame.setGeometry(x_pos, y_pos, editor_width, editor_height)
+            frame.raise_()
+            frame.show()
+        except (AttributeError, RuntimeError):
+            return
+
+    def _focus_inline_response_editor(self, message_index):
+        """Reveal the edited card, place its overlay, and focus its text area."""
+        if int(self._inline_response_edit_index) != int(message_index):
+            return
+        try:
+            self.output_box.scrollToAnchor(f"direct-message-{int(message_index)}")
+        except RuntimeError:
+            return
+        self._position_inline_response_editor()
+        source_editor = self._inline_response_editor_box
+        if source_editor is not None:
+            source_editor.setFocus(Qt.OtherFocusReason)
+            source_editor.moveCursor(QTextCursor.Start)
+
+    def _cancel_inline_response_editor(self):
+        """Leave edit mode and restore the rendered response card."""
+        message_index = int(self._inline_response_edit_index)
+        self._destroy_inline_response_editor()
+        self._render_output()
+        if message_index >= 0:
+            QTimer.singleShot(
+                0,
+                lambda index=message_index: self.output_box.scrollToAnchor(
+                    f"direct-message-{index}"
+                ),
+            )
+
+    def _commit_inline_response_editor(self):
+        """Save the in-card source editor and return the card to rendered mode."""
+        message_index = int(self._inline_response_edit_index)
+        source_editor = self._inline_response_editor_box
+        if message_index < 0 or source_editor is None:
+            return
+        edited_source = source_editor.toPlainText()
+        self._destroy_inline_response_editor()
+        try:
+            self._save_response_output_edit(message_index, edited_source)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Could not save response",
+                f"The response files could not be updated.\n\n{exc}",
+            )
+            self._open_response_editor(message_index, initial_source=edited_source)
+            return
+        QTimer.singleShot(
+            0,
+            lambda index=message_index: self.output_box.scrollToAnchor(
+                f"direct-message-{index}"
+            ),
+        )
+
+    def _open_response_editor(self, message_index, initial_source=None):
+        """Edit one completed response directly inside its conversation card."""
         from PySide6.QtWidgets import QPlainTextEdit
 
         try:
@@ -4299,11 +4425,23 @@ class _InputOutputDialog(QDialog):
             message = self._chat_messages[message_index]
             if message[0] != "assistant":
                 return
-            source = self._assistant_message_text(
-                message, "content", message_index
+            source = (
+                str(initial_source)
+                if initial_source is not None
+                else self._assistant_message_text(
+                    message, "content", message_index
+                )
             )
         except (IndexError, TypeError, ValueError):
             return
+
+        if (
+            self._inline_response_editor_frame is not None
+            and self._inline_response_edit_index == message_index
+        ):
+            self._inline_response_editor_box.setFocus(Qt.OtherFocusReason)
+            return
+        self._destroy_inline_response_editor()
 
         storage = self._assistant_storage_for(message)
         content_reference = str(storage.get("content_path", "") or "")
@@ -4318,70 +4456,66 @@ class _InputOutputDialog(QDialog):
             return
 
         request_label = str(message[5] if len(message) > 5 else "")
-        editor = QDialog(self)
-        editor.setWindowTitle(
-            f"Edit Direct Text Response{f' — {request_label}' if request_label else ''}"
-        )
-        editor.setWindowFlags(
-            editor.windowFlags()
-            | Qt.WindowSystemMenuHint
-            | Qt.WindowMinMaxButtonsHint
-            | Qt.WindowCloseButtonHint
-        )
-        editor.resize(980, 720)
-        editor.setMinimumSize(620, 440)
-        layout = QVBoxLayout(editor)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
+        session = self._current_chat_session()
+        session_id = session.get("id") if session is not None else None
+        frame = QFrame(self.output_box.viewport())
+        frame.setObjectName("directInlineResponseEditor")
+        frame.setAttribute(Qt.WA_StyledBackground, True)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(6)
 
+        heading_row = QHBoxLayout()
+        heading_row.setContentsMargins(3, 0, 3, 0)
         heading = QLabel(
-            f"Edit response{f' · {request_label}' if request_label else ''}"
+            f"Editing response{f' · {request_label}' if request_label else ''}"
         )
-        heading.setStyleSheet("font-size: 14pt; font-weight: 700;")
-        layout.addWidget(heading)
-        detail = QLabel(
-            "Saving updates this response's Markdown, plain-text, HTML, and XHTML files."
-        )
-        detail.setWordWrap(True)
-        detail.setStyleSheet("color: #cbd5e1;")
-        layout.addWidget(detail)
+        heading.setObjectName("directInlineResponseEditorTitle")
+        heading_row.addWidget(heading)
+        heading_row.addStretch(1)
+        detail = QLabel("Updates MD, TXT, HTML, and XHTML")
+        detail.setObjectName("directInlineResponseEditorDetail")
+        heading_row.addWidget(detail)
+        layout.addLayout(heading_row)
 
-        source_editor = QPlainTextEdit()
+        source_editor = QPlainTextEdit(frame)
+        source_editor.setObjectName("directInlineResponseEditorBox")
         source_editor.setPlainText(source)
         source_editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         source_editor.setUndoRedoEnabled(True)
         layout.addWidget(source_editor, 1)
 
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
         buttons.addStretch(1)
-        cancel_button = QPushButton("Cancel")
-        save_button = QPushButton("Save changes")
+        cancel_button = QPushButton("Cancel", frame)
+        cancel_button.setObjectName("directInlineResponseCancel")
+        save_button = QPushButton("Save changes", frame)
+        save_button.setObjectName("directInlineResponseSave")
         save_button.setDefault(True)
-        cancel_button.clicked.connect(editor.reject)
-        save_button.clicked.connect(editor.accept)
+        cancel_button.clicked.connect(self._cancel_inline_response_editor)
+        save_button.clicked.connect(self._commit_inline_response_editor)
         buttons.addWidget(cancel_button)
         buttons.addWidget(save_button)
         layout.addLayout(buttons)
 
         save_shortcut = QShortcut(
-            QKeySequence(QKeySequence.StandardKey.Save), editor
+            QKeySequence(QKeySequence.StandardKey.Save), frame
         )
-        save_shortcut.activated.connect(editor.accept)
-        source_editor.setFocus()
-        source_editor.moveCursor(QTextCursor.Start)
-        if editor.exec() != QDialog.Accepted:
-            return
+        save_shortcut.activated.connect(self._commit_inline_response_editor)
+        cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), frame)
+        cancel_shortcut.activated.connect(self._cancel_inline_response_editor)
 
-        try:
-            self._save_response_output_edit(
-                message_index, source_editor.toPlainText()
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Could not save response",
-                f"The response files could not be updated.\n\n{exc}",
-            )
+        self._inline_response_editor_frame = frame
+        self._inline_response_editor_box = source_editor
+        self._inline_response_edit_index = message_index
+        self._inline_response_edit_session_id = session_id
+        frame.hide()
+        self._render_output()
+        QTimer.singleShot(
+            0,
+            lambda index=message_index: self._focus_inline_response_editor(index),
+        )
 
     def _handle_output_anchor(self, url):
         """Expand/collapse a response's processing details inside the chat."""
@@ -5645,10 +5779,22 @@ class _InputOutputDialog(QDialog):
             if freeze_viewport:
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
+        if self._inline_response_editor_frame is not None:
+            QTimer.singleShot(0, self._position_inline_response_editor)
         return True
 
     def _render_output(self, active_only=False):
         import html as html_lib
+
+        current_session = self._current_chat_session()
+        current_session_id = (
+            current_session.get("id") if current_session is not None else None
+        )
+        if (
+            self._inline_response_editor_frame is not None
+            and self._inline_response_edit_session_id != current_session_id
+        ):
+            self._destroy_inline_response_editor()
 
         history_start = max(
             0,
@@ -5794,7 +5940,24 @@ class _InputOutputDialog(QDialog):
                 content = self._assistant_message_text(
                     message, "content", message_index
                 )
-                if str(content or "").strip():
+                inline_editing = bool(
+                    self._inline_response_editor_frame is not None
+                    and message_index == self._inline_response_edit_index
+                    and message_index < len(self._chat_messages)
+                )
+                if inline_editing:
+                    editor_marker = html_lib.escape(
+                        self._inline_response_editor_marker(message_index)
+                    )
+                    editor_height = self._inline_response_editor_height()
+                    rendered = (
+                        "<span class='inline-response-editor-marker'>"
+                        f"{editor_marker}</span>"
+                        "<table class='inline-response-editor-placeholder' "
+                        f"width='100%' height='{editor_height}' cellspacing='0' "
+                        "cellpadding='0'><tr><td>&nbsp;</td></tr></table>"
+                    )
+                elif str(content or "").strip():
                     current_session = self._current_chat_session()
                     current_session_id = (
                         current_session.get("id")
@@ -5895,7 +6058,7 @@ class _InputOutputDialog(QDialog):
                             f"{rendered_processing}</td></tr></table>"
                         )
                 message_actions = []
-                if str(content or ""):
+                if str(content or "") and not inline_editing:
                     was_copied = self._copied_message_key == (
                         session_id,
                         message_index,
@@ -6099,6 +6262,11 @@ class _InputOutputDialog(QDialog):
             f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
+            ".inline-response-editor-marker { color: #242424; font-size: 1px; "
+            "line-height: 1px; }"
+            ".inline-response-editor-placeholder, "
+            ".inline-response-editor-placeholder td { background: #242424; "
+            "border: none; padding: 0; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
             ".glossary-request-row, .glossary-request-row td { border: none; }"
@@ -6173,6 +6341,8 @@ class _InputOutputDialog(QDialog):
             if freeze_viewport:
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
+        if self._inline_response_editor_frame is not None:
+            QTimer.singleShot(0, self._position_inline_response_editor)
 
     def _commit_assistant_message(self, completion_message=None):
         """Freeze the active streamed response into the visible chat history."""
