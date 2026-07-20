@@ -1530,7 +1530,7 @@ class _InputOutputDialog(QDialog):
             "QLabel#directSubtitle, QLabel#directMuted { color: #cbd5e1; }"
             "QLabel#directZoomIndicator { color: #94a3b8; font-size: 8.5pt; "
             "padding: 0 3px 1px 3px; background: transparent; }"
-            "QPushButton#sidebarToggleButton { min-width: 34px; max-width: 34px; "
+            "QPushButton#sidebarToggleButton { min-width: 74px; max-width: 86px; "
             "min-height: 34px; max-height: 34px; padding: 0; font-size: 11pt; }"
             "QTabWidget#directTextTabs::pane { border: none; background: transparent; }"
             "QTabWidget#directTextTabs QTabBar::tab { background: #1e1e1e; color: #cbd5e1; "
@@ -1587,7 +1587,7 @@ class _InputOutputDialog(QDialog):
         header_layout.setContentsMargins(22, 12, 20, 12)
         header_layout.setSpacing(12)
 
-        self.sidebar_toggle_button = QPushButton("◀")
+        self.sidebar_toggle_button = QPushButton("◀ Chats")
         self.sidebar_toggle_button.setObjectName("sidebarToggleButton")
         self.sidebar_toggle_button.setToolTip("Hide conversation sidebar")
         self.sidebar_toggle_button.setAccessibleName("Hide conversation sidebar")
@@ -1761,8 +1761,6 @@ class _InputOutputDialog(QDialog):
         self.output_box.setContextMenuPolicy(Qt.CustomContextMenu)
         self.output_box.customContextMenuRequested.connect(self._show_output_context_menu)
         self.output_box.anchorClicked.connect(self._handle_output_anchor)
-        self.output_box.installEventFilter(self)
-        self.output_box.viewport().installEventFilter(self)
         timeline_layout.addWidget(self.output_box, 1)
         self.chat_splitter.addWidget(timeline_shell)
 
@@ -1842,6 +1840,9 @@ class _InputOutputDialog(QDialog):
         )
         self.input_box.installEventFilter(self)
         self.input_box.viewport().installEventFilter(self)
+        # Install the timeline wheel filter only after both editors exist.
+        # Adding QTextBrowser to its layout emits construction-time events.
+        self.output_box.viewport().installEventFilter(self)
         self.input_box.textChanged.connect(self._on_chat_draft_changed)
         composer_input_row.addWidget(self.input_box, 1)
 
@@ -2443,7 +2444,9 @@ class _InputOutputDialog(QDialog):
             adjustment = int(adjustment)
         except (TypeError, ValueError):
             return
-        new_level = max(-5, min(8, self._chat_zoom_level + adjustment))
+        # 1.1 ** -15 is roughly 24%, matching the useful lower end of
+        # browser-style zoom instead of stopping prematurely at 62% (-5).
+        new_level = max(-15, min(8, self._chat_zoom_level + adjustment))
         if new_level == self._chat_zoom_level:
             return
         self._chat_zoom_level = new_level
@@ -2886,16 +2889,22 @@ class _InputOutputDialog(QDialog):
 
     def eventFilter(self, watched, event):
         """Use chat-style Enter/Shift+Enter behavior in the composer."""
-        input_viewport = (
-            self.input_box.viewport() if hasattr(self, "input_box") else None
-        )
-        output_viewport = (
-            self.output_box.viewport() if hasattr(self, "output_box") else None
-        )
+        input_box = getattr(self, "input_box", None)
+        output_box = getattr(self, "output_box", None)
+        try:
+            input_viewport = input_box.viewport() if input_box is not None else None
+        except RuntimeError:
+            input_box = None
+            input_viewport = None
+        try:
+            output_viewport = output_box.viewport() if output_box is not None else None
+        except RuntimeError:
+            output_box = None
+            output_viewport = None
         if watched in (
-            getattr(self, "input_box", None),
+            input_box,
             input_viewport,
-            getattr(self, "output_box", None),
+            output_box,
             output_viewport,
         ) and event.type() == QEvent.Wheel:
             if event.modifiers() & Qt.ControlModifier:
@@ -2906,13 +2915,14 @@ class _InputOutputDialog(QDialog):
                     self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
                     event.accept()
                     return True
-        if watched is self.input_box or watched is input_viewport:
+        if watched is input_box or watched is input_viewport:
             if (
                 watched is input_viewport
                 and event.type() == QEvent.MouseButtonPress
                 and event.button() == Qt.LeftButton
-                and self.input_box.isEnabled()
-                and not self.input_box.isReadOnly()
+                and input_box is not None
+                and input_box.isEnabled()
+                and not input_box.isReadOnly()
             ):
                 # Mouse events belong to QPlainTextEdit's viewport. Position
                 # the ordinary insertion caret at the clicked character; do
@@ -2921,10 +2931,10 @@ class _InputOutputDialog(QDialog):
                     point = event.position().toPoint()
                 except AttributeError:
                     point = event.pos()
-                self.input_box.setTextCursor(
-                    self.input_box.cursorForPosition(point)
+                input_box.setTextCursor(
+                    input_box.cursorForPosition(point)
                 )
-                self.input_box.setFocus(Qt.MouseFocusReason)
+                input_box.setFocus(Qt.MouseFocusReason)
                 QTimer.singleShot(0, self._refresh_input_cursor_feedback)
             elif event.type() in (QEvent.MouseButtonRelease, QEvent.FocusIn):
                 QTimer.singleShot(0, self._refresh_input_cursor_feedback)
@@ -2990,7 +3000,9 @@ class _InputOutputDialog(QDialog):
         visible = bool(visible)
         self._chat_sidebar_hidden = not visible
         self.chat_sidebar.setVisible(visible)
-        self.sidebar_toggle_button.setText("◀" if visible else "▶")
+        self.sidebar_toggle_button.setText(
+            "◀ Chats" if visible else "▶ Chats"
+        )
         action_text = "Hide" if visible else "Show"
         tooltip = f"{action_text} conversation sidebar"
         self.sidebar_toggle_button.setToolTip(tooltip)

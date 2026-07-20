@@ -6954,6 +6954,7 @@ class BatchTranslationProcessor:
         self._ordered_dispatch_condition = threading.Condition()
         self._ordered_dispatch_next = 0
         self._ordered_dispatch_released = set()
+        self._ordered_dispatch_last_release = 0.0
         
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
@@ -7019,7 +7020,30 @@ class BatchTranslationProcessor:
                     timeout=min(0.1, remaining)
                 )
 
+            # Give the released worker a small head start into client.send().
+            # Without this spacing, the next Python thread can wake quickly
+            # enough to overtake it before the provider transport is entered.
+            try:
+                release_interval = max(
+                    0.0,
+                    float(os.getenv("ORDERED_BATCH_DISPATCH_INTERVAL", "0.025")),
+                )
+            except (TypeError, ValueError):
+                release_interval = 0.025
+            while self._ordered_dispatch_last_release:
+                release_delay = (
+                    self._ordered_dispatch_last_release
+                    + release_interval
+                    - time.monotonic()
+                )
+                if release_delay <= 0:
+                    break
+                self._ordered_dispatch_condition.wait(
+                    timeout=min(0.05, release_delay)
+                )
+
             self._ordered_dispatch_released.add(request_order)
+            self._ordered_dispatch_last_release = time.monotonic()
             self._ordered_dispatch_next = max(
                 self._ordered_dispatch_next,
                 request_order + 1,
@@ -7571,9 +7595,6 @@ class BatchTranslationProcessor:
                 while True:
                     try:
                         def _mark_batch_chunk_progress_on_send():
-                            self._wait_for_ordered_request_dispatch(
-                                chapter.get('_batch_request_order')
-                            )
                             _mark_batch_chapter_progress_on_send()
                             if _single_pass_glossary_mode():
                                 _mark_single_pass_glossary_in_progress(
@@ -7592,6 +7613,11 @@ class BatchTranslationProcessor:
                             context='translation',
                             chapter_context=chapter_ctx,
                             bypass_graceful_stop=True,
+                            before_dispatch_callback=lambda: (
+                                self._wait_for_ordered_request_dispatch(
+                                    chapter.get('_batch_request_order')
+                                )
+                            ),
                             before_send_callback=_mark_batch_chunk_progress_on_send,
                             local_cancel_only_check=chunk_abort_event.is_set,
                         )
@@ -7825,6 +7851,11 @@ class BatchTranslationProcessor:
                                     context='translation',
                                     chapter_context=chapter_ctx,
                                     bypass_graceful_stop=True,
+                                    before_dispatch_callback=lambda: (
+                                        self._wait_for_ordered_request_dispatch(
+                                            chapter.get('_batch_request_order')
+                                        )
+                                    ),
                                     before_send_callback=_mark_batch_chunk_progress_on_send,
                                     local_cancel_only_check=chunk_abort_event.is_set,
                                 )
@@ -9068,9 +9099,6 @@ class BatchTranslationProcessor:
                 }
 
                 def _mark_merged_request_progress_on_send():
-                    self._wait_for_ordered_request_dispatch(
-                        parent_chapter.get('_batch_request_order')
-                    )
                     _mark_merged_progress_on_send()
                     if _single_pass_glossary_mode():
                         _mark_single_pass_glossary_in_progress(
@@ -9087,6 +9115,11 @@ class BatchTranslationProcessor:
                     self.check_stop_fn,
                     context='translation',
                     chapter_context=chapter_ctx,
+                    before_dispatch_callback=lambda: (
+                        self._wait_for_ordered_request_dispatch(
+                            parent_chapter.get('_batch_request_order')
+                        )
+                    ),
                     before_send_callback=_mark_merged_request_progress_on_send,
                 )
                 if _single_pass_glossary_mode() and isinstance(merged_response, str):
@@ -17014,7 +17047,8 @@ def _skip_thinking_env(context_key):
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
                         chunk_timeout=None, request_id=None, context=None,
                         chapter_context=None, bypass_graceful_stop=False,
-                        before_send_callback=None, local_cancel_only_check=None):
+                        before_send_callback=None, local_cancel_only_check=None,
+                        before_dispatch_callback=None):
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
@@ -17220,6 +17254,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     tls_for_local_cancel.local_cancel_reason = lambda: api_call_state.get("cancel_reason")
             except Exception:
                 tls_for_local_cancel = None
+
+            # Batch ordering belongs before client.send(), so request setup and
+            # its visible pre-stagger log follow spine order as well. Progress
+            # marking remains in before_send_callback at the true in-flight
+            # boundary inside UnifiedClient.
+            if callable(before_dispatch_callback):
+                try:
+                    before_dispatch_callback()
+                except Exception as dispatch_err:
+                    print(
+                        "⚠️ Ordered batch pre-dispatch callback failed: "
+                        f"{dispatch_err}"
+                    )
             
             # Build send parameters (context is optional)
             send_params = {
