@@ -1489,9 +1489,11 @@ class _InputOutputDialog(QDialog):
         self._run_source_path = ""
         self._run_source_extension = ".txt"
         self._run_source_is_attachment = False
+        self._run_manual_glossary_path = ""
         self._run_started_at = 0.0
         self._render_pending = False
         self._rendered_message_cache = {}
+        self._drop_hover_active = False
         self._history_visible_start = 0
         self._history_page_size = 10
         self._history_character_budget = 120000
@@ -1562,6 +1564,11 @@ class _InputOutputDialog(QDialog):
             "QFrame#directComposerCard { background: #2d2d2d; border: 1px solid #4a5568; "
             "border-radius: 14px; }"
             "QFrame#directComposerCard:focus-within { border-color: #666666; }"
+            "QFrame#directComposerCard[dropActive=\"true\"] { "
+            "background: #26384a; border: 2px solid #65a9ff; }"
+            "QFrame#directComposerCard[dropActive=\"true\"] "
+            "QPushButton#directAttachmentButton { background: #344f6b; "
+            "border-color: #65a9ff; color: white; }"
             "QPlainTextEdit#directComposer { background: transparent; color: white; "
             "border: none; padding: 6px 4px; font-size: 10.5pt; "
             "selection-background-color: #5a9fd4; }"
@@ -1771,6 +1778,7 @@ class _InputOutputDialog(QDialog):
 
         composer = QFrame()
         composer.setObjectName("directComposerCard")
+        self.composer_card = composer
         composer.setMinimumHeight(150)
         composer_layout = QVBoxLayout(composer)
         composer_layout.setContentsMargins(12, 7, 8, 7)
@@ -1838,6 +1846,7 @@ class _InputOutputDialog(QDialog):
         self.input_box.setUndoRedoEnabled(True)
         self.input_box.setAcceptDrops(True)
         self.input_box.dragEnterEvent = self._input_drag_enter_event
+        self.input_box.dragLeaveEvent = self._input_drag_leave_event
         self.input_box.dropEvent = self._input_drop_event
         self.input_box.setContextMenuPolicy(Qt.CustomContextMenu)
         self.input_box.customContextMenuRequested.connect(
@@ -1938,13 +1947,19 @@ class _InputOutputDialog(QDialog):
             "QRadioButton::indicator:disabled { background-color: #1a1a1a; "
             "border-color: #3a3a3a; }"
         )
+        self.no_glossary_override_radio = QRadioButton("No Override")
+        self.no_glossary_override_radio.setStyleSheet(glossary_radio_style)
+        self.no_glossary_override_radio.setToolTip(
+            "Uses the glossary mode and currently selected glossary from the main "
+            "translator without applying a Direct Text override."
+        )
         self.force_no_glossary_radio = QRadioButton("Force No Glossary")
         self.force_no_glossary_radio.setStyleSheet(glossary_radio_style)
         self.force_no_glossary_radio.setToolTip(
             "Ignores automatic and manually loaded glossaries only for Direct Text "
             "runs."
         )
-        self.manual_glossary_radio = QRadioButton("Manual glossary")
+        self.manual_glossary_radio = QRadioButton("Force Manual Glossary")
         self.manual_glossary_radio.setStyleSheet(glossary_radio_style)
         self.manual_glossary_radio.setToolTip(
             "Uses Manual Glossary Only for Direct Text. Every submission asks you "
@@ -1953,26 +1968,46 @@ class _InputOutputDialog(QDialog):
 
         self.glossary_mode_button_group = QButtonGroup(self)
         self.glossary_mode_button_group.setExclusive(True)
+        self.glossary_mode_button_group.addButton(
+            self.no_glossary_override_radio
+        )
         self.glossary_mode_button_group.addButton(self.force_no_glossary_radio)
         self.glossary_mode_button_group.addButton(self.manual_glossary_radio)
 
-        # Preserve a legacy "neither override" configuration until the user
-        # selects a radio. If an old config somehow enabled both, Manual wins.
-        manual_glossary_enabled = bool(
-            translator.config.get('direct_text_manual_glossary', False)
+        configured_glossary_override = str(
+            translator.config.get('direct_text_glossary_override_mode', '') or ''
+        ).strip().lower()
+        if configured_glossary_override not in {
+            'none', 'no_glossary', 'manual'
+        }:
+            # The three-way setting defaults to inheriting the parent
+            # translator. Legacy booleans are intentionally not promoted into
+            # an override until the user explicitly selects one of the new
+            # radio options.
+            configured_glossary_override = 'none'
+        self.no_glossary_override_radio.setChecked(
+            configured_glossary_override == 'none'
         )
-        no_glossary_enabled = bool(
-            translator.config.get(
-                'direct_text_force_no_glossary', legacy_simple_mode
+        self.force_no_glossary_radio.setChecked(
+            configured_glossary_override == 'no_glossary'
+        )
+        self.manual_glossary_radio.setChecked(
+            configured_glossary_override == 'manual'
+        )
+        self.no_glossary_override_radio.toggled.connect(
+            lambda checked: self._on_glossary_override_toggled(
+                'none', checked
             )
-        ) and not manual_glossary_enabled
-        self.force_no_glossary_radio.setChecked(no_glossary_enabled)
-        self.manual_glossary_radio.setChecked(manual_glossary_enabled)
+        )
         self.force_no_glossary_radio.toggled.connect(
-            self._on_force_no_glossary_toggled
+            lambda checked: self._on_glossary_override_toggled(
+                'no_glossary', checked
+            )
         )
         self.manual_glossary_radio.toggled.connect(
-            self._on_manual_glossary_toggled
+            lambda checked: self._on_glossary_override_toggled(
+                'manual', checked
+            )
         )
         self.skip_thinking_checkbox = translator._create_styled_checkbox(
             "Disable all thinking"
@@ -2139,12 +2174,17 @@ class _InputOutputDialog(QDialog):
                 "Run a single translation pass even when Multipass is enabled in the main window.",
             ),
             (
+                self.no_glossary_override_radio,
+                "Use the main translator's current glossary mode and selected "
+                "glossary without a Direct Text override.",
+            ),
+            (
                 self.force_no_glossary_radio,
                 "Ignore automatic and manually loaded glossaries for these chat translations.",
             ),
             (
                 self.manual_glossary_radio,
-                "Use Manual Glossary Only and request a glossary file or pasted glossary "
+                "Force Manual Glossary Only and request a glossary file or pasted glossary "
                 "before every Direct Text translation.",
             ),
             (
@@ -2484,15 +2524,23 @@ class _InputOutputDialog(QDialog):
         except Exception:
             pass
 
-    def _on_force_no_glossary_toggled(self, checked):
-        """Persist the exclusive Direct Text No Glossary selection."""
-        self._persist_dialog_option(
-            'direct_text_force_no_glossary', bool(checked)
-        )
-
-    def _on_manual_glossary_toggled(self, checked):
-        """Persist the exclusive Direct Text Manual Glossary selection."""
-        self._persist_dialog_option('direct_text_manual_glossary', bool(checked))
+    def _on_glossary_override_toggled(self, mode, checked):
+        """Persist one exclusive Direct Text glossary override mode."""
+        if not checked:
+            return
+        mode = str(mode or 'none').strip().lower()
+        if mode not in {'none', 'no_glossary', 'manual'}:
+            mode = 'none'
+        try:
+            config = self.translator.config
+            config['direct_text_glossary_override_mode'] = mode
+            # Keep the previous keys synchronized for backward compatibility
+            # with older builds that do not know about the enum setting.
+            config['direct_text_force_no_glossary'] = mode == 'no_glossary'
+            config['direct_text_manual_glossary'] = mode == 'manual'
+            self.translator.save_config(show_message=False)
+        except Exception:
+            pass
 
     def _request_direct_text_manual_glossary(self):
         """Ask for a per-run glossary by file drop, browsing, or pasted content.
@@ -3122,15 +3170,40 @@ class _InputOutputDialog(QDialog):
                     and os.path.isfile(path)
                     and self._is_supported_dropped_text_file(path)
                 ):
+                    self._set_input_drop_hover(True)
                     event.acceptProposedAction()
                     return
         except Exception:
             pass
+        self._set_input_drop_hover(False)
         event.ignore()
+
+    def _input_drag_leave_event(self, event):
+        """Restore the normal composer appearance when a drag leaves it."""
+        self._set_input_drop_hover(False)
+        event.accept()
+
+    def _set_input_drop_hover(self, active):
+        """Repolish the composer so file-drag acceptance is unmistakable."""
+        active = bool(active)
+        if active == self._drop_hover_active:
+            return
+        self._drop_hover_active = active
+        card = getattr(self, 'composer_card', None)
+        if card is None:
+            return
+        card.setProperty('dropActive', active)
+        try:
+            card.style().unpolish(card)
+            card.style().polish(card)
+        except Exception:
+            pass
+        card.update()
 
     def _input_drop_event(self, event):
         """Attach the first dropped file without copying its contents into the editor."""
         path = ""
+        self._set_input_drop_hover(False)
         try:
             for url in event.mimeData().urls():
                 candidate = url.toLocalFile()
@@ -4129,6 +4202,11 @@ class _InputOutputDialog(QDialog):
                     raise FileNotFoundError(
                         "The selected manual glossary is no longer available."
                     )
+            # Keep the exact glossary selected for this run independent from
+            # the parent window's state. The parent state is temporarily
+            # mutated by auto-loading/generation and is restored when Direct
+            # Text finishes, so it is not a reliable persistence source.
+            self._run_manual_glossary_path = manual_glossary_path
             if attachment:
                 attached_path = attachment["path"]
                 attached_extension = os.path.splitext(attached_path)[1].lower()
@@ -4284,6 +4362,7 @@ class _InputOutputDialog(QDialog):
             self.chat_list.setEnabled(False)
             self.delete_chat_button.setEnabled(False)
             self.force_multipass_off_checkbox.setEnabled(False)
+            self.no_glossary_override_radio.setEnabled(False)
             self.force_no_glossary_radio.setEnabled(False)
             self.manual_glossary_radio.setEnabled(False)
             self.skip_thinking_checkbox.setEnabled(False)
@@ -5461,7 +5540,7 @@ class _InputOutputDialog(QDialog):
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
 
-    def _commit_assistant_message(self):
+    def _commit_assistant_message(self, completion_message=None):
         """Freeze the active streamed response into the visible chat history."""
         if not self._assistant_message_active:
             return
@@ -5481,6 +5560,8 @@ class _InputOutputDialog(QDialog):
                 self._chat_messages.append(
                     self._request_segment_message(segment, output_folder)
                 )
+            if completion_message:
+                self._chat_messages.append(completion_message)
             self._assistant_message_active = False
             self._active_request_segments = []
             self._request_segment_by_thread = {}
@@ -5510,6 +5591,8 @@ class _InputOutputDialog(QDialog):
                 "Request 1",
             )
         )
+        if completion_message:
+            self._chat_messages.append(completion_message)
         self._assistant_message_active = False
         self._reset_history_window()
         self._save_chat_history()
@@ -5701,7 +5784,80 @@ class _InputOutputDialog(QDialog):
                     os.path.join(target_folder, os.path.basename(expected_abs)),
                 )
                 copied_any = True
+        if copied_any:
+            self._sync_attachment_glossary(target_folder)
         return target_folder if copied_any else ""
+
+    def _effective_run_glossary_path(self):
+        """Return the authoritative glossary used by the active Direct Text run."""
+        try:
+            if self.force_no_glossary_radio.isChecked():
+                return ""
+        except Exception:
+            pass
+
+        # An explicitly supplied Direct Text manual glossary has the highest
+        # precedence. For inherited/automatic modes, glossary generation may
+        # replace the parent's path during the run, so inspect the live values
+        # after that explicit candidate.
+        candidates = [
+            getattr(self, '_run_manual_glossary_path', ''),
+            getattr(self.translator, '_direct_text_manual_glossary_path', ''),
+            os.environ.get('MANUAL_GLOSSARY', ''),
+            getattr(self.translator, 'manual_glossary_path', ''),
+        ]
+        seen = set()
+        for candidate in candidates:
+            path = os.path.abspath(str(candidate or '').strip())
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            if os.path.isfile(path):
+                return path
+        return ""
+
+    def _sync_attachment_glossary(self, target_folder):
+        """Make the reused attachment tree match this run's effective glossary."""
+        import shutil
+
+        canonical_names = ('glossary.csv', 'glossary.json', 'glossary.md')
+        glossary_path = self._effective_run_glossary_path()
+
+        # No Glossary is authoritative for the current run. Do not leave a
+        # canonical glossary from an earlier attachment run in the reused
+        # folder, where it looks active and can be auto-detected later.
+        if not glossary_path:
+            try:
+                force_none = self.force_no_glossary_radio.isChecked()
+            except Exception:
+                force_none = False
+            if force_none:
+                for name in canonical_names:
+                    stale_path = os.path.join(target_folder, name)
+                    if os.path.isfile(stale_path):
+                        os.remove(stale_path)
+            return ""
+
+        extension = os.path.splitext(glossary_path)[1].lower()
+        if extension in {'.csv', '.txt'}:
+            target_name = 'glossary.csv'
+        elif extension == '.md':
+            target_name = 'glossary.md'
+        elif extension == '.json':
+            target_name = 'glossary.json'
+        else:
+            target_name = 'glossary.csv'
+        target_path = os.path.abspath(os.path.join(target_folder, target_name))
+
+        # Remove only the alternate canonical glossary formats managed by the
+        # translation pipeline. Other CSV/JSON artifacts are left untouched.
+        for name in canonical_names:
+            candidate = os.path.abspath(os.path.join(target_folder, name))
+            if candidate != target_path and os.path.isfile(candidate):
+                os.remove(candidate)
+        if os.path.abspath(glossary_path) != target_path:
+            shutil.copy2(glossary_path, target_path)
+        return target_path
 
     def _discover_generated_output(self):
         """Find the final translated artifact created inside the scoped temp root."""
@@ -5835,6 +5991,196 @@ class _InputOutputDialog(QDialog):
                 )
                 return os.path.dirname(self._expected_output)
 
+    def _find_direct_run_artifact(self, filename):
+        """Find one run artifact, preferring the attached source's output tree."""
+        if not self._temp_root or not os.path.isdir(self._temp_root):
+            return ""
+        source_stem = os.path.splitext(
+            os.path.basename(self._run_source_path or "")
+        )[0]
+        preferred_root = os.path.abspath(
+            os.path.join(self._temp_root, source_stem)
+        )
+        candidates = []
+        for root, _dirs, files in os.walk(self._temp_root):
+            if filename not in files:
+                continue
+            path = os.path.abspath(os.path.join(root, filename))
+            try:
+                in_preferred_tree = (
+                    os.path.commonpath([path, preferred_root])
+                    == preferred_root
+                )
+            except ValueError:
+                in_preferred_tree = False
+            try:
+                modified = os.path.getmtime(path)
+            except OSError:
+                modified = 0.0
+            candidates.append((1 if in_preferred_tree else 0, modified, path))
+        if not candidates:
+            return ""
+        candidates.sort(reverse=True)
+        return candidates[0][2]
+
+    def _build_attachment_extraction_summary(self, output_folder):
+        """Build the final, persisted chat card from real extraction artifacts."""
+        if not self._run_source_is_attachment:
+            return None
+        import json as json_lib
+        import time
+
+        report_path = self._find_direct_run_artifact("extraction_report.txt")
+        metadata_path = self._find_direct_run_artifact("metadata.json")
+        chapters_path = self._find_direct_run_artifact("chapters_full.json")
+        metadata = {}
+        chapters = []
+        try:
+            if metadata_path:
+                with open(metadata_path, 'r', encoding='utf-8') as handle:
+                    loaded = json_lib.load(handle)
+                if isinstance(loaded, dict):
+                    metadata = loaded
+        except (OSError, TypeError, ValueError):
+            metadata = {}
+        try:
+            if chapters_path:
+                with open(chapters_path, 'r', encoding='utf-8') as handle:
+                    loaded = json_lib.load(handle)
+                if isinstance(loaded, list):
+                    chapters = loaded
+        except (OSError, TypeError, ValueError):
+            chapters = []
+
+        # Do not manufacture an extraction report for single images or plain
+        # pasted text. EPUB/PDF extraction leaves at least one of these
+        # authoritative artifacts behind.
+        if not report_path and not chapters and not metadata.get('extraction_mode'):
+            return None
+
+        try:
+            chapter_count = int(metadata.get('chapter_count', len(chapters)) or 0)
+        except (TypeError, ValueError):
+            chapter_count = len(chapters)
+        if not chapter_count:
+            chapter_count = len(chapters)
+        payloads_ready = metadata.get('chapter_payloads_ready')
+        try:
+            payloads_ready = int(payloads_ready)
+        except (TypeError, ValueError):
+            payloads_ready = sum(
+                1 for chapter in chapters
+                if isinstance(chapter, dict)
+                and isinstance(chapter.get('body'), str)
+            )
+
+        text_only = 0
+        image_only = 0
+        mixed = 0
+        empty_minimal = 0
+        for chapter in chapters:
+            if not isinstance(chapter, dict):
+                continue
+            has_images = bool(chapter.get('has_images'))
+            try:
+                file_size = int(chapter.get('file_size', 0) or 0)
+            except (TypeError, ValueError):
+                file_size = 0
+            if file_size < 50:
+                empty_minimal += 1
+            if bool(chapter.get('is_image_only', False)):
+                image_only += 1
+            elif has_images and file_size >= 500:
+                mixed += 1
+            elif not has_images and file_size >= 500:
+                text_only += 1
+
+        extracted_resources = metadata.get('extracted_resources') or {}
+        resource_count = 0
+        if isinstance(extracted_resources, dict):
+            for value in extracted_resources.values():
+                if isinstance(value, (list, tuple, set, dict)):
+                    resource_count += len(value)
+                elif isinstance(value, int):
+                    resource_count += max(0, value)
+
+        issue_lines = []
+        if report_path:
+            try:
+                with open(report_path, 'r', encoding='utf-8') as handle:
+                    report_text = handle.read()
+                issue_section = report_text.split('POTENTIAL ISSUES:', 1)
+                if len(issue_section) == 2:
+                    for line in issue_section[1].splitlines():
+                        value = line.strip().lstrip('•').strip()
+                        if value and not value.lower().startswith('none detected'):
+                            issue_lines.append(value)
+            except OSError:
+                pass
+
+        request_count = len(self._active_request_segments)
+        thinking_tokens = sum(
+            int(segment.get('thinking_tokens', 0) or 0)
+            for segment in self._active_request_segments
+        )
+        text_tokens = sum(
+            int(segment.get('text_tokens', 0) or 0)
+            for segment in self._active_request_segments
+        )
+        elapsed_seconds = (
+            max(0, int(time.time() - self._run_started_at))
+            if self._run_started_at
+            else 0
+        )
+        source_name = os.path.basename(self._run_source_path or 'Attachment')
+        extraction_mode = str(
+            metadata.get('extraction_mode', 'unknown') or 'unknown'
+        ).title()
+        language = str(metadata.get('detected_language', 'unknown') or 'unknown')
+        ready_label = (
+            "Ready"
+            if chapter_count > 0 and payloads_ready == chapter_count
+            else "Incomplete"
+        )
+
+        lines = [
+            "## Extraction report summary",
+            "",
+            f"**Source:** `{source_name}`",
+            "",
+            f"- **Extraction:** {ready_label} · {extraction_mode} mode · "
+            f"{language}",
+            f"- **Chapter payloads:** {payloads_ready:,}/{chapter_count:,} ready",
+            f"- **Content:** {text_only:,} text · {image_only:,} image-only · "
+            f"{mixed:,} mixed · {empty_minimal:,} empty/minimal",
+            f"- **Resources extracted:** {resource_count:,}",
+            f"- **API requests:** {request_count:,}",
+            f"- **Tokens:** Thinking {thinking_tokens:,} · Text {text_tokens:,}",
+            f"- **Elapsed:** {elapsed_seconds // 60}m {elapsed_seconds % 60}s",
+        ]
+        if issue_lines:
+            lines.extend(("", "**Potential issues:**"))
+            lines.extend(f"- {issue}" for issue in issue_lines[:4])
+        else:
+            lines.extend(("", "**Potential issues:** None detected."))
+        if report_path:
+            lines.extend(
+                (
+                    "",
+                    "The complete `extraction_report.txt` and extracted metadata "
+                    "are saved in the attachment output folder.",
+                )
+            )
+
+        return (
+            "assistant",
+            "\n".join(lines),
+            "",
+            "Completed",
+            str(output_folder or ""),
+            "Extraction report",
+        )
+
     def _finish_translation(self):
         if not self._active:
             return
@@ -5889,7 +6235,10 @@ class _InputOutputDialog(QDialog):
         else:
             self._set_status("No translated output was produced")
 
-        self._commit_assistant_message()
+        completion_message = self._build_attachment_extraction_summary(
+            output_folder
+        )
+        self._commit_assistant_message(completion_message=completion_message)
         self._restore_run_context()
 
     def _restore_run_context(self):
@@ -5993,6 +6342,7 @@ class _InputOutputDialog(QDialog):
         self.new_chat_button.setEnabled(True)
         self.chat_list.setEnabled(True)
         self.force_multipass_off_checkbox.setEnabled(True)
+        self.no_glossary_override_radio.setEnabled(True)
         self.force_no_glossary_radio.setEnabled(True)
         self.manual_glossary_radio.setEnabled(True)
         self.skip_thinking_checkbox.setEnabled(True)

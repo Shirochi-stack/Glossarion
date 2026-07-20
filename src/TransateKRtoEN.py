@@ -20244,9 +20244,11 @@ def main(log_callback=None, stop_callback=None):
             
             target_path = os.path.join(out, target_name)
             
-            # In "Manual Glossary Only" mode (off_no_automap) the user may have edited
-            # the glossary in the in-app editor after loading it. Prefer whatever is
-            # already present in the output folder so we don't clobber those edits.
+            # In "Manual Glossary Only" mode (off_no_automap), preserve editor
+            # changes only when MANUAL_GLOSSARY already points at that exact
+            # output file. If the user selected an external manual glossary,
+            # it is authoritative and must replace a stale glossary left by an
+            # older run in the reused output directory.
             _auto_mode_env = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
             _existing_in_output = find_glossary_file(out)
             if (
@@ -20254,6 +20256,8 @@ def main(log_callback=None, stop_callback=None):
                 and _existing_in_output
                 and os.path.isfile(_existing_in_output)
                 and _has_glossary_data(_existing_in_output)
+                and os.path.abspath(config.MANUAL_GLOSSARY)
+                    == os.path.abspath(_existing_in_output)
             ):
                 print(
                     "📑 Manual Glossary Only mode: using existing glossary from output folder "
