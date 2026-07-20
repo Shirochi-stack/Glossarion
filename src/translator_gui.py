@@ -2406,11 +2406,16 @@ class _InputOutputDialog(QDialog):
         zoom_factor = 1.1 ** self._chat_zoom_level
         composer_point_size = 10.5 * zoom_factor
         self._chat_zoom_percent = int(round(zoom_factor * 100))
+        composer_font = QFont(self.input_box.font())
+        composer_font.setPointSizeF(composer_point_size)
+        self.input_box.setFont(composer_font)
+        self.input_box.document().setDefaultFont(composer_font)
         self.input_box.setStyleSheet(
             "QPlainTextEdit#directComposer { "
             f"font-size: {composer_point_size:.2f}pt; "
             "}"
         )
+        self.input_box.viewport().update()
         self.input_box.setToolTip(
             f"Composer zoom: {self._chat_zoom_percent}%"
         )
@@ -2440,7 +2445,15 @@ class _InputOutputDialog(QDialog):
                 dpr = max(1.0, float(self.devicePixelRatioF()))
             except Exception:
                 dpr = 1.0
-            radius_px = max(1, int(round(int(logical_radius) * dpr)))
+            logical_radius_px = max(1, int(round(float(logical_radius))))
+            # QTextDocument does not render CSS border-radius consistently.
+            # Draw each arc at no less than 4x resolution, then perform our own
+            # smooth downsample; relying on QTextBrowser to scale a small PNG
+            # produces visibly stair-stepped corners on fractional-DPI setups.
+            render_scale = max(4.0, dpr * 2.0)
+            radius_px = max(
+                1, int(round(logical_radius_px * render_scale))
+            )
             diameter_px = radius_px * 2
             canvas = QImage(
                 diameter_px,
@@ -2452,7 +2465,7 @@ class _InputOutputDialog(QDialog):
             painter.setRenderHint(QPainter.Antialiasing, True)
             path = QPainterPath()
             border_px = (
-                max(1.0, float(border_width) * dpr)
+                max(1.0, float(border_width) * render_scale)
                 if border_color and float(border_width or 0) > 0
                 else 0.0
             )
@@ -2481,6 +2494,12 @@ class _InputOutputDialog(QDialog):
             encoded_corners = {}
             for name, (x_pos, y_pos) in quadrants.items():
                 corner = canvas.copy(x_pos, y_pos, radius_px, radius_px)
+                corner = corner.scaled(
+                    logical_radius_px,
+                    logical_radius_px,
+                    Qt.IgnoreAspectRatio,
+                    Qt.SmoothTransformation,
+                )
                 corner_bytes = QByteArray()
                 corner_buffer = QBuffer(corner_bytes)
                 corner_buffer.open(QIODevice.WriteOnly)
@@ -4581,6 +4600,10 @@ class _InputOutputDialog(QDialog):
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
         body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
+        output_font = QFont(self.output_box.font())
+        output_font.setPointSizeF(body_font_point_size)
+        self.output_box.setFont(output_font)
+        self.output_box.document().setDefaultFont(output_font)
         document = (
             "<html><head><style>"
             "body { background-color: #1e1e1e; color: white; line-height: 1.48; "
@@ -4602,7 +4625,9 @@ class _InputOutputDialog(QDialog):
             ".user-bubble-cap, .user-bubble-cap td, .user-bubble-corner, "
             ".user-bubble-cap-edge { font-size: 1px; line-height: 1px; }"
             ".user-bubble-edge, .user-bubble-content { background-color: #2d2d2d; }"
-            ".user-bubble-content { color: white; padding: 0 4px; }"
+            f".user-bubble {{ font-size: {body_font_point_size:.2f}pt; }}"
+            ".user-bubble-content { color: white; padding: 0 4px; "
+            f"font-size: {body_font_point_size:.2f}pt; }}"
             ".attachment-message { padding: 2px 0; }"
             ".attachment-message-icon { font-size: 1.35em; padding-right: 8px; }"
             ".attachment-message-meta { color: #aeb8c8; font-size: 0.82em; }"
@@ -4614,7 +4639,8 @@ class _InputOutputDialog(QDialog):
             ".assistant-avatar { background-color: transparent; color: white; "
             "font-weight: 700; text-align: center; }"
             ".assistant-bubble { background-color: #242424; border: 1px solid #3f4856; "
-            "border-radius: 14px; padding: 11px 13px; }"
+            "border-radius: 14px; padding: 11px 13px; "
+            f"font-size: {body_font_point_size:.2f}pt; }}"
             ".assistant-bubble-shell, .rounded-assistant-bubble, "
             ".rounded-assistant-bubble td { border: none; padding: 0; }"
             ".assistant-bubble-cap, .assistant-bubble-cap td, "
@@ -4630,7 +4656,7 @@ class _InputOutputDialog(QDialog):
             ".rounded-assistant-bubble td.assistant-bubble-right { "
             "border-right: 1px solid #3f4856; }"
             ".rounded-assistant-bubble td.assistant-bubble-content { "
-            "color: white; padding: 0 1px; }"
+            f"color: white; padding: 0 1px; font-size: {body_font_point_size:.2f}pt; }}"
             ".processing-summary { margin: 1px 0 10px 0; }"
             ".processing-summary a { color: #cbd5e1; font-weight: 600; "
             "text-decoration: none; }"
@@ -4641,7 +4667,7 @@ class _InputOutputDialog(QDialog):
             "line-height: 1.35; }"
             ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
             ".pending { color: #cbd5e1; font-style: italic; }"
-            ".message-content { color: white; }"
+            f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
