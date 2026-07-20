@@ -1496,6 +1496,7 @@ class _InputOutputDialog(QDialog):
         self._assistant_avatar_width = 28
         self._assistant_avatar_height = 36
         self._user_bubble_corner_data = {}
+        self._assistant_bubble_corner_data = {}
 
         self.setWindowTitle("Direct Text Translation")
         self.setObjectName("directTextDialog")
@@ -2090,6 +2091,12 @@ class _InputOutputDialog(QDialog):
         self._user_bubble_corner_data = self._build_rounded_bubble_corners(
             "#2d2d2d", logical_radius=12
         )
+        self._assistant_bubble_corner_data = self._build_rounded_bubble_corners(
+            "#242424",
+            logical_radius=14,
+            border_color="#3f4856",
+            border_width=1,
+        )
         self._render_output()
 
         self._drain_timer = QTimer(self)
@@ -2417,11 +2424,17 @@ class _InputOutputDialog(QDialog):
         finally:
             self._output_auto_scroll_disabled = auto_scroll_was_disabled
 
-    def _build_rounded_bubble_corners(self, color, logical_radius=12):
+    def _build_rounded_bubble_corners(
+        self,
+        color,
+        logical_radius=12,
+        border_color=None,
+        border_width=0,
+    ):
         """Create antialiased HiDPI corner images for QTextDocument bubbles."""
         try:
             from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF
-            from PySide6.QtGui import QImage, QPainterPath
+            from PySide6.QtGui import QImage, QPainterPath, QPen
 
             try:
                 dpr = max(1.0, float(self.devicePixelRatioF()))
@@ -2437,14 +2450,26 @@ class _InputOutputDialog(QDialog):
             canvas.fill(Qt.transparent)
             painter = QPainter(canvas)
             painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setPen(Qt.NoPen)
             path = QPainterPath()
-            path.addRoundedRect(
-                QRectF(0, 0, diameter_px, diameter_px),
-                radius_px,
-                radius_px,
+            border_px = (
+                max(1.0, float(border_width) * dpr)
+                if border_color and float(border_width or 0) > 0
+                else 0.0
             )
+            inset = border_px / 2.0
+            rect = QRectF(
+                inset,
+                inset,
+                diameter_px - border_px,
+                diameter_px - border_px,
+            )
+            path.addRoundedRect(rect, radius_px - inset, radius_px - inset)
             painter.fillPath(path, QColor(str(color)))
+            if border_px:
+                painter.setPen(QPen(QColor(str(border_color)), border_px))
+                painter.drawPath(path)
+            else:
+                painter.setPen(Qt.NoPen)
             painter.end()
 
             quadrants = {
@@ -2512,6 +2537,50 @@ class _InputOutputDialog(QDialog):
             f"<td class='user-bubble-edge user-bubble-cap-edge' "
             f"height='{radius}'></td>"
             f"<td class='user-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('br')}</td>"
+            "</tr></table></td>"
+        )
+
+    def _rounded_assistant_bubble_html(self, rendered):
+        """Wrap an assistant response in one rounded, bordered card."""
+        corners = self._assistant_bubble_corner_data
+        if not all(corners.get(name) for name in ("tl", "tr", "bl", "br")):
+            return f"<td class='assistant-bubble'>{rendered}</td>"
+
+        import html as html_lib
+
+        radius = 14
+
+        def corner_image(name):
+            source = html_lib.escape(corners[name], quote=True)
+            return (
+                f"<img src='{source}' width='{radius}' height='{radius}' "
+                "style='vertical-align: top;'>"
+            )
+
+        return (
+            "<td class='assistant-bubble-shell'>"
+            "<table class='rounded-assistant-bubble' width='100%' cellspacing='0' "
+            "cellpadding='0'>"
+            "<tr class='assistant-bubble-cap'>"
+            f"<td class='assistant-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('tl')}</td>"
+            f"<td class='assistant-bubble-edge assistant-bubble-top' "
+            f"height='{radius}'></td>"
+            f"<td class='assistant-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('tr')}</td>"
+            "</tr><tr>"
+            f"<td class='assistant-bubble-edge assistant-bubble-left' "
+            f"width='{radius}'></td>"
+            f"<td class='assistant-bubble-content'>{rendered}</td>"
+            f"<td class='assistant-bubble-edge assistant-bubble-right' "
+            f"width='{radius}'></td>"
+            "</tr><tr class='assistant-bubble-cap'>"
+            f"<td class='assistant-bubble-corner' width='{radius}' "
+            f"height='{radius}'>{corner_image('bl')}</td>"
+            f"<td class='assistant-bubble-edge assistant-bubble-bottom' "
+            f"height='{radius}'></td>"
+            f"<td class='assistant-bubble-corner' width='{radius}' "
             f"height='{radius}'>{corner_image('br')}</td>"
             "</tr></table></td>"
         )
@@ -4481,6 +4550,21 @@ class _InputOutputDialog(QDialog):
                         + "&nbsp;&nbsp;&nbsp;".join(message_actions)
                         + "</div>"
                     )
+                assistant_inner_html = (
+                    "<div class='role'>GLOSSARION"
+                    + (
+                        f" <span class='request-label'>· {html_lib.escape(request_label)}</span>"
+                        if request_label
+                        else ""
+                    )
+                    + "</div>"
+                    + processing_html
+                    + f"<div class='message-content'>{rendered}</div>"
+                    + message_actions_html
+                )
+                assistant_bubble_html = self._rounded_assistant_bubble_html(
+                    assistant_inner_html
+                )
                 message_html.append(
                     "<table class='chat-row assistant-row' width='100%' cellspacing='0' "
                     "cellpadding='0'><tr>"
@@ -4489,18 +4573,8 @@ class _InputOutputDialog(QDialog):
                     f"height='{self._assistant_avatar_height}' cellspacing='0' "
                     "cellpadding='0'><tr><td class='assistant-avatar' align='center' "
                     f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
-                    "<td class='assistant-bubble'>"
-                    "<div class='role'>GLOSSARION"
-                    + (
-                        f" <span class='request-label'>· {html_lib.escape(request_label)}</span>"
-                        if request_label
-                        else ""
-                    )
-                    + "</div>"
-                    f"{processing_html}"
-                    f"<div class='message-content'>{rendered}</div>"
-                    f"{message_actions_html}"
-                    "</td><td width='8%'></td></tr></table>"
+                    f"{assistant_bubble_html}"
+                    "<td width='8%'></td></tr></table>"
                     "<div class='message-gap'>&nbsp;</div>"
                 )
 
@@ -4540,7 +4614,23 @@ class _InputOutputDialog(QDialog):
             ".assistant-avatar { background-color: transparent; color: white; "
             "font-weight: 700; text-align: center; }"
             ".assistant-bubble { background-color: #242424; border: 1px solid #3f4856; "
-            "border-radius: 10px; padding: 11px 13px; }"
+            "border-radius: 14px; padding: 11px 13px; }"
+            ".assistant-bubble-shell, .rounded-assistant-bubble, "
+            ".rounded-assistant-bubble td { border: none; padding: 0; }"
+            ".assistant-bubble-cap, .assistant-bubble-cap td, "
+            ".assistant-bubble-corner { font-size: 1px; line-height: 1px; }"
+            ".assistant-bubble-edge, .assistant-bubble-content { "
+            "background-color: #242424; }"
+            ".rounded-assistant-bubble td.assistant-bubble-top { "
+            "border-top: 1px solid #3f4856; }"
+            ".rounded-assistant-bubble td.assistant-bubble-bottom { "
+            "border-bottom: 1px solid #3f4856; }"
+            ".rounded-assistant-bubble td.assistant-bubble-left { "
+            "border-left: 1px solid #3f4856; }"
+            ".rounded-assistant-bubble td.assistant-bubble-right { "
+            "border-right: 1px solid #3f4856; }"
+            ".rounded-assistant-bubble td.assistant-bubble-content { "
+            "color: white; padding: 0 1px; }"
             ".processing-summary { margin: 1px 0 10px 0; }"
             ".processing-summary a { color: #cbd5e1; font-weight: 600; "
             "text-decoration: none; }"
