@@ -889,6 +889,24 @@ def _atomic_json_write(filepath, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _atomic_text_write(filepath, text):
+    """Atomically replace a UTF-8 text file without exposing partial content."""
+    directory = os.path.dirname(filepath)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = filepath + ".tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8', newline='') as handle:
+            handle.write(str(text or ""))
+        os.replace(tmp_path, filepath)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _get_app_dir() -> str:
     """Return the application's base directory.
 
@@ -1494,6 +1512,7 @@ class _InputOutputDialog(QDialog):
         self._run_started_at = 0.0
         self._render_pending = False
         self._rendered_message_cache = {}
+        self._message_text_cache = {}
         self._drop_hover_active = False
         self._history_visible_start = 0
         self._history_page_size = 10
@@ -2380,14 +2399,21 @@ class _InputOutputDialog(QDialog):
                             )
                         )
                     elif role == "assistant":
+                        thinking = str(
+                            raw_message[2] if len(raw_message) > 2 else ""
+                        )
+                        storage = self._normalize_message_storage(
+                            raw_message[6] if len(raw_message) > 6 else None
+                        )
                         messages.append(
                             (
                                 "assistant",
                                 content,
-                                str(raw_message[2] if len(raw_message) > 2 else ""),
+                                thinking,
                                 str(raw_message[3] if len(raw_message) > 3 else "Processing"),
                                 str(raw_message[4] if len(raw_message) > 4 else ""),
                                 str(raw_message[5] if len(raw_message) > 5 else ""),
+                                storage,
                             )
                         )
 
@@ -2444,6 +2470,173 @@ class _InputOutputDialog(QDialog):
         if timer is not None:
             timer.start()
 
+    @staticmethod
+    def _normalize_message_storage(storage):
+        """Return the safe, JSON-serializable metadata for a file-backed reply."""
+        if not isinstance(storage, dict):
+            return {}
+        normalized = {}
+        for key in ("content_path", "thinking_path"):
+            value = str(storage.get(key, "") or "").strip()
+            if value:
+                normalized[key] = value
+        for key in ("content_chars", "thinking_chars"):
+            try:
+                normalized[key] = max(0, int(storage.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                normalized[key] = 0
+        return normalized
+
+    def _history_file_reference(self, path):
+        """Store a portable path relative to the history JSON when possible."""
+        absolute = os.path.abspath(os.path.expanduser(str(path or "")))
+        history_directory = os.path.dirname(os.path.abspath(self._chat_history_path))
+        try:
+            reference = os.path.relpath(absolute, history_directory)
+        except ValueError:
+            reference = absolute
+        return reference.replace('\\', '/')
+
+    def _resolve_history_file_reference(self, reference):
+        """Resolve either a v2 relative reference or an absolute fallback path."""
+        value = str(reference or "").strip()
+        if not value:
+            return ""
+        value = value.replace('/', os.sep).replace('\\', os.sep)
+        if os.path.isabs(value):
+            return os.path.abspath(value)
+        history_directory = os.path.dirname(os.path.abspath(self._chat_history_path))
+        return os.path.abspath(os.path.join(history_directory, value))
+
+    @staticmethod
+    def _assistant_storage_for(message):
+        if (
+            isinstance(message, (list, tuple))
+            and len(message) > 6
+            and isinstance(message[6], dict)
+        ):
+            return message[6]
+        return {}
+
+    def _assistant_message_char_count(self, message, kind="content"):
+        inline_index = 2 if kind == "thinking" else 1
+        inline = str(message[inline_index] if len(message) > inline_index else "")
+        if inline:
+            return len(inline)
+        storage = self._assistant_storage_for(message)
+        try:
+            return max(0, int(storage.get(f"{kind}_chars", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _assistant_message_has_text(self, message, kind="content"):
+        inline_index = 2 if kind == "thinking" else 1
+        if str(message[inline_index] if len(message) > inline_index else "").strip():
+            return True
+        storage = self._assistant_storage_for(message)
+        return bool(
+            storage.get(f"{kind}_path")
+            or self._assistant_message_char_count(message, kind) > 0
+        )
+
+    def _assistant_message_text(self, message, kind="content", message_index=-1):
+        """Lazily load one response or thinking stream from its backing file."""
+        inline_index = 2 if kind == "thinking" else 1
+        inline = str(message[inline_index] if len(message) > inline_index else "")
+        if inline:
+            return inline
+        storage = self._assistant_storage_for(message)
+        reference = str(storage.get(f"{kind}_path", "") or "")
+        if not reference:
+            return ""
+        session = self._current_chat_session()
+        session_id = session.get("id") if session is not None else None
+        cache_key = (session_id, int(message_index), kind, reference)
+        cached = self._message_text_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        path = self._resolve_history_file_reference(reference)
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                value = handle.read()
+        except Exception:
+            label = "thinking log" if kind == "thinking" else "response"
+            value = f"*The saved {label} file is missing or unreadable.*"
+        if len(self._message_text_cache) >= 128:
+            self._message_text_cache.clear()
+        self._message_text_cache[cache_key] = value
+        return value
+
+    def _externalize_session_messages(self, session):
+        """Move assistant bodies into files and return their compact JSON records."""
+        messages = list(session.get("messages", []))
+        serialized = []
+        normalized_messages = []
+        message_directory = ""
+        for message_index, message in enumerate(messages):
+            if not isinstance(message, (list, tuple)) or not message:
+                continue
+            if str(message[0] or "") != "assistant":
+                normalized = tuple(message)
+                normalized_messages.append(normalized)
+                serialized.append(list(normalized))
+                continue
+
+            values = list(message[:6])
+            while len(values) < 6:
+                values.append("")
+            values[0] = "assistant"
+            values[1] = str(values[1] or "")
+            values[2] = str(values[2] or "")
+            values[3] = str(values[3] or "Processing")
+            values[4] = str(values[4] or "")
+            values[5] = str(values[5] or "")
+            storage = self._normalize_message_storage(
+                message[6] if len(message) > 6 else None
+            )
+
+            for kind, inline_index, suffix in (
+                ("content", 1, "response.md"),
+                ("thinking", 2, "thinking.md"),
+            ):
+                inline_text = values[inline_index]
+                if not inline_text:
+                    continue
+                path_key = f"{kind}_path"
+                try:
+                    if not message_directory:
+                        conversation_folder = (
+                            self._ensure_conversation_output_folder_for_session(session)
+                        )
+                        message_directory = os.path.join(
+                            conversation_folder, "Chat Messages"
+                        )
+                    # Newly completed bodies are written to our managed
+                    # directory instead of trusting any path that may have been
+                    # hand-edited into the history JSON.
+                    target_path = os.path.join(
+                        message_directory,
+                        f"{message_index + 1:06d}-{suffix}",
+                    )
+                    _atomic_text_write(target_path, inline_text)
+                    storage[path_key] = self._history_file_reference(target_path)
+                    storage[f"{kind}_chars"] = len(inline_text)
+                    values[inline_index] = ""
+                except Exception as exc:
+                    # Keep this one body inline if its file could not be safely
+                    # written; the next save will retry without losing data.
+                    print(
+                        f"[Direct Text] Could not externalize {kind} for chat "
+                        f"{session.get('id')}, message {message_index + 1}: {exc}"
+                    )
+
+            normalized = tuple(values + [storage])
+            normalized_messages.append(normalized)
+            serialized.append(list(normalized))
+
+        session["messages"] = normalized_messages
+        return serialized
+
     def _save_chat_history(self):
         """Atomically persist all retained Direct Text conversations."""
         try:
@@ -2454,11 +2647,12 @@ class _InputOutputDialog(QDialog):
                 current["expanded"] = set(self._expanded_processing_messages)
             sessions = []
             for session in self._chat_sessions:
+                serialized_messages = self._externalize_session_messages(session)
                 sessions.append(
                     {
                         "id": int(session.get("id", 0)),
                         "title": str(session.get("title", "New chat") or "New chat"),
-                        "messages": [list(message) for message in session.get("messages", [])],
+                        "messages": serialized_messages,
                         "draft": str(session.get("draft", "") or ""),
                         "attachment": self._normalize_attachment_record(
                             session.get("attachment")
@@ -2475,6 +2669,8 @@ class _InputOutputDialog(QDialog):
                         ),
                     }
                 )
+            if current is not None:
+                self._chat_messages = current["messages"]
             current_chat_id = current.get("id") if current is not None else None
             history_directory = os.path.dirname(self._chat_history_path)
             if history_directory:
@@ -2482,7 +2678,7 @@ class _InputOutputDialog(QDialog):
             _atomic_json_write(
                 self._chat_history_path,
                 {
-                    "version": 1,
+                    "version": 2,
                     "current_chat_id": current_chat_id,
                     "sessions": sessions,
                 },
@@ -3392,11 +3588,21 @@ class _InputOutputDialog(QDialog):
         visible_characters = 0
         while start > 0:
             message = messages[start - 1]
-            message_size = len(str(message[1] if len(message) > 1 else ""))
+            if message and message[0] == "assistant":
+                message_size = self._assistant_message_char_count(message, "content")
+            else:
+                message_size = len(str(message[1] if len(message) > 1 else ""))
             # Thinking is collapsed by default, but include expanded thinking
             # in the budget because it is part of the Qt document in that case.
             if (start - 1) in self._expanded_processing_messages:
-                message_size += len(str(message[2] if len(message) > 2 else ""))
+                if message and message[0] == "assistant":
+                    message_size += self._assistant_message_char_count(
+                        message, "thinking"
+                    )
+                else:
+                    message_size += len(
+                        str(message[2] if len(message) > 2 else "")
+                    )
             if visible_count >= self._history_page_size:
                 break
             if (
@@ -3933,7 +4139,9 @@ class _InputOutputDialog(QDialog):
                     message = self._chat_messages[message_index]
                     if message[0] != "assistant":
                         return
-                    content = str(message[1] or "")
+                    content = self._assistant_message_text(
+                        message, "content", message_index
+                    )
                 elif (
                     self._assistant_message_active
                     and message_index >= len(self._chat_messages)
@@ -5302,6 +5510,9 @@ class _InputOutputDialog(QDialog):
                     )
                     continue
 
+                content = self._assistant_message_text(
+                    message, "content", message_index
+                )
                 if str(content or "").strip():
                     current_session = self._current_chat_session()
                     current_session_id = (
@@ -5326,7 +5537,17 @@ class _InputOutputDialog(QDialog):
                         "<span class='pending'>Working on your translation<span> …</span></span>"
                     )
 
-                processing_text = str(message[2] if len(message) > 2 else "")
+                expanded = message_index in self._expanded_processing_messages
+                processing_has_text = self._assistant_message_has_text(
+                    message, "thinking"
+                )
+                processing_text = (
+                    self._assistant_message_text(
+                        message, "thinking", message_index
+                    )
+                    if expanded
+                    else ""
+                )
                 processing_label = str(
                     message[3] if len(message) > 3 else "Processing"
                 )
@@ -5352,13 +5573,12 @@ class _InputOutputDialog(QDialog):
                 ):
                     processing_label += "  …"
                 show_processing = bool(
-                    processing_text.strip()
+                    processing_has_text
                     or is_active_message
                     or processing_label.startswith("Token summary")
                 )
                 processing_html = ""
                 if show_processing:
-                    expanded = message_index in self._expanded_processing_messages
                     arrow = "▼" if expanded else "▶"
                     safe_label = html_lib.escape(processing_label)
                     processing_html = (
@@ -5741,9 +5961,8 @@ class _InputOutputDialog(QDialog):
             return
         self._finish_translation()
 
-    def _conversation_output_folder(self):
-        """Return this chat's single persistent Direct Text output folder."""
-        session = self._current_chat_session()
+    def _ensure_conversation_output_folder_for_session(self, session):
+        """Return one session's persistent Direct Text output folder."""
         if session is None:
             return ""
 
@@ -5802,8 +6021,15 @@ class _InputOutputDialog(QDialog):
         target_folder = os.path.join(direct_text_root, folder_name)
         os.makedirs(target_folder, exist_ok=True)
         session["output_folder"] = target_folder
-        self._last_output_folder = target_folder
+        if session is self._current_chat_session():
+            self._last_output_folder = target_folder
         return target_folder
+
+    def _conversation_output_folder(self):
+        """Return the current chat's single persistent Direct Text output folder."""
+        return self._ensure_conversation_output_folder_for_session(
+            self._current_chat_session()
+        )
 
     def _next_indexed_output_path(self, target_folder, extension=".txt"):
         """Return a collision-safe ``Direct Text N`` path for any output type."""
