@@ -6203,6 +6203,7 @@ class _InputOutputDialog(QDialog):
 
         text_only = 0
         image_only = 0
+        actionable_image_only = 0
         mixed = 0
         empty_minimal = 0
         for chapter in chapters:
@@ -6217,6 +6218,8 @@ class _InputOutputDialog(QDialog):
                 empty_minimal += 1
             if bool(chapter.get('is_image_only', False)):
                 image_only += 1
+                if not self._is_expected_cover_chapter(chapter):
+                    actionable_image_only += 1
             elif has_images and file_size >= 500:
                 mixed += 1
             elif not has_images and file_size >= 500:
@@ -6240,6 +6243,21 @@ class _InputOutputDialog(QDialog):
                 if len(issue_section) == 2:
                     for line in issue_section[1].splitlines():
                         value = line.strip().lstrip('•').strip()
+                        if 'contain only images' in value.lower():
+                            if actionable_image_only == 0:
+                                continue
+                            chapter_word = (
+                                'chapter' if actionable_image_only == 1
+                                else 'chapters'
+                            )
+                            verb = (
+                                'contains' if actionable_image_only == 1
+                                else 'contain'
+                            )
+                            value = (
+                                f"{actionable_image_only} {chapter_word} {verb} "
+                                "only images (may need OCR)"
+                            )
                         if value and not value.lower().startswith('none detected'):
                             issue_lines.append(value)
             except OSError:
@@ -6307,6 +6325,33 @@ class _InputOutputDialog(QDialog):
             str(output_folder or ""),
             "Extraction report",
         )
+
+    @staticmethod
+    def _is_expected_cover_chapter(chapter):
+        """Identify cover/title-page records that are valid image-only pages."""
+        if not isinstance(chapter, dict):
+            return False
+        if chapter.get('is_cover') is True:
+            return True
+        import re
+
+        for key in (
+            'title', 'filename', 'original_filename', 'original_basename',
+            'original_html_file',
+        ):
+            value = str(chapter.get(key, '') or '').strip().lower()
+            if not value:
+                continue
+            basename = os.path.basename(value.replace('\\', '/'))
+            stem = os.path.splitext(basename)[0]
+            compact = re.sub(r'[^a-z0-9]+', '', stem)
+            normalized = re.sub(r'[^a-z0-9]+', '_', stem).strip('_')
+            if (
+                normalized in {'cover', 'cover_page', 'title_page'}
+                or compact in {'cover', 'coverpage', 'titlepage'}
+            ):
+                return True
+        return False
 
     def _finish_translation(self):
         if not self._active:

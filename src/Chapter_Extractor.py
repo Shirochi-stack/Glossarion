@@ -2543,6 +2543,33 @@ def _validate_critical_files( output_dir, extracted_resources):
     else:
         print(f"✅ Found OPF file(s): {opf_files}")
 
+def _is_expected_cover_chapter(chapter):
+    """Return True for EPUB cover/title-page files expected to be image-only."""
+    if not isinstance(chapter, dict):
+        return False
+    if chapter.get('is_cover') is True:
+        return True
+
+    import re
+    for key in (
+        'title', 'filename', 'original_filename', 'original_basename',
+        'original_html_file',
+    ):
+        value = str(chapter.get(key, '') or '').strip().lower()
+        if not value:
+            continue
+        basename = os.path.basename(value.replace('\\', '/'))
+        stem = os.path.splitext(basename)[0]
+        compact = re.sub(r'[^a-z0-9]+', '', stem)
+        normalized = re.sub(r'[^a-z0-9]+', '_', stem).strip('_')
+        if (
+            normalized in {'cover', 'cover_page', 'title_page'}
+            or compact in {'cover', 'coverpage', 'titlepage'}
+        ):
+            return True
+    return False
+
+
 def _create_extraction_report( output_dir, metadata, chapters, extracted_resources):
     """Create comprehensive extraction report with HTML file tracking"""
     report_path = os.path.join(output_dir, 'extraction_report.txt')
@@ -2633,8 +2660,18 @@ def _create_extraction_report( output_dir, metadata, chapters, extracted_resourc
         f.write(f"\nPOTENTIAL ISSUES:\n")
         issues = []
         
-        if image_only_chapters:
-            issues.append(f"  • {len(image_only_chapters)} chapters contain only images (may need OCR)")
+        actionable_image_only_chapters = [
+            chapter for chapter in image_only_chapters
+            if not _is_expected_cover_chapter(chapter)
+        ]
+        if actionable_image_only_chapters:
+            image_only_count = len(actionable_image_only_chapters)
+            chapter_word = "chapter" if image_only_count == 1 else "chapters"
+            verb = "contains" if image_only_count == 1 else "contain"
+            issues.append(
+                f"  • {image_only_count} {chapter_word} {verb} only images "
+                "(may need OCR)"
+            )
         
         missing_payloads = sum(
             1 for chapter in chapters
