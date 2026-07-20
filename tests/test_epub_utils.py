@@ -1,9 +1,13 @@
-import pytest
+import ast
+import json
 import os
 import zipfile
 from pathlib import Path
 
+import pytest
+
 import epub_converter
+from QA_Scanner_GUI import _normalize_qa_dialog_path
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
 from qa_scan_runtime import (
@@ -16,12 +20,158 @@ from qa_scan_runtime import (
 from scan_html_folder import (
     _count_quotation_marks,
     _missing_ending_quotation_paragraphs,
+    cross_reference_word_counts,
     detect_quotation_mismatch,
     extract_epub_punctuation_info,
     extract_epub_quotation_info,
+    extract_html_word_counts,
     generate_reports,
     process_html_file_batch,
+    scan_html_folder,
 )
+
+
+def test_cancelled_native_folder_dialog_values_are_rejected(tmp_path):
+    assert _normalize_qa_dialog_path(False) == ""
+    assert _normalize_qa_dialog_path(None) == ""
+    assert _normalize_qa_dialog_path("") == ""
+    assert _normalize_qa_dialog_path("false") == ""
+    assert _normalize_qa_dialog_path(("false", "ignored")) == ""
+
+    # Only a bare sentinel is rejected; a legitimate absolute path whose final
+    # component happens to use that name remains a valid path value.
+    real_path = tmp_path / "false"
+    assert _normalize_qa_dialog_path(real_path) == str(real_path)
+
+
+def test_qa_executor_worker_does_not_construct_qt_dialogs():
+    source_path = Path(__file__).resolve().parents[1] / "src" / "QA_Scanner_GUI.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    run_scan_worker = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "QAScannerMixin":
+            for method in node.body:
+                if isinstance(method, ast.FunctionDef) and method.name == "run_qa_scan":
+                    run_scan_worker = next(
+                        child
+                        for child in method.body
+                        if isinstance(child, ast.FunctionDef) and child.name == "run_scan"
+                    )
+                    break
+
+    assert run_scan_worker is not None
+    referenced_names = {
+        node.id for node in ast.walk(run_scan_worker) if isinstance(node, ast.Name)
+    }
+    assert "QMessageBox" not in referenced_names
+    assert "QFileDialog" not in referenced_names
+
+
+def test_standalone_html_source_matches_response_html_by_filename(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_EXACT_CHAR_COUNT", "1")
+    monkeypatch.delenv("QA_USE_WORD_COUNT", raising=False)
+    source_path = tmp_path / "chapter0001.html"
+    source_path.write_text(
+        "<html><body><h1>Chapter One</h1><p>Source text for comparison.</p></body></html>",
+        encoding="utf-8",
+    )
+
+    source_counts = extract_html_word_counts(
+        source_path,
+        log=lambda _message: None,
+    )
+    result = cross_reference_word_counts(
+        source_counts,
+        "response_chapter0001.xhtml",
+        "Chapter One\nSource text for comparison.",
+        log=lambda _message: None,
+        qa_settings={
+            "min_duplicate_word_count": 0,
+            "source_language": "english",
+            "target_language": "english",
+            "word_count_multipliers": {"english": 1.0, "other": 1.0},
+        },
+    )
+
+    assert source_counts[1]["filename"] == source_path.name
+    assert source_counts[1]["has_headers"] is True
+    assert result["found_match"] is True
+    assert result["original_file"] == source_path.name
+    assert result["ratio"] == 1.0
+    assert result["is_reasonable"] is True
+
+
+def test_standalone_html_source_supports_word_count_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_USE_WORD_COUNT", "1")
+    monkeypatch.delenv("QA_EXACT_CHAR_COUNT", raising=False)
+    source_path = tmp_path / "single.htm"
+    source_path.write_text(
+        "<html><body><p>one two three four</p></body></html>",
+        encoding="utf-8",
+    )
+
+    source_counts = extract_html_word_counts(source_path, log=lambda _message: None)
+
+    assert source_counts[1]["word_count"] == 4
+    assert source_counts[1]["small_file_word_count"] == 4
+
+
+def test_qa_scan_cross_references_standalone_html_source_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_EXACT_CHAR_COUNT", "1")
+    monkeypatch.delenv("QA_USE_WORD_COUNT", raising=False)
+    source_path = tmp_path / "chapter0002.html"
+    source_path.write_text(
+        "<html><body><h1>Chapter Two</h1><p>A complete standalone source chapter.</p></body></html>",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "translated"
+    output_dir.mkdir()
+    (output_dir / "response_chapter0002.xhtml").write_text(
+        "<html><body><h1>Chapter Two</h1><p>A complete standalone source chapter.</p></body></html>",
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update(
+        {
+            "check_word_count_ratio": True,
+            "min_duplicate_word_count": 0,
+            "check_missing_images": False,
+            "check_punctuation_mismatch": False,
+            "check_quotation_mismatch": False,
+            "check_silent_truncation": False,
+            "check_ai_truncation_detection": False,
+            "check_multiple_headers": False,
+            "check_repetition": False,
+            "check_translation_artifacts": False,
+            "check_glossary_leakage": False,
+            "use_thread_executor": True,
+            "source_language": "english",
+            "target_language": "english",
+        }
+    )
+
+    scan_html_folder(
+        str(output_dir),
+        log=lambda _message: None,
+        mode="quick-scan",
+        qa_settings=settings,
+        epub_path=str(source_path),
+    )
+
+    report_path = (
+        output_dir
+        / f"{output_dir.name}_Scan Report"
+        / "validation_results.json"
+    )
+    results = json.loads(report_path.read_text(encoding="utf-8"))
+    translated_result = next(
+        row for row in results if row["filename"] == "response_chapter0002.xhtml"
+    )
+    word_count_check = translated_result["word_count_check"]
+    assert word_count_check["found_match"] is True
+    assert word_count_check["original_file"] == source_path.name
+    assert word_count_check["ratio"] == 1.0
 
 
 def test_html_entity_decoder_basic_entities():

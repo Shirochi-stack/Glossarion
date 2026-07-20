@@ -5457,6 +5457,57 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
         log(f"❌ Error reading EPUB file: {e}")
         return {}
 
+
+def extract_html_word_counts(html_path, log=print, min_file_length=0):
+    """Extract source metadata for one standalone HTML-family file.
+
+    The returned shape matches one entry from ``extract_epub_word_counts`` so
+    the regular filename-based EPUB comparison path can compare a translated
+    ``response_<name>.html`` (or the same basename with another HTML
+    extension) against this source file.
+    """
+    try:
+        with open(html_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+            content = source_file.read()
+
+        soup = BeautifulSoup(content, 'html.parser')
+        text = soup.get_text(separator='\n', strip=True)
+        if len(text) < min_file_length:
+            log(
+                f"⚠️ Standalone HTML source is below the minimum length "
+                f"({len(text)} < {min_file_length} characters)"
+            )
+            return {}
+
+        script_hint = detect_dominant_script(text)
+        has_cjk = script_hint in ['cjk', 'japanese', 'korean']
+        small_file_word_count = _count_small_file_words(text)
+        if os.getenv('QA_USE_WORD_COUNT', '0') == '1':
+            word_count = small_file_word_count if has_cjk else _count_words(text)
+        else:
+            word_count = _count_chars_cached(text)
+
+        basename = os.path.basename(html_path)
+        log(f"📄 Loaded standalone HTML source for word count: {basename}")
+        return {
+            1: {
+                'word_count': word_count,
+                'small_file_word_count': small_file_word_count,
+                'filename': basename,
+                'full_path': os.path.abspath(html_path),
+                'is_cjk': has_cjk,
+                'script': script_hint,
+                'spine_index': 1,
+                'has_headers': bool(soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])),
+                'custom_tags_count': _count_custom_tag_occurrences(content),
+                'custom_tag_names': _collect_custom_tag_names(content),
+            }
+        }
+    except Exception as exc:
+        log(f"❌ Error reading standalone HTML source: {exc}")
+        return {}
+
+
 def extract_epub_html_content(epub_path, log=print):
     """Extract raw HTML content for each chapter from the original EPUB using spine order.
     
@@ -8438,6 +8489,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     """
     global _stop_flag
     _stop_flag = False
+    standalone_html_source = bool(
+        epub_path and str(epub_path).lower().endswith(('.html', '.htm', '.xhtml'))
+    )
     
     # Auto-detect text file mode from source extension when not explicitly set
     # Enable for .txt or .pdf sources so PDFs are treated like text-mode inputs
@@ -8591,6 +8645,25 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         log(f"   No images found in word_count folder HTML files")
                 else:
                     log(f"   No HTML files found in word_count folder for image extraction")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                source_soup = BeautifulSoup(source_html, 'html.parser')
+                images = source_soup.find_all('img')
+                if images:
+                    original_image_info = {
+                        1: {
+                            'image_count': len(images),
+                            'image_srcs': [img.get('src', '') for img in images],
+                            'filename': os.path.basename(epub_path),
+                        }
+                    }
+                    log(f"🖼️ Found {len(images)} images in standalone HTML source")
+                else:
+                    log("   No images found in standalone HTML source")
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract images from standalone HTML source: {exc}")
         elif epub_path and os.path.exists(epub_path):
             # For EPUB mode, extract from EPUB
             image_source_epub_path = source_text_epub_path if _is_vision_output_mode(qa_settings) else epub_path
@@ -8643,6 +8716,24 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         log(f"   No ?! punctuation found in word_count folder HTML files")
                 else:
                     log(f"   No HTML files found in word_count folder for punctuation extraction")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                source_soup = BeautifulSoup(source_html, 'html.parser')
+                for tag in source_soup(['title', 'head', 'script', 'style', 'meta', 'link']):
+                    tag.decompose()
+                source_text = source_soup.get_text()
+                original_punctuation_info = {
+                    1: {
+                        'question_marks': source_text.count('?'),
+                        'exclamation_marks': source_text.count('!'),
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+                log("❗ Loaded punctuation from standalone HTML source")
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract punctuation from standalone HTML source: {exc}")
         elif epub_path and os.path.exists(epub_path):
             # For EPUB mode, extract from EPUB
             log(f"❗ Extracting punctuation information from original EPUB: {os.path.basename(epub_path)}")
@@ -8724,6 +8815,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     }
                 except Exception as exc:
                     log(f"   ⚠️ Could not extract quotations from source file: {exc}")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_content = source_file.read()
+                source_text = _visible_text_for_quotation_check(source_content)
+                original_quotation_info = {
+                    1: {
+                        'quotation_marks': _count_quotation_marks(
+                            source_text,
+                            skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                        ),
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+            except Exception as exc:
+                log(f"   ⚠️ Could not extract quotations from standalone HTML source: {exc}")
         elif epub_path and os.path.exists(epub_path):
             log(f"💬 Extracting quotation information from original EPUB: {os.path.basename(epub_path)}")
             original_quotation_info = extract_epub_quotation_info(
@@ -8768,6 +8875,19 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     log(f"   Loaded HTML content for {len(original_html_content)} source chunks")
             else:
                 log("   ⚠️ No word_count folder found for truncation detection in text mode")
+        elif standalone_html_source and os.path.exists(epub_path):
+            try:
+                with open(epub_path, 'r', encoding='utf-8', errors='ignore') as source_file:
+                    source_html = source_file.read()
+                original_html_content = {
+                    1: {
+                        'html': source_html,
+                        'filename': os.path.basename(epub_path),
+                    }
+                }
+                log("🔍 Loaded standalone HTML source for truncation detection")
+            except Exception as exc:
+                log(f"   ⚠️ Could not read standalone HTML source for truncation detection: {exc}")
         elif epub_path and os.path.exists(epub_path):
             truncation_source_epub_path = source_text_epub_path
             if check_ai_truncation:
@@ -8864,6 +8984,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log("⚠️ Word count cross-reference enabled but no valid text/PDF file provided - skipping this check")
                 check_word_count = False
+        elif standalone_html_source and os.path.exists(epub_path):
+            log(f"📄 Extracting word count from source HTML: {os.path.basename(epub_path)}")
+            min_length = qa_settings.get('min_file_length', 0)
+            original_word_counts = extract_html_word_counts(
+                epub_path,
+                log,
+                min_file_length=min_length,
+            )
+            log(f"   Found source metadata for {len(original_word_counts)} HTML file")
         elif epub_path and os.path.exists(epub_path):
             log(f"📚 Extracting word counts from source EPUB: {os.path.basename(source_text_epub_path)}")
             min_length = qa_settings.get('min_file_length', 0)
@@ -8911,7 +9040,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 except Exception as e:
                     log(f"   ⚠️ Could not load merge info: {e}")
         else:
-            log("⚠️ Word count cross-reference enabled but no valid EPUB provided - skipping this check")
+            log("⚠️ Word count cross-reference enabled but no valid EPUB/HTML source provided - skipping this check")
             check_word_count = False
     
     # Log settings
