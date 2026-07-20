@@ -1392,6 +1392,12 @@ class _InputOutputDialog(QDialog):
         '] sdk stream start (model=',
         '] sdk stream opened in ',
     )
+    # QTextDocument comments/empty anchors are not searchable, so the active
+    # streaming section uses tiny sentinel text.  Stream repaints replace only
+    # the text between these sentinels instead of rebuilding every saved chat
+    # message on the GUI thread.
+    _ACTIVE_STREAM_START_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_START_7F31"
+    _ACTIVE_STREAM_END_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_END_7F31"
 
     def __init__(self, translator):
         super().__init__(translator)
@@ -1486,6 +1492,9 @@ class _InputOutputDialog(QDialog):
         self._run_started_at = 0.0
         self._render_pending = False
         self._rendered_message_cache = {}
+        self._history_visible_start = 0
+        self._history_page_size = 10
+        self._history_character_budget = 120000
         # Follow newly streamed text by default. Users can opt into a fixed
         # viewport from Settings or the transcript context menu.
         self._output_auto_scroll_disabled = bool(
@@ -1887,7 +1896,11 @@ class _InputOutputDialog(QDialog):
         self.chat_list.customContextMenuRequested.connect(
             self._show_chat_context_menu
         )
-        self._load_chat_session(self._current_chat_index)
+        # The rounded-card assets used by the transcript are built below.
+        # Loading and rendering here used to lay out the entire saved chat once
+        # without those assets, then lay it out a second time after creating
+        # them.  Restore state now and perform one bounded render below.
+        self._load_chat_session(self._current_chat_index, render=False)
         self._refresh_chat_list()
 
         legacy_simple_mode = bool(
@@ -3299,7 +3312,33 @@ class _InputOutputDialog(QDialog):
             self.delete_chat_button.setEnabled(can_delete and not self._active)
         self._schedule_chat_history_save()
 
-    def _load_chat_session(self, index):
+    def _reset_history_window(self):
+        """Show a recent, bounded history window; older messages stay loadable."""
+        messages = self._chat_messages
+        start = len(messages)
+        visible_count = 0
+        visible_characters = 0
+        while start > 0:
+            message = messages[start - 1]
+            message_size = len(str(message[1] if len(message) > 1 else ""))
+            # Thinking is collapsed by default, but include expanded thinking
+            # in the budget because it is part of the Qt document in that case.
+            if (start - 1) in self._expanded_processing_messages:
+                message_size += len(str(message[2] if len(message) > 2 else ""))
+            if visible_count >= self._history_page_size:
+                break
+            if (
+                visible_count >= 3
+                and visible_characters + message_size
+                > self._history_character_budget
+            ):
+                break
+            start -= 1
+            visible_count += 1
+            visible_characters += message_size
+        self._history_visible_start = start
+
+    def _load_chat_session(self, index, render=True):
         if not (0 <= int(index) < len(self._chat_sessions)):
             return
         self._current_chat_index = int(index)
@@ -3318,6 +3357,7 @@ class _InputOutputDialog(QDialog):
         self._processing_label_text = "Processing"
         self._processing_spinner_active = False
         self._expanded_processing_messages = set(session.get("expanded", set()))
+        self._reset_history_window()
         self.input_box.setPlainText(str(session.get("draft", "") or ""))
         attachment = self._normalize_attachment_record(session.get("attachment"))
         if attachment and os.path.isfile(attachment["path"]):
@@ -3334,7 +3374,8 @@ class _InputOutputDialog(QDialog):
         self._processing_token_count = 0
         self._refresh_processing_label()
         self._set_status("Ready")
-        self._render_output()
+        if render:
+            self._render_output()
 
     def _refresh_chat_list(self):
         if not hasattr(self, "chat_list"):
@@ -3797,6 +3838,21 @@ class _InputOutputDialog(QDialog):
             target = url.toString()
         except Exception:
             target = str(url or "")
+        history_prefix = "direct-history:"
+        if target.startswith(history_prefix):
+            old_start = max(0, int(self._history_visible_start))
+            self._history_visible_start = max(
+                0, old_start - int(self._history_page_size)
+            )
+            self._render_output()
+            if old_start < len(self._chat_messages):
+                QTimer.singleShot(
+                    0,
+                    lambda index=old_start: self.output_box.scrollToAnchor(
+                        f"direct-message-{index}"
+                    ),
+                )
+            return
         copy_prefix = "direct-copy:"
         if target.startswith(copy_prefix):
             try:
@@ -4042,6 +4098,7 @@ class _InputOutputDialog(QDialog):
         )
         self._preserve_temp_root = False
         self._direct_graceful_stop_pending = False
+        self._reset_history_window()
         self._render_output()
 
         try:
@@ -4431,13 +4488,24 @@ class _InputOutputDialog(QDialog):
             return
         self._render_pending = True
         if not self._render_timer.isActive():
-            self._render_timer.start()
+            active_characters = sum(
+                len(str(segment.get("content", "") or ""))
+                + len(str(segment.get("thinking", "") or ""))
+                for segment in self._active_request_segments
+            )
+            # Large streamed documents cost more to parse/layout.  Adapt the
+            # repaint cadence rather than allowing setHtml/insertHtml work to
+            # starve normal window events.
+            interval = min(900, 280 + active_characters // 350)
+            if self._output_auto_scroll_disabled:
+                interval = max(interval, 450)
+            self._render_timer.start(interval)
 
     def _flush_scheduled_render(self):
         if not self._render_pending:
             return
         self._render_pending = False
-        self._render_output()
+        self._render_output(active_only=self._assistant_message_active)
 
     def _on_log_line(self, message, source_thread=None):
         """Queue a request-bound, channel-bound stream event for the UI thread."""
@@ -4889,18 +4957,83 @@ class _InputOutputDialog(QDialog):
 
         return _sanitized_fragment(rendered)
 
-    def _render_output(self):
+    @classmethod
+    def _active_stream_marker_html(cls, marker):
+        return (
+            "<span style='font-size:1px;color:#1e1e1e'>"
+            f"{marker}</span>"
+        )
+
+    def _replace_active_stream_fragment(self, fragment):
+        """Replace only active request cards in the existing QTextDocument."""
+        document = self.output_box.document()
+        start = document.find(self._ACTIVE_STREAM_START_MARKER)
+        if start.isNull():
+            return False
+        end = document.find(
+            self._ACTIVE_STREAM_END_MARKER,
+            start.selectionEnd(),
+        )
+        if end.isNull():
+            return False
+
+        scrollbar = self.output_box.verticalScrollBar()
+        previous_scroll = scrollbar.value()
+        horizontal_scrollbar = self.output_box.horizontalScrollBar()
+        previous_horizontal_scroll = horizontal_scrollbar.value()
+        freeze_viewport = bool(
+            self._output_auto_scroll_disabled
+            and self.output_box.updatesEnabled()
+        )
+        if freeze_viewport:
+            self.output_box.setUpdatesEnabled(False)
+        try:
+            cursor = QTextCursor(document)
+            cursor.setPosition(start.selectionStart())
+            cursor.setPosition(end.selectionEnd(), QTextCursor.KeepAnchor)
+            cursor.insertHtml(
+                self._active_stream_marker_html(
+                    self._ACTIVE_STREAM_START_MARKER
+                )
+                + fragment
+                + self._active_stream_marker_html(
+                    self._ACTIVE_STREAM_END_MARKER
+                )
+            )
+            if self._output_auto_scroll_disabled:
+                scrollbar.setSliderPosition(
+                    min(previous_scroll, scrollbar.maximum())
+                )
+                horizontal_scrollbar.setSliderPosition(
+                    min(previous_horizontal_scroll, horizontal_scrollbar.maximum())
+                )
+            else:
+                cursor = self.output_box.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.output_box.setTextCursor(cursor)
+                self.output_box.ensureCursorVisible()
+        finally:
+            if freeze_viewport:
+                self.output_box.setUpdatesEnabled(True)
+                self.output_box.viewport().update()
+        return True
+
+    def _render_output(self, active_only=False):
         import html as html_lib
 
-        messages = list(self._chat_messages)
+        history_start = max(
+            0,
+            min(int(self._history_visible_start), len(self._chat_messages)),
+        )
+        active_messages = []
         if self._assistant_message_active:
             if self._active_request_segments:
-                messages.extend(
+                active_messages.extend(
                     self._request_segment_message(segment)
                     for segment in self._active_request_segments
                 )
             else:
-                messages.append(
+                active_messages.append(
                     (
                         "assistant",
                         self._streamed_content,
@@ -4910,6 +5043,16 @@ class _InputOutputDialog(QDialog):
                         "Request 1",
                     )
                 )
+        if active_only:
+            if not self._assistant_message_active:
+                active_only = False
+            else:
+                messages = active_messages
+                first_message_index = len(self._chat_messages)
+        if not active_only:
+            messages = list(self._chat_messages[history_start:])
+            messages.extend(active_messages)
+            first_message_index = history_start
 
         if self._assistant_avatar_data_uri:
             avatar_source = html_lib.escape(
@@ -4924,7 +5067,7 @@ class _InputOutputDialog(QDialog):
             assistant_avatar = "G"
 
         message_html = []
-        if not messages:
+        if not messages and not active_only:
             message_html.append(
                 "<div class='empty-state'>"
                 "<div class='empty-icon'>💬</div>"
@@ -4934,7 +5077,31 @@ class _InputOutputDialog(QDialog):
                 "</div>"
             )
         else:
-            for message_index, message in enumerate(messages):
+            if not active_only and history_start > 0:
+                hidden_count = history_start
+                message_html.append(
+                    "<div class='history-loader'>"
+                    f"<a href='direct-history:{history_start}'>"
+                    f"↑ Show earlier messages ({hidden_count:,} hidden)</a>"
+                    "</div>"
+                )
+            active_marker_added = False
+            for message_index, message in enumerate(
+                messages, start=first_message_index
+            ):
+                if (
+                    not active_only
+                    and self._assistant_message_active
+                    and message_index >= len(self._chat_messages)
+                    and not active_marker_added
+                ):
+                    message_html.append(
+                        self._active_stream_marker_html(
+                            self._ACTIVE_STREAM_START_MARKER
+                        )
+                    )
+                    active_marker_added = True
+                row_anchor = f"<a name='direct-message-{message_index}'></a>"
                 role = message[0]
                 content = message[1]
                 if role in ("user", "user_file"):
@@ -4986,6 +5153,8 @@ class _InputOutputDialog(QDialog):
                         rendered = rendered.replace("\n", "<br>")
                     bubble_html = self._rounded_user_bubble_html(rendered)
                     message_html.append(
+                        row_anchor
+                        +
                         "<table class='chat-row user-row' width='100%' cellspacing='0' "
                         "cellpadding='0'><tr><td width='17%'></td>"
                         f"{bubble_html}"
@@ -5125,6 +5294,8 @@ class _InputOutputDialog(QDialog):
                     assistant_inner_html
                 )
                 message_html.append(
+                    row_anchor
+                    +
                     "<table class='chat-row assistant-row' width='100%' cellspacing='0' "
                     "cellpadding='0'><tr>"
                     "<td class='assistant-avatar-cell' width='38' valign='top'>"
@@ -5137,6 +5308,28 @@ class _InputOutputDialog(QDialog):
                     "<div class='message-gap'>&nbsp;</div>"
                 )
 
+            if not active_only and self._assistant_message_active:
+                if not active_marker_added:
+                    message_html.append(
+                        self._active_stream_marker_html(
+                            self._ACTIVE_STREAM_START_MARKER
+                        )
+                    )
+                message_html.append(
+                    self._active_stream_marker_html(
+                        self._ACTIVE_STREAM_END_MARKER
+                    )
+                )
+
+        if active_only:
+            fragment = ''.join(message_html)
+            if self._replace_active_stream_fragment(fragment):
+                return
+            # The first active update can race the initial full render.  Fall
+            # back once so the sentinels are installed, then later updates are
+            # localized.
+            return self._render_output(active_only=False)
+
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
@@ -5144,8 +5337,7 @@ class _InputOutputDialog(QDialog):
         body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
         output_font = QFont(self.output_box.font())
         output_font.setPointSizeF(body_font_point_size)
-        document = (
-            "<html><head><style>"
+        style_sheet = (
             "body { background-color: #1e1e1e; color: white; line-height: 1.48; "
             "margin: 14px 10px; font-family: 'Segoe UI', sans-serif; "
             f"font-size: {body_font_point_size:.2f}pt; }}"
@@ -5153,6 +5345,10 @@ class _InputOutputDialog(QDialog):
             ".empty-state h2 { color: white; font-size: 1.62em; margin: 10px 0; }"
             ".empty-state p { line-height: 1.55; }"
             ".empty-icon { color: #5a9fd4; font-size: 2.38em; }"
+            ".history-loader { color: #8fa2ba; text-align: center; "
+            "margin: 5px 0 22px 0; }"
+            ".history-loader a { color: #8fa2ba; text-decoration: none; "
+            "font-weight: 600; }"
             ".chat-row, .chat-row td, .avatar-table, .avatar-table td { border: none; }"
             ".role { color: #cbd5e1; font-size: 0.76em; font-weight: 700; "
             "letter-spacing: 0.08em; margin-bottom: 6px; }"
@@ -5223,9 +5419,13 @@ class _InputOutputDialog(QDialog):
             "border: 1px solid #596171; padding: 4px 7px; }"
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
-            "</style></head><body>"
-            f"{''.join(message_html)}"
-            "</body></html>"
+        )
+        document = (
+            "<html><head><style>"
+            + style_sheet
+            + "</style></head><body>"
+            + ''.join(message_html)
+            + "</body></html>"
         )
         # setHtml() temporarily resets the viewport before layout completes.
         # Suppress that intermediate repaint when follow-tail is disabled, then
@@ -5239,6 +5439,10 @@ class _InputOutputDialog(QDialog):
         try:
             self.output_box.setFont(output_font)
             self.output_box.document().setDefaultFont(output_font)
+            # Keep the stylesheet as a document default as well as embedding
+            # it in the full document. QTextCursor.insertHtml() consults the
+            # default stylesheet when localized streaming updates are inserted.
+            self.output_box.document().setDefaultStyleSheet(style_sheet)
             self.output_box.setHtml(document)
             if self._output_auto_scroll_disabled:
                 scrollbar.setSliderPosition(
@@ -5281,6 +5485,7 @@ class _InputOutputDialog(QDialog):
             self._active_request_segments = []
             self._request_segment_by_thread = {}
             self._stream_phase_by_thread = {}
+            self._reset_history_window()
             self._save_chat_history()
             self._schedule_stream_render(immediate=True)
             return
@@ -5306,6 +5511,7 @@ class _InputOutputDialog(QDialog):
             )
         )
         self._assistant_message_active = False
+        self._reset_history_window()
         self._save_chat_history()
         self._render_output()
 
@@ -23019,10 +23225,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     pass  # Payload saving handled by unified_api_client fallback
                 
                 # Run translation
-                translation_main(
+                translation_result = translation_main(
                     log_callback=self.append_log,
                     stop_callback=lambda: self.stop_requested
                 )
+
+                if translation_result is False:
+                    self.append_log("❌ Translation did not complete successfully.")
+                    return False
                 
                 if not self.stop_requested:
                     if getattr(self, '_translation_run_is_multipass_qa_refinement', False):

@@ -1036,6 +1036,10 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     else:
         metadata.update({
             'chapter_count': len(chapters),
+            'chapter_payloads_ready': sum(
+                1 for chapter in chapters
+                if isinstance(chapter.get('body'), str)
+            ),
             'detected_language': detected_language,
             'extracted_resources': extracted_resources,
             'extraction_mode': extraction_mode,
@@ -2613,10 +2617,18 @@ def _create_extraction_report( output_dir, metadata, chapters, extracted_resourc
                     if len(files) > 5:
                         f.write(f"    ... and {len(files) - 5} more\n")
         
-        f.write(f"\nHTML FILES WRITTEN:\n")
-        html_files_written = metadata.get('html_files_written', 0)
-        f.write(f"  Total: {html_files_written} files\n")
-        f.write(f"  Location: Main directory and 'originals' subdirectory\n")
+        f.write(f"\nCHAPTER PAYLOADS PREPARED:\n")
+        chapter_payloads_ready = sum(
+            1 for chapter in chapters
+            if isinstance(chapter.get('body'), str)
+        )
+        f.write(
+            f"  Total: {chapter_payloads_ready}/{len(chapters)} chapters\n"
+        )
+        f.write(
+            "  Storage: in-memory chapter bodies; the async worker writes "
+            "chapters_full.json after extraction\n"
+        )
         
         f.write(f"\nPOTENTIAL ISSUES:\n")
         issues = []
@@ -2624,9 +2636,14 @@ def _create_extraction_report( output_dir, metadata, chapters, extracted_resourc
         if image_only_chapters:
             issues.append(f"  • {len(image_only_chapters)} chapters contain only images (may need OCR)")
         
-        missing_html = sum(1 for c in chapters if not c.get('original_html_file'))
-        if missing_html > 0:
-            issues.append(f"  • {missing_html} chapters failed to write HTML files")
+        missing_payloads = sum(
+            1 for chapter in chapters
+            if not isinstance(chapter.get('body'), str)
+        )
+        if missing_payloads > 0:
+            issues.append(
+                f"  • {missing_payloads} chapters are missing extracted content"
+            )
         
         if not extracted_resources.get('epub_structure'):
             issues.append("  • No EPUB structure files found (may affect reconstruction)")
@@ -2639,13 +2656,23 @@ def _create_extraction_report( output_dir, metadata, chapters, extracted_resourc
     
     print(f"📄 Saved extraction report to: {report_path}")
 
-def _log_extraction_summary( chapters, extracted_resources, detected_language, html_files_written=0):
-    """Log final extraction summary with HTML file information"""
+def _log_extraction_summary(chapters, extracted_resources, detected_language):
+    """Log readiness of the chapter payload consumed by translation."""
     extraction_mode = chapters[0].get('extraction_mode', 'unknown') if chapters else 'unknown'
+    chapter_payloads_ready = sum(
+        1 for chapter in chapters
+        if isinstance(chapter.get('body'), str)
+    )
+    chapter_data_ready = bool(
+        chapters and chapter_payloads_ready == len(chapters)
+    )
     
     print(f"\n✅ {extraction_mode.capitalize()} extraction complete!")
     print(f"   📚 Chapters: {len(chapters)}")
-    print(f"   📄 HTML files written: {html_files_written}")
+    print(
+        f"   📄 Chapter payloads ready: "
+        f"{chapter_payloads_ready}/{len(chapters)}"
+    )
     print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
     print(f"   🌍 Language: {detected_language}")
     
@@ -2660,7 +2687,10 @@ def _log_extraction_summary( chapters, extracted_resources, detected_language, h
         print(f"   ⚠️ No EPUB structure files extracted!")
     
     print(f"\n🔍 Pre-flight check readiness:")
-    print(f"   ✅ HTML files: {'READY' if html_files_written > 0 else 'NOT READY'}")
+    print(
+        f"   ✅ Chapter data: "
+        f"{'READY' if chapter_data_ready else 'NOT READY'}"
+    )
     print(f"   ✅ Metadata: READY")
     print(f"   ✅ Resources: READY")
     

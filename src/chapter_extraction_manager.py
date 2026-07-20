@@ -52,6 +52,78 @@ class ChapterExtractionManager:
         except Exception:
             pass
         return False
+
+    def _consume_terminal_output_line(self, line):
+        """Consume output drained after process exit, including its result."""
+        line = str(line or "").strip()
+        if not line:
+            return
+        if line.startswith("[RESULT]"):
+            try:
+                self.result = json.loads(line[8:].strip())
+                if self.result.get("success"):
+                    self._log("✅ Extraction completed successfully!")
+                    self._log(
+                        f"📚 Extracted {self.result.get('chapters', 0)} chapters"
+                    )
+                else:
+                    self._log(
+                        f"❌ Extraction failed: "
+                        f"{self.result.get('error', 'Unknown error')}"
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._log(f"⚠️ Failed to parse extraction result: {exc}")
+            return
+        if line.startswith("[ERROR]"):
+            message = line[7:].strip()
+            self._log(f"❌ {message}")
+            self.error_queue.put(message)
+            return
+        if line.startswith("[INFO]"):
+            self._log(f"ℹ️ {line[6:].strip()}")
+            return
+        if line.startswith("[WARNING]"):
+            self._log(f"⚠️ {line[9:].strip()}")
+            return
+        if line.startswith("[PROGRESS]"):
+            # The terminal drain normally contains only the final few records;
+            # retaining the plain progress text is more useful than losing it.
+            self._log(line[10:].strip())
+            return
+        if not line.startswith("["):
+            self._log(line)
+
+    def _recover_completed_result(self, output_dir, returncode):
+        """Recover only from a valid artifact written by a clean worker exit."""
+        if returncode != 0:
+            return None
+        chapters_path = os.path.join(output_dir, "chapters_full.json")
+        if not os.path.isfile(chapters_path):
+            return None
+        try:
+            with open(chapters_path, "r", encoding="utf-8") as handle:
+                chapters = json.load(handle)
+            if not isinstance(chapters, list):
+                return None
+            metadata = {}
+            metadata_path = os.path.join(output_dir, "metadata.json")
+            if os.path.isfile(metadata_path):
+                with open(metadata_path, "r", encoding="utf-8") as handle:
+                    loaded_metadata = json.load(handle)
+                if isinstance(loaded_metadata, dict):
+                    metadata = loaded_metadata
+            self._log(
+                "✅ Recovered extraction completion from the validated "
+                "chapters_full.json artifact"
+            )
+            return {
+                "success": True,
+                "chapters": len(chapters),
+                "metadata": metadata,
+            }
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._log(f"⚠️ Could not validate extracted chapter data: {exc}")
+            return None
         
     def extract_chapters_async(self, epub_path, output_dir, extraction_mode="smart", 
                               progress_callback=None, completion_callback=None):
@@ -277,8 +349,7 @@ class ChapterExtractionManager:
                 # Process any remaining output
                 if remaining_output:
                     for line in remaining_output.strip().split('\n'):
-                        if line and not line.startswith("["):
-                            self._log(line)
+                        self._consume_terminal_output_line(line)
                 
                 # Check for errors
                 suppress_errors = self._should_suppress_subprocess_errors(remaining_error, self.process.returncode)
@@ -328,6 +399,11 @@ class ChapterExtractionManager:
                     pass  # Ignore cleanup errors in finally block
             
             # Ensure result is never None
+            if self.result is None:
+                if not self.stop_requested and process_ref is not None:
+                    self.result = self._recover_completed_result(
+                        output_dir, process_ref.returncode
+                    )
             if self.result is None:
                 if self.stop_requested:
                     self.result = {

@@ -19639,14 +19639,14 @@ def main(log_callback=None, stop_callback=None):
             while not extraction_result["completed"]:
                 if check_stop():
                     extraction_manager.stop_extraction()
-                    return
+                    return False
                 
                 time.sleep(0.1)  # Check every 100ms
             
             # Check if extraction was successful
             if not extraction_result["result"] or not extraction_result["result"].get("success"):
                 log_callback("❌ Chapter extraction failed")
-                return
+                return False
             
             sync_loaded_css_and_fonts_to_output(out)
 
@@ -22251,10 +22251,16 @@ def main(log_callback=None, stop_callback=None):
             print("\n📘 Building final EPUB…")
             try:
                 from epub_converter import fallback_compile_epub
-                fallback_compile_epub(out, log_callback=log_callback)
+                compiled_epub = fallback_compile_epub(
+                    out, log_callback=log_callback
+                )
+                if not compiled_epub or not os.path.isfile(compiled_epub):
+                    print("❌ EPUB build did not produce an output file")
+                    return False
                 print("✅ Image mode EPUB passthrough complete:", out)
             except Exception as e:
                 print(f"❌ EPUB build failed: {e}")
+                return False
 
         # Clean up passthrough env var
         os.environ.pop("IMAGE_MODE_EPUB_PASSTHROUGH", None)
@@ -26095,7 +26101,12 @@ def main(log_callback=None, stop_callback=None):
         try:
             from epub_converter import fallback_compile_epub
             if not _single_chapter_run:
-                fallback_compile_epub(out, log_callback=log_callback)
+                compiled_epub = fallback_compile_epub(
+                    out, log_callback=log_callback
+                )
+                if not compiled_epub or not os.path.isfile(compiled_epub):
+                    print("❌ EPUB build did not produce an output file")
+                    return False
                 print("✅ All done: your final EPUB is in", out)
 
             total_time = time.time() - translation_start_time
@@ -26119,8 +26130,10 @@ def main(log_callback=None, stop_callback=None):
                 
         except Exception as e:
             print("❌ EPUB build failed:", e)
+            return False
 
     print("TRANSLATION_COMPLETE_SIGNAL")
+    return True
 
 if __name__ == "__main__":
     from shutdown_utils import run_cli_main
