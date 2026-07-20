@@ -1483,7 +1483,12 @@ class _InputOutputDialog(QDialog):
         self._run_started_at = 0.0
         self._render_pending = False
         self._rendered_message_cache = {}
-        self._output_auto_scroll_disabled = False
+        # Direct Text reparses a rich transcript while streams are active.
+        # Default to a stable viewport; users can opt back into follow-tail
+        # behavior from Settings or the transcript context menu.
+        self._output_auto_scroll_disabled = bool(
+            translator.config.get('direct_text_disable_auto_scroll', True)
+        )
         self._chat_zoom_level = 0
         self._chat_zoom_percent = 100
         self._processing_text = ""
@@ -1950,6 +1955,19 @@ class _InputOutputDialog(QDialog):
                 'direct_text_skip_prompt_profile', checked
             )
         )
+        self.disable_auto_scroll_checkbox = translator._create_styled_checkbox(
+            "Disable conversation auto-scroll"
+        )
+        self.disable_auto_scroll_checkbox.setChecked(
+            self._output_auto_scroll_disabled
+        )
+        self.disable_auto_scroll_checkbox.setToolTip(
+            "Keep the Direct Text transcript at its current position while "
+            "requests stream. This is enabled by default."
+        )
+        self.disable_auto_scroll_checkbox.toggled.connect(
+            self._set_output_auto_scroll_disabled
+        )
         self.attachment_prompt_role_combo = QComboBox()
         self.attachment_prompt_role_combo.setToolTip(
             "Role used for text typed alongside an attached file."
@@ -2011,6 +2029,7 @@ class _InputOutputDialog(QDialog):
             self.force_no_glossary_checkbox,
             self.skip_thinking_checkbox,
             self.skip_prompt_profile_checkbox,
+            self.disable_auto_scroll_checkbox,
         ):
             checkbox.setStyleSheet(
                 checkbox.styleSheet()
@@ -2069,6 +2088,11 @@ class _InputOutputDialog(QDialog):
                 self.skip_prompt_profile_checkbox,
                 "Ignore the selected main-window prompt profile in its currently configured role.",
             ),
+            (
+                self.disable_auto_scroll_checkbox,
+                "Keep the conversation viewport fixed while responses stream. "
+                "Uncheck to follow the newest generated text automatically.",
+            ),
         )
         for checkbox, description in setting_rows:
             card = QFrame()
@@ -2096,6 +2120,7 @@ class _InputOutputDialog(QDialog):
             logical_radius=14,
             border_color="#3f4856",
             border_width=1,
+            supersample=True,
         )
         self._render_output()
 
@@ -2108,7 +2133,9 @@ class _InputOutputDialog(QDialog):
         # event loop and stall the rest of the GUI.
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
-        self._render_timer.setInterval(300)
+        self._render_timer.setInterval(
+            450 if self._output_auto_scroll_disabled else 300
+        )
         self._render_timer.timeout.connect(self._flush_scheduled_render)
 
         self._poll_timer = QTimer(self)
@@ -2435,8 +2462,9 @@ class _InputOutputDialog(QDialog):
         logical_radius=12,
         border_color=None,
         border_width=0,
+        supersample=False,
     ):
-        """Create antialiased HiDPI corner images for QTextDocument bubbles."""
+        """Create corner images for QTextDocument bubbles."""
         try:
             from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF
             from PySide6.QtGui import QImage, QPainterPath, QPen
@@ -2446,11 +2474,10 @@ class _InputOutputDialog(QDialog):
             except Exception:
                 dpr = 1.0
             logical_radius_px = max(1, int(round(float(logical_radius))))
-            # QTextDocument does not render CSS border-radius consistently.
-            # Draw each arc at no less than 4x resolution, then perform our own
-            # smooth downsample; relying on QTextBrowser to scale a small PNG
-            # produces visibly stair-stepped corners on fractional-DPI setups.
-            render_scale = max(4.0, dpr * 2.0)
+            # Keep the already-crisp user bubble at its native logical size.
+            # Only bordered response cards opt into supersampling; downscaling
+            # every corner makes the unbordered input/user card look soft.
+            render_scale = max(4.0, dpr * 2.0) if supersample else 1.0
             radius_px = max(
                 1, int(round(logical_radius_px * render_scale))
             )
@@ -2494,12 +2521,13 @@ class _InputOutputDialog(QDialog):
             encoded_corners = {}
             for name, (x_pos, y_pos) in quadrants.items():
                 corner = canvas.copy(x_pos, y_pos, radius_px, radius_px)
-                corner = corner.scaled(
-                    logical_radius_px,
-                    logical_radius_px,
-                    Qt.IgnoreAspectRatio,
-                    Qt.SmoothTransformation,
-                )
+                if radius_px != logical_radius_px:
+                    corner = corner.scaled(
+                        logical_radius_px,
+                        logical_radius_px,
+                        Qt.IgnoreAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
                 corner_bytes = QByteArray()
                 corner_buffer = QBuffer(corner_bytes)
                 corner_buffer.open(QIODevice.WriteOnly)
@@ -3234,7 +3262,17 @@ class _InputOutputDialog(QDialog):
         menu.exec(self.input_box.viewport().mapToGlobal(position))
 
     def _set_output_auto_scroll_disabled(self, disabled):
-        self._output_auto_scroll_disabled = bool(disabled)
+        disabled = bool(disabled)
+        self._output_auto_scroll_disabled = disabled
+        checkbox = getattr(self, 'disable_auto_scroll_checkbox', None)
+        if checkbox is not None and checkbox.isChecked() != disabled:
+            checkbox.setChecked(disabled)
+        self._persist_dialog_option(
+            'direct_text_disable_auto_scroll', disabled
+        )
+        render_timer = getattr(self, '_render_timer', None)
+        if render_timer is not None:
+            render_timer.setInterval(450 if disabled else 300)
         if not self._output_auto_scroll_disabled:
             scrollbar = self.output_box.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
@@ -3839,10 +3877,17 @@ class _InputOutputDialog(QDialog):
     def _thread_key_from_log(line, source_thread=None):
         import re
 
-        if source_thread:
-            return str(source_thread)
-        match = re.search(r"\[([^\]]+)\]", str(line or ""))
-        return match.group(1).strip() if match else ""
+        # An API worker is sometimes mentioned inside a record that is emitted
+        # by its parent orchestration thread. Prefer that explicit worker ID;
+        # generic provider tags such as ``[gemini-native]`` are not request IDs.
+        match = re.search(
+            r"\[((?:Thread|Dummy)-[^\]]+)\]",
+            str(line or ""),
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+        return str(source_thread or "").strip()
 
     def _begin_request_segment(self, line, source_thread=None):
         """Create one independently rendered response for an outbound API call."""
@@ -3939,11 +3984,15 @@ class _InputOutputDialog(QDialog):
         self._render_output()
 
     def _on_log_line(self, message, source_thread=None):
-        """Worker callback: queue data plus thread identity, never touch widgets."""
+        """Queue a request-bound, channel-bound stream event for the UI thread."""
         try:
+            import threading
+
             value = str(message)
-            thread_key = str(source_thread or "")
-            self._log_queue.append((value, thread_key))
+            callback_thread = str(
+                source_thread or threading.current_thread().name or ""
+            )
+            thread_key = self._thread_key_from_log(value, callback_thread)
 
             # Tell append_log not to duplicate high-volume token payloads in
             # the main-window QTextEdit. Direct Text still receives and renders
@@ -3954,7 +4003,11 @@ class _InputOutputDialog(QDialog):
                 phase = "processing"
             elif "thinking complete" in low:
                 phase = "processing"
-            elif value.strip().startswith("🧠") and "thinking" in low:
+            elif (
+                (value.strip().startswith("🧠") and "thinking" in low)
+                or " thinking..." in low
+                or low.endswith("thinking...")
+            ):
                 phase = "thinking"
             elif (
                 "text streaming" in low
@@ -3962,7 +4015,19 @@ class _InputOutputDialog(QDialog):
                 or ("first token" in low and "streaming" in low)
             ):
                 phase = "text"
+            elif (
+                "sending api call now" in low
+                or "api call in progress" in low
+            ):
+                phase = "processing"
             self._listener_stream_phase_by_thread[thread_key] = phase
+            self._log_queue.append(
+                {
+                    "message": value,
+                    "thread": thread_key,
+                    "channel": phase,
+                }
+            )
             if phase in ("thinking", "text"):
                 stripped = value.strip()
                 is_control = (
@@ -4005,12 +4070,16 @@ class _InputOutputDialog(QDialog):
         )
         return any(phrase in low for phrase in status_phrases)
 
-    def _classify_line(self, line, source_thread=None):
+    def _classify_line(self, line, source_thread=None, channel_hint=None):
         raw = str(line).rstrip("\n")
         stripped = raw.strip()
         low = stripped.lower()
         thread_key = str(source_thread or "")
         phase = self._stream_phase_by_thread.get(thread_key, "processing")
+        channel_hint = str(channel_hint or "").strip().lower()
+        if channel_hint in ("thinking", "text", "processing"):
+            phase = channel_hint
+            self._stream_phase_by_thread[thread_key] = phase
 
         # Provider transport banners are useful in the main application log,
         # but they are neither model reasoning nor generated response text.
@@ -4077,7 +4146,10 @@ class _InputOutputDialog(QDialog):
             if segment is not None:
                 segment["phase"] = phase
             return "log"
-        if phase != "text" and (
+        # Providers may interleave multiple native thought and text blocks in
+        # one response. An explicit thought-start record always opens the
+        # thinking channel, even if this request previously streamed text.
+        if (
             stripped.startswith("🧠")
             or " thinking..." in low
             or low.endswith("thinking...")
@@ -4162,14 +4234,22 @@ class _InputOutputDialog(QDialog):
                 queued = self._log_queue.popleft()
             except IndexError:
                 break
-            if isinstance(queued, tuple) and len(queued) == 2:
+            if isinstance(queued, dict):
+                message = queued.get("message", "")
+                source_thread = str(queued.get("thread", "") or "")
+                channel_hint = str(queued.get("channel", "") or "")
+            elif isinstance(queued, tuple) and len(queued) == 2:
                 message, source_thread = queued
+                channel_hint = ""
             else:
                 message, source_thread = queued, ""
+                channel_hint = ""
             drained += 1
             for raw_line in str(message).split("\n"):
                 for line in self._split_embedded_pipeline_log(raw_line):
-                    kind = self._classify_line(line, source_thread)
+                    kind = self._classify_line(
+                        line, source_thread, channel_hint=channel_hint
+                    )
                     segment = self._request_segment_for_thread(
                         source_thread, create=kind in ("content", "thinking")
                     )
@@ -4535,14 +4615,18 @@ class _InputOutputDialog(QDialog):
                             visible_processing = (
                                 "No thinking stream was emitted for this response."
                             )
-                        safe_processing = html_lib.escape(visible_processing).replace(
-                            "\n", "<br>"
+                        # Thinking is isolated from the visible answer, but it
+                        # is still streamed model text. Render its Markdown and
+                        # safe HTML with the same sanitizer used by responses
+                        # instead of exposing literal ``**bold**``/tag syntax.
+                        rendered_processing = self._markup_to_html(
+                            visible_processing
                         )
                         processing_html += (
                             "<table class='processing-detail-table' width='100%' "
                             "cellspacing='0' cellpadding='0'><tr>"
                             "<td class='processing-detail-cell'>"
-                            f"{safe_processing}</td></tr></table>"
+                            f"{rendered_processing}</td></tr></table>"
                         )
                 message_actions = []
                 if str(content or ""):
@@ -4599,11 +4683,11 @@ class _InputOutputDialog(QDialog):
 
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
+        horizontal_scrollbar = self.output_box.horizontalScrollBar()
+        previous_horizontal_scroll = horizontal_scrollbar.value()
         body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
         output_font = QFont(self.output_box.font())
         output_font.setPointSizeF(body_font_point_size)
-        self.output_box.setFont(output_font)
-        self.output_box.document().setDefaultFont(output_font)
         document = (
             "<html><head><style>"
             "body { background-color: #1e1e1e; color: white; line-height: 1.48; "
@@ -4687,14 +4771,35 @@ class _InputOutputDialog(QDialog):
             f"{''.join(message_html)}"
             "</body></html>"
         )
-        self.output_box.setHtml(document)
-        if self._output_auto_scroll_disabled:
-            scrollbar.setValue(min(previous_scroll, scrollbar.maximum()))
-        else:
-            cursor = self.output_box.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            self.output_box.setTextCursor(cursor)
-            self.output_box.ensureCursorVisible()
+        # setHtml() temporarily resets the viewport before layout completes.
+        # Suppress that intermediate repaint when follow-tail is disabled, then
+        # restore both axes before presenting the new document in one frame.
+        freeze_viewport = bool(
+            self._output_auto_scroll_disabled
+            and self.output_box.updatesEnabled()
+        )
+        if freeze_viewport:
+            self.output_box.setUpdatesEnabled(False)
+        try:
+            self.output_box.setFont(output_font)
+            self.output_box.document().setDefaultFont(output_font)
+            self.output_box.setHtml(document)
+            if self._output_auto_scroll_disabled:
+                scrollbar.setSliderPosition(
+                    min(previous_scroll, scrollbar.maximum())
+                )
+                horizontal_scrollbar.setSliderPosition(
+                    min(previous_horizontal_scroll, horizontal_scrollbar.maximum())
+                )
+            else:
+                cursor = self.output_box.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                self.output_box.setTextCursor(cursor)
+                self.output_box.ensureCursorVisible()
+        finally:
+            if freeze_viewport:
+                self.output_box.setUpdatesEnabled(True)
+                self.output_box.viewport().update()
 
     def _commit_assistant_message(self):
         """Freeze the active streamed response into the visible chat history."""

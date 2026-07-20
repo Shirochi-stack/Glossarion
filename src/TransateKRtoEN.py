@@ -10513,18 +10513,22 @@ def set_output_redirect(log_callback=None):
                 self.main_thread = threading.main_thread()
                 
             def write(self, text):
-                if text.strip():
+                # Keep leading whitespace: streaming backends use a four-space
+                # prefix to identify thought payloads. ``strip()`` erased that
+                # channel signal before Direct Text could route the event.
+                value = str(text).rstrip('\r\n')
+                if value.strip():
                     # The callback (append_log) is already thread-safe - it handles QTimer internally
                     # So we can call it directly from any thread
                     try:
                         self.callback(
-                            text.strip(),
+                            value,
                             source_thread=threading.current_thread().name,
                         )
                     except TypeError:
                         # Standalone/legacy callbacks still use the original
                         # one-argument contract.
-                        self.callback(text.strip())
+                        self.callback(value)
                     
             def flush(self):
                 pass
