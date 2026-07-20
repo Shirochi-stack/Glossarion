@@ -1481,6 +1481,12 @@ class _InputOutputDialog(QDialog):
         self._chat_history_save_timer.setSingleShot(True)
         self._chat_history_save_timer.setInterval(450)
         self._chat_history_save_timer.timeout.connect(self._save_chat_history)
+        self._inline_response_resize_timer = QTimer(self)
+        self._inline_response_resize_timer.setSingleShot(True)
+        self._inline_response_resize_timer.setInterval(140)
+        self._inline_response_resize_timer.timeout.connect(
+            self._resize_inline_response_editor_to_content
+        )
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
         self._pending_glossary_approval = None
@@ -4381,8 +4387,67 @@ class _InputOutputDialog(QDialog):
             viewport_height = 640
         return max(260, min(520, int(viewport_height * 0.58)))
 
+    def _rich_response_editor_content_height(self, source_editor=None):
+        """Return the rich document's natural height at its current editor width."""
+        source_editor = source_editor or self._inline_response_editor_box
+        if source_editor is None:
+            return 0
+        try:
+            document_height = float(
+                source_editor.document().documentLayout().documentSize().height()
+            )
+            return max(180, min(12000, int(document_height + 8)))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 0
+
+    def _set_inline_response_placeholder_height(self, height):
+        """Resize only the transparent spacer in the existing chat document."""
+        try:
+            document = self.output_box.document()
+            message_index = int(self._inline_response_edit_index)
+            start = document.find(self._inline_response_editor_marker(message_index))
+            end = document.find(
+                self._inline_response_editor_end_marker(message_index)
+            )
+            if start.isNull() or end.isNull():
+                return False
+            cursor = QTextCursor(document)
+            cursor.setPosition(start.selectionEnd())
+            cursor.setPosition(end.selectionStart(), QTextCursor.KeepAnchor)
+            cursor.insertHtml(
+                "<img src='"
+                + self._INLINE_RESPONSE_SPACER_DATA_URI
+                + f"' width='1' height='{int(height)}'>"
+            )
+            return True
+        except (AttributeError, RuntimeError):
+            return False
+        return False
+
+    def _resize_inline_response_editor_to_content(self):
+        """Remove unused edit space as the parsed rich document changes."""
+        if self._inline_response_editor_box is None:
+            return
+        target_height = self._rich_response_editor_content_height()
+        if target_height <= 0:
+            return
+        current_height = int(self._inline_response_reserved_height or 0)
+        if abs(target_height - current_height) < 4:
+            return
+        self._inline_response_reserved_height = target_height
+        self._set_inline_response_placeholder_height(target_height)
+        self._position_inline_response_editor()
+
+    def _schedule_inline_response_editor_resize(self):
+        timer = getattr(self, "_inline_response_resize_timer", None)
+        if timer is not None:
+            timer.start()
+
     def _destroy_inline_response_editor(self):
         """Remove the native overlay without rebuilding the transcript."""
+        resize_timer = getattr(self, "_inline_response_resize_timer", None)
+        if resize_timer is not None:
+            resize_timer.stop()
         frame = self._inline_response_editor_frame
         self._inline_response_editor_frame = None
         self._inline_response_editor_box = None
@@ -4446,6 +4511,7 @@ class _InputOutputDialog(QDialog):
         if source_editor is not None:
             source_editor.setFocus(Qt.OtherFocusReason)
             source_editor.moveCursor(QTextCursor.Start)
+            self._schedule_inline_response_editor_resize()
 
     def _cancel_inline_response_editor(self):
         """Leave edit mode and restore the rendered response card."""
@@ -4680,7 +4746,25 @@ class _InputOutputDialog(QDialog):
         source_editor.setLineWrapMode(QTextEdit.WidgetWidth)
         source_editor.setUndoRedoEnabled(True)
         source_editor.setFont(self.output_box.font())
+        estimated_width = max(
+            320, int(self.output_box.viewport().width() * 0.79)
+        )
+        source_editor.resize(
+            estimated_width,
+            max(180, reserved_height or self._inline_response_editor_height()),
+        )
         source_editor.setHtml(self._response_editor_document_html(source))
+        source_editor.document().setTextWidth(max(300, estimated_width - 4))
+        natural_height = self._rich_response_editor_content_height(source_editor)
+        if natural_height > 0:
+            reserved_height = (
+                min(reserved_height, natural_height)
+                if reserved_height > 0
+                else natural_height
+            )
+        source_editor.textChanged.connect(
+            self._schedule_inline_response_editor_resize
+        )
 
         save_shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.Save), source_editor
