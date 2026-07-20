@@ -1416,6 +1416,10 @@ class _InputOutputDialog(QDialog):
     # message on the GUI thread.
     _ACTIVE_STREAM_START_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_START_7F31"
     _ACTIVE_STREAM_END_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_END_7F31"
+    _INLINE_RESPONSE_SPACER_DATA_URI = (
+        "data:image/gif;base64,"
+        "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+    )
 
     def __init__(self, translator):
         super().__init__(translator)
@@ -1534,6 +1538,9 @@ class _InputOutputDialog(QDialog):
         self._inline_response_editor_box = None
         self._inline_response_edit_index = -1
         self._inline_response_edit_session_id = None
+        self._inline_response_original_source = ""
+        self._inline_response_source_kind = "plain"
+        self._inline_response_reserved_height = 0
         self._assistant_avatar_data_uri = ""
         self._assistant_avatar_width = 28
         self._assistant_avatar_height = 36
@@ -1585,15 +1592,9 @@ class _InputOutputDialog(QDialog):
             "QListWidget#chatHistoryList::item:selected { background: #2d2d2d; color: white; }"
             "QTextBrowser#chatTimeline { background: #1e1e1e; color: white; "
             "border: none; padding: 0; selection-background-color: #5a9fd4; }"
-            "QFrame#directInlineResponseEditor { background: #242424; border: none; }"
-            "QLabel#directInlineResponseEditorTitle { color: #cbd5e1; "
-            "font-size: 9pt; font-weight: 700; }"
-            "QLabel#directInlineResponseEditorDetail { color: #8fa2ba; font-size: 8pt; }"
-            "QPlainTextEdit#directInlineResponseEditorBox { background: #1e1e1e; "
-            "color: white; border: 1px solid #4a5568; border-radius: 8px; "
-            "padding: 9px; selection-background-color: #5a9fd4; }"
-            "QPushButton#directInlineResponseCancel, "
-            "QPushButton#directInlineResponseSave { min-height: 30px; padding: 0 13px; }"
+            "QTextEdit#directInlineResponseEditorBox { background: #242424; "
+            "color: white; border: none; border-radius: 0; padding: 0; "
+            "selection-background-color: #5a9fd4; }"
             "QFrame#directComposerCard { background: #2d2d2d; border: 1px solid #4a5568; "
             "border-radius: 14px; }"
             "QFrame#directComposerCard:focus-within { border-color: #666666; }"
@@ -2643,19 +2644,32 @@ class _InputOutputDialog(QDialog):
             )
             return '<?xml version="1.0" encoding="utf-8"?>\n' + namespaced
 
-    def _write_response_files(self, markdown_path, source):
+    def _write_response_files(
+        self,
+        markdown_path,
+        source,
+        *,
+        text_source=None,
+        html_source=None,
+    ):
         """Update an editable response's Markdown, text, HTML, and XHTML files."""
         markdown_path = os.path.abspath(str(markdown_path or ""))
         response_stem = os.path.splitext(markdown_path)[0]
         text_path = response_stem + ".txt"
         html_path = response_stem + ".html"
         xhtml_path = response_stem + ".xhtml"
-        html_document = self._response_html_document(source)
-        xhtml_document = self._response_xhtml_document(source)
+        markdown_source = str(source or "")
+        plain_text_source = (
+            markdown_source if text_source is None else str(text_source or "")
+        )
+        html_document = self._response_html_document(
+            markdown_source if html_source is None else html_source
+        )
+        xhtml_document = self._response_xhtml_document(html_document)
 
         targets = (
-            (markdown_path, str(source or "")),
-            (text_path, str(source or "")),
+            (markdown_path, markdown_source),
+            (text_path, plain_text_source),
             (html_path, html_document),
             (xhtml_path, xhtml_document),
         )
@@ -4270,7 +4284,14 @@ class _InputOutputDialog(QDialog):
             response_stem + ".xhtml",
         )
 
-    def _save_response_output_edit(self, message_index, edited_source):
+    def _save_response_output_edit(
+        self,
+        message_index,
+        edited_source,
+        *,
+        text_source=None,
+        html_source=None,
+    ):
         """Persist an edited card to every managed format and refresh its caches."""
         if not (0 <= int(message_index) < len(self._chat_messages)):
             raise IndexError("Response message is no longer available")
@@ -4287,7 +4308,10 @@ class _InputOutputDialog(QDialog):
         if not markdown_path:
             raise OSError("The conversation output folder is unavailable")
         text_path, html_path, xhtml_path = self._write_response_files(
-            markdown_path, edited_source
+            markdown_path,
+            edited_source,
+            text_source=text_source,
+            html_source=html_source,
         )
 
         values = list(message[:6])
@@ -4312,10 +4336,45 @@ class _InputOutputDialog(QDialog):
 
     @staticmethod
     def _inline_response_editor_marker(message_index):
-        return f"DIRECT_TEXT_INLINE_RESPONSE_EDITOR_{int(message_index)}_7F31"
+        return (
+            f"DIRECT_TEXT_RESPONSE_CONTENT_START_{int(message_index)}_7F31"
+        )
+
+    @staticmethod
+    def _inline_response_editor_end_marker(message_index):
+        return f"DIRECT_TEXT_RESPONSE_CONTENT_END_{int(message_index)}_7F31"
+
+    @staticmethod
+    def _response_layout_marker_html(marker):
+        return (
+            "<span style='font-size:1px;line-height:1px;color:#242424'>"
+            f"{marker}</span>"
+        )
+
+    def _measure_inline_response_editor_height(self, message_index):
+        """Measure the rendered response body before replacing it with an editor."""
+        try:
+            document = self.output_box.document()
+            start = document.find(self._inline_response_editor_marker(message_index))
+            end = document.find(
+                self._inline_response_editor_end_marker(message_index)
+            )
+            if start.isNull() or end.isNull():
+                return 0
+            start.setPosition(start.selectionStart())
+            end.setPosition(end.selectionStart())
+            start_y = self.output_box.cursorRect(start).y()
+            end_y = self.output_box.cursorRect(end).y()
+            measured = int(end_y - start_y)
+            return max(180, min(12000, measured + 3)) if measured > 0 else 0
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 0
 
     def _inline_response_editor_height(self):
         """Choose a useful in-card editor height without swallowing the timeline."""
+        reserved_height = int(self._inline_response_reserved_height or 0)
+        if reserved_height > 0:
+            return reserved_height
         try:
             viewport_height = int(self.output_box.viewport().height())
         except (AttributeError, RuntimeError):
@@ -4329,6 +4388,9 @@ class _InputOutputDialog(QDialog):
         self._inline_response_editor_box = None
         self._inline_response_edit_index = -1
         self._inline_response_edit_session_id = None
+        self._inline_response_original_source = ""
+        self._inline_response_source_kind = "plain"
+        self._inline_response_reserved_height = 0
         if frame is not None:
             try:
                 frame.hide()
@@ -4349,12 +4411,19 @@ class _InputOutputDialog(QDialog):
             if marker_cursor.isNull():
                 frame.hide()
                 return
+            marker_cursor.setPosition(marker_cursor.selectionStart())
             marker_rect = self.output_box.cursorRect(marker_cursor)
             editor_height = self._inline_response_editor_height()
             x_pos = max(8, marker_rect.x())
-            right_margin = max(12, int(viewport.width() * 0.085))
-            editor_width = max(300, viewport.width() - x_pos - right_margin)
-            y_pos = marker_rect.y() + max(1, marker_rect.height())
+            right_margin = max(18, int(viewport.width() * 0.105))
+            editor_width = max(
+                300,
+                min(
+                    viewport.width() - x_pos - 8,
+                    viewport.width() - x_pos - right_margin,
+                ),
+            )
+            y_pos = marker_rect.y() + 1
             if y_pos >= viewport.height() or y_pos + editor_height <= 0:
                 frame.hide()
                 return
@@ -4391,23 +4460,170 @@ class _InputOutputDialog(QDialog):
                 ),
             )
 
+    @staticmethod
+    def _response_edit_source_kind(source):
+        """Classify the stored source so rich edits serialize appropriately."""
+        import re
+
+        value = str(source or "")
+        if re.search(
+            r"<(?:!doctype\s+html|html\b|head\b|body\b)",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            return "html_document"
+        if re.search(
+            r"</?(?:h[1-6]|p|div|span|br|hr|ul|ol|li|blockquote|pre|code|"
+            r"table|thead|tbody|tfoot|tr|th|td|strong|b|em|i|u|s|del|a|img)\b",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            return "html_fragment"
+        if re.search(
+            r"(?m)^(?:#{1,6}\s|\s*[-+*]\s|\s*\d+[.)]\s|>\s|```)|"
+            r"\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[^\]]+\]\([^)]+\)",
+            value,
+        ):
+            return "markdown"
+        return "plain"
+
+    def _response_editor_document_html(self, source):
+        """Render editor contents with the same parser and visual rules as chat."""
+        rendered = self._markup_to_html(source)
+        point_size = 10.5 * (1.1 ** self._chat_zoom_level)
+        return (
+            "<html><head><style>"
+            "body { background:#242424; color:white; margin:0; "
+            "font-family:'Segoe UI',sans-serif; line-height:1.48; "
+            f"font-size:{point_size:.2f}pt; }}"
+            "p { margin:0 0 0.78em 0; }"
+            "pre { background:#171a21; border:1px solid #343a46; "
+            "padding:9px; white-space:pre-wrap; }"
+            "code { background:#20242d; padding:1px 3px; }"
+            "blockquote { border-left:3px solid #5a9fd4; margin-left:4px; "
+            "padding-left:11px; color:#cbd5e1; }"
+            "table { border-collapse:collapse; }"
+            "th, td { border:1px solid #596171; padding:4px 7px; }"
+            "a { color:#65a9ff; } img { max-width:100%; }"
+            "</style></head><body>"
+            f"{rendered}"
+            "</body></html>"
+        )
+
+    @staticmethod
+    def _rich_response_editor_fragment(source_editor):
+        """Convert Qt rich text into clean semantic body HTML."""
+        import re
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(source_editor.toHtml(), "html.parser")
+        for unwanted in soup.find_all(("script", "style", "meta", "link", "base")):
+            unwanted.decompose()
+        body = soup.body if soup.body is not None else soup
+
+        for span in list(body.find_all("span")):
+            style = str(span.get("style", "") or "").lower()
+            semantic = []
+            if re.search(r"font-weight\s*:\s*(?:bold|[6-9]00)", style):
+                semantic.append("strong")
+            if re.search(r"font-style\s*:\s*italic", style):
+                semantic.append("em")
+            if re.search(r"text-decoration[^;]*\bunderline\b", style):
+                semantic.append("u")
+            if re.search(r"text-decoration[^;]*\bline-through\b", style):
+                semantic.append("s")
+            span.attrs.pop("style", None)
+            if not semantic:
+                span.unwrap()
+                continue
+            span.name = semantic[0]
+            current = span
+            for tag_name in semantic[1:]:
+                wrapper = soup.new_tag(tag_name)
+                for child in list(current.contents):
+                    wrapper.append(child.extract())
+                current.append(wrapper)
+                current = wrapper
+
+        for tag in body.find_all(True):
+            tag.attrs.pop("style", None)
+            tag.attrs.pop("bgcolor", None)
+            for attribute in list(tag.attrs):
+                if str(attribute).lower().startswith("on"):
+                    del tag.attrs[attribute]
+        return body.decode_contents().strip()
+
+    def _inline_response_edit_payload(self):
+        """Return synchronized Markdown, plain-text, and HTML edit values."""
+        source_editor = self._inline_response_editor_box
+        if source_editor is None:
+            return "", "", ""
+        fragment = self._rich_response_editor_fragment(source_editor)
+        plain_text = source_editor.toPlainText()
+        source_kind = str(self._inline_response_source_kind or "plain")
+        original_source = str(self._inline_response_original_source or "")
+
+        if source_kind == "html_document":
+            try:
+                from bs4 import BeautifulSoup
+
+                document = BeautifulSoup(original_source, "html.parser")
+                body = document.body
+                if body is None:
+                    raise ValueError("HTML response has no body")
+                replacement = BeautifulSoup(fragment, "html.parser")
+                body.clear()
+                for child in list(replacement.contents):
+                    body.append(child.extract())
+                html_source = str(document)
+            except Exception:
+                html_source = self._response_html_document(fragment)
+            return html_source, plain_text, html_source
+
+        if source_kind == "html_fragment":
+            return fragment, plain_text, fragment
+
+        if source_kind == "markdown":
+            try:
+                import html2text
+
+                converter = html2text.HTML2Text()
+                converter.body_width = 0
+                converter.ignore_links = False
+                converter.ignore_images = False
+                converter.unicode_snob = True
+                markdown_source = converter.handle(fragment).strip()
+            except Exception:
+                markdown_source = plain_text
+            return markdown_source, plain_text, fragment
+
+        return plain_text, plain_text, fragment
+
     def _commit_inline_response_editor(self):
         """Save the in-card source editor and return the card to rendered mode."""
         message_index = int(self._inline_response_edit_index)
         source_editor = self._inline_response_editor_box
         if message_index < 0 or source_editor is None:
             return
-        edited_source = source_editor.toPlainText()
+        edited_source, edited_plain_text, edited_html = (
+            self._inline_response_edit_payload()
+        )
+        reopen_source = edited_html or edited_source
         self._destroy_inline_response_editor()
         try:
-            self._save_response_output_edit(message_index, edited_source)
+            self._save_response_output_edit(
+                message_index,
+                edited_source,
+                text_source=edited_plain_text,
+                html_source=edited_html,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
                 "Could not save response",
                 f"The response files could not be updated.\n\n{exc}",
             )
-            self._open_response_editor(message_index, initial_source=edited_source)
+            self._open_response_editor(message_index, initial_source=reopen_source)
             return
         QTimer.singleShot(
             0,
@@ -4418,7 +4634,7 @@ class _InputOutputDialog(QDialog):
 
     def _open_response_editor(self, message_index, initial_source=None):
         """Edit one completed response directly inside its conversation card."""
-        from PySide6.QtWidgets import QPlainTextEdit
+        from PySide6.QtWidgets import QTextEdit
 
         try:
             message_index = int(message_index)
@@ -4441,6 +4657,7 @@ class _InputOutputDialog(QDialog):
         ):
             self._inline_response_editor_box.setFocus(Qt.OtherFocusReason)
             return
+        reserved_height = self._measure_inline_response_editor_height(message_index)
         self._destroy_inline_response_editor()
 
         storage = self._assistant_storage_for(message)
@@ -4455,62 +4672,31 @@ class _InputOutputDialog(QDialog):
             )
             return
 
-        request_label = str(message[5] if len(message) > 5 else "")
         session = self._current_chat_session()
         session_id = session.get("id") if session is not None else None
-        frame = QFrame(self.output_box.viewport())
-        frame.setObjectName("directInlineResponseEditor")
-        frame.setAttribute(Qt.WA_StyledBackground, True)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(6)
-
-        heading_row = QHBoxLayout()
-        heading_row.setContentsMargins(3, 0, 3, 0)
-        heading = QLabel(
-            f"Editing response{f' · {request_label}' if request_label else ''}"
-        )
-        heading.setObjectName("directInlineResponseEditorTitle")
-        heading_row.addWidget(heading)
-        heading_row.addStretch(1)
-        detail = QLabel("Updates MD, TXT, HTML, and XHTML")
-        detail.setObjectName("directInlineResponseEditorDetail")
-        heading_row.addWidget(detail)
-        layout.addLayout(heading_row)
-
-        source_editor = QPlainTextEdit(frame)
+        source_editor = QTextEdit(self.output_box.viewport())
         source_editor.setObjectName("directInlineResponseEditorBox")
-        source_editor.setPlainText(source)
-        source_editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        source_editor.setFrameShape(QFrame.NoFrame)
+        source_editor.setLineWrapMode(QTextEdit.WidgetWidth)
         source_editor.setUndoRedoEnabled(True)
-        layout.addWidget(source_editor, 1)
-
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.addStretch(1)
-        cancel_button = QPushButton("Cancel", frame)
-        cancel_button.setObjectName("directInlineResponseCancel")
-        save_button = QPushButton("Save changes", frame)
-        save_button.setObjectName("directInlineResponseSave")
-        save_button.setDefault(True)
-        cancel_button.clicked.connect(self._cancel_inline_response_editor)
-        save_button.clicked.connect(self._commit_inline_response_editor)
-        buttons.addWidget(cancel_button)
-        buttons.addWidget(save_button)
-        layout.addLayout(buttons)
+        source_editor.setFont(self.output_box.font())
+        source_editor.setHtml(self._response_editor_document_html(source))
 
         save_shortcut = QShortcut(
-            QKeySequence(QKeySequence.StandardKey.Save), frame
+            QKeySequence(QKeySequence.StandardKey.Save), source_editor
         )
         save_shortcut.activated.connect(self._commit_inline_response_editor)
-        cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), frame)
+        cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), source_editor)
         cancel_shortcut.activated.connect(self._cancel_inline_response_editor)
 
-        self._inline_response_editor_frame = frame
+        self._inline_response_editor_frame = source_editor
         self._inline_response_editor_box = source_editor
         self._inline_response_edit_index = message_index
         self._inline_response_edit_session_id = session_id
-        frame.hide()
+        self._inline_response_original_source = source
+        self._inline_response_source_kind = self._response_edit_source_kind(source)
+        self._inline_response_reserved_height = reserved_height
+        source_editor.hide()
         self._render_output()
         QTimer.singleShot(
             0,
@@ -4585,6 +4771,14 @@ class _InputOutputDialog(QDialog):
                 1600,
                 lambda key=copied_key: self._clear_copy_confirmation(key),
             )
+            return
+        edit_save_prefix = "direct-edit-save:"
+        if target.startswith(edit_save_prefix):
+            self._commit_inline_response_editor()
+            return
+        edit_cancel_prefix = "direct-edit-cancel:"
+        if target.startswith(edit_cancel_prefix):
+            self._cancel_inline_response_editor()
             return
         edit_prefix = "direct-edit:"
         if target.startswith(edit_prefix):
@@ -5946,16 +6140,11 @@ class _InputOutputDialog(QDialog):
                     and message_index < len(self._chat_messages)
                 )
                 if inline_editing:
-                    editor_marker = html_lib.escape(
-                        self._inline_response_editor_marker(message_index)
-                    )
                     editor_height = self._inline_response_editor_height()
                     rendered = (
-                        "<span class='inline-response-editor-marker'>"
-                        f"{editor_marker}</span>"
-                        "<table class='inline-response-editor-placeholder' "
-                        f"width='100%' height='{editor_height}' cellspacing='0' "
-                        "cellpadding='0'><tr><td>&nbsp;</td></tr></table>"
+                        "<img class='inline-response-editor-placeholder' "
+                        f"src='{self._INLINE_RESPONSE_SPACER_DATA_URI}' "
+                        f"width='1' height='{editor_height}'>"
                     )
                 elif str(content or "").strip():
                     current_session = self._current_chat_session()
@@ -6058,7 +6247,16 @@ class _InputOutputDialog(QDialog):
                             f"{rendered_processing}</td></tr></table>"
                         )
                 message_actions = []
-                if str(content or "") and not inline_editing:
+                if inline_editing:
+                    message_actions.extend(
+                        (
+                            f"<a class='message-action' href='direct-edit-save:{message_index}' "
+                            "title='Save this edited response'>✓&nbsp;&nbsp;Save changes</a>",
+                            f"<a class='message-action' href='direct-edit-cancel:{message_index}' "
+                            "title='Discard these edits'>Cancel</a>",
+                        )
+                    )
+                elif str(content or ""):
                     was_copied = self._copied_message_key == (
                         session_id,
                         message_index,
@@ -6088,6 +6286,12 @@ class _InputOutputDialog(QDialog):
                         + "&nbsp;&nbsp;&nbsp;".join(message_actions)
                         + "</div>"
                     )
+                content_start_html = self._response_layout_marker_html(
+                    self._inline_response_editor_marker(message_index)
+                )
+                content_end_html = self._response_layout_marker_html(
+                    self._inline_response_editor_end_marker(message_index)
+                )
                 assistant_inner_html = (
                     "<div class='role'>GLOSSARION"
                     + (
@@ -6097,7 +6301,9 @@ class _InputOutputDialog(QDialog):
                     )
                     + "</div>"
                     + processing_html
+                    + content_start_html
                     + f"<div class='message-content'>{rendered}</div>"
+                    + content_end_html
                     + message_actions_html
                 )
                 assistant_bubble_html = self._rounded_assistant_bubble_html(
@@ -6262,11 +6468,8 @@ class _InputOutputDialog(QDialog):
             f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
-            ".inline-response-editor-marker { color: #242424; font-size: 1px; "
-            "line-height: 1px; }"
-            ".inline-response-editor-placeholder, "
-            ".inline-response-editor-placeholder td { background: #242424; "
-            "border: none; padding: 0; }"
+            ".inline-response-editor-placeholder { border: none; padding: 0; "
+            "margin: 0; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
             ".glossary-request-row, .glossary-request-row td { border: none; }"
