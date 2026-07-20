@@ -1400,6 +1400,8 @@ class _InputOutputDialog(QDialog):
             QPlainTextEdit,
             QTextBrowser,
             QListWidget,
+            QRadioButton,
+            QButtonGroup,
         )
 
         self.translator = translator
@@ -1909,22 +1911,55 @@ class _InputOutputDialog(QDialog):
                 'direct_text_force_multipass_off', checked
             )
         )
-        self.force_no_glossary_checkbox = translator._create_styled_checkbox(
-            "Force No Glossary"
+        glossary_radio_style = (
+            "QRadioButton { color: white; spacing: 7px; background: transparent; }"
+            "QRadioButton::indicator { width: 14px; height: 14px; "
+            "border: 1px solid #5a9fd4; border-radius: 8px; "
+            "background-color: #2d2d2d; }"
+            "QRadioButton::indicator:checked { background-color: "
+            "qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, "
+            "stop:0 #5a9fd4, stop:0.55 #5a9fd4, "
+            "stop:0.6 #2d2d2d, stop:1 #2d2d2d); border-color: #5a9fd4; }"
+            "QRadioButton::indicator:hover { border-color: #7bb3e0; }"
+            "QRadioButton:disabled { color: #666666; }"
+            "QRadioButton::indicator:disabled { background-color: #1a1a1a; "
+            "border-color: #3a3a3a; }"
         )
-        self.force_no_glossary_checkbox.setChecked(
-            bool(translator.config.get(
-                'direct_text_force_no_glossary', legacy_simple_mode
-            ))
-        )
-        self.force_no_glossary_checkbox.setToolTip(
+        self.force_no_glossary_radio = QRadioButton("Force No Glossary")
+        self.force_no_glossary_radio.setStyleSheet(glossary_radio_style)
+        self.force_no_glossary_radio.setToolTip(
             "Ignores automatic and manually loaded glossaries only for Direct Text "
-            "runs. Uncheck to use the main window's current glossary mode."
+            "runs."
         )
-        self.force_no_glossary_checkbox.toggled.connect(
-            lambda checked: self._persist_dialog_option(
-                'direct_text_force_no_glossary', checked
+        self.manual_glossary_radio = QRadioButton("Manual glossary")
+        self.manual_glossary_radio.setStyleSheet(glossary_radio_style)
+        self.manual_glossary_radio.setToolTip(
+            "Uses Manual Glossary Only for Direct Text. Every submission asks you "
+            "to drop a glossary file or paste its contents before translation starts."
+        )
+
+        self.glossary_mode_button_group = QButtonGroup(self)
+        self.glossary_mode_button_group.setExclusive(True)
+        self.glossary_mode_button_group.addButton(self.force_no_glossary_radio)
+        self.glossary_mode_button_group.addButton(self.manual_glossary_radio)
+
+        # Preserve a legacy "neither override" configuration until the user
+        # selects a radio. If an old config somehow enabled both, Manual wins.
+        manual_glossary_enabled = bool(
+            translator.config.get('direct_text_manual_glossary', False)
+        )
+        no_glossary_enabled = bool(
+            translator.config.get(
+                'direct_text_force_no_glossary', legacy_simple_mode
             )
+        ) and not manual_glossary_enabled
+        self.force_no_glossary_radio.setChecked(no_glossary_enabled)
+        self.manual_glossary_radio.setChecked(manual_glossary_enabled)
+        self.force_no_glossary_radio.toggled.connect(
+            self._on_force_no_glossary_toggled
+        )
+        self.manual_glossary_radio.toggled.connect(
+            self._on_manual_glossary_toggled
         )
         self.skip_thinking_checkbox = translator._create_styled_checkbox(
             "Disable all thinking"
@@ -2041,7 +2076,6 @@ class _InputOutputDialog(QDialog):
         # transparent as well instead of drawing a dark full-width stripe.
         for checkbox in (
             self.force_multipass_off_checkbox,
-            self.force_no_glossary_checkbox,
             self.skip_thinking_checkbox,
             self.skip_prompt_profile_checkbox,
             self.disable_auto_scroll_checkbox,
@@ -2092,8 +2126,13 @@ class _InputOutputDialog(QDialog):
                 "Run a single translation pass even when Multipass is enabled in the main window.",
             ),
             (
-                self.force_no_glossary_checkbox,
+                self.force_no_glossary_radio,
                 "Ignore automatic and manually loaded glossaries for these chat translations.",
+            ),
+            (
+                self.manual_glossary_radio,
+                "Use Manual Glossary Only and request a glossary file or pasted glossary "
+                "before every Direct Text translation.",
             ),
             (
                 self.skip_thinking_checkbox,
@@ -2431,6 +2470,230 @@ class _InputOutputDialog(QDialog):
             self.translator.save_config(show_message=False)
         except Exception:
             pass
+
+    def _on_force_no_glossary_toggled(self, checked):
+        """Persist the exclusive Direct Text No Glossary selection."""
+        self._persist_dialog_option(
+            'direct_text_force_no_glossary', bool(checked)
+        )
+
+    def _on_manual_glossary_toggled(self, checked):
+        """Persist the exclusive Direct Text Manual Glossary selection."""
+        self._persist_dialog_option('direct_text_manual_glossary', bool(checked))
+
+    def _request_direct_text_manual_glossary(self):
+        """Ask for a per-run glossary by file drop, browsing, or pasted content.
+
+        Returns a small source record on acceptance and ``None`` when cancelled.
+        The caller materializes pasted data inside the request's temporary folder;
+        no glossary path or contents are persisted in Direct Text settings/history.
+        """
+        import json as json_lib
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        allowed_extensions = {'.csv', '.json', '.txt', '.md'}
+
+        class _GlossaryPasteEdit(QPlainTextEdit):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self.source_path = ""
+                self.source_extension = ".txt"
+                self.source_text = ""
+                self._loading_file = False
+                self.path_loaded_callback = None
+                self.setAcceptDrops(True)
+
+            @staticmethod
+            def _supported_path(path):
+                return bool(
+                    path
+                    and os.path.isfile(path)
+                    and os.path.splitext(path)[1].lower() in allowed_extensions
+                )
+
+            def load_path(self, path):
+                path = os.path.abspath(os.path.expanduser(str(path or "")))
+                if not self._supported_path(path):
+                    return False
+                try:
+                    with open(path, 'r', encoding='utf-8-sig') as glossary_file:
+                        content = glossary_file.read()
+                except UnicodeDecodeError:
+                    with open(
+                        path, 'r', encoding='utf-8', errors='replace'
+                    ) as glossary_file:
+                        content = glossary_file.read()
+                except OSError:
+                    return False
+                self._loading_file = True
+                try:
+                    self.setPlainText(content)
+                    self.source_path = path
+                    self.source_extension = os.path.splitext(path)[1].lower()
+                    self.source_text = self.toPlainText()
+                finally:
+                    self._loading_file = False
+                if callable(self.path_loaded_callback):
+                    self.path_loaded_callback(path)
+                return True
+
+            def dragEnterEvent(self, event):
+                try:
+                    urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+                    if urls and self._supported_path(urls[0].toLocalFile()):
+                        event.acceptProposedAction()
+                        return
+                except Exception:
+                    pass
+                super().dragEnterEvent(event)
+
+            def dropEvent(self, event):
+                try:
+                    urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+                    if urls and self.load_path(urls[0].toLocalFile()):
+                        event.acceptProposedAction()
+                        return
+                except Exception:
+                    pass
+                super().dropEvent(event)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Provide Manual Glossary")
+        dialog.setModal(True)
+        dialog.resize(720, 540)
+        dialog.setMinimumSize(560, 420)
+        try:
+            dialog.setWindowIcon(self.windowIcon())
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("Manual glossary required")
+        title.setObjectName("directTitle")
+        layout.addWidget(title)
+
+        instructions = QLabel(
+            "Drop a CSV, JSON, TXT, or Markdown glossary below, browse for one, "
+            "or paste the glossary contents. This glossary applies only to the "
+            "translation you are about to send."
+        )
+        instructions.setObjectName("directMuted")
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        editor = _GlossaryPasteEdit(dialog)
+        editor.setPlaceholderText(
+            "Drop a glossary file here or paste glossary contents…"
+        )
+        editor.setMinimumHeight(260)
+        layout.addWidget(editor, 1)
+
+        source_label = QLabel("No glossary file selected — pasted contents will be used")
+        source_label.setObjectName("directMuted")
+        source_label.setWordWrap(True)
+        layout.addWidget(source_label)
+
+        editor.path_loaded_callback = (
+            lambda path: source_label.setText(f"Loaded file: {path}")
+        )
+
+        def _editor_changed():
+            if (
+                not editor._loading_file
+                and editor.source_path
+                and editor.toPlainText() != editor.source_text
+            ):
+                editor.source_path = ""
+                source_label.setText(
+                    "Using edited/pasted glossary contents for this translation"
+                )
+
+        editor.textChanged.connect(_editor_changed)
+
+        footer = QHBoxLayout()
+        browse_button = QPushButton("Browse…")
+        cancel_button = QPushButton("Cancel")
+        use_button = QPushButton("Use glossary")
+        use_button.setDefault(True)
+        footer.addWidget(browse_button)
+        footer.addStretch(1)
+        footer.addWidget(cancel_button)
+        footer.addWidget(use_button)
+        layout.addLayout(footer)
+
+        def _load_selected_path(path):
+            if not path:
+                return
+            if editor.load_path(path):
+                source_label.setText(f"Loaded file: {editor.source_path}")
+                return
+            QMessageBox.warning(
+                dialog,
+                "Unsupported glossary",
+                "Select a readable CSV, JSON, TXT, or Markdown glossary file.",
+            )
+
+        def _browse():
+            path, _selected_filter = QFileDialog.getOpenFileName(
+                dialog,
+                "Select manual glossary",
+                "",
+                "Glossary files (*.csv *.json *.txt *.md);;All files (*.*)",
+            )
+            _load_selected_path(path)
+
+        result = {}
+
+        def _accept():
+            content = editor.toPlainText()
+            if not content.strip():
+                QMessageBox.information(
+                    dialog,
+                    "Glossary required",
+                    "Drop a glossary file or paste glossary contents before continuing.",
+                )
+                return
+
+            if editor.source_path and content == editor.source_text:
+                result.update({
+                    'kind': 'path',
+                    'path': editor.source_path,
+                    'extension': editor.source_extension,
+                })
+                dialog.accept()
+                return
+
+            extension = '.txt'
+            stripped = content.lstrip()
+            if stripped.startswith(('{', '[')):
+                try:
+                    json_lib.loads(content)
+                    extension = '.json'
+                except (TypeError, ValueError):
+                    # Keep malformed/non-JSON structured text as plain text;
+                    # this avoids silently rewriting what the user pasted.
+                    extension = '.txt'
+            else:
+                nonempty_lines = [line for line in content.splitlines() if line.strip()]
+                if len(nonempty_lines) > 1 and ',' in nonempty_lines[0]:
+                    extension = '.csv'
+            result.update({
+                'kind': 'content',
+                'content': content,
+                'extension': extension,
+            })
+            dialog.accept()
+
+        browse_button.clicked.connect(_browse)
+        cancel_button.clicked.connect(dialog.reject)
+        use_button.clicked.connect(_accept)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return result or None
 
     def _adjust_chat_zoom(self, adjustment):
         """Zoom conversation and composer text with browser-style limits."""
@@ -3709,6 +3972,13 @@ class _InputOutputDialog(QDialog):
         except Exception:
             pass
 
+        manual_glossary_source = None
+        if self.manual_glossary_radio.isChecked():
+            manual_glossary_source = self._request_direct_text_manual_glossary()
+            if not manual_glossary_source:
+                self._set_status("Manual glossary required")
+                return
+
         import uuid
         from datetime import datetime
 
@@ -3776,6 +4046,32 @@ class _InputOutputDialog(QDialog):
 
         try:
             self._temp_root = tempfile.mkdtemp(prefix="glossarion_input_output_")
+            manual_glossary_path = ""
+            if manual_glossary_source:
+                if manual_glossary_source.get('kind') == 'path':
+                    manual_glossary_path = os.path.abspath(
+                        str(manual_glossary_source.get('path') or '')
+                    )
+                else:
+                    glossary_extension = str(
+                        manual_glossary_source.get('extension') or '.txt'
+                    ).lower()
+                    if glossary_extension not in {'.csv', '.json', '.txt', '.md'}:
+                        glossary_extension = '.txt'
+                    manual_glossary_path = os.path.join(
+                        self._temp_root,
+                        f"direct_text_manual_glossary{glossary_extension}",
+                    )
+                    with open(
+                        manual_glossary_path, 'w', encoding='utf-8'
+                    ) as glossary_file:
+                        glossary_file.write(
+                            str(manual_glossary_source.get('content') or '')
+                        )
+                if not manual_glossary_path or not os.path.isfile(manual_glossary_path):
+                    raise FileNotFoundError(
+                        "The selected manual glossary is no longer available."
+                    )
             if attachment:
                 attached_path = attachment["path"]
                 attached_extension = os.path.splitext(attached_path)[1].lower()
@@ -3843,6 +4139,8 @@ class _InputOutputDialog(QDialog):
                 '_direct_text_archive_conversion_dir',
                 '_direct_text_force_multipass_off',
                 '_direct_text_force_no_glossary',
+                '_direct_text_use_manual_glossary',
+                '_direct_text_manual_glossary_path',
                 '_direct_text_skip_thinking',
                 '_direct_text_attachment_prompt',
                 '_direct_text_attachment_prompt_role',
@@ -3874,8 +4172,17 @@ class _InputOutputDialog(QDialog):
                 self.force_multipass_off_checkbox.isChecked()
             )
             gui._direct_text_force_no_glossary = bool(
-                self.force_no_glossary_checkbox.isChecked()
+                self.force_no_glossary_radio.isChecked()
+                and not manual_glossary_path
             )
+            gui._direct_text_use_manual_glossary = bool(manual_glossary_path)
+            gui._direct_text_manual_glossary_path = manual_glossary_path
+            if manual_glossary_path:
+                gui.manual_glossary_path = manual_glossary_path
+                gui.manual_glossary_manually_loaded = True
+                gui.auto_loaded_glossary_path = None
+                gui.auto_loaded_glossary_for_file = None
+                gui.manual_glossary_map = {}
             gui._direct_text_skip_thinking = bool(
                 self.skip_thinking_checkbox.isChecked()
             )
@@ -3920,7 +4227,8 @@ class _InputOutputDialog(QDialog):
             self.chat_list.setEnabled(False)
             self.delete_chat_button.setEnabled(False)
             self.force_multipass_off_checkbox.setEnabled(False)
-            self.force_no_glossary_checkbox.setEnabled(False)
+            self.force_no_glossary_radio.setEnabled(False)
+            self.manual_glossary_radio.setEnabled(False)
             self.skip_thinking_checkbox.setEnabled(False)
             self.skip_prompt_profile_checkbox.setEnabled(False)
             self.attachment_prompt_role_combo.setEnabled(False)
@@ -5479,7 +5787,8 @@ class _InputOutputDialog(QDialog):
         self.new_chat_button.setEnabled(True)
         self.chat_list.setEnabled(True)
         self.force_multipass_off_checkbox.setEnabled(True)
-        self.force_no_glossary_checkbox.setEnabled(True)
+        self.force_no_glossary_radio.setEnabled(True)
+        self.manual_glossary_radio.setEnabled(True)
         self.skip_thinking_checkbox.setEnabled(True)
         self.skip_prompt_profile_checkbox.setEnabled(True)
         self.attachment_prompt_role_combo.setEnabled(True)
@@ -5509,6 +5818,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     open_progress_manager_signal = Signal()
     # Qt Signal for refreshing the visible input path after worker-side file resolution
     input_files_updated_signal = Signal(list)
+    # Worker-to-GUI bridge used to pause a Direct Text run after automatic
+    # glossary generation without opening Qt dialogs from the worker thread.
+    direct_text_glossary_approval_signal = Signal(str, object)
     _CUSTOM_PREFIX_ENDPOINT_TYPES = (
         "/chat/completions",
         "/images/generations",
@@ -5810,6 +6122,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.open_progress_manager_signal.connect(self._open_progress_manager_on_main_thread)
         # Input path refresh request
         self.input_files_updated_signal.connect(self._apply_selected_files_to_input_field)
+        self.direct_text_glossary_approval_signal.connect(
+            self._show_direct_text_glossary_approval
+        )
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -15498,6 +15813,11 @@ Recent translations to summarize:
     def _current_auto_glossary_mode(self):
         if (
             getattr(self, '_input_output_run_active', False)
+            and getattr(self, '_direct_text_use_manual_glossary', False)
+        ):
+            return 'off_no_automap'
+        if (
+            getattr(self, '_input_output_run_active', False)
             and getattr(self, '_direct_text_force_no_glossary', True)
         ):
             return 'no_glossary'
@@ -20216,8 +20536,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 return
                             
                             # Auto-load the generated glossary (only if extraction completed fully)
-                            self._auto_load_glossary_after_extraction()
-                            
+                            generated_glossary = self._auto_load_glossary_after_extraction()
+
+                            if getattr(self, '_input_output_run_active', False):
+                                self.append_log(
+                                    "⏸️ Direct Text: glossary generation is complete; "
+                                    "waiting for approval before translation"
+                                )
+                                if not self._await_direct_text_glossary_approval(
+                                    generated_glossary
+                                    or getattr(self, 'manual_glossary_path', '')
+                                ):
+                                    self.append_log(
+                                        "⏹️ Direct Text translation cancelled at "
+                                        "the glossary approval step"
+                                    )
+                                    return
+
                             self.append_log(f"\n📑 Glossary extraction complete, proceeding to translation...")
                         except Exception as e:
                             self.append_log(f"⚠️ Glossary extraction failed: {e}")
@@ -20479,8 +20814,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
 
+        backend_glossary_callback_installed = False
         try:
             self._export_multipass_runtime_env()
+
+            if getattr(self, '_input_output_run_active', False):
+                try:
+                    import TransateKRtoEN
+                    TransateKRtoEN.set_direct_text_glossary_approval_callback(
+                        self._await_direct_text_glossary_approval
+                    )
+                    backend_glossary_callback_installed = True
+                except Exception as exc:
+                    self.append_log(
+                        f"⚠️ Could not install Direct Text glossary approval gate: {exc}"
+                    )
 
             # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
             # Check if profile name contains BeautifulSoup or html2text
@@ -20862,6 +21210,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return False
         
         finally:
+            if backend_glossary_callback_installed:
+                try:
+                    import TransateKRtoEN
+                    TransateKRtoEN.set_direct_text_glossary_approval_callback(None)
+                except Exception:
+                    pass
             # IMPORTANT: do NOT reset stop flags, null the translation thread, or
             # emit thread_complete_signal here.
             #
@@ -22827,7 +23181,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if getattr(self, '_direct_text_force_multipass_off', True):
             os.environ['MULTIPASS_MODE'] = '0'
 
-        if getattr(self, '_direct_text_force_no_glossary', True):
+        manual_glossary_path = str(
+            getattr(self, '_direct_text_manual_glossary_path', '') or ''
+        ).strip()
+        use_manual_glossary = bool(
+            getattr(self, '_direct_text_use_manual_glossary', False)
+            and manual_glossary_path
+            and os.path.isfile(manual_glossary_path)
+        )
+        if use_manual_glossary:
+            os.environ['AUTO_GLOSSARY_MODE'] = 'off_no_automap'
+            os.environ['ENABLE_AUTO_GLOSSARY'] = '0'
+            os.environ['SINGLE_PASS_GLOSSARY_MODE'] = '0'
+            os.environ['FUZZY_AUTO_MAPPING'] = '0'
+            os.environ['APPEND_GLOSSARY'] = '1'
+            os.environ['MANUAL_GLOSSARY'] = manual_glossary_path
+            os.environ['DEFER_GLOSSARY_APPEND'] = '0'
+        elif getattr(self, '_direct_text_force_no_glossary', True):
             os.environ['AUTO_GLOSSARY_MODE'] = 'no_glossary'
             os.environ['ENABLE_AUTO_GLOSSARY'] = '0'
             os.environ['SINGLE_PASS_GLOSSARY_MODE'] = '0'
@@ -30984,7 +31354,7 @@ Important rules:
         try:
             files = list(getattr(self, 'selected_files', []) or [])
             if not files:
-                return
+                return ""
             
             # Determine glossary base dir
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
@@ -30998,7 +31368,7 @@ Important rules:
             
             if not os.path.isdir(glossary_base_dir):
                 self.append_log(f"📑 No Glossary folder found after extraction")
-                return
+                return ""
             
             # Build a set of candidate names to match against glossary filenames.
             # For text/EPUB files: use the file basename (e.g. "MyNovel")
@@ -31070,11 +31440,185 @@ Important rules:
                 self.config['manual_glossary_path'] = best_match
                 os.environ['MANUAL_GLOSSARY'] = best_match
                 self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
-                return  # Loaded successfully
+                return best_match  # Loaded successfully
             
             self.append_log(f"📑 No matching glossary found in {glossary_base_dir}")
+            return ""
         except Exception as e:
             self.append_log(f"⚠️ Failed to auto-load glossary: {e}")
+            return ""
+
+    def _await_direct_text_glossary_approval(self, glossary_path):
+        """Block the translation worker until the GUI records Yes/Edit/No."""
+        import threading
+
+        request = {
+            "event": threading.Event(),
+            "accepted": False,
+        }
+        self.direct_text_glossary_approval_signal.emit(
+            os.path.abspath(str(glossary_path or "")) if glossary_path else "",
+            request,
+        )
+        while not request["event"].wait(0.1):
+            if self.stop_requested:
+                return False
+        return bool(request.get("accepted", False))
+
+    def _show_direct_text_glossary_approval(self, glossary_path, request):
+        """Show the Direct Text glossary approval prompt on the GUI thread."""
+        direct_dialog = getattr(self, '_input_output_dialog', None)
+        try:
+            dialog_parent = (
+                direct_dialog
+                if direct_dialog is not None and direct_dialog.isVisible()
+                else self
+            )
+        except RuntimeError:
+            dialog_parent = self
+
+        accepted = False
+        try:
+            while True:
+                prompt = QMessageBox(dialog_parent)
+                prompt.setWindowTitle("Glossary generation complete")
+                prompt.setIcon(QMessageBox.Question)
+                prompt.setText(
+                    "Glossary generation is complete. Accept this glossary "
+                    "and start translation?"
+                )
+                if glossary_path and os.path.isfile(glossary_path):
+                    prompt.setInformativeText(glossary_path)
+                else:
+                    prompt.setInformativeText(
+                        "No editable glossary file was found. You can continue "
+                        "or stop this Direct Text run."
+                    )
+
+                edit_button = prompt.addButton("Edit", QMessageBox.ActionRole)
+                yes_button = prompt.addButton("Yes", QMessageBox.AcceptRole)
+                no_button = prompt.addButton("No", QMessageBox.RejectRole)
+                edit_button.setEnabled(
+                    bool(glossary_path and os.path.isfile(glossary_path))
+                )
+                prompt.setDefaultButton(yes_button)
+                prompt.setEscapeButton(no_button)
+                prompt.exec()
+
+                clicked = prompt.clickedButton()
+                if clicked is edit_button:
+                    self._edit_direct_text_generated_glossary(
+                        glossary_path, dialog_parent
+                    )
+                    # Editing is not implicit acceptance. Return to the same
+                    # Yes/Edit/No decision after the editor closes.
+                    continue
+                if clicked is yes_button:
+                    accepted = True
+                    self.append_log("✅ Direct Text: generated glossary accepted")
+                else:
+                    self.append_log("⏹️ Direct Text: generated glossary rejected")
+                    # Treat No exactly like the existing Stop action so every
+                    # translation/glossary stop flag follows the normal path.
+                    self.stop_translation()
+                break
+        except Exception as exc:
+            self.append_log(f"⚠️ Could not show glossary approval: {exc}")
+            try:
+                self.stop_translation()
+            except Exception:
+                pass
+        finally:
+            request["accepted"] = accepted
+            request["event"].set()
+
+    def _edit_direct_text_generated_glossary(self, glossary_path, parent=None):
+        """Open a modal text editor for the generated CSV/JSON glossary."""
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        path = os.path.abspath(str(glossary_path or ""))
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(
+                parent or self,
+                "Glossary unavailable",
+                "The generated glossary file could not be found.",
+            )
+            return False
+
+        try:
+            with open(path, 'rb') as handle:
+                raw_content = handle.read()
+            has_utf8_bom = raw_content.startswith(b'\xef\xbb\xbf')
+            content = raw_content.decode('utf-8-sig')
+        except Exception as exc:
+            QMessageBox.warning(
+                parent or self,
+                "Could not open glossary",
+                f"Could not read the generated glossary:\n\n{exc}",
+            )
+            return False
+
+        editor_dialog = QDialog(parent or self)
+        editor_dialog.setWindowTitle(f"Edit Generated Glossary — {os.path.basename(path)}")
+        editor_dialog.setWindowFlags(
+            editor_dialog.windowFlags()
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
+        editor_dialog.resize(900, 680)
+        editor_dialog.setMinimumSize(620, 420)
+
+        layout = QVBoxLayout(editor_dialog)
+        path_label = QLabel(path)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+
+        editor = QPlainTextEdit()
+        editor.setPlainText(content)
+        editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        editor.setFont(QFont("Consolas", 10))
+        layout.addWidget(editor, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        cancel_button = QPushButton("Cancel")
+        save_button = QPushButton("Save")
+        save_button.setDefault(True)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        saved = {"value": False}
+
+        def save_changes():
+            temp_path = f"{path}.direct-text-edit-{os.getpid()}.tmp"
+            try:
+                encoding = 'utf-8-sig' if has_utf8_bom else 'utf-8'
+                with open(temp_path, 'w', encoding=encoding, newline='') as handle:
+                    handle.write(editor.toPlainText())
+                os.replace(temp_path, path)
+                saved["value"] = True
+                self.append_log(
+                    f"💾 Direct Text: saved edited glossary: {os.path.basename(path)}"
+                )
+                editor_dialog.accept()
+            except Exception as exc:
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception:
+                    pass
+                QMessageBox.warning(
+                    editor_dialog,
+                    "Could not save glossary",
+                    f"Could not save the generated glossary:\n\n{exc}",
+                )
+
+        cancel_button.clicked.connect(editor_dialog.reject)
+        save_button.clicked.connect(save_changes)
+        editor_dialog.exec()
+        return saved["value"]
 
     def _periodic_automap_refresh(self):
         """Periodically re-check auto-mapping so new glossary files are picked up.

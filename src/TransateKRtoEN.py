@@ -10618,6 +10618,25 @@ except AttributeError:
             pass
 
 _stop_requested = False
+_direct_text_glossary_approval_callback = None
+
+
+def set_direct_text_glossary_approval_callback(callback):
+    """Install the GUI-owned Direct Text glossary approval gate."""
+    global _direct_text_glossary_approval_callback
+    _direct_text_glossary_approval_callback = callback
+
+
+def _approve_direct_text_generated_glossary(glossary_path):
+    """Return False only when an installed Direct Text gate rejects the file."""
+    callback = _direct_text_glossary_approval_callback
+    if callback is None:
+        return True
+    try:
+        return bool(callback(glossary_path or ""))
+    except Exception as exc:
+        print(f"⚠️ Direct Text glossary approval failed: {exc}")
+        return False
 
 def set_stop_flag(value):
     """Set the global stop flag"""
@@ -20804,6 +20823,20 @@ def main(log_callback=None, stop_callback=None):
                             return
                     except Exception:
                         pass
+
+                    # Minimal mode generates its glossary inside the backend,
+                    # immediately before deferred prompt appending and chapter
+                    # translation. Direct Text installs a GUI callback here so
+                    # the user can edit, accept, or reject that generated file.
+                    generated_glossary_path = find_glossary_file(out)
+                    if not _approve_direct_text_generated_glossary(
+                        generated_glossary_path
+                    ):
+                        print(
+                            "⏹️ Direct Text translation cancelled at the "
+                            "glossary approval step"
+                        )
+                        return
                     
                     # Copy glossary extension if configured (after auto-glossary generation)
                     if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
