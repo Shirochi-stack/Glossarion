@@ -1,13 +1,7 @@
 name: Build All Platforms
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:  # Manual trigger also available
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   # ============================================================================
