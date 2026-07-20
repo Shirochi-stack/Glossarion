@@ -5636,6 +5636,7 @@ class _InputOutputDialog(QDialog):
     def _apply_direct_response_payload(self, line):
         """Install a backend response that cannot be exposed as token logs."""
         import json as json_lib
+        import re
 
         raw = str(line or "")
         if not raw.startswith(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):
@@ -5654,12 +5655,24 @@ class _InputOutputDialog(QDialog):
         if not label or not content:
             return True
         order = payload.get("order")
+        request_number = payload.get("request_number")
         target = None
         normalized_order = None
         try:
             normalized_order = int(order)
         except (TypeError, ValueError):
             pass
+        try:
+            request_number = int(request_number)
+            if request_number < 1:
+                request_number = None
+        except (TypeError, ValueError):
+            request_match = re.fullmatch(
+                r"Request\s+(\d+)", label, flags=re.IGNORECASE
+            )
+            request_number = (
+                int(request_match.group(1)) if request_match else None
+            )
 
         # Dispatch order is the stable request identity.  A provider may lose
         # chapter context at completion and call the same response ``Request
@@ -5705,6 +5718,11 @@ class _InputOutputDialog(QDialog):
             )
         ):
             target["label"] = label
+        if request_number is not None:
+            # Chapter/chunk identity and request sequence are independent.
+            # Keep both so completion payloads cannot replace one with the
+            # other when the response card is rendered.
+            target["request_number"] = request_number
         target["content"] = content
         target["text_tokens"] = current_tokens
         target["phase"] = "processing"
@@ -5817,6 +5835,7 @@ class _InputOutputDialog(QDialog):
                 return existing
         segment = {
             "label": request_label,
+            "request_number": segment_number,
             "thread": thread_key,
             "content": "",
             "thinking": "",
@@ -5863,13 +5882,27 @@ class _InputOutputDialog(QDialog):
             processing_label = f"Generating Text ({text_tokens:,} tokens)"
         else:
             processing_label = "Processing"
+        response_label = str(segment.get("label", "") or "").strip()
+        try:
+            request_number = int(segment.get("request_number", 0) or 0)
+        except (TypeError, ValueError):
+            request_number = 0
+        label_is_generic = response_label.lower().startswith("request ")
+        label_has_request = " · request " in response_label.lower()
+        if response_label and not label_is_generic and not label_has_request:
+            if request_number > 0:
+                response_label = (
+                    f"{response_label} · Request {request_number}"
+                )
+        elif not response_label and request_number > 0:
+            response_label = f"Request {request_number}"
         return (
             "assistant",
             str(segment.get("content", "") or ""),
             str(segment.get("thinking", "") or ""),
             processing_label,
             str(output_folder or ""),
-            str(segment.get("label", "") or ""),
+            response_label,
         )
 
     def _schedule_stream_render(self, immediate=False):
@@ -7596,6 +7629,7 @@ class _InputOutputDialog(QDialog):
         if target is None:
             target = {
                 "label": "Header / TOC translation",
+                "request_number": len(self._active_request_segments) + 1,
                 "thread": "",
                 "content": "",
                 "thinking": "",

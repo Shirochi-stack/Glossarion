@@ -17179,10 +17179,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             except (TypeError, ValueError):
                 label = "Request"
 
+        try:
+            request_number = int(dispatch_order) + 1
+            if request_number < 1 or request_number >= 1_000_000:
+                request_number = None
+        except (TypeError, ValueError):
+            request_number = None
+
         payload = json.dumps(
             {
                 "label": label,
                 "order": dispatch_order,
+                "request_number": request_number,
                 "content": value,
             },
             ensure_ascii=False,
