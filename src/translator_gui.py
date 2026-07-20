@@ -2162,6 +2162,14 @@ class _InputOutputDialog(QDialog):
         self._poll_timer.setInterval(200)
         self._poll_timer.timeout.connect(self._poll_translation)
 
+        self._send_availability_timer = QTimer(self)
+        self._send_availability_timer.setInterval(200)
+        self._send_availability_timer.timeout.connect(
+            self._refresh_send_availability
+        )
+        self._send_availability_timer.start()
+        self._refresh_send_availability()
+
         self._ctrl_enter_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
         self._ctrl_enter_shortcut.activated.connect(self._on_enter_clicked)
 
@@ -3321,6 +3329,11 @@ class _InputOutputDialog(QDialog):
         state = str(state or 'idle')
         states = {
             'idle': ('Send', True, 'Send text for translation'),
+            'blocked': (
+                'Send',
+                False,
+                'Unavailable while Run Translation is running',
+            ),
             'running': ('Stop', True, 'Stop translation'),
             'finishing': (
                 'Finishing…',
@@ -3340,6 +3353,30 @@ class _InputOutputDialog(QDialog):
         except Exception:
             pass
         self.enter_button.update()
+
+    def _main_translation_is_running(self):
+        """Return whether the parent window owns an active translation run."""
+        thread = getattr(self.translator, 'translation_thread', None)
+        future = getattr(self.translator, 'translation_future', None)
+        try:
+            thread_running = bool(thread and thread.is_alive())
+        except Exception:
+            thread_running = False
+        try:
+            future_running = bool(future and not future.done())
+        except Exception:
+            future_running = False
+        return thread_running or future_running
+
+    def _refresh_send_availability(self):
+        """Keep Send disabled while the main Run Translation owns the worker."""
+        if self._active or self._direct_graceful_stop_pending:
+            return
+        blocked = self._main_translation_is_running()
+        current_state = str(self.enter_button.property('directState') or '')
+        desired_state = 'blocked' if blocked else 'idle'
+        if current_state != desired_state:
+            self._set_enter_button_state(desired_state)
 
     def _toggle_fullscreen(self):
         """Toggle F11 fullscreen while preserving the previous window state."""
@@ -3590,6 +3627,10 @@ class _InputOutputDialog(QDialog):
         import time
 
         now = time.time()
+        if not self._active and self._main_translation_is_running():
+            self._refresh_send_availability()
+            self._set_status("Run Translation is currently running")
+            return
         if self._direct_graceful_stop_pending:
             if now - self._direct_graceful_stop_ts < 2.0:
                 self._direct_graceful_stop_pending = False
