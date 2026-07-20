@@ -1461,6 +1461,7 @@ class _InputOutputDialog(QDialog):
         self._chat_history_save_timer.timeout.connect(self._save_chat_history)
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
+        self._pending_glossary_approval = None
         self._active_request_segments = []
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
@@ -3980,6 +3981,26 @@ class _InputOutputDialog(QDialog):
                 return
             self._open_specific_output_folder(folder)
             return
+        glossary_prefix = "direct-glossary:"
+        if target.startswith(glossary_prefix):
+            action = target[len(glossary_prefix):].strip().lower()
+            pending = self._pending_glossary_approval
+            if not isinstance(pending, dict):
+                return
+            if action == 'edit':
+                glossary_path = str(pending.get('path', '') or '')
+                if glossary_path and os.path.isfile(glossary_path):
+                    self.translator._edit_direct_text_generated_glossary(
+                        glossary_path, self
+                    )
+                    self._render_output()
+                return
+            if action == 'yes':
+                self._resolve_glossary_approval(True)
+                return
+            if action == 'no':
+                self._resolve_glossary_approval(False, stop_run=True)
+                return
         prefix = "direct-processing:"
         if not target.startswith(prefix):
             return
@@ -3996,6 +4017,48 @@ class _InputOutputDialog(QDialog):
             session["expanded"] = set(self._expanded_processing_messages)
         self._schedule_chat_history_save()
         self._render_output()
+
+    def _present_glossary_approval_request(self, glossary_path, request):
+        """Display the post-generation decision as an inline chat request."""
+        self._pending_glossary_approval = {
+            'path': os.path.abspath(str(glossary_path or ''))
+            if glossary_path else '',
+            'request': request,
+        }
+        self.tabs.setCurrentWidget(self.chat_tab)
+        self._set_status("Glossary ready — choose Edit, Yes, or No")
+        self._render_output()
+        if not self._output_auto_scroll_disabled:
+            scrollbar = self.output_box.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _resolve_glossary_approval(self, accepted, stop_run=False):
+        """Resolve and remove the active inline glossary approval request."""
+        pending = self._pending_glossary_approval
+        if not isinstance(pending, dict):
+            return
+        self._pending_glossary_approval = None
+        request = pending.get('request')
+        if isinstance(request, dict):
+            request['accepted'] = bool(accepted)
+            event = request.get('event')
+            if event is not None:
+                event.set()
+        if accepted:
+            self.translator.append_log(
+                "✅ Direct Text: generated glossary accepted"
+            )
+            self._set_status("Starting translation…")
+        else:
+            self.translator.append_log(
+                "⏹️ Direct Text: generated glossary rejected"
+            )
+            self._set_status("Stopping…" if stop_run else "Stopped")
+        self._render_output()
+        if stop_run:
+            # Match the normal Direct Text Stop path so glossary and
+            # translation cancellation flags remain consistent.
+            self.translator.stop_translation()
 
     def _clear_copy_confirmation(self, copied_key):
         """Restore the clipboard action after its brief Copied confirmation."""
@@ -5398,6 +5461,52 @@ class _InputOutputDialog(QDialog):
                     )
                 )
 
+        pending_glossary = self._pending_glossary_approval
+        if isinstance(pending_glossary, dict):
+            glossary_path = str(pending_glossary.get('path', '') or '')
+            glossary_available = bool(
+                glossary_path and os.path.isfile(glossary_path)
+            )
+            if glossary_available:
+                glossary_detail = (
+                    "<div class='glossary-request-path'>"
+                    + html_lib.escape(glossary_path)
+                    + "</div>"
+                )
+                edit_action = (
+                    "<a class='glossary-request-button glossary-edit' "
+                    "href='direct-glossary:edit'>✏️&nbsp;&nbsp;Edit</a>"
+                )
+            else:
+                glossary_detail = (
+                    "<div class='glossary-request-path'>No editable glossary "
+                    "file was found. You can continue or stop this run.</div>"
+                )
+                edit_action = (
+                    "<span class='glossary-request-button-disabled'>"
+                    "✏️&nbsp;&nbsp;Edit</span>"
+                )
+            message_html.append(
+                "<table class='glossary-request-row' width='100%' cellspacing='0' "
+                "cellpadding='0'><tr><td width='12%'></td>"
+                "<td class='glossary-request-card'>"
+                "<div class='role'>GLOSSARION · ACTION REQUIRED</div>"
+                "<div class='glossary-request-title'>Glossary generation complete</div>"
+                "<div class='glossary-request-copy'>Accept this glossary and start "
+                "translation?</div>"
+                + glossary_detail
+                + "<div class='glossary-request-actions'>"
+                + edit_action
+                + "&nbsp;&nbsp;"
+                "<a class='glossary-request-button glossary-yes' "
+                "href='direct-glossary:yes'>✓&nbsp;&nbsp;Yes</a>"
+                "&nbsp;&nbsp;"
+                "<a class='glossary-request-button glossary-no' "
+                "href='direct-glossary:no'>■&nbsp;&nbsp;No</a>"
+                "</div></td><td width='12%'></td></tr></table>"
+                "<div class='message-gap'>&nbsp;</div>"
+            )
+
         if active_only:
             fragment = ''.join(message_html)
             if self._replace_active_stream_fragment(fragment):
@@ -5485,6 +5594,26 @@ class _InputOutputDialog(QDialog):
             "border-top: 1px solid #3f4856; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
+            ".glossary-request-row, .glossary-request-row td { border: none; }"
+            ".glossary-request-card { background: #25282d; color: white; "
+            "border: 1px solid #5a9fd4; padding: 15px 17px; }"
+            ".glossary-request-title { color: white; font-size: 1.12em; "
+            "font-weight: 700; margin: 2px 0 7px 0; }"
+            ".glossary-request-copy { color: #d5dbe5; margin-bottom: 8px; }"
+            ".glossary-request-path { color: #9faabd; background: #1b1e24; "
+            "border: 1px solid #3f4856; padding: 7px 9px; margin: 7px 0 13px 0; "
+            "font-family: 'Consolas','Menlo',monospace; font-size: 0.78em; }"
+            ".glossary-request-actions { margin-top: 13px; }"
+            ".glossary-request-button, .glossary-request-button-disabled { "
+            "padding: 7px 13px; font-weight: 700; text-decoration: none; }"
+            ".glossary-edit { color: #d7e8ff; background: #354154; "
+            "border: 1px solid #5a718f; }"
+            ".glossary-yes { color: white; background: #287a4b; "
+            "border: 1px solid #43a66f; }"
+            ".glossary-no { color: white; background: #8c3636; "
+            "border: 1px solid #c65454; }"
+            ".glossary-request-button-disabled { color: #707783; "
+            "background: #292c31; border: 1px solid #3a3e45; }"
             "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
             "padding: 9px; white-space: pre-wrap; }"
@@ -6244,6 +6373,15 @@ class _InputOutputDialog(QDialog):
         self._poll_timer.stop()
         self._render_timer.stop()
         self._render_pending = False
+        pending_glossary = self._pending_glossary_approval
+        self._pending_glossary_approval = None
+        if isinstance(pending_glossary, dict):
+            request = pending_glossary.get('request')
+            if isinstance(request, dict):
+                request['accepted'] = False
+                event = request.get('event')
+                if event is not None:
+                    event.set()
         gui = self.translator
 
         if self._listener_attached:
@@ -32024,70 +32162,27 @@ Important rules:
         return bool(request.get("accepted", False))
 
     def _show_direct_text_glossary_approval(self, glossary_path, request):
-        """Show the Direct Text glossary approval prompt on the GUI thread."""
+        """Place the Direct Text glossary decision inside the conversation."""
         direct_dialog = getattr(self, '_input_output_dialog', None)
         try:
-            dialog_parent = (
-                direct_dialog
-                if direct_dialog is not None and direct_dialog.isVisible()
-                else self
+            if direct_dialog is None:
+                raise RuntimeError("Direct Text dialog is unavailable")
+            direct_dialog._present_glossary_approval_request(
+                glossary_path, request
             )
-        except RuntimeError:
-            dialog_parent = self
-
-        accepted = False
-        try:
-            while True:
-                prompt = QMessageBox(dialog_parent)
-                prompt.setWindowTitle("Glossary generation complete")
-                prompt.setIcon(QMessageBox.Question)
-                prompt.setText(
-                    "Glossary generation is complete. Accept this glossary "
-                    "and start translation?"
-                )
-                if glossary_path and os.path.isfile(glossary_path):
-                    prompt.setInformativeText(glossary_path)
-                else:
-                    prompt.setInformativeText(
-                        "No editable glossary file was found. You can continue "
-                        "or stop this Direct Text run."
-                    )
-
-                edit_button = prompt.addButton("Edit", QMessageBox.ActionRole)
-                yes_button = prompt.addButton("Yes", QMessageBox.AcceptRole)
-                no_button = prompt.addButton("No", QMessageBox.RejectRole)
-                edit_button.setEnabled(
-                    bool(glossary_path and os.path.isfile(glossary_path))
-                )
-                prompt.setDefaultButton(yes_button)
-                prompt.setEscapeButton(no_button)
-                prompt.exec()
-
-                clicked = prompt.clickedButton()
-                if clicked is edit_button:
-                    self._edit_direct_text_generated_glossary(
-                        glossary_path, dialog_parent
-                    )
-                    # Editing is not implicit acceptance. Return to the same
-                    # Yes/Edit/No decision after the editor closes.
-                    continue
-                if clicked is yes_button:
-                    accepted = True
-                    self.append_log("✅ Direct Text: generated glossary accepted")
-                else:
-                    self.append_log("⏹️ Direct Text: generated glossary rejected")
-                    # Treat No exactly like the existing Stop action so every
-                    # translation/glossary stop flag follows the normal path.
-                    self.stop_translation()
-                break
+            if not direct_dialog.isVisible():
+                direct_dialog.show()
+                direct_dialog.raise_()
+            return
         except Exception as exc:
-            self.append_log(f"⚠️ Could not show glossary approval: {exc}")
+            self.append_log(
+                f"⚠️ Could not display inline glossary approval: {exc}"
+            )
             try:
                 self.stop_translation()
             except Exception:
                 pass
-        finally:
-            request["accepted"] = accepted
+            request["accepted"] = False
             request["event"].set()
 
     def _edit_direct_text_generated_glossary(self, glossary_path, parent=None):
