@@ -5149,11 +5149,32 @@ class _InputOutputDialog(QDialog):
 
     def _present_glossary_approval_request(self, glossary_path, request):
         """Display the post-generation decision as an inline chat request."""
-        self._pending_glossary_approval = {
-            'path': os.path.abspath(str(glossary_path or ''))
-            if glossary_path else '',
-            'request': request,
-        }
+        normalized_path = (
+            os.path.abspath(str(glossary_path or '')) if glossary_path else ''
+        )
+        pending = self._pending_glossary_approval
+        if (
+            isinstance(pending, dict)
+            and os.path.normcase(str(pending.get('path', '') or ''))
+            == os.path.normcase(normalized_path)
+        ):
+            # Multiple pipeline layers can reach the same approval gate before
+            # the GUI thread repaints.  They represent one user decision. Keep
+            # one card and release every waiting callback from that decision.
+            requests = pending.setdefault(
+                'requests',
+                [pending.get('request')] if pending.get('request') else [],
+            )
+            if isinstance(request, dict) and all(
+                existing is not request for existing in requests
+            ):
+                requests.append(request)
+        else:
+            self._pending_glossary_approval = {
+                'path': normalized_path,
+                'request': request,
+                'requests': [request] if isinstance(request, dict) else [],
+            }
         self.tabs.setCurrentWidget(self.chat_tab)
         self._set_status("Glossary ready — choose Edit, Yes, or No")
         self._render_output()
@@ -5167,8 +5188,15 @@ class _InputOutputDialog(QDialog):
         if not isinstance(pending, dict):
             return
         self._pending_glossary_approval = None
-        request = pending.get('request')
-        if isinstance(request, dict):
+        requests = list(pending.get('requests', []) or [])
+        primary_request = pending.get('request')
+        if isinstance(primary_request, dict) and all(
+            existing is not primary_request for existing in requests
+        ):
+            requests.insert(0, primary_request)
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
             request['accepted'] = bool(accepted)
             event = request.get('event')
             if event is not None:
@@ -6915,11 +6943,10 @@ class _InputOutputDialog(QDialog):
                             self._ACTIVE_STREAM_START_MARKER
                         )
                     )
-                message_html.append(
-                    self._active_stream_marker_html(
-                        self._ACTIVE_STREAM_END_MARKER
-                    )
-                )
+                # The end marker is appended after the interactive glossary
+                # gate below.  Keeping that transient card inside the live
+                # fragment prevents the next streaming repaint from inserting
+                # a second copy beside the full-document copy.
 
         pending_glossary = self._pending_glossary_approval
         if isinstance(pending_glossary, dict):
@@ -6934,8 +6961,10 @@ class _InputOutputDialog(QDialog):
                     + "</div>"
                 )
                 edit_action = (
-                    "<a class='glossary-request-button glossary-edit' "
-                    "href='direct-glossary:edit'>✏️&nbsp;&nbsp;Edit</a>"
+                    "<td class='glossary-action-cell glossary-edit' width='92' "
+                    "height='34' align='center' valign='middle'>"
+                    "<a class='glossary-action-link' href='direct-glossary:edit'>"
+                    "✏️&nbsp;&nbsp;Edit</a></td>"
                 )
             else:
                 glossary_detail = (
@@ -6943,28 +6972,48 @@ class _InputOutputDialog(QDialog):
                     "file was found. You can continue or stop this run.</div>"
                 )
                 edit_action = (
-                    "<span class='glossary-request-button-disabled'>"
-                    "✏️&nbsp;&nbsp;Edit</span>"
+                    "<td class='glossary-action-cell glossary-action-disabled' "
+                    "width='92' height='34' align='center' valign='middle'>"
+                    "<span class='glossary-action-disabled-text'>"
+                    "✏️&nbsp;&nbsp;Edit</span></td>"
                 )
-            message_html.append(
-                "<table class='glossary-request-row' width='100%' cellspacing='0' "
-                "cellpadding='0'><tr><td width='12%'></td>"
-                "<td class='glossary-request-card'>"
+            glossary_request_inner = (
                 "<div class='role'>GLOSSARION · ACTION REQUIRED</div>"
                 "<div class='glossary-request-title'>Glossary generation complete</div>"
                 "<div class='glossary-request-copy'>Accept this glossary and start "
                 "translation?</div>"
                 + glossary_detail
-                + "<div class='glossary-request-actions'>"
+                + "<table class='glossary-request-actions' cellspacing='0' "
+                "cellpadding='0'><tr>"
                 + edit_action
-                + "&nbsp;&nbsp;"
-                "<a class='glossary-request-button glossary-yes' "
-                "href='direct-glossary:yes'>✓&nbsp;&nbsp;Yes</a>"
-                "&nbsp;&nbsp;"
-                "<a class='glossary-request-button glossary-no' "
-                "href='direct-glossary:no'>■&nbsp;&nbsp;No</a>"
-                "</div></td><td width='12%'></td></tr></table>"
+                + "<td class='glossary-action-gap' width='9'></td>"
+                "<td class='glossary-action-cell glossary-yes' width='78' "
+                "height='34' align='center' valign='middle'>"
+                "<a class='glossary-action-link' href='direct-glossary:yes'>"
+                "✓&nbsp;&nbsp;Yes</a></td>"
+                "<td class='glossary-action-gap' width='9'></td>"
+                "<td class='glossary-action-cell glossary-no' width='72' "
+                "height='34' align='center' valign='middle'>"
+                "<a class='glossary-action-link' href='direct-glossary:no'>"
+                "■&nbsp;&nbsp;No</a></td>"
+                "</tr></table>"
+            )
+            glossary_request_bubble = self._rounded_assistant_bubble_html(
+                glossary_request_inner
+            )
+            message_html.append(
+                "<table class='glossary-request-row' width='100%' cellspacing='0' "
+                "cellpadding='0'><tr><td width='12%'></td>"
+                + glossary_request_bubble
+                + "<td width='12%'></td></tr></table>"
                 "<div class='message-gap'>&nbsp;</div>"
+            )
+
+        if not active_only and self._assistant_message_active:
+            message_html.append(
+                self._active_stream_marker_html(
+                    self._ACTIVE_STREAM_END_MARKER
+                )
             )
 
         if active_only:
@@ -7065,25 +7114,26 @@ class _InputOutputDialog(QDialog):
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
             "font-weight: 600; text-decoration: none; }"
             ".glossary-request-row, .glossary-request-row td { border: none; }"
-            ".glossary-request-card { background: #25282d; color: white; "
-            "border: 1px solid #5a9fd4; padding: 15px 17px; }"
             ".glossary-request-title { color: white; font-size: 1.12em; "
             "font-weight: 700; margin: 2px 0 7px 0; }"
             ".glossary-request-copy { color: #d5dbe5; margin-bottom: 8px; }"
-            ".glossary-request-path { color: #9faabd; background: #1b1e24; "
-            "border: 1px solid #3f4856; padding: 7px 9px; margin: 7px 0 13px 0; "
+            ".glossary-request-path { color: #9faabd; background-color: transparent; "
+            "border: none; padding: 3px 0; margin: 7px 0 13px 0; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 0.78em; }"
-            ".glossary-request-actions { margin-top: 13px; }"
-            ".glossary-request-button, .glossary-request-button-disabled { "
-            "padding: 7px 13px; font-weight: 700; text-decoration: none; }"
-            ".glossary-edit { color: #d7e8ff; background: #354154; "
+            ".glossary-request-actions { margin-top: 13px; border: none; }"
+            ".glossary-request-actions td { border: none; }"
+            ".glossary-action-cell { padding: 6px 12px; text-align: center; }"
+            ".glossary-action-link { color: white; font-weight: 700; "
+            "text-decoration: none; }"
+            ".glossary-edit { color: #d7e8ff; background-color: #354154; "
             "border: 1px solid #5a718f; }"
-            ".glossary-yes { color: white; background: #287a4b; "
+            ".glossary-yes { color: white; background-color: #287a4b; "
             "border: 1px solid #43a66f; }"
-            ".glossary-no { color: white; background: #8c3636; "
+            ".glossary-no { color: white; background-color: #8c3636; "
             "border: 1px solid #c65454; }"
-            ".glossary-request-button-disabled { color: #707783; "
-            "background: #292c31; border: 1px solid #3a3e45; }"
+            ".glossary-action-disabled { color: #707783; "
+            "background-color: #292c31; border: 1px solid #3a3e45; }"
+            ".glossary-action-disabled-text { color: #707783; font-weight: 700; }"
             "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
             "padding: 9px; white-space: pre-wrap; }"
@@ -8008,8 +8058,15 @@ class _InputOutputDialog(QDialog):
         pending_glossary = self._pending_glossary_approval
         self._pending_glossary_approval = None
         if isinstance(pending_glossary, dict):
-            request = pending_glossary.get('request')
-            if isinstance(request, dict):
+            requests = list(pending_glossary.get('requests', []) or [])
+            primary_request = pending_glossary.get('request')
+            if isinstance(primary_request, dict) and all(
+                existing is not primary_request for existing in requests
+            ):
+                requests.insert(0, primary_request)
+            for request in requests:
+                if not isinstance(request, dict):
+                    continue
                 request['accepted'] = False
                 event = request.get('event')
                 if event is not None:
