@@ -182,6 +182,7 @@ app_files = [
 
 	# AuthGPT - ChatGPT subscription OAuth
 	('authgpt_auth.py', '.'),
+	('authgrok_auth.py', '.'),  # xAI Grok subscription OAuth
 	('authgem_auth.py', '.'),
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
 	('authza_auth.py', '.'),
@@ -283,6 +284,7 @@ app_modules = [
 	'duplicate_detection_config',
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
+	'authgrok_auth',  # xAI Grok subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
 	'authza_auth',  # Azure/Additional auth
