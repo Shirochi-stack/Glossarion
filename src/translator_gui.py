@@ -1284,6 +1284,28 @@ from Retranslation_GUI import RetranslationMixin
 from GlossaryManager_GUI import GlossaryManagerMixin
 
 
+class _DirectChatTitleButton(QPushButton):
+    """Sidebar title button that preserves the existing double-click rename UX."""
+
+    doubleClicked = Signal()
+
+    def __init__(self, title, parent=None):
+        self._full_title = str(title or "New chat")
+        super().__init__(self._full_title, parent)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        available = max(24, self.width() - 12)
+        elided = self.fontMetrics().elidedText(
+            self._full_title, Qt.ElideRight, available
+        )
+        QPushButton.setText(self, elided)
+
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit()
+        event.accept()
+
+
 class _InputOutputDialog(QDialog):
     """Small chat-like front end for the normal text-file translation flow.
 
@@ -1591,9 +1613,24 @@ class _InputOutputDialog(QDialog):
             "QListWidget#chatHistoryList { background: transparent; border: none; "
             "outline: none; padding: 0; }"
             "QListWidget#chatHistoryList::item { color: #cbd5e1; "
-            "padding: 9px 10px; margin: 2px 0; border-radius: 4px; }"
+            "padding: 0; margin: 2px 0; border-radius: 4px; }"
             "QListWidget#chatHistoryList::item:hover { background: #252525; color: white; }"
             "QListWidget#chatHistoryList::item:selected { background: #2d2d2d; color: white; }"
+            "QWidget#directChatSidebarRow { background: transparent; border: none; }"
+            "QPushButton#directChatTitleButton { background: transparent; color: #cbd5e1; "
+            "border: none; text-align: left; padding: 8px 3px 8px 9px; }"
+            "QPushButton#directChatTitleButton:hover { color: white; }"
+            "QToolButton#directChatAttachmentsButton { background: transparent; color: #cbd5e1; "
+            "border: none; border-radius: 4px; min-width: 28px; max-width: 28px; "
+            "min-height: 30px; max-height: 30px; padding: 0; }"
+            "QToolButton#directChatAttachmentsButton:hover { background: #3b3b3b; color: white; }"
+            "QToolButton#directChatAttachmentsButton:disabled { color: #626b78; background: transparent; }"
+            "QDialog#directAttachmentsDialog { background: #1e1e1e; }"
+            "QFrame#directAttachmentManagerCard { background: #252525; "
+            "border: 1px solid #4a5568; border-radius: 9px; }"
+            "QLabel#directAttachmentManagerName { color: white; font-weight: 650; }"
+            "QLabel#directAttachmentManagerPath { color: #aeb8c8; font-size: 8.5pt; }"
+            "QPushButton#directAttachmentMigrateButton { min-width: 92px; min-height: 32px; }"
             "QTextBrowser#chatTimeline { background: #1e1e1e; color: white; "
             "border: none; padding: 0; selection-background-color: #5a9fd4; }"
             "QTextEdit#directInlineResponseEditorBox { background: #242424; "
@@ -3853,13 +3890,75 @@ class _InputOutputDialog(QDialog):
         try:
             self.chat_list.blockSignals(True)
             self.chat_list.clear()
-            for session in self._chat_sessions:
+            for session_index, session in enumerate(self._chat_sessions):
                 title = str(session.get("title", "New chat") or "New chat")
-                self.chat_list.addItem(title)
+                self.chat_list.addItem("")
                 item = self.chat_list.item(self.chat_list.count() - 1)
+                item.setSizeHint(QSize(0, 48))
                 item.setToolTip(
                     f"{title}\nDouble-click or right-click to rename"
                 )
+
+                row_widget = QWidget()
+                row_widget.setObjectName("directChatSidebarRow")
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 3, 0)
+                row_layout.setSpacing(1)
+
+                title_button = _DirectChatTitleButton(title)
+                title_button.setObjectName("directChatTitleButton")
+                title_button.setAutoDefault(False)
+                title_button.setToolTip(
+                    f"{title}\nDouble-click or right-click to rename"
+                )
+                title_button.setSizePolicy(
+                    QSizePolicy.Expanding, QSizePolicy.Preferred
+                )
+                title_button.clicked.connect(
+                    lambda _checked=False, index=session_index: (
+                        self.chat_list.setCurrentRow(index)
+                    )
+                )
+                title_button.doubleClicked.connect(
+                    lambda index=session_index: self._rename_chat(index)
+                )
+                title_button.setContextMenuPolicy(Qt.CustomContextMenu)
+                title_button.customContextMenuRequested.connect(
+                    lambda position, button=title_button, index=session_index: (
+                        self._show_chat_context_menu_for_index(
+                            index, button.mapToGlobal(position)
+                        )
+                    )
+                )
+                row_layout.addWidget(title_button, 1)
+
+                attachment_folders = self._conversation_attachment_folders(
+                    session
+                )
+                attachment_count = len(attachment_folders)
+                attachment_button = QToolButton()
+                attachment_button.setObjectName(
+                    "directChatAttachmentsButton"
+                )
+                attachment_button.setText("📎")
+                attachment_button.setAutoRaise(True)
+                attachment_button.setToolTip(
+                    f"Manage {attachment_count} saved attachment"
+                    f"{'s' if attachment_count != 1 else ''}"
+                    if attachment_count
+                    else "No saved attachments for this conversation"
+                )
+                attachment_button.setAccessibleName(
+                    f"Conversation attachments ({attachment_count})"
+                )
+                attachment_button.setEnabled(not self._active)
+                attachment_button.clicked.connect(
+                    lambda _checked=False, index=session_index: (
+                        self._show_conversation_attachments(index)
+                    )
+                )
+                row_layout.addWidget(attachment_button, 0, Qt.AlignVCenter)
+                self.chat_list.setItemWidget(item, row_widget)
             self.chat_list.setCurrentRow(self._current_chat_index)
         finally:
             self.chat_list.blockSignals(False)
@@ -3935,6 +4034,14 @@ class _InputOutputDialog(QDialog):
         if item is None:
             return
         index = self.chat_list.row(item)
+        self._show_chat_context_menu_for_index(
+            index, self.chat_list.viewport().mapToGlobal(position)
+        )
+
+    def _show_chat_context_menu_for_index(self, index, global_position):
+        """Show sidebar actions for a known conversation row."""
+        if self._active or not (0 <= int(index) < len(self._chat_sessions)):
+            return
         if index != self._current_chat_index:
             self.chat_list.setCurrentRow(index)
 
@@ -3950,7 +4057,7 @@ class _InputOutputDialog(QDialog):
                 or session.get("attachment")
             )
         )
-        selected = menu.exec(self.chat_list.viewport().mapToGlobal(position))
+        selected = menu.exec(global_position)
         if selected is rename_action:
             self._rename_chat(index)
         elif selected is delete_action:
@@ -4054,6 +4161,469 @@ class _InputOutputDialog(QDialog):
                 "Direct Text conversation area."
             )
         return folder
+
+    @staticmethod
+    def _managed_conversation_output_folder(session):
+        """Return an existing, recognized Direct Text conversation folder."""
+        existing = os.path.realpath(
+            os.path.abspath(str(session.get("output_folder", "") or ""))
+        )
+        if not existing or not os.path.isdir(existing):
+            return ""
+
+        # Older histories could store an attachment descendant instead of the
+        # conversation root. Walk upward until the direct child of Direct Text
+        # is found, but never accept an arbitrary directory from edited JSON.
+        candidate = existing
+        while True:
+            parent = os.path.dirname(candidate)
+            if os.path.basename(parent).casefold() == "direct text":
+                return candidate if os.path.isdir(candidate) else ""
+            if not parent or parent == candidate:
+                break
+            candidate = parent
+
+        temp_root = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+        if (
+            os.path.normcase(os.path.dirname(existing)) == temp_root
+            and os.path.basename(existing).startswith(
+                "glossarion_direct_text_chat_"
+            )
+        ):
+            return existing
+        return ""
+
+    def _conversation_attachment_folders(self, session):
+        """List the immediate managed attachment workspaces for one chat."""
+        conversation_folder = self._managed_conversation_output_folder(session)
+        if not conversation_folder:
+            return []
+        stored_folder = os.path.abspath(
+            str(session.get("output_folder", "") or "")
+        )
+        if os.path.normcase(stored_folder) != os.path.normcase(
+            conversation_folder
+        ):
+            session["output_folder"] = conversation_folder
+            self._schedule_chat_history_save()
+        attachments_root = os.path.join(conversation_folder, "Attachments")
+        if not os.path.isdir(attachments_root):
+            return []
+        try:
+            folders = [
+                os.path.abspath(os.path.join(attachments_root, name))
+                for name in os.listdir(attachments_root)
+                if os.path.isdir(os.path.join(attachments_root, name))
+            ]
+        except OSError:
+            return []
+        return sorted(
+            folders,
+            key=lambda path: os.path.basename(path).casefold(),
+        )
+
+    def _direct_text_migration_output_root(self, conversation_folder):
+        """Resolve the same output root used by normal Run Translation."""
+        configured_root = (
+            os.environ.get("OUTPUT_DIRECTORY")
+            or os.environ.get("OUTPUT_DIR")
+            or self.translator.config.get("output_directory")
+        )
+        if configured_root:
+            return os.path.abspath(os.path.expanduser(str(configured_root)))
+
+        conversation_folder = os.path.abspath(str(conversation_folder or ""))
+        direct_text_root = os.path.dirname(conversation_folder)
+        if os.path.basename(direct_text_root).casefold() == "direct text":
+            return os.path.dirname(direct_text_root)
+        return _get_app_dir() if getattr(sys, "frozen", False) else os.getcwd()
+
+    @staticmethod
+    def _path_is_same_or_descendant(path, parent):
+        """Return whether an absolute path is equal to or below a parent."""
+        try:
+            path = os.path.normcase(os.path.abspath(str(path or "")))
+            parent = os.path.normcase(os.path.abspath(str(parent or "")))
+            return os.path.commonpath([path, parent]) == parent
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _relocate_session_attachment_paths(
+        self, session, source_folder, target_folder
+    ):
+        """Keep response links valid after an attachment workspace is moved."""
+        source_folder = os.path.abspath(source_folder)
+        target_folder = os.path.abspath(target_folder)
+
+        def relocated(path):
+            value = str(path or "").strip()
+            if not value:
+                return ""
+            absolute = os.path.abspath(value)
+            if not self._path_is_same_or_descendant(absolute, source_folder):
+                return ""
+            relative = os.path.relpath(absolute, source_folder)
+            return os.path.normpath(os.path.join(target_folder, relative))
+
+        updated_messages = []
+        for message in session.get("messages", []):
+            if not isinstance(message, (list, tuple)) or not message:
+                updated_messages.append(message)
+                continue
+            values = list(message)
+            if str(values[0] or "") == "assistant":
+                while len(values) < 7:
+                    values.append({} if len(values) == 6 else "")
+                moved_output = relocated(values[4])
+                if moved_output:
+                    values[4] = moved_output
+
+                storage = self._normalize_message_storage(values[6])
+                for key in (
+                    "content_path",
+                    "content_text_path",
+                    "content_html_path",
+                    "content_xhtml_path",
+                    "thinking_path",
+                ):
+                    reference = str(storage.get(key, "") or "")
+                    if not reference:
+                        continue
+                    old_path = self._resolve_history_file_reference(reference)
+                    new_path = relocated(old_path)
+                    if new_path:
+                        storage[key] = self._history_file_reference(new_path)
+                values[6] = storage
+            updated_messages.append(tuple(values))
+        session["messages"] = updated_messages
+
+        moved_last_output = relocated(self._last_output_folder)
+        if moved_last_output and session is self._current_chat_session():
+            self._last_output_folder = moved_last_output
+            self._chat_messages = session["messages"]
+
+    @staticmethod
+    def _preferred_attachment_compiled_documents(folder):
+        """Choose the attachment's authoritative top-level EPUB/PDF outputs.
+
+        Attachment workspaces normally contain one compiled document. If an
+        interrupted or older run left more than one, the newest top-level file
+        is the best representation of the attachment run that is being moved.
+        Nested PDFs are resources, not compiled attachment outputs, and are
+        deliberately ignored.
+        """
+        folder = os.path.abspath(str(folder or ""))
+        preferred = {}
+        try:
+            entries = [
+                entry
+                for entry in os.scandir(folder)
+                if entry.is_file(follow_symlinks=False)
+            ]
+        except OSError:
+            return preferred
+        for extension in (".epub", ".pdf"):
+            candidates = [
+                entry
+                for entry in entries
+                if os.path.splitext(entry.name)[1].casefold() == extension
+            ]
+            if not candidates:
+                continue
+
+            def candidate_key(entry):
+                try:
+                    modified = float(entry.stat(follow_symlinks=False).st_mtime)
+                except OSError:
+                    modified = 0.0
+                return modified, entry.name.casefold()
+
+            preferred[extension] = max(candidates, key=candidate_key).name
+        return preferred
+
+    @staticmethod
+    def _remove_extra_attachment_compiled_documents(folder, preferred):
+        """Keep only the attachment-priority compiled EPUB/PDF files."""
+        folder = os.path.realpath(os.path.abspath(str(folder or "")))
+        for extension, preferred_name in dict(preferred or {}).items():
+            keep_path = os.path.join(folder, str(preferred_name))
+            if not os.path.isfile(keep_path):
+                raise FileNotFoundError(
+                    f"The attachment's preferred {extension} output is missing: "
+                    f"{keep_path}"
+                )
+            for entry in os.scandir(folder):
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if os.path.splitext(entry.name)[1].casefold() != extension:
+                    continue
+                if os.path.normcase(entry.name) == os.path.normcase(
+                    str(preferred_name)
+                ):
+                    continue
+                os.remove(entry.path)
+
+    def _migrate_conversation_attachment(
+        self, session_index, source_folder, message_parent=None
+    ):
+        """Move one attachment tree beside Direct Text, confirming conflicts."""
+        message_parent = message_parent or self
+        if self._active:
+            QMessageBox.information(
+                message_parent,
+                "Attachment migration unavailable",
+                "Wait for the current Direct Text run to finish before moving files.",
+            )
+            return False
+        try:
+            session_index = int(session_index)
+        except (TypeError, ValueError):
+            return False
+        if not (0 <= session_index < len(self._chat_sessions)):
+            return False
+
+        session = self._chat_sessions[session_index]
+        conversation_folder = self._managed_conversation_output_folder(session)
+        attachments_root = os.path.realpath(
+            os.path.join(conversation_folder, "Attachments")
+        )
+        source_folder = os.path.realpath(os.path.abspath(str(source_folder)))
+        if (
+            not conversation_folder
+            or not os.path.isdir(source_folder)
+            or os.path.normcase(os.path.dirname(source_folder))
+            != os.path.normcase(attachments_root)
+        ):
+            QMessageBox.warning(
+                message_parent,
+                "Attachment unavailable",
+                "This folder is no longer a managed attachment for the conversation.",
+            )
+            return False
+
+        target_root = self._direct_text_migration_output_root(
+            conversation_folder
+        )
+        target_folder = os.path.abspath(
+            os.path.join(target_root, os.path.basename(source_folder))
+        )
+        if os.path.normcase(target_folder) == os.path.normcase(source_folder):
+            QMessageBox.information(
+                message_parent,
+                "Attachment already migrated",
+                f"The attachment is already at:\n{target_folder}",
+            )
+            return False
+
+        preferred_compiled_documents = (
+            self._preferred_attachment_compiled_documents(source_folder)
+        )
+        destination_exists = os.path.exists(target_folder)
+        if destination_exists:
+            warning = QMessageBox(message_parent)
+            warning.setIcon(QMessageBox.Warning)
+            warning.setWindowTitle("Attachment folder already exists")
+            warning.setText(
+                "A folder with this attachment name already exists at the "
+                "migration destination."
+            )
+            warning.setInformativeText(
+                f"{target_folder}\n\n"
+                "Merge the attachment into it and replace files that have the "
+                "same names? Files found only in the existing destination will "
+                "be kept, except extra top-level compiled EPUB/PDF files. The "
+                "compiled document from this attachment takes priority."
+            )
+            merge_button = warning.addButton(
+                "Merge and replace", QMessageBox.AcceptRole
+            )
+            cancel_button = warning.addButton(QMessageBox.Cancel)
+            warning.setDefaultButton(cancel_button)
+            warning.exec()
+            if warning.clickedButton() is not merge_button:
+                return False
+
+        try:
+            import shutil
+
+            os.makedirs(target_root, exist_ok=True)
+            if destination_exists and os.path.isdir(target_folder):
+                shutil.copytree(
+                    source_folder,
+                    target_folder,
+                    dirs_exist_ok=True,
+                )
+                self._remove_extra_attachment_compiled_documents(
+                    target_folder, preferred_compiled_documents
+                )
+                # Revalidate the exact recursive-delete target after copying.
+                if (
+                    os.path.normcase(os.path.dirname(source_folder))
+                    != os.path.normcase(attachments_root)
+                ):
+                    raise ValueError(
+                        "The attachment source changed during migration."
+                )
+                shutil.rmtree(source_folder)
+            elif destination_exists:
+                self._remove_extra_attachment_compiled_documents(
+                    source_folder, preferred_compiled_documents
+                )
+                os.remove(target_folder)
+                shutil.move(source_folder, target_folder)
+            else:
+                self._remove_extra_attachment_compiled_documents(
+                    source_folder, preferred_compiled_documents
+                )
+                shutil.move(source_folder, target_folder)
+        except Exception as exc:
+            QMessageBox.warning(
+                message_parent,
+                "Could not migrate attachment",
+                f"The attachment could not be moved.\n\n{exc}",
+            )
+            return False
+
+        self._relocate_session_attachment_paths(
+            session, source_folder, target_folder
+        )
+        self._message_text_cache.clear()
+        self._rendered_message_cache.clear()
+        self._save_chat_history()
+        self._refresh_chat_list()
+        if session_index == self._current_chat_index:
+            self._render_output(preserve_viewport=True)
+        QMessageBox.information(
+            message_parent,
+            "Attachment migrated",
+            f"The attachment workspace was moved to:\n{target_folder}",
+        )
+        return True
+
+    def _show_conversation_attachments(self, session_index):
+        """Open a per-conversation attachment manager dialog."""
+        if self._active:
+            return
+        try:
+            session_index = int(session_index)
+        except (TypeError, ValueError):
+            return
+        if not (0 <= session_index < len(self._chat_sessions)):
+            return
+
+        session = self._chat_sessions[session_index]
+        title = str(session.get("title", "New chat") or "New chat")
+        dialog = QDialog(self)
+        dialog.setObjectName("directAttachmentsDialog")
+        dialog.setWindowTitle(f"Attachments — {title}")
+        dialog.setModal(True)
+        dialog.resize(720, 440)
+        dialog.setMinimumSize(560, 340)
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+        heading = QLabel(f"Attachments — {title}")
+        heading.setObjectName("directTitle")
+        root.addWidget(heading)
+
+        description = QLabel(
+            "Saved attachment workspaces for this conversation. Migrating one "
+            "moves its complete output tree beside the Direct Text folder, or "
+            "into the configured output override."
+        )
+        description.setObjectName("directMuted")
+        description.setWordWrap(True)
+        root.addWidget(description)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(9)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+
+        close_button = QPushButton("Close")
+        close_button.setMinimumSize(132, 44)
+        close_button.clicked.connect(dialog.accept)
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_row.addWidget(close_button)
+        root.addLayout(close_row)
+
+        def refresh_rows():
+            while content_layout.count():
+                layout_item = content_layout.takeAt(0)
+                widget = layout_item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+            folders = self._conversation_attachment_folders(session)
+            if not folders:
+                empty_label = QLabel(
+                    "No attachment workspaces remain in this conversation."
+                )
+                empty_label.setObjectName("directMuted")
+                empty_label.setAlignment(Qt.AlignCenter)
+                content_layout.addWidget(empty_label, 1)
+                return
+
+            conversation_folder = self._managed_conversation_output_folder(
+                session
+            )
+            target_root = self._direct_text_migration_output_root(
+                conversation_folder
+            )
+            for folder in folders:
+                card = QFrame()
+                card.setObjectName("directAttachmentManagerCard")
+                card_layout = QHBoxLayout(card)
+                card_layout.setContentsMargins(12, 10, 10, 10)
+                card_layout.setSpacing(10)
+
+                icon = QLabel("📎")
+                icon.setFixedWidth(24)
+                icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+                card_layout.addWidget(icon, 0)
+
+                labels = QVBoxLayout()
+                labels.setSpacing(3)
+                name_label = QLabel(os.path.basename(folder))
+                name_label.setObjectName("directAttachmentManagerName")
+                path_label = QLabel(folder)
+                path_label.setObjectName("directAttachmentManagerPath")
+                path_label.setWordWrap(True)
+                path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                labels.addWidget(name_label)
+                labels.addWidget(path_label)
+                card_layout.addLayout(labels, 1)
+
+                migrate_button = QPushButton("Migrate")
+                migrate_button.setObjectName(
+                    "directAttachmentMigrateButton"
+                )
+                migrate_button.setToolTip(
+                    "Move this complete attachment workspace to:\n"
+                    f"{os.path.join(target_root, os.path.basename(folder))}"
+                )
+                migrate_button.clicked.connect(
+                    lambda _checked=False, path=folder: (
+                        refresh_rows()
+                        if self._migrate_conversation_attachment(
+                            session_index, path, dialog
+                        )
+                        else None
+                    )
+                )
+                card_layout.addWidget(migrate_button, 0, Qt.AlignVCenter)
+                content_layout.addWidget(card)
+            content_layout.addStretch(1)
+
+        refresh_rows()
+        dialog.exec()
 
     def _title_current_chat_from_text(self, text):
         session = self._current_chat_session()
