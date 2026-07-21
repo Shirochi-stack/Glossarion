@@ -1455,13 +1455,13 @@ class _InputOutputDialog(QDialog):
         if screen is None:
             return (1040, 960, 720, 640)
         available = screen.availableGeometry()
-        default_width = max(1, int(available.width() * 0.74))
-        default_height = max(1, int(available.height() * 0.88))
+        default_width = max(1, int(available.width() * 0.70))
+        default_height = max(1, int(available.height() * 0.82))
         minimum_width = min(
-            default_width, max(1, int(available.width() * 0.50))
+            default_width, max(1, int(available.width() * 0.46))
         )
         minimum_height = min(
-            default_height, max(1, int(available.height() * 0.55))
+            default_height, max(1, int(available.height() * 0.50))
         )
         return (
             default_width,
@@ -8420,7 +8420,9 @@ class _InputOutputDialog(QDialog):
                     message_actions.extend(
                         (
                             f"<a class='message-action' href='direct-edit-save:{message_index}' "
-                            "title='Save this edited response'>✓&nbsp;&nbsp;Save changes</a>",
+                            "title='Save this edited response'>"
+                            "<span class='save-checkmark' style='color:#43a66f;'>✓</span>"
+                            "&nbsp;&nbsp;Save changes</a>",
                             f"<a class='message-action' href='direct-edit-cancel:{message_index}' "
                             "title='Discard these edits'>Cancel</a>",
                         )
@@ -8509,7 +8511,7 @@ class _InputOutputDialog(QDialog):
                     "cellpadding='0'><tr><td class='assistant-avatar' align='center' "
                     f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
                     f"{assistant_bubble_html}"
-                    "<td width='8%'></td></tr></table>"
+                    "<td width='3%'></td></tr></table>"
                     + row_end_html
                     + "<div class='message-gap'>&nbsp;</div>"
                 )
@@ -8575,9 +8577,9 @@ class _InputOutputDialog(QDialog):
             )
             message_html.append(
                 "<table class='glossary-request-row' width='100%' cellspacing='0' "
-                "cellpadding='0'><tr><td width='12%'></td>"
+                "cellpadding='0'><tr><td width='5%'></td>"
                 + glossary_request_bubble
-                + "<td width='12%'></td></tr></table>"
+                + "<td width='5%'></td></tr></table>"
                 "<div class='message-gap'>&nbsp;</div>"
             )
 
