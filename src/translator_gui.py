@@ -1455,13 +1455,13 @@ class _InputOutputDialog(QDialog):
         if screen is None:
             return (1040, 960, 720, 640)
         available = screen.availableGeometry()
-        default_width = max(1, int(available.width() * 0.70))
-        default_height = max(1, int(available.height() * 0.82))
+        default_width = max(1, int(available.width() * 0.66))
+        default_height = max(1, int(available.height() * 0.78))
         minimum_width = min(
-            default_width, max(1, int(available.width() * 0.46))
+            default_width, max(1, int(available.width() * 0.43))
         )
         minimum_height = min(
-            default_height, max(1, int(available.height() * 0.50))
+            default_height, max(1, int(available.height() * 0.47))
         )
         return (
             default_width,
