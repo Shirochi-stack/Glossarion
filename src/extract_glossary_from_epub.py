@@ -1875,6 +1875,25 @@ def _glossary_progress_filename(value) -> str:
         return ""
     return name
 
+def _glossary_chapter_number_from_filename(value):
+    """Return translation-style display numbering for an extracted chapter file.
+
+    Spine positions are one-based ordering metadata, not chapter numbers.  The
+    translation path displays non-numbered HTML/XHTML front matter (for example
+    info.xhtml) as Chapter 0, so glossary request cards must do the same instead
+    of falling back to that file's spine position.
+    """
+    name = os.path.basename(str(value or "").strip())
+    if not name:
+        return None
+    stem, extension = os.path.splitext(name)
+    numbers = re.findall(r"[0-9]+", stem)
+    if numbers:
+        return int(numbers[-1])
+    if extension.lower() in (".html", ".xhtml", ".htm"):
+        return 0
+    return None
+
 def _normalize_glossary_qa_issues(value=None, chapters=None):
     """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
     normalized = {}
@@ -7378,10 +7397,9 @@ def main(log_callback=None, stop_callback=None):
     _GLOSSARY_CHAPTER_FILENAMES = {int(k): os.path.basename(str(v or "")) for k, v in (_chapter_filenames or {}).items()}
     _GLOSSARY_CHAPTER_NUMBERS = {}
     for _idx, _fname in _GLOSSARY_CHAPTER_FILENAMES.items():
-        _stem = os.path.splitext(_fname)[0]
-        _nums = re.findall(r'[0-9]+', _stem) if _stem else []
-        if _nums:
-            _GLOSSARY_CHAPTER_NUMBERS[_idx] = int(_nums[-1])
+        _display_num = _glossary_chapter_number_from_filename(_fname)
+        if _display_num is not None:
+            _GLOSSARY_CHAPTER_NUMBERS[_idx] = _display_num
     for _idx, _pos in _GLOSSARY_CHAPTER_POSITIONS.items():
         _GLOSSARY_CHAPTER_NUMBERS.setdefault(_idx, _pos)
     _GLOSSARY_TOTAL_CHAPTERS = len(chapters)

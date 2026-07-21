@@ -1519,6 +1519,7 @@ class _InputOutputDialog(QDialog):
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
         self._listener_stream_phase_by_thread = {}
+        self._listener_glossary_threads = set()
         self._pending_attachment = None
         try:
             parent_output_mode = translator._get_output_mode()
@@ -3467,6 +3468,13 @@ class _InputOutputDialog(QDialog):
             f"background-color:{background}; border-right:1px solid {border};"
         )
         center_style = f"background-color:{background}; color:{foreground};"
+        centered_label = (
+            "<table class='glossary-action-label' width='100%' height='24' "
+            "cellspacing='0' cellpadding='0'><tr>"
+            "<td height='24' align='center' valign='middle'>"
+            + center
+            + "</td></tr></table>"
+        )
         return (
             "<td class='glossary-action-slot' width='104' valign='middle'>"
             "<table class='rounded-glossary-action' width='100%' cellspacing='0' "
@@ -3478,7 +3486,7 @@ class _InputOutputDialog(QDialog):
             "</tr><tr>"
             f"<td width='{radius}' height='24' style='{left_style}'></td>"
             f"<td class='glossary-action-content' height='24' align='center' "
-            f"valign='middle' style='{center_style}'>{center}</td>"
+            f"valign='middle' style='{center_style}'>{centered_label}</td>"
             f"<td width='{radius}' height='24' style='{right_style}'></td>"
             "</tr><tr class='glossary-action-cap'>"
             f"<td width='{radius}' height='{radius}'>{corner_image('bl')}</td>"
@@ -3993,6 +4001,7 @@ class _InputOutputDialog(QDialog):
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
         self._listener_stream_phase_by_thread = {}
+        self._listener_glossary_threads = set()
         self._streamed_content = ""
         self._last_output_folder = str(session.get("output_folder", "") or "")
         self._log_queue.clear()
@@ -6357,6 +6366,7 @@ class _InputOutputDialog(QDialog):
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
         self._listener_stream_phase_by_thread = {}
+        self._listener_glossary_threads = set()
         self._last_output_folder = str(
             current_session.get("output_folder", "") if current_session else ""
         )
@@ -7094,10 +7104,24 @@ class _InputOutputDialog(QDialog):
             is_glossary_stream_start = value.strip().startswith(
                 self._DIRECT_GLOSSARY_STREAM_START_PREFIX
             )
+            is_direct_response_payload = value.strip().startswith(
+                self._DIRECT_RESPONSE_PAYLOAD_PREFIX
+            )
+            if is_glossary_stream_start:
+                # Glossary providers do not consistently emit a separate
+                # ``Text streaming`` banner. Treat this explicit request marker
+                # as the boundary so raw CSV/JSON chunks are not also appended
+                # to the main GUI log one chunk at a time.
+                self._listener_glossary_threads.add(thread_key)
+                phase = "text"
+            is_glossary_thread = thread_key in self._listener_glossary_threads
             if any(phrase in low for phrase in self._STREAM_END_LOG_PHRASES):
                 phase = "processing"
+                self._listener_glossary_threads.discard(thread_key)
             elif "thinking complete" in low:
-                phase = "processing"
+                # A glossary response may move directly from thinking to answer
+                # chunks without a provider text-start banner.
+                phase = "text" if is_glossary_thread else "processing"
             elif (
                 (value.strip().startswith("🧠") and "thinking" in low)
                 or " thinking..." in low
@@ -7123,13 +7147,17 @@ class _InputOutputDialog(QDialog):
                     "channel": phase,
                 }
             )
-            if is_glossary_stream_start:
+            if is_glossary_stream_start or is_direct_response_payload:
                 return "suppress-main-log"
             if phase in ("thinking", "text"):
                 stripped = value.strip()
                 is_control = (
                     not stripped
                     or self._looks_like_pipeline_status(stripped)
+                    or any(
+                        phrase in low
+                        for phrase in self._HIDDEN_STREAM_START_LOG_PHRASES
+                    )
                     or "thinking" in low
                     or "streaming" in low
                     or "stream complete" in low
@@ -7614,6 +7642,169 @@ class _InputOutputDialog(QDialog):
             f"{marker}</span>"
         )
 
+    def _capture_output_viewport_anchor(self):
+        """Capture a stable visible text block and its viewport pixel offset."""
+        try:
+            from PySide6.QtCore import QPoint
+
+            document = self.output_box.document()
+            viewport = self.output_box.viewport()
+            sample_y = max(4, min(viewport.height() - 4, viewport.height() // 3))
+            sampled_cursor = self.output_box.cursorForPosition(QPoint(8, sample_y))
+            sampled_block = sampled_cursor.block()
+            if not sampled_block.isValid():
+                return None
+
+            candidates = [sampled_block]
+            block = sampled_block
+            for _ in range(6):
+                block = block.next()
+                if not block.isValid():
+                    break
+                candidates.append(block)
+            block = sampled_block
+            for _ in range(6):
+                block = block.previous()
+                if not block.isValid():
+                    break
+                candidates.append(block)
+
+            dynamic_phrases = (
+                "token summary", "generating text", "thinking (",
+                "processing", "working on your translation",
+            )
+            best = None
+            for candidate in candidates:
+                text = candidate.text().strip()
+                if not text:
+                    continue
+                cursor = QTextCursor(document)
+                cursor.setPosition(candidate.position())
+                viewport_y = int(self.output_box.cursorRect(cursor).top())
+                if viewport_y < -40 or viewport_y > viewport.height() + 40:
+                    continue
+                low = text.lower()
+                dynamic = any(phrase in low for phrase in dynamic_phrases)
+                score = (
+                    1 if dynamic else 0,
+                    abs(viewport_y - sample_y),
+                    -min(len(text), 160),
+                )
+                if best is None or score < best[0]:
+                    best = (score, candidate, text, viewport_y)
+
+            if best is None:
+                candidate = sampled_block
+                text = candidate.text().strip()
+                cursor = QTextCursor(document)
+                cursor.setPosition(candidate.position())
+                viewport_y = int(self.output_box.cursorRect(cursor).top())
+            else:
+                _, candidate, text, viewport_y = best
+
+            return {
+                "needle": text[:160],
+                "position": int(candidate.position()),
+                "viewport_y": int(viewport_y),
+                "scroll": int(self.output_box.verticalScrollBar().value()),
+                "horizontal_scroll": int(
+                    self.output_box.horizontalScrollBar().value()
+                ),
+            }
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return None
+
+    def _restore_output_viewport_anchor(self, anchor):
+        """Restore the same visible text to the same viewport y-coordinate."""
+        if not isinstance(anchor, dict):
+            return False
+        try:
+            document = self.output_box.document()
+            scrollbar = self.output_box.verticalScrollBar()
+            plain_text = document.toPlainText()
+            needle = str(anchor.get("needle", "") or "")
+            old_position = int(anchor.get("position", 0) or 0)
+            target_position = -1
+
+            if needle:
+                matches = []
+                offset = 0
+                while len(matches) < 64:
+                    found = plain_text.find(needle, offset)
+                    if found < 0:
+                        break
+                    matches.append(found)
+                    offset = found + max(1, len(needle))
+                if matches:
+                    target_position = min(
+                        matches, key=lambda position: abs(position - old_position)
+                    )
+            if target_position < 0:
+                scrollbar.setSliderPosition(
+                    max(
+                        scrollbar.minimum(),
+                        min(
+                            int(anchor.get("scroll", 0) or 0),
+                            scrollbar.maximum(),
+                        ),
+                    )
+                )
+                horizontal = self.output_box.horizontalScrollBar()
+                horizontal.setSliderPosition(
+                    max(
+                        horizontal.minimum(),
+                        min(
+                            int(anchor.get("horizontal_scroll", 0) or 0),
+                            horizontal.maximum(),
+                        ),
+                    )
+                )
+                return True
+
+            cursor = QTextCursor(document)
+            cursor.setPosition(target_position)
+            current_y = int(self.output_box.cursorRect(cursor).top())
+            desired_y = int(anchor.get("viewport_y", current_y) or 0)
+            corrected_scroll = scrollbar.value() + current_y - desired_y
+            scrollbar.setSliderPosition(
+                max(scrollbar.minimum(), min(corrected_scroll, scrollbar.maximum()))
+            )
+            horizontal = self.output_box.horizontalScrollBar()
+            horizontal.setSliderPosition(
+                max(
+                    horizontal.minimum(),
+                    min(
+                        int(anchor.get("horizontal_scroll", 0) or 0),
+                        horizontal.maximum(),
+                    ),
+                )
+            )
+            return True
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return False
+
+    def _schedule_output_viewport_anchor_restore(self, anchor):
+        """Reapply an anchor after QTextDocument's deferred layout settles."""
+        if not isinstance(anchor, dict):
+            return
+        try:
+            document = self.output_box.document()
+            expected_document = document
+            expected_revision = int(document.revision())
+
+            def restore_after_layout():
+                if not self._output_auto_scroll_disabled:
+                    return
+                if self.output_box.document() is not expected_document:
+                    return
+                if int(expected_document.revision()) != expected_revision:
+                    return
+                self._restore_output_viewport_anchor(anchor)
+
+            QTimer.singleShot(0, restore_after_layout)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+
     def _replace_active_stream_fragment(self, fragment):
         """Replace only active request cards in the existing QTextDocument."""
         document = self.output_box.document()
@@ -7631,6 +7822,11 @@ class _InputOutputDialog(QDialog):
         previous_scroll = scrollbar.value()
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
         previous_horizontal_scroll = horizontal_scrollbar.value()
+        viewport_anchor = (
+            self._capture_output_viewport_anchor()
+            if self._output_auto_scroll_disabled
+            else None
+        )
         freeze_viewport = bool(
             self._output_auto_scroll_disabled
             and self.output_box.updatesEnabled()
@@ -7651,12 +7847,13 @@ class _InputOutputDialog(QDialog):
                 )
             )
             if self._output_auto_scroll_disabled:
-                scrollbar.setSliderPosition(
-                    min(previous_scroll, scrollbar.maximum())
-                )
-                horizontal_scrollbar.setSliderPosition(
-                    min(previous_horizontal_scroll, horizontal_scrollbar.maximum())
-                )
+                if not self._restore_output_viewport_anchor(viewport_anchor):
+                    scrollbar.setSliderPosition(
+                        min(previous_scroll, scrollbar.maximum())
+                    )
+                    horizontal_scrollbar.setSliderPosition(
+                        min(previous_horizontal_scroll, horizontal_scrollbar.maximum())
+                    )
             else:
                 cursor = self.output_box.textCursor()
                 cursor.movePosition(QTextCursor.End)
@@ -7666,6 +7863,8 @@ class _InputOutputDialog(QDialog):
             if freeze_viewport:
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
+        if self._output_auto_scroll_disabled:
+            self._schedule_output_viewport_anchor_restore(viewport_anchor)
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
         return True
@@ -8148,13 +8347,21 @@ class _InputOutputDialog(QDialog):
 
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
+        viewport_anchor = (
+            self._capture_output_viewport_anchor()
+            if self._output_auto_scroll_disabled
+            else None
+        )
         previous_bottom_gap = max(
             0, scrollbar.maximum() - previous_scroll
         )
         bottom_threshold = max(
             32, min(180, int(scrollbar.pageStep() * 0.12))
         )
-        preserve_from_bottom = previous_bottom_gap <= bottom_threshold
+        preserve_from_bottom = bool(
+            not self._output_auto_scroll_disabled
+            and previous_bottom_gap <= bottom_threshold
+        )
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
         previous_horizontal_scroll = horizontal_scrollbar.value()
         body_font_point_size = 10.5 * (1.1 ** self._chat_zoom_level)
@@ -8242,6 +8449,9 @@ class _InputOutputDialog(QDialog):
             ".glossary-request-actions td { padding: 0; }"
             ".rounded-glossary-action, .rounded-glossary-action td { "
             "border-collapse: collapse; padding: 0; }"
+            ".glossary-action-label, .glossary-action-label td { "
+            "border: none; margin: 0; padding: 0; line-height: 24px; "
+            "vertical-align: middle; }"
             ".glossary-action-cap, .glossary-action-cap td { "
             "font-size: 1px; line-height: 1px; }"
             ".glossary-action-content { padding: 0 8px; text-align: center; }"
@@ -8291,7 +8501,12 @@ class _InputOutputDialog(QDialog):
                     self._inline_response_editor_height()
                 )
             if keep_viewport:
-                if preserve_from_bottom:
+                if (
+                    self._output_auto_scroll_disabled
+                    and self._restore_output_viewport_anchor(viewport_anchor)
+                ):
+                    pass
+                elif preserve_from_bottom:
                     scrollbar.setSliderPosition(
                         max(0, scrollbar.maximum() - previous_bottom_gap)
                     )
@@ -8311,6 +8526,8 @@ class _InputOutputDialog(QDialog):
             if freeze_viewport:
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
+        if self._output_auto_scroll_disabled:
+            self._schedule_output_viewport_anchor_restore(viewport_anchor)
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
 
@@ -8338,6 +8555,7 @@ class _InputOutputDialog(QDialog):
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
         self._listener_stream_phase_by_thread = {}
+        self._listener_glossary_threads = set()
         self._streamed_content = ""
         self._thinking_stream_text = ""
         self._thinking_token_count = 0
@@ -8404,6 +8622,8 @@ class _InputOutputDialog(QDialog):
             self._active_request_segments = []
             self._request_segment_by_thread = {}
             self._stream_phase_by_thread = {}
+            self._listener_stream_phase_by_thread = {}
+            self._listener_glossary_threads = set()
             self._reset_history_window()
             self._save_chat_history()
             self._schedule_stream_render(immediate=True)
