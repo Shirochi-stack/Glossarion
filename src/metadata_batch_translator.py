@@ -3074,11 +3074,24 @@ class MetadataTranslator:
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
             print("⚠️ send_with_interrupt not available, using direct client.send()")
-            response = self.client.send(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                if self._is_cancelled_error(exc):
+                    raise MetadataTranslationCancelled(
+                        "Metadata translation stopped by user"
+                    ) from None
+                raise
+        except Exception as exc:
+            if self._is_cancelled_error(exc):
+                raise MetadataTranslationCancelled(
+                    "Metadata translation stopped by user"
+                ) from None
+            raise
 
         self._raise_if_stop_requested()
         

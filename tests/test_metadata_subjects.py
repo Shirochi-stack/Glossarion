@@ -1,9 +1,16 @@
 import json
 import zipfile
 
+import pytest
+
 from Chapter_Extractor import _extract_epub_metadata
 from epub_metadata_utils import restore_truncated_repeatable_metadata
-from metadata_batch_translator import MetadataBatchTranslatorUI, MetadataTranslator
+from metadata_batch_translator import (
+    MetadataBatchTranslatorUI,
+    MetadataTranslationCancelled,
+    MetadataTranslator,
+)
+from unified_api_client import UnifiedClientError
 
 
 SUBJECTS = [
@@ -164,3 +171,19 @@ def test_incomplete_subject_array_response_is_rejected():
     )
 
     assert parsed == {}
+
+
+def test_metadata_send_normalizes_user_cancellation_without_exception_chain(monkeypatch):
+    import TransateKRtoEN
+
+    def cancelled_send(**_kwargs):
+        raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
+
+    monkeypatch.setattr(TransateKRtoEN, "send_with_interrupt", cancelled_send)
+    translator = MetadataTranslator(object(), {"output_language": "English"})
+
+    with pytest.raises(MetadataTranslationCancelled) as exc_info:
+        translator._send_with_retry([], 0.3, 100, context="metadata")
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
