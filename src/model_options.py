@@ -25,8 +25,8 @@ def get_model_options() -> List[str]:
         # - gemini-3-pro-preview shut down March 9 2026, removed
         # - gemini-pro / gemini-pro-vision are legacy 1.0 models, removed
         # - gemini-2.0-flash/lite scheduled shutdown June 1 2026, still available
-        "gemini-3.5-flash","gemini-3-flash-preview",
-        "gemini-3.1-pro-preview","gemini-3.1-flash-lite",
+        "gemini-3.6-flash","gemini-3.5-flash","gemini-3-flash-preview",
+        "gemini-3.1-pro-preview","gemini-3.5-flash-lite","gemini-3.1-flash-lite",
         "gemini-3.1-flash-image-preview",
         "gemini-3-pro-image-preview",
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
@@ -42,7 +42,7 @@ def get_model_options() -> List[str]:
         "claude-3-haiku-20240307",       
         
         # Grok Models
-        "grok-4.3","grok-4.20-beta-0309-reasoning","grok-4.20-beta-0309-non-reasoning", "grok-4.20-multi-agent-beta-0309",
+        "grok-4.5","grok-4.3","grok-4.20-beta-0309-reasoning","grok-4.20-beta-0309-non-reasoning", "grok-4.20-multi-agent-beta-0309",
         "grok-4.20-multi-agent-experimental-beta-0304","grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning","grok-4-0709", "grok-4-fast",
         "grok-4-fast-reasoning", "grok-4-fast-non-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",        
         
@@ -305,6 +305,9 @@ def get_model_options() -> List[str]:
         "antigravity/gemini-3-flash-agent",
         "antigravity/gemini-3.1-flash-image",
         "antigravity/gemini-3.1-flash-lite",
+        "antigravity/gemini-3.6-flash-low",
+        "antigravity/gemini-3.6-flash-medium",
+        "antigravity/gemini-3.6-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
         "antigravity/gemini-3.1-pro-low",
