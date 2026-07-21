@@ -1558,6 +1558,12 @@ class _InputOutputDialog(QDialog):
         self._output_auto_scroll_disabled = bool(
             translator.config.get('direct_text_disable_auto_scroll', False)
         )
+        # When follow-tail is disabled, retain one semantic viewport anchor
+        # across the whole stream. Re-capturing after every repaint allows
+        # tiny QTextDocument layout differences to accumulate into visible
+        # upward/downward drift.
+        self._output_viewport_lock_anchor = None
+        self._output_scrollbar_drag_active = False
         self._chat_zoom_level = 0
         self._chat_zoom_percent = 100
         self._processing_text = ""
@@ -1943,7 +1949,9 @@ class _InputOutputDialog(QDialog):
         self.input_box.viewport().installEventFilter(self)
         # Install the timeline wheel filter only after both editors exist.
         # Adding QTextBrowser to its layout emits construction-time events.
+        self.output_box.installEventFilter(self)
         self.output_box.viewport().installEventFilter(self)
+        self.output_box.verticalScrollBar().installEventFilter(self)
         self.input_box.textChanged.connect(self._on_chat_draft_changed)
         composer_input_row.addWidget(self.input_box, 1)
 
@@ -3232,6 +3240,8 @@ class _InputOutputDialog(QDialog):
             self._render_output()
         finally:
             self._output_auto_scroll_disabled = auto_scroll_was_disabled
+            if not auto_scroll_was_disabled:
+                self._output_viewport_lock_anchor = None
 
     def _build_rounded_bubble_corners(
         self,
@@ -3410,7 +3420,7 @@ class _InputOutputDialog(QDialog):
         )
 
     def _rounded_glossary_action_html(
-        self, variant, text, href="", enabled=True
+        self, variant, text, href="", enabled=True, icon=""
     ):
         """Render an evenly sized approval action with real rounded corners."""
         import html as html_lib
@@ -3427,15 +3437,35 @@ class _InputOutputDialog(QDialog):
         background, border, foreground = palette[key]
         corners = self._glossary_action_corner_data.get(key, {})
         label = html_lib.escape(str(text or ""))
+        icon_label = html_lib.escape(str(icon or ""))
         if enabled and href:
+            escaped_href = html_lib.escape(str(href), quote=True)
             center = (
                 "<a class='glossary-action-link' href='"
-                + html_lib.escape(str(href), quote=True)
-                + "'>" + label + "</a>"
+                + escaped_href
+                + "'>" + ((icon_label + "&nbsp;&nbsp;") if icon_label else "")
+                + label + "</a>"
+            )
+            icon_center = (
+                "<a class='glossary-action-link glossary-action-icon' href='"
+                + escaped_href + "'>" + icon_label + "</a>"
+            )
+            label_center = (
+                "<a class='glossary-action-link glossary-action-text' href='"
+                + escaped_href + "'>" + label + "</a>"
             )
         else:
             center = (
                 "<span class='glossary-action-disabled-text'>"
+                + ((icon_label + "&nbsp;&nbsp;") if icon_label else "")
+                + label + "</span>"
+            )
+            icon_center = (
+                "<span class='glossary-action-disabled-text glossary-action-icon'>"
+                + icon_label + "</span>"
+            )
+            label_center = (
+                "<span class='glossary-action-disabled-text glossary-action-text'>"
                 + label + "</span>"
             )
         if not all(corners.get(name) for name in ("tl", "tr", "bl", "br")):
@@ -3469,11 +3499,14 @@ class _InputOutputDialog(QDialog):
         )
         center_style = f"background-color:{background}; color:{foreground};"
         centered_label = (
-            "<table class='glossary-action-label' width='100%' height='24' "
+            "<table class='glossary-action-label' height='24' align='center' "
             "cellspacing='0' cellpadding='0'><tr>"
-            "<td height='24' align='center' valign='middle'>"
-            + center
-            + "</td></tr></table>"
+            "<td class='glossary-action-icon-cell' height='24' align='center' "
+            "valign='middle'>" + icon_center + "</td>"
+            "<td class='glossary-action-label-gap' width='7'></td>"
+            "<td class='glossary-action-text-cell' height='24' align='center' "
+            "valign='middle'>" + label_center + "</td>"
+            "</tr></table>"
         )
         return (
             "<td class='glossary-action-slot' width='104' valign='middle'>"
@@ -3753,9 +3786,13 @@ class _InputOutputDialog(QDialog):
             input_viewport = None
         try:
             output_viewport = output_box.viewport() if output_box is not None else None
+            output_scrollbar = (
+                output_box.verticalScrollBar() if output_box is not None else None
+            )
         except RuntimeError:
             output_box = None
             output_viewport = None
+            output_scrollbar = None
         inline_editor = getattr(self, "_inline_response_editor_box", None)
         try:
             inline_editor_viewport = (
@@ -3789,6 +3826,9 @@ class _InputOutputDialog(QDialog):
                             * 3
                         )
                     scrollbar.setValue(scrollbar.value() - scroll_amount)
+                    QTimer.singleShot(
+                        0, self._refresh_output_viewport_lock_anchor
+                    )
                 event.accept()
                 return True
         if watched in (
@@ -3805,6 +3845,25 @@ class _InputOutputDialog(QDialog):
                     self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
                     event.accept()
                     return True
+            elif watched in (output_box, output_viewport):
+                # Let QTextBrowser perform the wheel movement first, then make
+                # that user-selected position the new persistent stream lock.
+                QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
+        if watched is output_scrollbar:
+            if event.type() == QEvent.MouseButtonPress:
+                self._output_scrollbar_drag_active = True
+                self._output_viewport_lock_anchor = None
+            elif event.type() == QEvent.MouseButtonRelease:
+                self._output_scrollbar_drag_active = False
+                QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
+            elif event.type() == QEvent.Wheel:
+                QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
+        if watched is output_box and event.type() == QEvent.KeyRelease:
+            if event.key() in (
+                Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown,
+                Qt.Key_Home, Qt.Key_End, Qt.Key_Space,
+            ):
+                QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_viewport and event.type() == QEvent.Resize:
             QTimer.singleShot(0, self._position_inline_response_editor)
         if watched is input_box or watched is input_viewport:
@@ -3984,6 +4043,7 @@ class _InputOutputDialog(QDialog):
                 return
             scrollbar = self.output_box.verticalScrollBar()
             scrollbar.setSliderPosition(scrollbar.maximum())
+            self._refresh_output_viewport_lock_anchor()
 
         # QTextBrowser finalizes document geometry on the next event-loop turn.
         # Deferring the move avoids calculating against the old conversation's
@@ -5027,8 +5087,11 @@ class _InputOutputDialog(QDialog):
         if render_timer is not None:
             render_timer.setInterval(450 if disabled else 300)
         if not self._output_auto_scroll_disabled:
+            self._output_viewport_lock_anchor = None
             scrollbar = self.output_box.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+        else:
+            self._refresh_output_viewport_lock_anchor()
 
     def _set_enter_button_state(self, state):
         """Mirror the main Run button's idle, graceful, and hard-stop states."""
@@ -6335,6 +6398,7 @@ class _InputOutputDialog(QDialog):
         if current_session is not None:
             current_session["draft"] = ""
             current_session["attachment"] = None
+        self._refresh_output_viewport_lock_anchor()
         self._assistant_message_active = True
         self._expanded_processing_messages.discard(len(self._chat_messages))
         self.input_box.clear()
@@ -7685,7 +7749,21 @@ class _InputOutputDialog(QDialog):
                     continue
                 low = text.lower()
                 dynamic = any(phrase in low for phrase in dynamic_phrases)
+                # Avoid locking to the final one or two blocks. A short first
+                # response can initially place its last block high in the
+                # viewport, but once text grows above it Qt cannot keep that
+                # tail block at the same y-coordinate (scroll range ends at the
+                # document bottom). Prefer a nearby block with content below it.
+                following_blocks = 0
+                probe = candidate
+                for _ in range(3):
+                    probe = probe.next()
+                    if not probe.isValid():
+                        break
+                    following_blocks += 1
+                near_document_tail = following_blocks < 2
                 score = (
+                    1 if near_document_tail else 0,
                     1 if dynamic else 0,
                     abs(viewport_y - sample_y),
                     -min(len(text), 160),
@@ -7713,6 +7791,36 @@ class _InputOutputDialog(QDialog):
             }
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return None
+
+    def _refresh_output_viewport_lock_anchor(self):
+        """Acquire a new fixed viewport only after an intentional navigation."""
+        if not self._output_auto_scroll_disabled:
+            self._output_viewport_lock_anchor = None
+            return None
+        anchor = self._capture_output_viewport_anchor()
+        if isinstance(anchor, dict):
+            self._output_viewport_lock_anchor = anchor
+        return self._output_viewport_lock_anchor
+
+    def _output_viewport_anchor_for_render(self):
+        """Return the persistent disabled-auto-scroll anchor for a repaint."""
+        if not self._output_auto_scroll_disabled:
+            return None
+        if self._output_scrollbar_drag_active:
+            return self._refresh_output_viewport_lock_anchor()
+        anchor = self._output_viewport_lock_anchor
+        if not isinstance(anchor, dict):
+            anchor = self._refresh_output_viewport_lock_anchor()
+        return anchor
+
+    def _settle_output_document_layout(self):
+        """Force Qt to finish current text geometry before restoring a viewport."""
+        try:
+            layout = self.output_box.document().documentLayout()
+            if layout is not None:
+                layout.documentSize()
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
 
     def _restore_output_viewport_anchor(self, anchor):
         """Restore the same visible text to the same viewport y-coordinate."""
@@ -7759,6 +7867,15 @@ class _InputOutputDialog(QDialog):
                         ),
                     )
                 )
+                anchor["scroll"] = int(scrollbar.value())
+                # A structural render can legitimately remove the old anchor
+                # (notably the empty-chat prompt when the first request starts).
+                # Re-lock once against the new document; do not remain on a raw
+                # scrollbar value for every subsequent token repaint.
+                if anchor is self._output_viewport_lock_anchor:
+                    replacement = self._capture_output_viewport_anchor()
+                    if isinstance(replacement, dict):
+                        self._output_viewport_lock_anchor = replacement
                 return True
 
             cursor = QTextCursor(document)
@@ -7769,6 +7886,8 @@ class _InputOutputDialog(QDialog):
             scrollbar.setSliderPosition(
                 max(scrollbar.minimum(), min(corrected_scroll, scrollbar.maximum()))
             )
+            anchor["position"] = int(target_position)
+            anchor["scroll"] = int(scrollbar.value())
             horizontal = self.output_box.horizontalScrollBar()
             horizontal.setSliderPosition(
                 max(
@@ -7799,7 +7918,10 @@ class _InputOutputDialog(QDialog):
                     return
                 if int(expected_document.revision()) != expected_revision:
                     return
-                self._restore_output_viewport_anchor(anchor)
+                active_anchor = self._output_viewport_lock_anchor
+                if not isinstance(active_anchor, dict):
+                    active_anchor = anchor
+                self._restore_output_viewport_anchor(active_anchor)
 
             QTimer.singleShot(0, restore_after_layout)
         except (AttributeError, RuntimeError, TypeError, ValueError):
@@ -7823,7 +7945,7 @@ class _InputOutputDialog(QDialog):
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
         previous_horizontal_scroll = horizontal_scrollbar.value()
         viewport_anchor = (
-            self._capture_output_viewport_anchor()
+            self._output_viewport_anchor_for_render()
             if self._output_auto_scroll_disabled
             else None
         )
@@ -7847,6 +7969,7 @@ class _InputOutputDialog(QDialog):
                 )
             )
             if self._output_auto_scroll_disabled:
+                self._settle_output_document_layout()
                 if not self._restore_output_viewport_anchor(viewport_anchor):
                     scrollbar.setSliderPosition(
                         min(previous_scroll, scrollbar.maximum())
@@ -8284,7 +8407,7 @@ class _InputOutputDialog(QDialog):
                     + "</div>"
                 )
                 edit_action = self._rounded_glossary_action_html(
-                    "edit", "✏️  Edit", "direct-glossary:edit"
+                    "edit", "Edit", "direct-glossary:edit", icon="✏️"
                 )
             else:
                 glossary_detail = (
@@ -8292,13 +8415,13 @@ class _InputOutputDialog(QDialog):
                     "file was found. You can continue or stop this run.</div>"
                 )
                 edit_action = self._rounded_glossary_action_html(
-                    "disabled", "✏️  Edit", enabled=False
+                    "disabled", "Edit", enabled=False, icon="✏️"
                 )
             yes_action = self._rounded_glossary_action_html(
-                "yes", "✓  Yes", "direct-glossary:yes"
+                "yes", "Yes", "direct-glossary:yes", icon="✓"
             )
             no_action = self._rounded_glossary_action_html(
-                "no", "■  No", "direct-glossary:no"
+                "no", "No", "direct-glossary:no", icon="■"
             )
             glossary_request_inner = (
                 "<div class='role'>GLOSSARION · ACTION REQUIRED</div>"
@@ -8306,8 +8429,8 @@ class _InputOutputDialog(QDialog):
                 "<div class='glossary-request-copy'>Accept this glossary and start "
                 "translation?</div>"
                 + glossary_detail
-                + "<table class='glossary-request-actions' cellspacing='0' "
-                "cellpadding='0'><tr>"
+                + "<table class='glossary-request-actions' align='center' "
+                "cellspacing='0' cellpadding='0'><tr>"
                 + edit_action
                 + "<td class='glossary-action-gap' width='10'></td>"
                 + yes_action
@@ -8348,7 +8471,7 @@ class _InputOutputDialog(QDialog):
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
         viewport_anchor = (
-            self._capture_output_viewport_anchor()
+            self._output_viewport_anchor_for_render()
             if self._output_auto_scroll_disabled
             else None
         )
@@ -8452,6 +8575,10 @@ class _InputOutputDialog(QDialog):
             ".glossary-action-label, .glossary-action-label td { "
             "border: none; margin: 0; padding: 0; line-height: 24px; "
             "vertical-align: middle; }"
+            ".glossary-action-icon-cell, .glossary-action-text-cell { "
+            "height: 24px; text-align: center; vertical-align: middle; }"
+            ".glossary-action-icon, .glossary-action-text { "
+            "line-height: 24px; vertical-align: middle; }"
             ".glossary-action-cap, .glossary-action-cap td { "
             "font-size: 1px; line-height: 1px; }"
             ".glossary-action-content { padding: 0 8px; text-align: center; }"
@@ -8496,6 +8623,8 @@ class _InputOutputDialog(QDialog):
             # default stylesheet when localized streaming updates are inserted.
             self.output_box.document().setDefaultStyleSheet(style_sheet)
             self.output_box.setHtml(document)
+            if self._output_auto_scroll_disabled:
+                self._settle_output_document_layout()
             if self._inline_response_editor_frame is not None:
                 self._set_inline_response_placeholder_height(
                     self._inline_response_editor_height()
