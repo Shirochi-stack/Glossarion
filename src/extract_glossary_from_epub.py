@@ -38,6 +38,213 @@ _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
 _gender_tracker_lock = threading.Lock()
 
+
+class _OrderedGlossaryBatchDispatcher:
+    """Release batch units into their first API send in reading order."""
+
+    def __init__(self, enabled=True, stop_check=None):
+        self.enabled = bool(enabled)
+        self.stop_check = stop_check
+        self._condition = threading.Condition()
+        self._next_order = 0
+        self._released = set()
+        self._abandoned = set()
+        self._last_release = 0.0
+
+    def _advance_abandoned_locked(self):
+        while self._next_order in self._abandoned:
+            self._abandoned.remove(self._next_order)
+            self._next_order += 1
+
+    def wait_for_turn(self, request_order):
+        """Gate only the first send; retries and later chunks pass immediately."""
+        if not self.enabled or request_order is None:
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+
+        try:
+            timeout = max(
+                5.0,
+                float(os.getenv("ORDERED_BATCH_DISPATCH_TIMEOUT", "120")),
+            )
+        except (TypeError, ValueError):
+            timeout = 120.0
+        deadline = time.monotonic() + timeout
+
+        with self._condition:
+            if (
+                request_order in self._released
+                or request_order < self._next_order
+            ):
+                return
+            self._advance_abandoned_locked()
+            while request_order != self._next_order:
+                if callable(self.stop_check) and self.stop_check():
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    print(
+                        "⚠️ Ordered glossary batch dispatch timed out waiting "
+                        "for an earlier spine item; releasing this request"
+                    )
+                    self._next_order = request_order
+                    break
+                self._condition.wait(timeout=min(0.1, remaining))
+                self._advance_abandoned_locked()
+
+            try:
+                release_interval = max(
+                    0.0,
+                    float(os.getenv("ORDERED_BATCH_DISPATCH_INTERVAL", "0.025")),
+                )
+            except (TypeError, ValueError):
+                release_interval = 0.025
+            while self._last_release:
+                delay = self._last_release + release_interval - time.monotonic()
+                if delay <= 0:
+                    break
+                self._condition.wait(timeout=min(0.05, delay))
+
+            self._released.add(request_order)
+            self._last_release = time.monotonic()
+            self._next_order = max(self._next_order, request_order + 1)
+            self._advance_abandoned_locked()
+            self._condition.notify_all()
+
+    def abandon_if_unsent(self, request_order):
+        """Prevent one pre-send worker failure from blocking later spine items."""
+        if not self.enabled or request_order is None:
+            return
+        try:
+            request_order = int(request_order)
+        except (TypeError, ValueError):
+            return
+        with self._condition:
+            if request_order in self._released or request_order < self._next_order:
+                return
+            self._abandoned.add(request_order)
+            self._advance_abandoned_locked()
+            self._condition.notify_all()
+
+# Direct Text needs the glossary phase to be a first-class part of the chat,
+# not just a collection of provider lifecycle logs.  The API client already
+# prints streamed thinking from the actual API worker thread; retain that
+# request-local stream until ``send_with_interrupt`` has the exact final
+# response and can publish both channels together.
+_direct_stream_capture_lock = threading.Lock()
+_direct_stream_captures = {}
+_DIRECT_TEXT_GLOSSARY_STREAM_START_PREFIX = (
+    "[DIRECT_TEXT_GLOSSARY_STREAM_START] "
+)
+
+
+def _capture_direct_text_stream_write(text):
+    """Capture streamed glossary thinking for the current API worker."""
+    if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1":
+        return
+    value = str(text or "")
+    if not value:
+        return
+    thread_id = threading.current_thread().ident
+    if thread_id is None:
+        return
+    with _direct_stream_capture_lock:
+        state = _direct_stream_captures.setdefault(
+            thread_id, {"phase": "processing", "thinking": []}
+        )
+        for raw_line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            low = stripped.lower()
+            if "thinking complete" in low:
+                state["phase"] = "processing"
+                continue
+            if (
+                " thinking..." in low
+                or low.endswith("thinking...")
+                or (stripped.startswith("🧠") and "thinking" in low)
+            ):
+                state["phase"] = "thinking"
+                continue
+            if (
+                "text streaming" in low
+                or "first text token" in low
+                or ("first token" in low and "streaming" in low)
+                or "stream finished" in low
+                or "stream complete" in low
+            ):
+                state["phase"] = "processing"
+                continue
+            if state.get("phase") == "thinking" and stripped != "\u200b":
+                # Provider thinking lines are indented for the application log;
+                # the saved thinking file should contain the model text itself.
+                state["thinking"].append(
+                    raw_line[4:] if raw_line.startswith("    ") else raw_line
+                )
+
+
+def _consume_direct_text_thinking(thread_id):
+    if thread_id is None:
+        return ""
+    with _direct_stream_capture_lock:
+        state = _direct_stream_captures.pop(thread_id, None)
+    if not isinstance(state, dict):
+        return ""
+    return "\n".join(str(line) for line in state.get("thinking", [])).strip()
+
+
+def _emit_direct_text_glossary_stream_start(label, source_thread=""):
+    """Bind live provider output to its Direct Text glossary request card.
+
+    Some streaming providers do not print a ``Text streaming`` banner when a
+    response has no reasoning block. Without an explicit request boundary the
+    GUI treats those otherwise-unlabelled lines as application logs and only
+    sees the authoritative response payload at completion.
+    """
+    if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1":
+        return
+    payload = json.dumps(
+        {
+            "label": str(label or "Glossary request"),
+            "source_thread": str(source_thread or ""),
+        },
+        ensure_ascii=False,
+    )
+    print(f"{_DIRECT_TEXT_GLOSSARY_STREAM_START_PREFIX}{payload}")
+
+
+def _emit_direct_text_glossary_response(
+    label, content, thinking="", source_thread=""
+):
+    """Publish a completed glossary API response to the Direct Text dialog."""
+    if os.getenv("DIRECT_TEXT_ACTIVE", "0") != "1":
+        return
+    response_text = content
+    if isinstance(response_text, tuple):
+        response_text = response_text[0] if response_text else ""
+    if hasattr(response_text, "content"):
+        response_text = response_text.content
+    elif hasattr(response_text, "text"):
+        response_text = response_text.text
+    response_text = str(response_text or "")
+    if not response_text:
+        return
+    payload = json.dumps(
+        {
+            "label": str(label or "Glossary request"),
+            "content": response_text,
+            "thinking": str(thinking or ""),
+            "phase": "glossary",
+            "source_thread": str(source_thread or ""),
+        },
+        ensure_ascii=False,
+    )
+    print(f"[DIRECT_TEXT_RESPONSE_PAYLOAD] {payload}")
+
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
     try:
@@ -600,6 +807,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
 
                 start_time = time.time()
                 try:
+                    _emit_direct_text_glossary_stream_start(
+                        chapter_label,
+                        threading.current_thread().name,
+                    )
                     result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context=context or 'glossary')
                 finally:
                     if tls_for_callback is not None:
@@ -737,6 +948,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             getattr(result, '_glossarion_actual_model', None),
                             getattr(result, '_glossarion_actual_key', None),
                         )
+                        _consume_direct_text_thinking(api_thread.ident)
                         raise result
                     if isinstance(result, tuple):
                         # Check if we have the new format with response object and model/key metadata.
@@ -773,6 +985,15 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # If graceful stop was requested, mark that an API call completed
                         if os.environ.get('GRACEFUL_STOP') == '1':
                             os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
+                        glossary_thinking = _consume_direct_text_thinking(
+                            api_thread.ident
+                        )
+                        _emit_direct_text_glossary_response(
+                            chapter_label,
+                            content,
+                            glossary_thinking,
+                            api_thread.name,
+                        )
                         return content, finish_reason or 'stop', raw_obj
                 except queue.Empty:
                     # During graceful stop, don't cancel the API call - let it complete
@@ -824,6 +1045,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     raise
                 
                 if timeout_retry_count < max_timeout_retries:
+                    _consume_direct_text_thinking(api_thread.ident)
                     timeout_retry_count += 1
                     # Detailed log with chapter context like TransateKRtoEN.py
                     if "timed out" in error_msg.lower():
@@ -835,25 +1057,25 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         print(f"⚠️ {chapter_label}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
                     else:
                         print(f"⚠️ {chapter_label}: {error_msg}, retrying ({timeout_retry_count}/{max_timeout_retries})...")
-                    
+
                     # Reinitialize the client if it was closed (check correct client based on type)
                     # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
                     if not getattr(client, '_multi_key_mode', False):
                         client_type = getattr(client, 'client_type', 'unknown')
                         needs_reinit = False
-                        
+
                         if client_type == 'gemini':
                             needs_reinit = hasattr(client, 'gemini_client') and client.gemini_client is None
                         elif client_type == 'openai':
                             needs_reinit = hasattr(client, 'openai_client') and client.openai_client is None
-                        
+
                         if needs_reinit:
                             try:
                                 print(f"   🔄 Reinitializing {client_type} client...")
                                 client._setup_client()
                             except Exception as reinit_err:
                                 print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
-                    
+
                     # Add staggered delay before retry
                     # Prefer per-key delay from glossary keys, fall back to SEND_INTERVAL_SECONDS
                     import random
@@ -862,7 +1084,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     retry_delay = random.uniform(base_delay / 2, base_delay)
                     print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)
-                    
+
                     # Clear the queue and continue retry loop
                     while not result_queue.empty():
                         try:
@@ -2091,6 +2313,7 @@ def set_output_redirect(log_callback=None):
                 self.main_thread = threading.main_thread()
                 
             def write(self, text):
+                _capture_direct_text_stream_write(text)
                 if text.strip():
                     # The callback (append_log) is already thread-safe - it handles QTimer internally
                     # So we can call it directly from any thread
@@ -6460,6 +6683,12 @@ def main(log_callback=None, stop_callback=None):
     GLOSSARY_SOURCE_SCRIPT_IS_CJK = None
     _GLOSSARY_SOURCE_SCRIPT_READY = False
     _GLOSSARY_SOURCE_SCRIPT_LOGGED = False
+
+    # Thread identifiers may be reused between runs.  Never let an aborted
+    # request's partial thinking stream attach to a later glossary request.
+    if os.getenv("DIRECT_TEXT_ACTIVE", "0") == "1":
+        with _direct_stream_capture_lock:
+            _direct_stream_captures.clear()
     
     # Redirect print/logs to callback if provided
     if log_callback:
@@ -7390,6 +7619,28 @@ def main(log_callback=None, stop_callback=None):
         else:
             units_to_process = [[ch] for ch in chapters_to_process]  # Each chapter as single-item group
             is_merged_mode = False
+
+        # ``extract_chapters_from_epub`` returns documents in OPF spine order,
+        # and every merge group above preserves that sequence. Futures are also
+        # submitted in this order, but worker scheduling can otherwise let a
+        # later unit reach client.send() first. Assign a stable ticket to each
+        # unit and gate only its first send so parallel requests stay parallel
+        # after being released in reading order.
+        ordered_batch_dispatch_enabled = (
+            os.getenv("ORDER_BATCH_REQUESTS_BY_SPINE", "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+        ordered_batch_dispatcher = _OrderedGlossaryBatchDispatcher(
+            enabled=ordered_batch_dispatch_enabled,
+            stop_check=check_stop,
+        )
+        unit_dispatch_order = {
+            int(unit[0][0]): order
+            for order, unit in enumerate(units_to_process)
+            if unit
+        }
+        if ordered_batch_dispatch_enabled:
+            print("📚 Glossary batch API dispatch: OPF spine order")
         
         aggressive_mode = batching_mode == 'aggressive'
         if batching_mode == 'conservative':
@@ -7517,8 +7768,13 @@ def main(log_callback=None, stop_callback=None):
                 def _submit_unit(unit):
                     """Submit a single work unit and return its Future."""
                     unit_indices = [u_idx for u_idx, _ in unit]
+                    dispatch_order = unit_dispatch_order.get(unit_indices[0])
 
-                    def _mark_unit_progress_on_send(unit_indices=unit_indices):
+                    def _mark_unit_progress_on_send(
+                        unit_indices=unit_indices,
+                        dispatch_order=dispatch_order,
+                    ):
+                        ordered_batch_dispatcher.wait_for_turn(dispatch_order)
                         _mark_glossary_in_progress(unit_indices)
 
                     if is_merged_mode:
@@ -7575,6 +7831,11 @@ def main(log_callback=None, stop_callback=None):
                             chapter_num=_glossary_chapter_actual_num(idx, context=progress_context),
                         )
                     futures[future] = unit
+                    future.add_done_callback(
+                        lambda _future, order=dispatch_order: (
+                            ordered_batch_dispatcher.abandon_if_unsent(order)
+                        )
+                    )
                     # Small yield to keep GUI responsive
                     time.sleep(0.001)
                     return future

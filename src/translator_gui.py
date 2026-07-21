@@ -1435,6 +1435,9 @@ class _InputOutputDialog(QDialog):
         '] sdk stream opened in ',
     )
     _DIRECT_RESPONSE_PAYLOAD_PREFIX = '[DIRECT_TEXT_RESPONSE_PAYLOAD] '
+    _DIRECT_GLOSSARY_STREAM_START_PREFIX = (
+        '[DIRECT_TEXT_GLOSSARY_STREAM_START] '
+    )
     # QTextDocument comments/empty anchors are not searchable, so the active
     # streaming section uses tiny sentinel text.  Stream repaints replace only
     # the text between these sentinels instead of rebuilding every saved chat
@@ -2308,7 +2311,26 @@ class _InputOutputDialog(QDialog):
             border_width=1,
             supersample=True,
         )
+        self._glossary_action_corner_data = {
+            "edit": self._build_rounded_bubble_corners(
+                "#354154", logical_radius=7,
+                border_color="#5a718f", border_width=1,
+            ),
+            "yes": self._build_rounded_bubble_corners(
+                "#287a4b", logical_radius=7,
+                border_color="#43a66f", border_width=1,
+            ),
+            "no": self._build_rounded_bubble_corners(
+                "#8c3636", logical_radius=7,
+                border_color="#c65454", border_width=1,
+            ),
+            "disabled": self._build_rounded_bubble_corners(
+                "#292c31", logical_radius=7,
+                border_color="#3a3e45", border_width=1,
+            ),
+        }
         self._render_output()
+        self._schedule_conversation_scroll_to_bottom()
 
         self._drain_timer = QTimer(self)
         self._drain_timer.setInterval(55)
@@ -3384,6 +3406,85 @@ class _InputOutputDialog(QDialog):
             "</tr></table></td>"
         )
 
+    def _rounded_glossary_action_html(
+        self, variant, text, href="", enabled=True
+    ):
+        """Render an evenly sized approval action with real rounded corners."""
+        import html as html_lib
+
+        palette = {
+            "edit": ("#354154", "#5a718f", "#ffffff"),
+            "yes": ("#287a4b", "#43a66f", "#ffffff"),
+            "no": ("#8c3636", "#c65454", "#ffffff"),
+            "disabled": ("#292c31", "#3a3e45", "#707783"),
+        }
+        key = str(variant or "disabled")
+        if key not in palette or not enabled:
+            key = "disabled"
+        background, border, foreground = palette[key]
+        corners = self._glossary_action_corner_data.get(key, {})
+        label = html_lib.escape(str(text or ""))
+        if enabled and href:
+            center = (
+                "<a class='glossary-action-link' href='"
+                + html_lib.escape(str(href), quote=True)
+                + "'>" + label + "</a>"
+            )
+        else:
+            center = (
+                "<span class='glossary-action-disabled-text'>"
+                + label + "</span>"
+            )
+        if not all(corners.get(name) for name in ("tl", "tr", "bl", "br")):
+            return (
+                "<td class='glossary-action-slot' width='104' height='38' "
+                "align='center' valign='middle' style='background-color:"
+                f"{background}; border:1px solid {border}; color:{foreground};'>"
+                f"{center}</td>"
+            )
+
+        radius = 7
+
+        def corner_image(name):
+            source = html_lib.escape(corners[name], quote=True)
+            return (
+                f"<img src='{source}' width='{radius}' height='{radius}' "
+                "style='vertical-align:top;'>"
+            )
+
+        top_style = (
+            f"background-color:{background}; border-top:1px solid {border};"
+        )
+        bottom_style = (
+            f"background-color:{background}; border-bottom:1px solid {border};"
+        )
+        left_style = (
+            f"background-color:{background}; border-left:1px solid {border};"
+        )
+        right_style = (
+            f"background-color:{background}; border-right:1px solid {border};"
+        )
+        center_style = f"background-color:{background}; color:{foreground};"
+        return (
+            "<td class='glossary-action-slot' width='104' valign='middle'>"
+            "<table class='rounded-glossary-action' width='100%' cellspacing='0' "
+            "cellpadding='0'>"
+            "<tr class='glossary-action-cap'>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('tl')}</td>"
+            f"<td height='{radius}' style='{top_style}'></td>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('tr')}</td>"
+            "</tr><tr>"
+            f"<td width='{radius}' height='24' style='{left_style}'></td>"
+            f"<td class='glossary-action-content' height='24' align='center' "
+            f"valign='middle' style='{center_style}'>{center}</td>"
+            f"<td width='{radius}' height='24' style='{right_style}'></td>"
+            "</tr><tr class='glossary-action-cap'>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('bl')}</td>"
+            f"<td height='{radius}' style='{bottom_style}'></td>"
+            f"<td width='{radius}' height='{radius}'>{corner_image('br')}</td>"
+            "</tr></table></td>"
+        )
+
     @staticmethod
     def _is_supported_dropped_text_file(path):
         extension = os.path.splitext(str(path or ''))[1].lower()
@@ -3859,6 +3960,26 @@ class _InputOutputDialog(QDialog):
             visible_characters += message_size
         self._history_visible_start = start
 
+    def _schedule_conversation_scroll_to_bottom(self):
+        """Open the selected conversation at its newest visible message."""
+        session = self._current_chat_session()
+        expected_session_id = session.get("id") if session is not None else None
+
+        def scroll_after_layout():
+            current = self._current_chat_session()
+            current_session_id = (
+                current.get("id") if current is not None else None
+            )
+            if current_session_id != expected_session_id:
+                return
+            scrollbar = self.output_box.verticalScrollBar()
+            scrollbar.setSliderPosition(scrollbar.maximum())
+
+        # QTextBrowser finalizes document geometry on the next event-loop turn.
+        # Deferring the move avoids calculating against the old conversation's
+        # scrollbar range and works even when streaming auto-scroll is disabled.
+        QTimer.singleShot(0, scroll_after_layout)
+
     def _load_chat_session(self, index, render=True):
         if not (0 <= int(index) < len(self._chat_sessions)):
             return
@@ -3897,6 +4018,7 @@ class _InputOutputDialog(QDialog):
         self._set_status("Ready")
         if render:
             self._render_output()
+            self._schedule_conversation_scroll_to_bottom()
 
     def _refresh_chat_list(self):
         if not hasattr(self, "chat_list"):
@@ -5990,6 +6112,11 @@ class _InputOutputDialog(QDialog):
             os.path.abspath(str(glossary_path or '')) if glossary_path else ''
         )
         pending = self._pending_glossary_approval
+        new_approval_request = not (
+            isinstance(pending, dict)
+            and os.path.normcase(str(pending.get('path', '') or ''))
+            == os.path.normcase(normalized_path)
+        )
         if (
             isinstance(pending, dict)
             and os.path.normcase(str(pending.get('path', '') or ''))
@@ -6012,6 +6139,13 @@ class _InputOutputDialog(QDialog):
                 'request': request,
                 'requests': [request] if isinstance(request, dict) else [],
             }
+        if new_approval_request:
+            # The approval signal is the exact boundary between glossary API
+            # work and translation API work. Drain and freeze those request
+            # cards now so their response.md/thinking.md files exist while the
+            # user is deciding, and translation starts with clean channels.
+            self._drain_log_queue(final=True)
+            self._commit_active_request_phase()
         self.tabs.setCurrentWidget(self.chat_tab)
         self._set_status("Glossary ready — choose Edit, Yes, or No")
         self._render_output()
@@ -6522,6 +6656,7 @@ class _InputOutputDialog(QDialog):
 
         label = str(payload.get("label", "") or "").strip()
         content = str(payload.get("content", "") or "")
+        thinking = str(payload.get("thinking", "") or "")
         if not label or not content:
             return True
         order = payload.get("order")
@@ -6544,8 +6679,11 @@ class _InputOutputDialog(QDialog):
                 int(request_match.group(1)) if request_match else None
             )
 
+        payload_source_thread = str(
+            payload.get("source_thread", "") or source_thread or ""
+        )
         thread_target = self._request_segment_for_thread(
-            source_thread, create=False
+            payload_source_thread, create=False
         )
 
         # Dispatch order is the stable request identity.  A provider may lose
@@ -6615,7 +6753,13 @@ class _InputOutputDialog(QDialog):
             self._active_request_segments.remove(thread_target)
 
         previous_tokens = int(target.get("text_tokens", 0) or 0)
+        previous_thinking_tokens = int(
+            target.get("thinking_tokens", 0) or 0
+        )
         current_tokens = self._count_tokens(content)
+        current_thinking_tokens = (
+            self._count_tokens(thinking) if thinking else previous_thinking_tokens
+        )
         existing_label = str(target.get("label", "") or "").strip()
         incoming_generic = label.lower().startswith("request ")
         existing_generic = existing_label.lower().startswith("request ")
@@ -6638,10 +6782,57 @@ class _InputOutputDialog(QDialog):
             target["request_number"] = request_number
         target["content"] = content
         target["text_tokens"] = current_tokens
+        if thinking:
+            # The glossary backend publishes the complete captured reasoning
+            # channel at request completion.  Replace any partially rendered
+            # live copy so retries/line-buffer flushes cannot duplicate it.
+            target["thinking"] = thinking
+            target["thinking_tokens"] = current_thinking_tokens
         target["status_only"] = False
         target["phase"] = "processing"
         target["complete"] = True
         self._generation_token_count += current_tokens - previous_tokens
+        if thinking:
+            self._thinking_token_count += (
+                current_thinking_tokens - previous_thinking_tokens
+            )
+        self._sort_active_request_segments()
+        return True
+
+    def _apply_direct_glossary_stream_start(self, line, source_thread=None):
+        """Bind one live glossary provider stream to a stable response card."""
+        import json as json_lib
+
+        raw = str(line or "")
+        if not raw.startswith(self._DIRECT_GLOSSARY_STREAM_START_PREFIX):
+            return False
+        try:
+            payload = json_lib.loads(
+                raw[len(self._DIRECT_GLOSSARY_STREAM_START_PREFIX):]
+            )
+        except (TypeError, ValueError):
+            return True
+        if not isinstance(payload, dict):
+            return True
+
+        label = str(payload.get("label", "") or "Glossary request").strip()
+        payload_thread = str(
+            payload.get("source_thread", "") or source_thread or ""
+        ).strip()
+        callback_thread = str(source_thread or "").strip()
+        segment = self._begin_request_segment(
+            f"{label} Direct Text glossary dispatch",
+            payload_thread,
+        )
+        segment["glossary_stream"] = True
+        segment["phase"] = "processing"
+        segment["complete"] = False
+
+        aliases = list(segment.get("thread_aliases", []) or [])
+        for alias in (payload_thread, callback_thread):
+            if alias and alias != segment.get("thread", "") and alias not in aliases:
+                aliases.append(alias)
+        segment["thread_aliases"] = aliases
         self._sort_active_request_segments()
         return True
 
@@ -6871,6 +7062,9 @@ class _InputOutputDialog(QDialog):
             # them here; status/configuration records remain in the main log.
             phase = self._listener_stream_phase_by_thread.get(thread_key, "")
             low = value.strip().lower()
+            is_glossary_stream_start = value.strip().startswith(
+                self._DIRECT_GLOSSARY_STREAM_START_PREFIX
+            )
             if any(phrase in low for phrase in self._STREAM_END_LOG_PHRASES):
                 phase = "processing"
             elif "thinking complete" in low:
@@ -6900,6 +7094,8 @@ class _InputOutputDialog(QDialog):
                     "channel": phase,
                 }
             )
+            if is_glossary_stream_start:
+                return "suppress-main-log"
             if phase in ("thinking", "text"):
                 stripped = value.strip()
                 is_control = (
@@ -6956,6 +7152,10 @@ class _InputOutputDialog(QDialog):
         if stripped.startswith(self._DIRECT_RESPONSE_PAYLOAD_PREFIX):
             self._apply_direct_response_payload(stripped, source_thread)
             return "payload"
+
+        if stripped.startswith(self._DIRECT_GLOSSARY_STREAM_START_PREFIX):
+            self._apply_direct_glossary_stream_start(stripped, source_thread)
+            return "request_start"
 
         # Provider transport banners are useful in the main application log,
         # but they are neither model reasoning nor generated response text.
@@ -7075,11 +7275,37 @@ class _InputOutputDialog(QDialog):
             return "content"
         if self._looks_like_pipeline_status(stripped):
             return "log"
-        if stripped[0] in self._STATUS_FIRST_CHARS:
-            return "log"
         if stripped.startswith(("Traceback", "File \"", "[DEBUG]", "[INFO]", "[WARN", "[ERROR")):
             return "log"
         if stripped in ("TRANSLATION_COMPLETE_SIGNAL", "GLOSSARY_COMPLETE_SIGNAL"):
+            return "log"
+
+        # Some providers omit a text-start banner when a glossary response has
+        # no visible reasoning block. In that case the first raw model line
+        # arrives while the request still says ``processing``. Limit this
+        # fallback to API workers introduced by the explicit glossary marker,
+        # so normal pipeline output retains the stricter filtering rules.
+        segment = self._request_segment_for_thread(
+            source_thread, create=False
+        )
+        if (
+            segment is not None
+            and segment.get("glossary_stream")
+            and not segment.get("complete")
+        ):
+            likely_model_text = (
+                stripped[0] not in self._STATUS_FIRST_CHARS
+                or stripped.startswith(
+                    ("#", "<", "*", "_", "`", ">", "-", "+", "[", "{")
+                )
+            )
+            if likely_model_text:
+                self._in_thinking = False
+                self._streaming_text = True
+                self._stream_phase_by_thread[thread_key] = "text"
+                segment["phase"] = "text"
+                return "content"
+        if stripped[0] in self._STATUS_FIRST_CHARS:
             return "log"
         if stripped.startswith("<"):
             # Raw HTML is valid streamed model output only while this exact
@@ -7168,6 +7394,8 @@ class _InputOutputDialog(QDialog):
                         processing_changed = True
                     elif kind == "payload":
                         output_changed = True
+                        processing_changed = True
+                    elif kind == "request_start":
                         processing_changed = True
                     elif kind == "ignore":
                         continue
@@ -7430,6 +7658,9 @@ class _InputOutputDialog(QDialog):
             0,
             min(int(self._history_visible_start), len(self._chat_messages)),
         )
+        glossary_approval_pending = isinstance(
+            self._pending_glossary_approval, dict
+        )
         active_messages = []
         if self._assistant_message_active:
             if self._active_request_segments:
@@ -7437,7 +7668,11 @@ class _InputOutputDialog(QDialog):
                     self._request_segment_message(segment)
                     for segment in self._active_request_segments
                 )
-            else:
+            elif not glossary_approval_pending:
+                # The run remains active while the inline glossary gate waits
+                # for Edit/Yes/No, but there is no translation request in
+                # flight yet.  Do not invent a blank Request 1/Processing card
+                # above the decision card during that pause.
                 active_messages.append(
                     (
                         "assistant",
@@ -7820,23 +8055,23 @@ class _InputOutputDialog(QDialog):
                     + html_lib.escape(glossary_path)
                     + "</div>"
                 )
-                edit_action = (
-                    "<td class='glossary-action-cell glossary-edit' width='92' "
-                    "height='34' align='center' valign='middle'>"
-                    "<a class='glossary-action-link' href='direct-glossary:edit'>"
-                    "✏️&nbsp;&nbsp;Edit</a></td>"
+                edit_action = self._rounded_glossary_action_html(
+                    "edit", "✏️  Edit", "direct-glossary:edit"
                 )
             else:
                 glossary_detail = (
                     "<div class='glossary-request-path'>No editable glossary "
                     "file was found. You can continue or stop this run.</div>"
                 )
-                edit_action = (
-                    "<td class='glossary-action-cell glossary-action-disabled' "
-                    "width='92' height='34' align='center' valign='middle'>"
-                    "<span class='glossary-action-disabled-text'>"
-                    "✏️&nbsp;&nbsp;Edit</span></td>"
+                edit_action = self._rounded_glossary_action_html(
+                    "disabled", "✏️  Edit", enabled=False
                 )
+            yes_action = self._rounded_glossary_action_html(
+                "yes", "✓  Yes", "direct-glossary:yes"
+            )
+            no_action = self._rounded_glossary_action_html(
+                "no", "■  No", "direct-glossary:no"
+            )
             glossary_request_inner = (
                 "<div class='role'>GLOSSARION · ACTION REQUIRED</div>"
                 "<div class='glossary-request-title'>Glossary generation complete</div>"
@@ -7846,17 +8081,11 @@ class _InputOutputDialog(QDialog):
                 + "<table class='glossary-request-actions' cellspacing='0' "
                 "cellpadding='0'><tr>"
                 + edit_action
-                + "<td class='glossary-action-gap' width='9'></td>"
-                "<td class='glossary-action-cell glossary-yes' width='78' "
-                "height='34' align='center' valign='middle'>"
-                "<a class='glossary-action-link' href='direct-glossary:yes'>"
-                "✓&nbsp;&nbsp;Yes</a></td>"
-                "<td class='glossary-action-gap' width='9'></td>"
-                "<td class='glossary-action-cell glossary-no' width='72' "
-                "height='34' align='center' valign='middle'>"
-                "<a class='glossary-action-link' href='direct-glossary:no'>"
-                "■&nbsp;&nbsp;No</a></td>"
-                "</tr></table>"
+                + "<td class='glossary-action-gap' width='10'></td>"
+                + yes_action
+                + "<td class='glossary-action-gap' width='10'></td>"
+                + no_action
+                + "</tr></table>"
             )
             glossary_request_bubble = self._rounded_assistant_bubble_html(
                 glossary_request_inner
@@ -7981,18 +8210,14 @@ class _InputOutputDialog(QDialog):
             "border: none; padding: 3px 0; margin: 7px 0 13px 0; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 0.78em; }"
             ".glossary-request-actions { margin-top: 13px; border: none; }"
-            ".glossary-request-actions td { border: none; }"
-            ".glossary-action-cell { padding: 6px 12px; text-align: center; }"
+            ".glossary-request-actions td { padding: 0; }"
+            ".rounded-glossary-action, .rounded-glossary-action td { "
+            "border-collapse: collapse; padding: 0; }"
+            ".glossary-action-cap, .glossary-action-cap td { "
+            "font-size: 1px; line-height: 1px; }"
+            ".glossary-action-content { padding: 0 8px; text-align: center; }"
             ".glossary-action-link { color: white; font-weight: 700; "
             "text-decoration: none; }"
-            ".glossary-edit { color: #d7e8ff; background-color: #354154; "
-            "border: 1px solid #5a718f; }"
-            ".glossary-yes { color: white; background-color: #287a4b; "
-            "border: 1px solid #43a66f; }"
-            ".glossary-no { color: white; background-color: #8c3636; "
-            "border: 1px solid #c65454; }"
-            ".glossary-action-disabled { color: #707783; "
-            "background-color: #292c31; border: 1px solid #3a3e45; }"
             ".glossary-action-disabled-text { color: #707783; font-weight: 700; }"
             "p { margin: 0 0 0.78em 0; }"
             "pre { background: #171a21; border: 1px solid #343a46; "
@@ -8059,6 +8284,41 @@ class _InputOutputDialog(QDialog):
                 self.output_box.viewport().update()
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
+
+    def _commit_active_request_phase(self):
+        """Persist real request cards without ending the ongoing Direct Text run."""
+        segments_to_commit = [
+            segment
+            for segment in self._active_request_segments
+            if (
+                str(segment.get("content", "") or "").strip()
+                or str(segment.get("thinking", "") or "").strip()
+                or int(segment.get("thinking_tokens", 0) or 0) > 0
+                or int(segment.get("text_tokens", 0) or 0) > 0
+            )
+        ]
+        for segment in segments_to_commit:
+            segment["complete"] = True
+            segment["phase"] = "processing"
+            self._chat_messages.append(
+                self._request_segment_message(
+                    segment, self._last_output_folder
+                )
+            )
+        self._active_request_segments = []
+        self._request_segment_by_thread = {}
+        self._stream_phase_by_thread = {}
+        self._listener_stream_phase_by_thread = {}
+        self._streamed_content = ""
+        self._thinking_stream_text = ""
+        self._thinking_token_count = 0
+        self._generation_token_count = 0
+        self._processing_token_count = 0
+        self._processing_text = ""
+        self._reset_history_window()
+        if segments_to_commit:
+            self._save_chat_history()
+        self._schedule_stream_render(immediate=True)
 
     def _commit_assistant_message(self, completion_message=None):
         """Freeze the active streamed response into the visible chat history."""
@@ -31992,6 +32252,7 @@ Important rules:
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
+                dialog._schedule_conversation_scroll_to_bottom()
                 dialog.input_box.setFocus()
                 return
             except RuntimeError:
@@ -32078,6 +32339,7 @@ Important rules:
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()
+            dialog._schedule_conversation_scroll_to_bottom()
             dialog.input_box.setFocus()
         except Exception as exc:
             self._input_output_dialog = None
