@@ -264,6 +264,13 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
 
+        # AuthGrok – xAI account via OAuth (catalog is account-specific)
+        "authgrok/grok-4.5", "authgrok/grok-4.3", "authgrok/grok-build",
+        "authgrok/grok-composer-2.5-fast",
+        "authgrok/grok-4.20-0309-reasoning",
+        "authgrok/grok-4.20-0309-non-reasoning",
+        "authgrok/grok-4.20-multi-agent-0309",
+
         # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
         "authcd/claude-sonnet-5", "authcd/claude-fable-5", "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5", "authcd/claude-opus-4-8",
         "authcd/claude-opus-4-7", "authcd/claude-opus-4-6", "authcd/claude-haiku-4-5",

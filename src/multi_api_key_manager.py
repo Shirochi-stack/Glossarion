@@ -1862,6 +1862,7 @@ class MultiAPIKeyDialog(QDialog):
         return (
             self._model_needs_google_creds(model)
             or model.startswith('authgpt')
+            or model.startswith('authgrok')
             or model.startswith('authcd')
             or model.startswith('authgem')
         )

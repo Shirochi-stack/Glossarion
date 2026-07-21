@@ -14546,6 +14546,18 @@ Recent translations to summarize:
             else:
                 self.authgpt_login_btn.hide()
 
+        # Show/hide AuthGrok login button
+        if hasattr(self, 'authgrok_login_btn'):
+            import re as _re
+            needs_authgrok = _re.match(r'^authgrok\d{0,4}/', model) is not None
+            if not needs_authgrok:
+                needs_authgrok = self._has_authgrok_in_key_pools()
+            if needs_authgrok:
+                self.authgrok_login_btn.show()
+                self._update_authgrok_login_status()
+            else:
+                self.authgrok_login_btn.hide()
+
         # Show/hide AuthCD login button
         if hasattr(self, 'authcd_login_btn'):
             import re as _re
@@ -14717,6 +14729,17 @@ Recent translations to summarize:
             pass
         return False
 
+    def _has_authgrok_in_key_pools(self):
+        """Check if any enabled key pool contains an AuthGrok model."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                import re as _re
+                if _re.match(r'^authgrok\d{0,4}/', str(model or '').strip().lower()):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _has_authgem_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgem model."""
         try:
@@ -14815,12 +14838,13 @@ Recent translations to summarize:
     def _collect_auth_account_ids_from_pools(self):
         """Scan enabled key pools and return sets of account IDs per provider.
 
-        Returns dict: {'authgpt': {0, 2}, 'authcd': {1}, 'authgem': {0, 3}}.
+        Returns dict: {'authgpt': {0, 2}, 'authgrok': {0}, 'authcd': {1}, 'authgem': {0, 3}}.
         """
         import re as _re
-        result = {'authgpt': set(), 'authcd': set(), 'authgem': set()}
+        result = {'authgpt': set(), 'authgrok': set(), 'authcd': set(), 'authgem': set()}
         patterns = {
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
+            'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
             'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
             'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
         }
@@ -14867,6 +14891,7 @@ Recent translations to summarize:
         model = str(getattr(self, 'model_var', '') or self.config.get('model', '') or '').strip().lower()
         _prov_patterns = {
             'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
+            'authgrok': _re.compile(r'^authgrok(\d{0,4})/'),
             'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
             'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
         }
@@ -14878,14 +14903,15 @@ Recent translations to summarize:
 
         combo_map = {
             'authgpt': 'authgpt_acct_combo',
+            'authgrok': 'authgrok_acct_combo',
             'authcd':  'authcd_acct_combo',
             'authgem': 'authgem_acct_combo',
         }
 
         if not hasattr(self, '_auth_account_ids'):
-            self._auth_account_ids = {'authgpt': [0], 'authcd': [0], 'authgem': [0]}
+            self._auth_account_ids = {'authgpt': [0], 'authgrok': [0], 'authcd': [0], 'authgem': [0]}
         if not hasattr(self, '_auth_account_idx'):
-            self._auth_account_idx = {'authgpt': 0, 'authcd': 0, 'authgem': 0}
+            self._auth_account_idx = {'authgpt': 0, 'authgrok': 0, 'authcd': 0, 'authgem': 0}
 
         for provider, acct_set in pool_ids.items():
             sorted_ids = sorted(acct_set) if acct_set else [0]
@@ -14922,7 +14948,7 @@ Recent translations to summarize:
                     combo.hide()
 
         # Update all visible main button labels to reflect current selection
-        for provider in ('authgpt', 'authcd', 'authgem'):
+        for provider in ('authgpt', 'authgrok', 'authcd', 'authgem'):
             main_btn_name = f"{provider}_login_btn"
             if hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible():
                 update_fn = getattr(self, f'_update_{provider}_login_status', None)
@@ -15337,6 +15363,134 @@ Recent translations to summarize:
         err = getattr(self, '_authgpt_login_error', 'Unknown error')
         self.append_log(f"\u274c ChatGPT login failed: {err}")
         QMessageBox.warning(self, "Login Failed", f"ChatGPT login failed:\n{err}")
+
+    # ==================================================================
+    # AuthGrok (xAI Login) – OAuth browser flow with Google sign-in support
+    # ==================================================================
+
+    def _get_authgrok_account_id(self):
+        ids_list = getattr(self, '_auth_account_ids', {}).get('authgrok', [])
+        idx = getattr(self, '_auth_account_idx', {}).get('authgrok', 0)
+        if len(ids_list) > 1 and 0 <= idx < len(ids_list):
+            return ids_list[idx]
+        model = getattr(self, 'model_var', '') or self.config.get('model', '')
+        import re as _re
+        match = _re.match(r'^authgrok(\d{1,4})/', model)
+        return int(match.group(1)) if match else 0
+
+    def _get_authgrok_store_for_current_model(self):
+        from authgrok_auth import get_store
+        return get_store(self._get_authgrok_account_id())
+
+    def _update_authgrok_login_status(self):
+        try:
+            store = self._get_authgrok_store_for_current_model()
+            account_id = self._get_authgrok_account_id()
+            suffix = f" #{account_id}" if account_id else ""
+            if store.has_tokens:
+                info = store.account_info
+                email = info.get('email', '')
+                name = info.get('name', '')
+                source = info.get('source', '')
+                self.authgrok_login_btn.setText(f"✅ Grok{suffix}")
+                details = [value for value in (
+                    f"Account: {email or name}" if (email or name) else "",
+                    f"Source: {source}" if source else "",
+                    "Click to log out",
+                ) if value]
+                self.authgrok_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+                    "<br>".join(details) + "</p></qt>"
+                )
+                self.authgrok_login_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+            else:
+                self.authgrok_login_btn.setText(f"🔐 Grok{suffix} Login")
+                self.authgrok_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    "Log in to xAI in your browser. You can choose Google sign-in on xAI's login page. "
+                    "No API key is needed.</p></qt>"
+                )
+                self.authgrok_login_btn.setStyleSheet(
+                    "background-color: #111111; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+        except ImportError:
+            self.authgrok_login_btn.setText("🔐 Grok Login (unavailable)")
+            self.authgrok_login_btn.setEnabled(False)
+
+    def _authgrok_login_clicked(self):
+        try:
+            store = self._get_authgrok_store_for_current_model()
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "AuthGrok Unavailable",
+                "The authgrok_auth module is not installed. Please check your installation.",
+            )
+            return
+
+        account_id = self._get_authgrok_account_id()
+        suffix = f" #{account_id}" if account_id else ""
+        if store.has_tokens:
+            info = store.account_info
+            account = info.get('email') or info.get('name') or 'xAI account'
+            reply = QMessageBox.question(
+                self,
+                "Grok Account",
+                f"Currently logged in as: {account}{suffix}\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                store.clear_tokens()
+                self._refresh_auth_account_arrows()
+                self._update_authgrok_login_status()
+                self.append_log(f"🔓 Grok{suffix}: Logged out")
+            return
+
+        self.authgrok_login_btn.setText("⏳ Logging in…")
+        self.authgrok_login_btn.setEnabled(False)
+        self.append_log(f"🔐 Grok{suffix}: Opening xAI login (Google sign-in supported)…")
+
+        def _do_login():
+            try:
+                from authgrok_auth import run_oauth_flow
+                store.save_tokens(run_oauth_flow())
+                QMetaObject.invokeMethod(self, "_authgrok_login_finished", Qt.QueuedConnection)
+            except Exception as exc:
+                self._authgrok_login_error = str(exc)
+                QMetaObject.invokeMethod(self, "_authgrok_login_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=_do_login, daemon=True).start()
+
+    @Slot()
+    def _authgrok_login_status_changed(self):
+        self._refresh_auth_account_arrows()
+
+    @Slot()
+    def _authgrok_login_finished(self):
+        self.authgrok_login_btn.setEnabled(True)
+        self._refresh_auth_account_arrows()
+        self._update_authgrok_login_status()
+        account_id = self._get_authgrok_account_id()
+        suffix = f" #{account_id}" if account_id else ""
+        try:
+            info = self._get_authgrok_store_for_current_model().account_info
+            detail = info.get('email') or info.get('name') or 'success'
+        except Exception:
+            detail = 'success'
+        self.append_log(f"✅ Grok{suffix}: Logged in ({detail})")
+
+    @Slot()
+    def _authgrok_login_failed(self):
+        self.authgrok_login_btn.setEnabled(True)
+        self._refresh_auth_account_arrows()
+        self._update_authgrok_login_status()
+        error = getattr(self, '_authgrok_login_error', 'Unknown error')
+        self.append_log(f"❌ Grok login failed: {error}")
+        QMessageBox.warning(self, "Login Failed", f"Grok login failed:\n{error}")
 
     # ==================================================================
     # AuthGem (Gemini Login) – mirrors the AuthGPT pattern
@@ -16132,6 +16286,18 @@ Recent translations to summarize:
             <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
         </p>
 
+        <h4>Grok Account (authgrok/)</h4>
+        <p>Use Grok through an xAI account OAuth session — no API key needed</p>
+        <ul>
+            <li><b>authgrok/grok-4.5</b> - Current flagship and offline fallback</li>
+            <li><b>authgrok/grok-4.3</b> - OAuth-compatible route when entitled</li>
+            <li><b>authgrok/grok-build</b> - Coding model when available to the account</li>
+        </ul>
+        <p style="color: #9ca3af; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click <b>🔐 Grok Login</b>; xAI's login page lets you choose Google sign-in.
+            The exact model catalog depends on the signed-in account.
+        </p>
+
         <h4>Claude Subscription (authcd/)</h4>
         <p>Use your Claude Pro/Max subscription directly — no API key needed</p>
         <ul>
@@ -16531,6 +16697,29 @@ Recent translations to summarize:
         self.authgpt_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgpt', idx))
         self.authgpt_acct_combo.hide()
         model_btn_layout.addWidget(self.authgpt_acct_combo)
+
+        # AuthGrok Login button (xAI OAuth; xAI's page supports Google sign-in)
+        self.authgrok_login_btn = QPushButton("🔐 Grok Login")
+        self.authgrok_login_btn.setStyleSheet(
+            "background-color: #111111; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.authgrok_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Log in to xAI via browser and choose Google sign-in if desired. "
+            "No API key needed.</p></qt>"
+        )
+        self.authgrok_login_btn.clicked.connect(self._authgrok_login_clicked)
+        self.authgrok_login_btn.hide()
+        model_btn_layout.addWidget(self.authgrok_login_btn)
+
+        self.authgrok_acct_combo = QComboBox()
+        self.authgrok_acct_combo.setStyleSheet(_acct_combo_style)
+        self.authgrok_acct_combo.setToolTip("Select Grok account slot")
+        self.authgrok_acct_combo.setFixedWidth(46)
+        self.authgrok_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgrok', idx))
+        self.authgrok_acct_combo.hide()
+        model_btn_layout.addWidget(self.authgrok_acct_combo)
         
         # AuthCD Login button (visible only for authcd/ models)
         self.authcd_login_btn = QPushButton("\ud83d\udd10 Claude Login")
@@ -35179,6 +35368,7 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
+                ("✕", "authgrok/", "AuthGrok", "Grok via xAI OAuth login", "#111111", "#d8d8d8"),
                 ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1438", "#d97706"),
                 ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#143840", "#4385f4"),
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#143840", "#34a853"),

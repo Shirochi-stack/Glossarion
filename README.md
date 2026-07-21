@@ -103,6 +103,7 @@
 * **Multi-Key Management** — key pool with rotation, rate limit caching, and per-key health tracking
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
+* **AuthGrok OAuth** — use an xAI/Grok account via browser login, including Google sign-in
 
 ---
 
@@ -125,6 +126,7 @@
 | **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
 | **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
+| **AuthGrok** | `authgrok/*` | authgrok/grok-4.5, authgrok/grok-4.3, authgrok/grok-build |
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
@@ -154,8 +156,9 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 1. **Direct Providers** — use API keys from OpenAI, Google, Anthropic, etc.
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
-4. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
-5. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
+4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
+5. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
+6. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 
 ### Manga Translation Setup
 1. Create a Google Cloud Project (or Azure AI resource)
@@ -302,6 +305,7 @@ Glossarion/
 │   ├── review_dialog.py            # Translation review UI
 │   ├── other_settings.py           # Advanced settings dialogs
 │   ├── authgpt_auth.py             # ChatGPT OAuth integration
+│   ├── authgrok_auth.py            # xAI/Grok OAuth integration
 │   ├── api_key_encryption.py       # API key encryption at rest
 │   ├── config_backup.py            # Config backup management
 │   ├── dpi_setup.py                # DPI awareness configuration

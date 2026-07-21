@@ -54,6 +54,7 @@ def test_browser_state_cleanup_removes_only_child_profiles(monkeypatch, tmp_path
 
     preserve_files = (
         "authgpt_tokens.json",
+        "authgrok_tokens.json",
         "authgem_tokens.json",
         "authcd_tokens.json",
         "config_android.json",

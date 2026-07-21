@@ -48,6 +48,7 @@ Supported models and their prefixes (Updated July 2025):
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 - AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
+- AuthGrok: authgrok/* (e.g., authgrok/grok-4.5) – Grok account via xAI OAuth
 - AuthGem: authgem/* (e.g., authgem/gemini-2.5-flash) – Gemini via Google OAuth + AI Studio (no API key)
 - AuthGem-Key: authgem-key/* (e.g., authgem-key/gemini-2.5-flash) – Gemini via AI Studio API key
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
@@ -98,6 +99,7 @@ Environment Variables:
 - POE_API_KEY: API key for Poe platform
 - AUTHGPT_BASE_URL: Override ChatGPT backend URL (default: https://chatgpt.com/backend-api)
 - AUTHGPT_TOKEN_FILE: Custom path for OAuth token storage (default: ~/.glossarion/authgpt_tokens.json)
+- AUTHGROK_TOKEN_FILE: Custom path for Grok OAuth token storage (default: ~/.glossarion/authgrok_tokens.json)
 - AUTHGEM_TOKEN_FILE: Custom path for AuthGem OAuth token storage (default: ~/.glossarion/authgem_tokens.json)
 - GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1) - Do NOT include /chat/completions
 - SAMBANOVA_API_URL: Custom SambaNova endpoint (default: https://api.sambanova.ai/v1)
@@ -1157,6 +1159,22 @@ except ImportError:
     _authgpt_cancel_stream = None
     _authgpt_reset_cancel = None
     AUTHGPT_AVAILABLE = False
+
+# AuthGrok - Grok account via xAI OAuth (optional)
+try:
+    from authgrok_auth import get_default_store as _authgrok_get_store
+    from authgrok_auth import get_store as _authgrok_get_store_by_id
+    from authgrok_auth import send_chat_completion as _authgrok_send
+    from authgrok_auth import cancel_stream as _authgrok_cancel_stream
+    from authgrok_auth import reset_cancel as _authgrok_reset_cancel
+    AUTHGROK_AVAILABLE = True
+except ImportError:
+    _authgrok_get_store = None
+    _authgrok_get_store_by_id = None
+    _authgrok_send = None
+    _authgrok_cancel_stream = None
+    _authgrok_reset_cancel = None
+    AUTHGROK_AVAILABLE = False
 
 # AuthGem - Gemini via Google OAuth / API key (optional)
 try:
@@ -2443,6 +2461,8 @@ class UnifiedClient:
         'google-translate': 'google_translate',
         'authgpt/': 'authgpt',
         'authgpt': 'authgpt',
+        'authgrok/': 'authgrok',
+        'authgrok': 'authgrok',
         'authgem-key/': 'authgem_key',
         'authgem-key': 'authgem_key',
         'authgem-vertex/': 'authgem_vertex',
@@ -2484,7 +2504,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -2612,6 +2632,7 @@ class UnifiedClient:
                 (r'^authgem-vertex\d{1,4}(?:/|$)', 'authgem_vertex'),
                 (r'^authgem\d{1,4}(?:/|$)', 'authgem'),
                 (r'^authgpt\d{1,4}(?:/|$)', 'authgpt'),
+                (r'^authgrok\d{1,4}(?:/|$)', 'authgrok'),
                 (r'^authza\d{1,4}(?:/|$)', 'authza'),
                 (r'^authnd\d{1,4}(?:/|$)', 'authnd'),
                 (r'^authcd\d{1,4}(?:/|$)', 'authcd'),
@@ -3563,6 +3584,13 @@ class UnifiedClient:
         except Exception:
             pass
 
+        # Cancel any in-flight AuthGrok SSE streams
+        try:
+            if _authgrok_cancel_stream is not None:
+                _authgrok_cancel_stream()
+        except Exception:
+            pass
+
         # Cancel any in-flight AuthGem requests
         try:
             if _authgem_cancel_stream is not None:
@@ -3629,6 +3657,12 @@ class UnifiedClient:
         try:
             if _authgpt_reset_cancel is not None:
                 _authgpt_reset_cancel()
+        except Exception:
+            pass
+        # Reset AuthGrok cancel event
+        try:
+            if _authgrok_reset_cancel is not None:
+                _authgrok_reset_cancel()
         except Exception:
             pass
         # Reset AuthCD cancel event
@@ -7732,6 +7766,14 @@ class UnifiedClient:
                 self.client_type = 'authgpt'
                 self._authgpt_account_id = int(_m.group(1))
 
+        # Dynamic fallback: match numbered AuthGrok variants.
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authgrok(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authgrok'
+                self._authgrok_account_id = int(_m.group(1))
+
         # Dynamic fallback: match numbered authza variants (authza1/, authza2/, etc.)
         if self.client_type is None:
             import re as _re
@@ -8207,6 +8249,16 @@ class UnifiedClient:
                     "exists under src/ with __init__.py, oauth.py, token_store.py, chatgpt_api.py."
                 )
             # logger.info("AuthGPT will use ChatGPT backend API with OAuth tokens")
+
+        elif self.client_type == 'authgrok':
+            # AuthGrok uses xAI's OAuth Responses proxy; no SDK client is needed.
+            if not AUTHGROK_AVAILABLE:
+                raise ImportError(
+                    "AuthGrok is unavailable. Make sure 'authgrok_auth.py' exists under src/."
+                )
+            account_id = getattr(self, '_authgrok_account_id', None)
+            if account_id:
+                print(f"🔐 AuthGrok: Using account slot #{account_id}")
 
         elif self.client_type in ('authgem', 'authgem_key', 'authgem_vertex'):
             # AuthGem uses Gemini API via Google OAuth or API key – no persistent SDK client
@@ -13700,6 +13752,12 @@ class UnifiedClient:
                     _authgpt_reset_cancel()
             except Exception:
                 pass
+            # Reset AuthGrok cancel event
+            try:
+                if _authgrok_reset_cancel is not None:
+                    _authgrok_reset_cancel()
+            except Exception:
+                pass
             # Reset AuthCD cancel event
             try:
                 if _authcd_reset_cancel is not None:
@@ -15439,13 +15497,18 @@ class UnifiedClient:
                 return f" (reasoning_effort: {'max' if effort == 'xhigh' else 'high'})"
             return f" (thinking enabled, effort: {effort})"
 
+        if model_lower.startswith('authgrok'):
+            reasoning = self._get_authgrok_reasoning_param()
+            effort = str(reasoning.get('effort', 'high') or 'high')
+            return f" (reasoning_effort: {effort})"
+
         if model_lower.startswith('authgpt'):
             reasoning = self._get_authgpt_reasoning_param()
             effort = str(reasoning.get('effort', 'none') or 'none')
             return f" (reasoning_effort: {effort})"
 
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authza', 'authcd', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authgrok', 'authza', 'authcd', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -17001,6 +17064,27 @@ class UnifiedClient:
         except Exception:
             return {"effort": "none"}
 
+    def _get_authgrok_reasoning_param(self) -> dict:
+        """Return xAI's Responses reasoning control for OAuth-backed Grok."""
+        try:
+            # Grok 4.5 defaults to high reasoning and cannot disable it.  When
+            # Glossarion thinking is off, omit the explicit field so xAI uses
+            # the selected model's own default.
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return {}
+            effort = (os.getenv('GPT_EFFORT', 'high') or 'high').strip().lower()
+            if effort == 'none':
+                return {}
+            if effort == 'xhigh':
+                model = (self._get_active_request_model() or '').lower()
+                if 'multi-agent' not in model:
+                    effort = 'high'
+            if effort not in ('low', 'medium', 'high', 'xhigh'):
+                effort = 'high'
+            return {"effort": effort}
+        except Exception:
+            return {}
+
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
         if not disable_safety:
@@ -17430,6 +17514,7 @@ class UnifiedClient:
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
             'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
+            'authgrok': self._send_authgrok,  # Grok account via xAI OAuth
             'authcd': self._send_authcd,  # Claude subscription via OAuth
             'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
@@ -24690,6 +24775,139 @@ class UnifiedClient:
         )
 
     # ------------------------------------------------------------------
+    # AuthGrok – xAI account OAuth + Grok CLI Responses proxy
+    # ------------------------------------------------------------------
+
+    def _send_authgrok(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send a request through xAI's OAuth-backed Grok Responses proxy."""
+        if not AUTHGROK_AVAILABLE or _authgrok_get_store is None or _authgrok_send is None:
+            raise UnifiedClientError(
+                "AuthGrok is unavailable. Ensure src/authgrok_auth.py is installed.",
+                error_type="config_error",
+            )
+
+        request_model = self._get_active_request_model()
+        actual_model = request_model
+        import re as _re
+        match = _re.match(r'^authgrok\d{0,4}/', actual_model, _re.IGNORECASE)
+        if match:
+            actual_model = actual_model[match.end():]
+        elif actual_model.lower().startswith('authgrok'):
+            actual_model = actual_model[len('authgrok'):].lstrip('/')
+        if not actual_model:
+            actual_model = 'grok-4.5'
+
+        account_id = self._extract_authgrok_account_id(request_model)
+        if account_id is None:
+            account_id = getattr(self, '_authgrok_account_id', None)
+        try:
+            if _authgrok_get_store_by_id is not None and account_id:
+                store = _authgrok_get_store_by_id(account_id)
+                account_label = f" (Account #{account_id})"
+            else:
+                store = _authgrok_get_store()
+                account_label = ""
+            access_token = store.get_valid_access_token(auto_login=True)
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthGrok{account_label if 'account_label' in dir() else ''} authentication failed: {exc}\n"
+                "Sign in to xAI in the browser (Google sign-in is supported) and make sure the account can use Grok.",
+                error_type="auth_error",
+            )
+
+        max_retries = max(1, self._get_max_retries())
+        attempt = 0
+        auth_retry_used = False
+        last_error = None
+        label = f"AuthGrok{account_label}" if account_label else "AuthGrok"
+        print(f"🔐 {label}: Sending OAuth request (model={actual_model})")
+
+        while attempt < max_retries:
+            if self._is_stop_requested():
+                raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+            try:
+                if _authgrok_reset_cancel is not None:
+                    _authgrok_reset_cancel()
+                http_tuning = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if http_tuning else None
+                read_timeout = self.request_timeout
+                if http_tuning:
+                    try:
+                        read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (TypeError, ValueError):
+                        pass
+
+                result = _authgrok_send(
+                    access_token=access_token,
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=read_timeout,
+                    log_fn=print,
+                    connect_timeout=connect_timeout,
+                    reasoning=self._get_authgrok_reasoning_param(),
+                )
+                if result.get("error_details"):
+                    raise RuntimeError(f"AuthGrok response failed: {result['error_details']}")
+                return UnifiedResponse(
+                    content=result.get("content", ""),
+                    finish_reason=result.get("finish_reason", "stop"),
+                    usage=result.get("usage"),
+                    raw_response=result,
+                )
+            except RuntimeError as exc:
+                error_text = str(exc)
+                lowered = error_text.lower()
+                if "stream cancelled" in lowered or self._should_abort_retry():
+                    self._log_once("⏹️ AuthGrok: Stream cancelled by user")
+                    raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+
+                # A bearer may be revoked before its recorded expiry. Force one
+                # refresh without consuming a normal request retry.
+                if "401" in error_text and not auth_retry_used:
+                    auth_retry_used = True
+                    try:
+                        access_token = store.get_valid_access_token(auto_login=True, force_refresh=True)
+                        print("🔄 AuthGrok: OAuth token refreshed; retrying request…")
+                        continue
+                    except Exception as refresh_exc:
+                        raise UnifiedClientError(
+                            f"AuthGrok token refresh failed: {refresh_exc}",
+                            error_type="auth_error",
+                        )
+
+                last_error = exc
+                attempt += 1
+                if "400" in error_text or "bad request" in lowered:
+                    raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="validation")
+                if "401" in error_text or "403" in error_text:
+                    raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="auth_error")
+                if "429" in error_text and attempt >= max_retries:
+                    raise UnifiedClientError(f"AuthGrok: {error_text}", error_type="rate_limit")
+                if attempt < max_retries:
+                    delay = self._get_send_interval()
+                    print(f"⚠️ AuthGrok request failed; retrying in {delay:.1f}s ({attempt}/{max_retries})")
+                    if not self._sleep_with_cancel(delay, 0.5):
+                        raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+            except UnifiedClientError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                attempt += 1
+                if self._should_abort_retry():
+                    raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+                if attempt < max_retries:
+                    delay = self._get_send_interval()
+                    if not self._sleep_with_cancel(delay, 0.5):
+                        raise UnifiedClientError("AuthGrok: Translation stopped by user", error_type="cancelled")
+
+        raise UnifiedClientError(
+            f"AuthGrok request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error",
+        )
+
+    # ------------------------------------------------------------------
     # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
     # ------------------------------------------------------------------
 
@@ -24918,6 +25136,15 @@ class UnifiedClient:
         """
         import re
         m = re.match(r'^authgpt(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
+    @staticmethod
+    def _extract_authgrok_account_id(model: str) -> Optional[int]:
+        """Extract the account slot from ``authgrokN/`` prefixes."""
+        import re
+        m = re.match(r'^authgrok(\d{1,4})(?:/|$)', model, re.IGNORECASE)
         if m:
             return int(m.group(1))
         return None
