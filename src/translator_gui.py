@@ -2692,8 +2692,9 @@ class _InputOutputDialog(QDialog):
         *,
         text_source=None,
         html_source=None,
+        output_artifact_path=None,
     ):
-        """Update an editable response's Markdown, text, HTML, and XHTML files."""
+        """Update an editable response and its translated output atomically."""
         markdown_path = os.path.abspath(str(markdown_path or ""))
         response_stem = os.path.splitext(markdown_path)[0]
         text_path = response_stem + ".txt"
@@ -2708,12 +2709,26 @@ class _InputOutputDialog(QDialog):
         )
         xhtml_document = self._response_xhtml_document(html_document)
 
-        targets = (
+        targets = [
             (markdown_path, markdown_source),
             (text_path, plain_text_source),
             (html_path, html_document),
             (xhtml_path, xhtml_document),
-        )
+        ]
+        artifact_path = os.path.abspath(str(output_artifact_path or ""))
+        if artifact_path and artifact_path not in {path for path, _value in targets}:
+            artifact_extension = os.path.splitext(artifact_path)[1].casefold()
+            artifact_value = {
+                ".html": html_document,
+                ".htm": html_document,
+                ".xhtml": xhtml_document,
+                ".xhtm": xhtml_document,
+                ".txt": plain_text_source,
+                ".md": markdown_source,
+                ".markdown": markdown_source,
+            }.get(artifact_extension)
+            if artifact_value is not None:
+                targets.append((artifact_path, artifact_value))
         previous = {}
         for path, _value in targets:
             existed = os.path.isfile(path)
@@ -4222,6 +4237,22 @@ class _InputOutputDialog(QDialog):
             key=lambda path: os.path.basename(path).casefold(),
         )
 
+    def _is_managed_attachment_workspace(self, session, folder):
+        """Return whether a folder is an immediate attachment of one chat."""
+        if session is None:
+            return False
+        conversation_folder = self._managed_conversation_output_folder(session)
+        folder = os.path.realpath(os.path.abspath(str(folder or "")))
+        if not conversation_folder or not folder or not os.path.isdir(folder):
+            return False
+        attachments_root = os.path.realpath(
+            os.path.join(conversation_folder, "Attachments")
+        )
+        return (
+            os.path.normcase(os.path.dirname(folder))
+            == os.path.normcase(attachments_root)
+        )
+
     def _direct_text_migration_output_root(self, conversation_folder):
         """Resolve the same output root used by normal Run Translation."""
         configured_root = (
@@ -4362,6 +4393,54 @@ class _InputOutputDialog(QDialog):
                 ):
                     continue
                 os.remove(entry.path)
+
+    def _attachment_compiled_epub_path(self, folder):
+        """Return the authoritative compiled EPUB in an attachment workspace."""
+        folder = os.path.abspath(str(folder or ""))
+        preferred = self._preferred_attachment_compiled_documents(folder)
+        epub_name = str(preferred.get(".epub", "") or "")
+        epub_path = os.path.join(folder, epub_name) if epub_name else ""
+        return epub_path if epub_path and os.path.isfile(epub_path) else ""
+
+    def _open_attachment_epub_reader(self, epub_path):
+        """Open a compiled attachment with the Library's integrated reader."""
+        epub_path = os.path.abspath(str(epub_path or ""))
+        if not epub_path or not os.path.isfile(epub_path):
+            QMessageBox.information(
+                self,
+                "EPUB unavailable",
+                "No compiled EPUB is available for this attachment.",
+            )
+            return
+        try:
+            from epub_library import EpubReaderDialog
+
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            reader = EpubReaderDialog(
+                epub_path,
+                config=self.translator.config,
+                parent=self,
+            )
+            reader.setModal(False)
+            reader.setAttribute(Qt.WA_DeleteOnClose)
+            # Parent ownership keeps every open reader alive; retaining the
+            # newest one also mirrors EpubLibraryDialog._open_reader_direct.
+            self._active_direct_epub_reader = reader
+            reader.show()
+            reader.raise_()
+            reader.activateWindow()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Could not open EPUB",
+                f"The EPUB Reader could not be opened.\n\n{exc}",
+            )
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
 
     def _migrate_conversation_attachment(
         self, session_index, source_folder, message_parent=None
@@ -5035,6 +5114,154 @@ class _InputOutputDialog(QDialog):
             response_stem + ".xhtml",
         )
 
+    @staticmethod
+    def _response_artifact_match_text(source):
+        """Reduce response markup to comparable visible text."""
+        import html as html_lib
+        import re
+
+        value = str(source or "")
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(value, "html.parser")
+            for unwanted in soup.find_all(("script", "style")):
+                unwanted.decompose()
+            value = soup.get_text(" ", strip=True)
+        except Exception:
+            value = re.sub(r"<[^>]+>", " ", value)
+        value = html_lib.unescape(value)
+        return " ".join(value.split()).casefold()
+
+    def _response_output_artifact_path(self, message, message_index):
+        """Resolve a chapter card to its real translated attachment file."""
+        import difflib
+        import json as json_lib
+        import re
+
+        if not isinstance(message, (list, tuple)):
+            return ""
+        output_folder = str(message[4] if len(message) > 4 else "").strip()
+        request_label = str(message[5] if len(message) > 5 else "").strip()
+        chapter_match = re.search(
+            r"\b(?:chapter|section)\s+(-?\d+)\b",
+            request_label,
+            flags=re.IGNORECASE,
+        )
+        if not output_folder or not chapter_match:
+            return ""
+        output_folder = os.path.abspath(os.path.expanduser(output_folder))
+        if not os.path.isdir(output_folder):
+            return ""
+        try:
+            chapter_number = int(chapter_match.group(1))
+        except (TypeError, ValueError):
+            return ""
+
+        progress_paths = []
+        direct_progress = os.path.join(output_folder, "translation_progress.json")
+        if os.path.isfile(direct_progress):
+            progress_paths.append(direct_progress)
+        else:
+            # Some attachment types keep each translated document one level
+            # below the card's output folder. Avoid Chat Messages and backup
+            # trees while locating their authoritative progress file.
+            for root, directories, files in os.walk(output_folder):
+                directories[:] = [
+                    name
+                    for name in directories
+                    if name.casefold()
+                    not in {"chat messages", "unrefined_backup", "sdlxliff"}
+                ]
+                if "translation_progress.json" in files:
+                    progress_paths.append(
+                        os.path.join(root, "translation_progress.json")
+                    )
+                if len(progress_paths) >= 12:
+                    break
+
+        candidates = []
+        supported_extensions = {
+            ".html",
+            ".htm",
+            ".xhtml",
+            ".xhtm",
+            ".txt",
+            ".md",
+            ".markdown",
+        }
+        for progress_path in progress_paths:
+            try:
+                with open(progress_path, "r", encoding="utf-8") as handle:
+                    progress = json_lib.load(handle)
+            except (OSError, TypeError, ValueError):
+                continue
+            chapters = progress.get("chapters", {})
+            if not isinstance(chapters, dict):
+                continue
+            progress_folder = os.path.dirname(progress_path)
+            for record in chapters.values():
+                if not isinstance(record, dict):
+                    continue
+                try:
+                    actual_number = int(record.get("actual_num"))
+                except (TypeError, ValueError):
+                    continue
+                if actual_number != chapter_number:
+                    continue
+                relative_output = str(record.get("output_file", "") or "").strip()
+                if not relative_output:
+                    continue
+                artifact_path = os.path.abspath(
+                    os.path.join(progress_folder, relative_output)
+                )
+                try:
+                    if os.path.commonpath((artifact_path, progress_folder)) != os.path.abspath(
+                        progress_folder
+                    ):
+                        continue
+                except ValueError:
+                    continue
+                if (
+                    os.path.splitext(artifact_path)[1].casefold()
+                    not in supported_extensions
+                    or not os.path.isfile(artifact_path)
+                ):
+                    continue
+                candidates.append(artifact_path)
+
+        candidates = list(dict.fromkeys(candidates))
+        if not candidates:
+            return ""
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Chapter zero can legitimately contain both a cover and an info page.
+        # Match the response's visible text instead of guessing from filenames.
+        response_text = self._response_artifact_match_text(
+            self._assistant_message_text(message, "content", message_index)
+        )
+        if not response_text:
+            return ""
+        ranked = []
+        for candidate in candidates:
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    candidate_text = self._response_artifact_match_text(handle.read())
+            except OSError:
+                continue
+            score = difflib.SequenceMatcher(
+                None,
+                response_text,
+                candidate_text,
+                autojunk=False,
+            ).ratio()
+            ranked.append((score, candidate))
+        if not ranked:
+            return ""
+        ranked.sort(reverse=True)
+        return ranked[0][1]
+
     def _save_response_output_edit(
         self,
         message_index,
@@ -5058,11 +5285,15 @@ class _InputOutputDialog(QDialog):
         ) = self._editable_response_paths(message_index)
         if not markdown_path:
             raise OSError("The conversation output folder is unavailable")
+        output_artifact_path = self._response_output_artifact_path(
+            message, int(message_index)
+        )
         text_path, html_path, xhtml_path = self._write_response_files(
             markdown_path,
             edited_source,
             text_source=text_source,
             html_source=html_source,
+            output_artifact_path=output_artifact_path,
         )
 
         values = list(message[:6])
@@ -5679,6 +5910,42 @@ class _InputOutputDialog(QDialog):
             except (TypeError, ValueError):
                 return
             self._open_specific_output_folder(folder)
+            return
+        attachment_migrate_prefix = "direct-attachment-migrate:"
+        if target.startswith(attachment_migrate_prefix):
+            try:
+                message_index = int(
+                    target[len(attachment_migrate_prefix):]
+                )
+                message = self._chat_messages[message_index]
+                folder = str(message[4] if len(message) > 4 else "")
+            except (IndexError, TypeError, ValueError):
+                return
+            session = self._current_chat_session()
+            if session is None or not self._is_managed_attachment_workspace(
+                session, folder
+            ):
+                QMessageBox.information(
+                    self,
+                    "Attachment already migrated",
+                    "This attachment is no longer inside the Direct Text folder.",
+                )
+                return
+            self._migrate_conversation_attachment(
+                self._current_chat_index, folder, self
+            )
+            return
+        attachment_reader_prefix = "direct-attachment-reader:"
+        if target.startswith(attachment_reader_prefix):
+            try:
+                message_index = int(target[len(attachment_reader_prefix):])
+                message = self._chat_messages[message_index]
+                folder = str(message[4] if len(message) > 4 else "")
+            except (IndexError, TypeError, ValueError):
+                return
+            self._open_attachment_epub_reader(
+                self._attachment_compiled_epub_path(folder)
+            )
             return
         glossary_prefix = "direct-glossary:"
         if target.startswith(glossary_prefix):
@@ -7428,6 +7695,9 @@ class _InputOutputDialog(QDialog):
                             f"{rendered_processing}</td></tr></table>"
                         )
                 message_actions = []
+                is_attachment_action_card = (
+                    request_label.strip().casefold() == "attachment actions"
+                )
                 if inline_editing:
                     message_actions.extend(
                         (
@@ -7437,7 +7707,7 @@ class _InputOutputDialog(QDialog):
                             "title='Discard these edits'>Cancel</a>",
                         )
                     )
-                elif str(content or ""):
+                elif str(content or "") and not is_attachment_action_card:
                     was_copied = self._copied_message_key == (
                         session_id,
                         message_index,
@@ -7453,6 +7723,26 @@ class _InputOutputDialog(QDialog):
                             f"<a class='message-action' href='direct-edit:{message_index}' "
                             "title='Edit this saved response'>"
                             "✏️&nbsp;&nbsp;Edit output</a>"
+                        )
+                if is_attachment_action_card and output_folder:
+                    if self._is_managed_attachment_workspace(
+                        session, output_folder
+                    ):
+                        message_actions.append(
+                            f"<a class='message-action' "
+                            f"href='direct-attachment-migrate:{message_index}' "
+                            "title='Move this attachment outside Direct Text'>"
+                            "📤&nbsp;&nbsp;Migrate attachment</a>"
+                        )
+                    compiled_epub = self._attachment_compiled_epub_path(
+                        output_folder
+                    )
+                    if compiled_epub:
+                        message_actions.append(
+                            f"<a class='message-action' "
+                            f"href='direct-attachment-reader:{message_index}' "
+                            "title='Open the compiled EPUB in the integrated reader'>"
+                            "📖&nbsp;&nbsp;Open in EPUB Reader</a>"
                         )
                 if output_folder:
                     message_actions.append(
@@ -7774,9 +8064,25 @@ class _InputOutputDialog(QDialog):
         """Freeze the active streamed response into the visible chat history."""
         if not self._assistant_message_active:
             return
+        if (
+            isinstance(completion_message, list)
+            and (
+                not completion_message
+                or isinstance(completion_message[0], (list, tuple))
+            )
+        ):
+            completion_messages = [
+                tuple(message)
+                for message in completion_message
+                if isinstance(message, (list, tuple)) and message
+            ]
+        elif completion_message:
+            completion_messages = [completion_message]
+        else:
+            completion_messages = []
         if self._active_request_segments:
             segments_to_commit = list(self._active_request_segments)
-            if len(segments_to_commit) > 1 or completion_message:
+            if len(segments_to_commit) > 1 or completion_messages:
                 # API clients emit lifecycle-only requests for bookkeeping
                 # channels such as EPUB metadata.  If that channel produced no
                 # model stream at all, it is not a second response and must not
@@ -7804,8 +8110,7 @@ class _InputOutputDialog(QDialog):
                         segment, self._last_output_folder
                     )
                 )
-            if completion_message:
-                self._chat_messages.append(completion_message)
+            self._chat_messages.extend(completion_messages)
             self._assistant_message_active = False
             self._active_request_segments = []
             self._request_segment_by_thread = {}
@@ -7835,8 +8140,7 @@ class _InputOutputDialog(QDialog):
                 "Request 1",
             )
         )
-        if completion_message:
-            self._chat_messages.append(completion_message)
+        self._chat_messages.extend(completion_messages)
         self._assistant_message_active = False
         self._reset_history_window()
         self._save_chat_history()
@@ -8356,6 +8660,53 @@ class _InputOutputDialog(QDialog):
         target["complete"] = True
         self._sort_active_request_segments()
 
+    def _build_attachment_action_card(self, output_folder):
+        """Build the final attachment-management card for a completed run."""
+        if (
+            not self._run_source_is_attachment
+            or not output_folder
+            or not os.path.isdir(output_folder)
+        ):
+            return None
+
+        source_name = os.path.basename(self._run_source_path or "Attachment")
+        compiled = self._preferred_attachment_compiled_documents(output_folder)
+        compiled_names = [
+            str(compiled[extension])
+            for extension in (".epub", ".pdf")
+            if compiled.get(extension)
+        ]
+        lines = [
+            "## Attachment ready",
+            "",
+            f"**Source:** {source_name}",
+            "",
+            "The attachment output workspace is ready.",
+        ]
+        if compiled_names:
+            lines.extend(
+                (
+                    "",
+                    "**Compiled output:** " + " · ".join(compiled_names),
+                )
+            )
+        lines.extend(
+            (
+                "",
+                "Use the actions below to migrate the workspace outside Direct "
+                "Text or, when available, open its compiled EPUB in the "
+                "integrated reader.",
+            )
+        )
+        return (
+            "assistant",
+            "\n".join(lines),
+            "",
+            "Completed",
+            os.path.abspath(str(output_folder)),
+            "Attachment actions",
+        )
+
     def _build_attachment_extraction_summary(self, output_folder):
         """Build the final, persisted chat card from real extraction artifacts."""
         if not self._run_source_is_attachment:
@@ -8614,10 +8965,17 @@ class _InputOutputDialog(QDialog):
             self._set_status("No translated output was produced")
 
         self._hydrate_header_toc_response()
-        completion_message = self._build_attachment_extraction_summary(
-            output_folder
+        completion_messages = [
+            message
+            for message in (
+                self._build_attachment_extraction_summary(output_folder),
+                self._build_attachment_action_card(output_folder),
+            )
+            if message is not None
+        ]
+        self._commit_assistant_message(
+            completion_message=completion_messages
         )
-        self._commit_assistant_message(completion_message=completion_message)
         self._restore_run_context()
 
     def _restore_run_context(self):
