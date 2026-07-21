@@ -1407,6 +1407,7 @@ class _InputOutputDialog(QDialog):
     )
     _EMBEDDED_PIPELINE_MARKERS = (
         '⏹️', '⏹', '🛑',
+        '📂 Payloads directory:',
         '🛰️ [gemini-native] Stream finished',
         '🛰️ [gemini-grpc] Stream finished',
         '🛰️ [anthropic] SSE stream complete',
@@ -7255,7 +7256,8 @@ class _InputOutputDialog(QDialog):
             "text streaming", "first text token", "thinking complete",
             "first token in", "stream finished", "stream complete",
             "skipping image title translation", "translation preview:",
-            "output directory:", "skipping post-translation scanning",
+            "output directory:", "payload directory:",
+            "payloads directory:", "skipping post-translation scanning",
         )
         return any(phrase in low for phrase in status_phrases)
 
@@ -7698,6 +7700,45 @@ class _InputOutputDialog(QDialog):
                 rendered = source.replace("\n", "<br>")
 
         return _sanitized_fragment(rendered)
+
+    @classmethod
+    def _thinking_markup_to_html(cls, source):
+        """Render thinking Markdown without nested pre/code frames.
+
+        QTextDocument keeps its generic ``pre`` border even when a descendant
+        CSS rule asks it not to.  Unwrap those blocks before insertion so the
+        thinking panel has one border, while explicit ``br`` tags retain the
+        whitespace that a preformatted block would otherwise provide.
+        """
+        import re
+
+        rendered = cls._markup_to_html(source)
+
+        def unwrap_pre(match):
+            content = re.sub(
+                r"</?code\b[^>]*>", "", match.group(1),
+                flags=re.IGNORECASE,
+            )
+            content = content.replace("\r\n", "\n").replace("\r", "\n")
+            return (
+                "<div class='processing-pre'>"
+                + content.replace("\n", "<br>")
+                + "</div>"
+            )
+
+        rendered = re.sub(
+            r"<pre\b[^>]*>(.*?)</pre>",
+            unwrap_pre,
+            rendered,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        rendered = re.sub(
+            r"<code\b[^>]*>(.*?)</code>",
+            r"<span class='processing-inline-code'>\1</span>",
+            rendered,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return rendered
 
     @classmethod
     def _active_stream_marker_html(cls, marker):
@@ -8271,14 +8312,23 @@ class _InputOutputDialog(QDialog):
                         # is still streamed model text. Render its Markdown and
                         # safe HTML with the same sanitizer used by responses
                         # instead of exposing literal ``**bold**``/tag syntax.
-                        rendered_processing = self._markup_to_html(
+                        rendered_processing = self._thinking_markup_to_html(
                             visible_processing
                         )
                         processing_html += (
                             "<table class='processing-detail-table' width='100%' "
-                            "cellspacing='0' cellpadding='9'><tr>"
-                            "<td class='processing-detail-cell'>"
-                            f"{rendered_processing}</td></tr></table>"
+                            "cellspacing='0' cellpadding='0'>"
+                            "<tr class='processing-detail-pad-row'>"
+                            "<td colspan='3' height='9' style='border:none'></td></tr>"
+                            "<tr><td class='processing-detail-pad-cell' width='11' "
+                            "style='border:none'></td>"
+                            "<td class='processing-detail-cell' style='border:none'>"
+                            f"{rendered_processing}</td>"
+                            "<td class='processing-detail-pad-cell' width='11' "
+                            "style='border:none'></td></tr>"
+                            "<tr class='processing-detail-pad-row'>"
+                            "<td colspan='3' height='9' style='border:none'></td>"
+                            "</tr></table>"
                         )
                 message_actions = []
                 is_attachment_action_card = (
@@ -8551,7 +8601,10 @@ class _InputOutputDialog(QDialog):
             "text-decoration: none; }"
             ".processing-detail-table { background: #171a21; "
             "border: 1px solid #4a5568; margin: 4px 0 12px 0; }"
-            ".processing-detail-cell { color: #aeb8c8; padding: 9px; "
+            ".processing-detail-pad-row, .processing-detail-pad-row td { "
+            "height: 9px; font-size: 1px; line-height: 1px; padding: 0; }"
+            ".processing-detail-pad-cell { width: 11px; padding: 0; }"
+            ".processing-detail-cell { color: #aeb8c8; padding: 0; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 0.81em; "
             "line-height: 1.35; }"
             ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
@@ -8589,11 +8642,19 @@ class _InputOutputDialog(QDialog):
             "pre { background: #171a21; border: 1px solid #343a46; "
             "padding: 9px; white-space: pre-wrap; }"
             "code { background: #20242d; padding: 1px 3px; }"
+            ".processing-pre, .processing-inline-code { "
+            "background: transparent; border: none; margin: 0; padding: 0; }"
             "blockquote { border-left: 3px solid #5a9fd4; "
             "margin-left: 4px; padding-left: 11px; color: #cbd5e1; }"
             "table { border-collapse: collapse; }"
             ".message-content table th, .message-content table td { "
             "border: 1px solid #596171; padding: 4px 7px; }"
+            # The thinking inset is also table-backed because QTextDocument
+            # ignores ordinary div padding.  Keep its structural spacer cells
+            # out of the generic rendered-Markdown table styling; otherwise
+            # every spacer gets a visible border and produces a nested frame.
+            ".message-content table.processing-detail-table td { "
+            "border: none; padding: 0; }"
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
         )
