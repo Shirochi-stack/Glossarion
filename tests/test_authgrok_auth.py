@@ -63,6 +63,36 @@ def test_build_responses_body_converts_messages_images_and_reasoning():
     assert body["input"][1]["content"] == [{"type": "output_text", "text": "Prior answer"}]
 
 
+def test_build_responses_body_maps_explicit_none_reasoning_to_low():
+    body = authgrok._build_responses_body(
+        [{"role": "user", "content": "Hello"}],
+        "grok-4.5",
+        reasoning={"effort": "none"},
+    )
+
+    assert body["reasoning"] == {"effort": "low"}
+
+
+def test_stream_log_breaks_after_html_block_tags_across_deltas():
+    text_buffer = []
+    logged = []
+
+    authgrok._append_stream_log_delta(text_buffer, "<h2>Title</h", logged.append)
+    authgrok._append_stream_log_delta(
+        text_buffer,
+        "2><p>First paragraph.</p><p>Second paragraph",
+        logged.append,
+    )
+    authgrok._append_stream_log_delta(text_buffer, ".</p>", logged.append)
+    authgrok._flush_stream_log_buffer(text_buffer, logged.append)
+
+    assert logged == [
+        "<h2>Title</h2>",
+        "<p>First paragraph.</p>",
+        "<p>Second paragraph.</p>",
+    ]
+
+
 def test_parse_responses_sse_uses_deltas_and_completed_usage():
     stream = "\n".join([
         'event: response.output_text.delta',
@@ -195,3 +225,15 @@ def test_unified_client_routes_authgrok_without_api_key():
     assert UnifiedClient._provider_from_model_name("authgrok/grok-4.5") == "authgrok"
     assert UnifiedClient._provider_from_model_name("authgrok12/grok-build") == "authgrok"
     assert any("authgrok" in prefix for prefix in UnifiedClient._NO_API_KEY_PREFIXES)
+
+
+def test_unified_client_maps_disabled_or_none_authgrok_reasoning_to_low(monkeypatch):
+    from unified_api_client import UnifiedClient
+
+    client = UnifiedClient.__new__(UnifiedClient)
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "0")
+    monkeypatch.setenv("GPT_EFFORT", "none")
+    assert client._get_authgrok_reasoning_param() == {"effort": "low"}
+
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    assert client._get_authgrok_reasoning_param() == {"effort": "low"}

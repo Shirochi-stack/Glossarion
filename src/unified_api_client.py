@@ -17067,14 +17067,14 @@ class UnifiedClient:
     def _get_authgrok_reasoning_param(self) -> dict:
         """Return xAI's Responses reasoning control for OAuth-backed Grok."""
         try:
-            # Grok 4.5 defaults to high reasoning and cannot disable it.  When
-            # Glossarion thinking is off, omit the explicit field so xAI uses
-            # the selected model's own default.
+            # Grok reasoning cannot be disabled, so Glossarion's "None"
+            # selection maps to the lowest supported effort instead of letting
+            # xAI fall back to the model's high default.
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
-                return {}
+                return {"effort": "low"}
             effort = (os.getenv('GPT_EFFORT', 'high') or 'high').strip().lower()
             if effort == 'none':
-                return {}
+                return {"effort": "low"}
             if effort == 'xhigh':
                 model = (self._get_active_request_model() or '').lower()
                 if 'multi-agent' not in model:
@@ -17083,7 +17083,7 @@ class UnifiedClient:
                 effort = 'high'
             return {"effort": effort}
         except Exception:
-            return {}
+            return {"effort": "low"}
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""

@@ -894,7 +894,7 @@ def _build_responses_body(
         body["temperature"] = float(temperature)
 
     effort = str((reasoning or {}).get("effort") or "").strip().lower()
-    if effort == "minimal":
+    if effort in ("minimal", "none"):
         effort = "low"
     if effort == "xhigh" and "multi-agent" not in str(model).lower():
         effort = "high"
@@ -1041,6 +1041,38 @@ def _is_terminal_sse_line(line: str) -> bool:
     }
 
 
+def _append_stream_log_delta(
+    text_buffer: List[str],
+    delta: str,
+    log_fn,
+    log_stream: bool = True,
+) -> None:
+    """Log streamed text in readable lines without changing response content."""
+    if not log_stream or not delta:
+        return
+    text_buffer.append(str(delta).replace("\r", ""))
+    combined = "".join(text_buffer)
+    for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+        combined = combined.replace(tag, tag + "\n")
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            log_fn(part.replace("\x1f", "\\x1F"))
+        text_buffer[:] = [parts[-1]]
+    elif len(combined) >= 160:
+        log_fn(combined.replace("\x1f", "\\x1F"))
+        text_buffer.clear()
+
+
+def _flush_stream_log_buffer(text_buffer: List[str], log_fn, log_stream: bool = True) -> None:
+    if not log_stream or not text_buffer:
+        return
+    remainder = "".join(text_buffer).rstrip("\n")
+    if remainder:
+        log_fn(remainder.replace("\x1f", "\\x1F"))
+    text_buffer.clear()
+
+
 def _stream_with_httpx(
     httpx_module,
     url: str,
@@ -1049,6 +1081,7 @@ def _stream_with_httpx(
     timeout: int,
     connect_timeout: Optional[float],
     log_fn,
+    log_stream: bool = True,
 ) -> Dict[str, Any]:
     lines: List[str] = []
     text_buffer: List[str] = []
@@ -1076,15 +1109,10 @@ def _stream_with_httpx(
                     event = None
                 if isinstance(event, dict) and event.get("type") == "response.output_text.delta":
                     delta = str(event.get("delta") or "")
-                    text_buffer.append(delta)
-                    if os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false") and delta:
-                        if "\n" in delta or len("".join(text_buffer)) >= 160:
-                            log_fn("".join(text_buffer).rstrip("\n"))
-                            text_buffer.clear()
+                    _append_stream_log_delta(text_buffer, delta, log_fn, log_stream)
             if _is_terminal_sse_line(line):
                 break
-    if text_buffer:
-        log_fn("".join(text_buffer))
+    _flush_stream_log_buffer(text_buffer, log_fn, log_stream)
     return _parse_sse_responses("\n".join(lines))
 
 
@@ -1093,6 +1121,8 @@ def _stream_with_requests(
     body: Dict[str, Any],
     headers: Dict[str, str],
     timeout: int,
+    log_fn,
+    log_stream: bool = True,
 ) -> Dict[str, Any]:
     response = requests.post(
         url,
@@ -1107,6 +1137,7 @@ def _stream_with_requests(
     if response.status_code >= 400:
         raise RuntimeError(f"AuthGrok HTTP {response.status_code}: {_safe_error_detail(response.text)}")
     lines: List[str] = []
+    text_buffer: List[str] = []
     for raw_line in response.iter_lines(chunk_size=1):
         if is_cancelled():
             response.close()
@@ -1115,8 +1146,21 @@ def _stream_with_requests(
             continue
         line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
         lines.append(line)
+        if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
+            try:
+                event = json.loads(line[5:].strip())
+            except ValueError:
+                event = None
+            if isinstance(event, dict) and event.get("type") == "response.output_text.delta":
+                _append_stream_log_delta(
+                    text_buffer,
+                    str(event.get("delta") or ""),
+                    log_fn,
+                    log_stream,
+                )
         if _is_terminal_sse_line(line):
             break
+    _flush_stream_log_buffer(text_buffer, log_fn, log_stream)
     return _parse_sse_responses("\n".join(lines))
 
 
@@ -1141,9 +1185,14 @@ def send_chat_completion(
     output = log_fn or print
     logger.info("AuthGrok: POST %s model=%s", url, model)
     reset_cancel()
+    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
 
     try:
         import httpx
-        return _stream_with_httpx(httpx, url, body, headers, timeout, connect_timeout, output)
+        return _stream_with_httpx(
+            httpx, url, body, headers, timeout, connect_timeout, output, log_stream
+        )
     except ImportError:
-        return _stream_with_requests(url, body, headers, timeout)
+        return _stream_with_requests(url, body, headers, timeout, output, log_stream)
