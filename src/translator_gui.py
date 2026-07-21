@@ -1433,6 +1433,8 @@ class _InputOutputDialog(QDialog):
         '] sse stream start (model=',
         '] sdk stream start (model=',
         '] sdk stream opened in ',
+        'sending api call in ',
+        'gemini safety status:',
     )
     _DIRECT_RESPONSE_PAYLOAD_PREFIX = '[DIRECT_TEXT_RESPONSE_PAYLOAD] '
     _DIRECT_GLOSSARY_STREAM_START_PREFIX = (
@@ -6611,6 +6613,16 @@ class _InputOutputDialog(QDialog):
                 label += (
                     f" (chunk {chapter_match.group(3)}/{chapter_match.group(4)})"
                 )
+            source_match = re.search(
+                r"(?:·|\[File:\s*)\s*([^·\[\]\r\n]+?\.(?:xhtml|html|htm))",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if source_match:
+                source_name = source_match.group(1).strip().replace("\\", "/")
+                source_name = source_name.rsplit("/", 1)[-1]
+                if source_name:
+                    label += f" · {source_name}"
             return label[0].upper() + label[1:]
         merged_match = re.search(
             r"\b(?:merged|request)\s+.+?(?=\s+response\b|\s*[\[(]|$)",
@@ -6765,6 +6777,16 @@ class _InputOutputDialog(QDialog):
         existing_generic = existing_label.lower().startswith("request ")
         incoming_has_chunk = "(chunk " in label.lower()
         existing_has_chunk = "(chunk " in existing_label.lower()
+        incoming_has_html_file = bool(
+            re.search(r"\.(?:xhtml|html|htm)(?:\s|$)", label, re.IGNORECASE)
+        )
+        existing_has_html_file = bool(
+            re.search(
+                r"\.(?:xhtml|html|htm)(?:\s|$)",
+                existing_label,
+                re.IGNORECASE,
+            )
+        )
         if (
             not existing_label
             or existing_generic
@@ -6772,6 +6794,11 @@ class _InputOutputDialog(QDialog):
                 not incoming_generic
                 and incoming_has_chunk
                 and not existing_has_chunk
+            )
+            or (
+                not incoming_generic
+                and incoming_has_html_file
+                and not existing_has_html_file
             )
         ):
             target["label"] = label
@@ -6824,6 +6851,8 @@ class _InputOutputDialog(QDialog):
             f"{label} Direct Text glossary dispatch",
             payload_thread,
         )
+        if label:
+            segment["label"] = label
         segment["glossary_stream"] = True
         segment["phase"] = "processing"
         segment["complete"] = False
@@ -7925,7 +7954,7 @@ class _InputOutputDialog(QDialog):
                         )
                         processing_html += (
                             "<table class='processing-detail-table' width='100%' "
-                            "cellspacing='0' cellpadding='0'><tr>"
+                            "cellspacing='0' cellpadding='9'><tr>"
                             "<td class='processing-detail-cell'>"
                             f"{rendered_processing}</td></tr></table>"
                         )

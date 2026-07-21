@@ -42,6 +42,34 @@ _single_pass_glossary_lock = threading.Lock()
 _single_pass_glossary_active_indices = set()
 
 
+def _direct_text_html_source_name(chapter):
+    """Return the EPUB HTML basename used for a Direct Text request card."""
+    if not isinstance(chapter, dict):
+        return ""
+    for key in (
+        "original_basename",
+        "original_filename",
+        "filename",
+        "source_filename",
+        "href",
+    ):
+        basename = os.path.basename(
+            str(chapter.get(key) or "").replace("\\", "/")
+        ).strip()
+        if os.path.splitext(basename)[1].lower() in (".html", ".xhtml", ".htm"):
+            return basename
+    return ""
+
+
+def _direct_text_label_with_source(label, source_file):
+    """Append an HTML source basename once, without changing other labels."""
+    label = " ".join(str(label or "Request").split()) or "Request"
+    source_file = os.path.basename(str(source_file or "").replace("\\", "/")).strip()
+    if not source_file or source_file.lower() in label.lower():
+        return label
+    return f"{label} · {source_file}"
+
+
 def _content_for_text_output(content):
     """Return the payload that should be written for a translated text source.
 
@@ -6519,6 +6547,7 @@ class TranslationProcessor:
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                     'merged_chapters': merged_chapters,
+                    'source_file': _direct_text_html_source_name(c),
                 }
 
                 def _mark_progress_on_send():
@@ -7602,6 +7631,7 @@ class BatchTranslationProcessor:
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                     'dispatch_order': chapter.get('_batch_request_order'),
+                    'source_file': _direct_text_html_source_name(chapter),
                 }
                 
                 # Get chunk timeout from environment
@@ -7639,8 +7669,11 @@ class BatchTranslationProcessor:
                             before_dispatch_callback=lambda: (
                                 self._announce_ordered_request_dispatch(
                                     chapter.get('_batch_request_order'),
-                                    f"Chapter {actual_num} "
-                                    f"(chunk {chunk_idx}/{total_chunks})",
+                                    _direct_text_label_with_source(
+                                        f"Chapter {actual_num} "
+                                        f"(chunk {chunk_idx}/{total_chunks})",
+                                        chapter_ctx.get('source_file'),
+                                    ),
                                 )
                             ),
                             before_send_callback=_mark_batch_chunk_progress_on_send,
@@ -7879,8 +7912,11 @@ class BatchTranslationProcessor:
                                     before_dispatch_callback=lambda: (
                                         self._announce_ordered_request_dispatch(
                                             chapter.get('_batch_request_order'),
-                                            f"Chapter {actual_num} "
-                                            f"(chunk {chunk_idx}/{total_chunks})",
+                                            _direct_text_label_with_source(
+                                                f"Chapter {actual_num} "
+                                                f"(chunk {chunk_idx}/{total_chunks})",
+                                                chapter_ctx.get('source_file'),
+                                            ),
                                         )
                                     ),
                                     before_send_callback=_mark_batch_chunk_progress_on_send,
@@ -9123,6 +9159,7 @@ class BatchTranslationProcessor:
                     'dispatch_order': parent_chapter.get(
                         '_batch_request_order'
                     ),
+                    'source_file': _direct_text_html_source_name(parent_chapter),
                 }
 
                 def _mark_merged_request_progress_on_send():
@@ -9150,6 +9187,11 @@ class BatchTranslationProcessor:
                                 f"{merged_chapter_nums_for_context[-1]}"
                                 if len(merged_chapter_nums_for_context) > 1
                                 else f"Merged {merged_chapter_nums_for_context[0]}"
+                            )
+                            + (
+                                f" · {chapter_ctx['source_file']}"
+                                if chapter_ctx.get('source_file')
+                                else ""
                             ),
                         )
                     ),
@@ -17146,6 +17188,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         chunk = chapter_context.get("chunk")
         total_chunks = chapter_context.get("total_chunks")
         dispatch_order = chapter_context.get("dispatch_order")
+        source_file = chapter_context.get("source_file")
         label = ""
         if merged:
             try:
@@ -17178,6 +17221,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 label = f"Request {int(dispatch_order) + 1}"
             except (TypeError, ValueError):
                 label = "Request"
+        label = _direct_text_label_with_source(label, source_file)
 
         try:
             request_number = int(dispatch_order) + 1
@@ -17357,6 +17401,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         chunk=chapter_context.get('chunk'),
                         total_chunks=chapter_context.get('total_chunks'),
                         merged_chapters=chapter_context.get('merged_chapters'),
+                        source_file=chapter_context.get('source_file'),
                     )
                     dispatch_order = chapter_context.get('dispatch_order')
                     if dispatch_order is not None:
@@ -17367,6 +17412,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # Compatibility for third-party/legacy clients that
                         # implement the older chapter-context signature.
                         context_kwargs.pop('dispatch_order', None)
+                        context_kwargs.pop('source_file', None)
                         client.set_chapter_context(**context_kwargs)
                 except Exception:
                     # Context is best-effort and should never break the call

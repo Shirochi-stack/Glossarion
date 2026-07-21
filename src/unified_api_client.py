@@ -17618,7 +17618,8 @@ class UnifiedClient:
         return "request"
 
     def set_chapter_context(self, chapter=None, chunk=None, total_chunks=None,
-                            merged_chapters=None, dispatch_order=None):
+                            merged_chapters=None, dispatch_order=None,
+                            source_file=None):
         """Store chapter/chunk context on thread-local state for logging and payload metadata."""
         try:
             tls = self._get_thread_local_client()
@@ -17628,6 +17629,7 @@ class UnifiedClient:
                 "total_chunks": total_chunks,
                 "merged_chapters": merged_chapters,
                 "dispatch_order": dispatch_order,
+                "source_file": source_file,
             }
             tls.chapter_context = context
 
@@ -17649,6 +17651,10 @@ class UnifiedClient:
                         info["merged_chapters"] = merged_chapters
                 if dispatch_order is not None:
                     info["dispatch_order"] = int(dispatch_order)
+                if source_file:
+                    info["source_file"] = os.path.basename(
+                        str(source_file).replace("\\", "/")
+                    )
                 self._thread_chapter_info[thread_id] = info
             except Exception:
                 pass
@@ -17673,6 +17679,16 @@ class UnifiedClient:
                     tls.current_request_label = f"{_chapter_term()} {chapter} (chunk {chunk}/{total_chunks})"
                 else:
                     tls.current_request_label = f"{_chapter_term()} {chapter}"
+            source_name = os.path.basename(
+                str(source_file or "").replace("\\", "/")
+            ).strip()
+            if source_name and source_name.lower() not in getattr(
+                tls, 'current_request_label', ''
+            ).lower():
+                tls.current_request_label = (
+                    getattr(tls, 'current_request_label', 'request')
+                    + f" · {source_name}"
+                )
             if (
                 dispatch_order is not None
                 and os.getenv("DIRECT_TEXT_ORDERED_BATCH", "0") == "1"

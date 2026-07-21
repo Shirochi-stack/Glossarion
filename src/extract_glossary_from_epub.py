@@ -642,6 +642,25 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             chapter_label = f"Chapter {chap_num} (chunk {chunk_idx}/{total_chunks})"
         else:
             chapter_label = f"Chapter {chap_num}"
+
+    # EPUB extraction already keeps the source filename indexed by the same
+    # internal chapter position. Carry it into Direct Text's live/final card
+    # identity so chapter and chunk numbers are not the only visible context.
+    chapter_source_file = ""
+    try:
+        filename_map = globals().get("_GLOSSARY_CHAPTER_FILENAMES", {}) or {}
+        chapter_source_file = filename_map.get(int(chapter_idx), "")
+    except (TypeError, ValueError):
+        chapter_source_file = ""
+    chapter_source_file = os.path.basename(
+        str(chapter_source_file or "").replace("\\", "/")
+    ).strip()
+    if (
+        os.path.splitext(chapter_source_file)[1].lower()
+        in (".html", ".xhtml", ".htm")
+        and chapter_source_file.lower() not in chapter_label.lower()
+    ):
+        chapter_label += f" · {chapter_source_file}"
     
     result_queue = queue.Queue()
 
