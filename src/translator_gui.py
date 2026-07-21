@@ -1447,6 +1447,29 @@ class _InputOutputDialog(QDialog):
     # message on the GUI thread.
     _ACTIVE_STREAM_START_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_START_7F31"
     _ACTIVE_STREAM_END_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_END_7F31"
+
+    @staticmethod
+    def _recommended_window_metrics():
+        """Return screen-relative default and minimum dialog dimensions."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return (1040, 960, 720, 640)
+        available = screen.availableGeometry()
+        default_width = max(1, int(available.width() * 0.74))
+        default_height = max(1, int(available.height() * 0.88))
+        minimum_width = min(
+            default_width, max(1, int(available.width() * 0.50))
+        )
+        minimum_height = min(
+            default_height, max(1, int(available.height() * 0.55))
+        )
+        return (
+            default_width,
+            default_height,
+            minimum_width,
+            minimum_height,
+        )
+
     def __init__(self, translator):
         super().__init__(translator)
         from collections import deque
@@ -1595,8 +1618,14 @@ class _InputOutputDialog(QDialog):
             | Qt.WindowMinMaxButtonsHint
             | Qt.WindowCloseButtonHint
         )
-        self.resize(1040, 840)
-        self.setMinimumSize(720, 560)
+        (
+            default_width,
+            default_height,
+            minimum_width,
+            minimum_height,
+        ) = self._recommended_window_metrics()
+        self.resize(default_width, default_height)
+        self.setMinimumSize(minimum_width, minimum_height)
         self._restore_maximized_after_fullscreen = False
 
         root = QVBoxLayout(self)
@@ -2049,6 +2078,16 @@ class _InputOutputDialog(QDialog):
             "Uses the glossary mode and currently selected glossary from the main "
             "translator without applying a Direct Text override."
         )
+        self.attachment_glossary_override_radio = QRadioButton(
+            "No Override (Attachments Only)"
+        )
+        self.attachment_glossary_override_radio.setStyleSheet(
+            glossary_radio_style
+        )
+        self.attachment_glossary_override_radio.setToolTip(
+            "Uses the main translator's glossary settings for attached files. "
+            "Direct Text submissions without an attachment use No Glossary."
+        )
         self.force_no_glossary_radio = QRadioButton("Force No Glossary")
         self.force_no_glossary_radio.setStyleSheet(glossary_radio_style)
         self.force_no_glossary_radio.setToolTip(
@@ -2067,6 +2106,9 @@ class _InputOutputDialog(QDialog):
         self.glossary_mode_button_group.addButton(
             self.no_glossary_override_radio
         )
+        self.glossary_mode_button_group.addButton(
+            self.attachment_glossary_override_radio
+        )
         self.glossary_mode_button_group.addButton(self.force_no_glossary_radio)
         self.glossary_mode_button_group.addButton(self.manual_glossary_radio)
 
@@ -2074,13 +2116,16 @@ class _InputOutputDialog(QDialog):
             translator.config.get('direct_text_glossary_override_mode', '') or ''
         ).strip().lower()
         if configured_glossary_override not in {
-            'none', 'no_glossary', 'manual'
+            'none', 'attachments_only', 'no_glossary', 'manual'
         }:
-            # Preserve Direct Text's safe default: do not use or generate a
-            # glossary unless the user explicitly chooses another mode.
-            configured_glossary_override = 'no_glossary'
+            # Plain text keeps the safe No Glossary behavior, while attached
+            # documents inherit the main translator by default.
+            configured_glossary_override = 'attachments_only'
         self.no_glossary_override_radio.setChecked(
             configured_glossary_override == 'none'
+        )
+        self.attachment_glossary_override_radio.setChecked(
+            configured_glossary_override == 'attachments_only'
         )
         self.force_no_glossary_radio.setChecked(
             configured_glossary_override == 'no_glossary'
@@ -2091,6 +2136,11 @@ class _InputOutputDialog(QDialog):
         self.no_glossary_override_radio.toggled.connect(
             lambda checked: self._on_glossary_override_toggled(
                 'none', checked
+            )
+        )
+        self.attachment_glossary_override_radio.toggled.connect(
+            lambda checked: self._on_glossary_override_toggled(
+                'attachments_only', checked
             )
         )
         self.force_no_glossary_radio.toggled.connect(
@@ -2271,6 +2321,11 @@ class _InputOutputDialog(QDialog):
                 self.no_glossary_override_radio,
                 "Use the main translator's current glossary mode and selected "
                 "glossary without a Direct Text override.",
+            ),
+            (
+                self.attachment_glossary_override_radio,
+                "Use the main translator's glossary settings for attachments; "
+                "use No Glossary for Direct Text without an attachment.",
             ),
             (
                 self.force_no_glossary_radio,
@@ -2964,8 +3019,10 @@ class _InputOutputDialog(QDialog):
         if not checked:
             return
         mode = str(mode or 'none').strip().lower()
-        if mode not in {'none', 'no_glossary', 'manual'}:
-            mode = 'none'
+        if mode not in {
+            'none', 'attachments_only', 'no_glossary', 'manual'
+        }:
+            mode = 'attachments_only'
         try:
             config = self.translator.config
             config['direct_text_glossary_override_mode'] = mode
@@ -2976,6 +3033,24 @@ class _InputOutputDialog(QDialog):
             self.translator.save_config(show_message=False)
         except Exception:
             pass
+
+    def _selected_glossary_override_mode(self):
+        """Return the active Direct Text glossary policy."""
+        if self.manual_glossary_radio.isChecked():
+            return 'manual'
+        if self.force_no_glossary_radio.isChecked():
+            return 'no_glossary'
+        if self.no_glossary_override_radio.isChecked():
+            return 'none'
+        return 'attachments_only'
+
+    @staticmethod
+    def _force_no_glossary_for_mode(mode, has_attachment):
+        """Resolve a persisted glossary policy for one submission."""
+        normalized = str(mode or 'attachments_only').strip().lower()
+        return normalized == 'no_glossary' or (
+            normalized == 'attachments_only' and not bool(has_attachment)
+        )
 
     def _request_direct_text_manual_glossary(self):
         """Ask for a per-run glossary by file drop, browsing, or pasted content.
@@ -6573,7 +6648,10 @@ class _InputOutputDialog(QDialog):
                 self.force_multipass_off_checkbox.isChecked()
             )
             gui._direct_text_force_no_glossary = bool(
-                self.force_no_glossary_radio.isChecked()
+                self._force_no_glossary_for_mode(
+                    self._selected_glossary_override_mode(),
+                    self._run_source_is_attachment,
+                )
                 and not manual_glossary_path
             )
             gui._direct_text_use_manual_glossary = bool(manual_glossary_path)
@@ -6632,6 +6710,7 @@ class _InputOutputDialog(QDialog):
             self.delete_chat_button.setEnabled(False)
             self.force_multipass_off_checkbox.setEnabled(False)
             self.no_glossary_override_radio.setEnabled(False)
+            self.attachment_glossary_override_radio.setEnabled(False)
             self.force_no_glossary_radio.setEnabled(False)
             self.manual_glossary_radio.setEnabled(False)
             self.skip_thinking_checkbox.setEnabled(False)
@@ -6657,10 +6736,16 @@ class _InputOutputDialog(QDialog):
             self._set_status("Could not start")
             self._restore_run_context()
 
-    @staticmethod
-    def _request_label_from_log(line, fallback_number):
+    def _request_label_from_log(self, line, fallback_number):
         """Extract the friendly chapter/chunk label from an API-start record."""
         import re
+
+        # Typed Direct Text is adapted to a temporary one-file document only
+        # so it can reuse the normal translation pipeline. Its synthetic
+        # chapter/chunk identity is an implementation detail, not useful chat
+        # metadata. Real attachments retain their spine/chunk labels.
+        if not self._run_source_is_attachment:
+            return f"Request {int(fallback_number)}"
 
         value = str(line or "")
         metadata_match = re.search(
@@ -6839,6 +6924,12 @@ class _InputOutputDialog(QDialog):
             )
             self._active_request_segments.remove(thread_target)
 
+        if not self._run_source_is_attachment:
+            plain_request_number = int(
+                target.get("request_number", 0) or request_number or 1
+            )
+            label = f"Request {plain_request_number}"
+
         previous_tokens = int(target.get("text_tokens", 0) or 0)
         previous_thinking_tokens = int(
             target.get("thinking_tokens", 0) or 0
@@ -6926,7 +7017,7 @@ class _InputOutputDialog(QDialog):
             f"{label} Direct Text glossary dispatch",
             payload_thread,
         )
-        if label:
+        if label and self._run_source_is_attachment:
             segment["label"] = label
         segment["glossary_stream"] = True
         segment["phase"] = "processing"
@@ -8318,17 +8409,8 @@ class _InputOutputDialog(QDialog):
                         processing_html += (
                             "<table class='processing-detail-table' width='100%' "
                             "cellspacing='0' cellpadding='0'>"
-                            "<tr class='processing-detail-pad-row'>"
-                            "<td colspan='3' height='9' style='border:none'></td></tr>"
-                            "<tr><td class='processing-detail-pad-cell' width='11' "
-                            "style='border:none'></td>"
-                            "<td class='processing-detail-cell' style='border:none'>"
-                            f"{rendered_processing}</td>"
-                            "<td class='processing-detail-pad-cell' width='11' "
-                            "style='border:none'></td></tr>"
-                            "<tr class='processing-detail-pad-row'>"
-                            "<td colspan='3' height='9' style='border:none'></td>"
-                            "</tr></table>"
+                            "<tr><td class='processing-detail-cell'>"
+                            f"{rendered_processing}</td></tr></table>"
                         )
                 message_actions = []
                 is_attachment_action_card = (
@@ -8600,11 +8682,12 @@ class _InputOutputDialog(QDialog):
             ".processing-summary a { color: #cbd5e1; font-weight: 600; "
             "text-decoration: none; }"
             ".processing-detail-table { background: #171a21; "
-            "border: 1px solid #4a5568; margin: 4px 0 12px 0; }"
-            ".processing-detail-pad-row, .processing-detail-pad-row td { "
-            "height: 9px; font-size: 1px; line-height: 1px; padding: 0; }"
-            ".processing-detail-pad-cell { width: 11px; padding: 0; }"
-            ".processing-detail-cell { color: #aeb8c8; padding: 0; "
+            "margin: 4px 0 12px 0; }"
+            # One cell owns the sole frame and its inset.  This selector must
+            # outrank the surrounding rounded assistant table's td reset;
+            # spacer cells create visible internal grid lines in QTextDocument.
+            ".processing-detail-table td.processing-detail-cell { "
+            "border: 1px solid #4a5568; padding: 9px 11px; color: #aeb8c8; "
             "font-family: 'Consolas','Menlo',monospace; font-size: 0.81em; "
             "line-height: 1.35; }"
             ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
@@ -8649,12 +8732,6 @@ class _InputOutputDialog(QDialog):
             "table { border-collapse: collapse; }"
             ".message-content table th, .message-content table td { "
             "border: 1px solid #596171; padding: 4px 7px; }"
-            # The thinking inset is also table-backed because QTextDocument
-            # ignores ordinary div padding.  Keep its structural spacer cells
-            # out of the generic rendered-Markdown table styling; otherwise
-            # every spacer gets a visible border and produces a nested frame.
-            ".message-content table.processing-detail-table td { "
-            "border: none; padding: 0; }"
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
         )
@@ -9044,7 +9121,13 @@ class _InputOutputDialog(QDialog):
     def _effective_run_glossary_path(self):
         """Return the authoritative glossary used by the active Direct Text run."""
         try:
-            if self.force_no_glossary_radio.isChecked():
+            if bool(
+                getattr(
+                    self.translator,
+                    '_direct_text_force_no_glossary',
+                    self.force_no_glossary_radio.isChecked(),
+                )
+            ):
                 return ""
         except Exception:
             pass
@@ -9081,7 +9164,13 @@ class _InputOutputDialog(QDialog):
         # folder, where it looks active and can be auto-detected later.
         if not glossary_path:
             try:
-                force_none = self.force_no_glossary_radio.isChecked()
+                force_none = bool(
+                    getattr(
+                        self.translator,
+                        '_direct_text_force_no_glossary',
+                        self.force_no_glossary_radio.isChecked(),
+                    )
+                )
             except Exception:
                 force_none = False
             if force_none:
@@ -9795,6 +9884,7 @@ class _InputOutputDialog(QDialog):
         self.chat_list.setEnabled(True)
         self.force_multipass_off_checkbox.setEnabled(True)
         self.no_glossary_override_radio.setEnabled(True)
+        self.attachment_glossary_override_radio.setEnabled(True)
         self.force_no_glossary_radio.setEnabled(True)
         self.manual_glossary_radio.setEnabled(True)
         self.skip_thinking_checkbox.setEnabled(True)
@@ -32720,8 +32810,16 @@ Important rules:
             | Qt.WindowMinMaxButtonsHint
             | Qt.WindowCloseButtonHint
         )
-        loading_dialog.resize(1040, 840)
-        loading_dialog.setMinimumSize(720, 560)
+        # Match the final dialog so the loading shell does not resize when the
+        # complete interface replaces it.
+        (
+            default_width,
+            default_height,
+            minimum_width,
+            minimum_height,
+        ) = _InputOutputDialog._recommended_window_metrics()
+        loading_dialog.resize(default_width, default_height)
+        loading_dialog.setMinimumSize(minimum_width, minimum_height)
         loading_dialog.setWindowIcon(self.windowIcon())
 
         loading_layout = QVBoxLayout(loading_dialog)
