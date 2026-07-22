@@ -3047,7 +3047,8 @@ def _create_response_handling_section(self, parent):
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
         "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, AuthGem, and Antigravity. "
-        "Disable to suppress thinking output and only show final text.</p></qt>"
+        "AuthGrok reasoning summaries always stream outside batch mode; this setting still applies to AuthGrok during batch mode. "
+        "For other providers, disable this to suppress thinking output and show only final text.</p></qt>"
     )
     try:
         self.stream_thinking_logs_checkbox.setChecked(bool(self.stream_thinking_logs_var))

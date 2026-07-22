@@ -137,6 +137,7 @@ def test_reasoning_summary_stream_is_separate_from_response_text(monkeypatch):
 
 
 def test_reasoning_summary_is_captured_but_hidden_when_toggle_is_off(monkeypatch):
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
     monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
     state = authgrok._new_stream_display_state()
     logged = []
@@ -156,6 +157,31 @@ def test_reasoning_summary_is_captured_but_hidden_when_toggle_is_off(monkeypatch
 
     assert result["thinking_text"] == "Hidden summary"
     assert logged == ["Visible answer"]
+
+
+def test_reasoning_summary_always_streams_outside_batch_mode(monkeypatch):
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
+    state = authgrok._new_stream_display_state()
+    logged = []
+
+    authgrok._process_stream_event(
+        {"type": "response.reasoning_summary_text.delta", "delta": "Always visible"},
+        state,
+        logged.append,
+        log_stream=False,
+    )
+    authgrok._process_stream_event(
+        {"type": "response.output_text.delta", "delta": "Final answer"},
+        state,
+        logged.append,
+        log_stream=False,
+    )
+
+    assert logged[0] == "🧠 [authgrok] Thinking..."
+    assert "    Always visible" in logged
+    assert "📡 AuthGrok: Text streaming..." not in logged
+    assert "Final answer" not in logged
 
 
 def test_parse_responses_sse_uses_deltas_and_completed_usage():

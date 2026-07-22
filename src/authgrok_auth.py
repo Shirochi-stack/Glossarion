@@ -1079,8 +1079,13 @@ _REASONING_DELTA_EVENT_TYPES = {
 }
 
 
-def _stream_thinking_logging_enabled() -> bool:
-    return os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
+def _stream_thinking_logging_enabled(log_stream: bool = True) -> bool:
+    # AuthGrok is a forced-stream provider. Outside batch translation, always
+    # show any reasoning summary events exposed by xAI. Batch mode remains
+    # opt-in so concurrent summaries do not flood or interleave in the log.
+    if os.getenv("BATCH_TRANSLATION", "0") != "1":
+        return True
+    return log_stream and os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
         "0", "false", "no", "off"
     )
 
@@ -1166,7 +1171,7 @@ def _process_stream_event(
         state["thinking_parts"].append(delta)
         state["thinking_chunks"] += 1
 
-        if not log_stream or not _stream_thinking_logging_enabled():
+        if not _stream_thinking_logging_enabled(log_stream):
             return
         if state.get("display_phase") != "thinking":
             _flush_stream_log_buffer(state["text_buffer"], log_fn, log_stream)
@@ -1184,10 +1189,11 @@ def _process_stream_event(
     delta = str(event.get("delta") or "")
     if not delta:
         return
-    if log_stream and state.get("display_phase") == "thinking":
+    if state.get("display_phase") == "thinking":
         _finish_thinking_display(state, log_fn)
-        log_fn("─" * 50)
-        log_fn("📡 AuthGrok: Text streaming...")
+        if log_stream:
+            log_fn("─" * 50)
+            log_fn("📡 AuthGrok: Text streaming...")
         state["display_phase"] = "text"
     state["text_started"] = True
     _append_stream_log_delta(state["text_buffer"], delta, log_fn, log_stream)
