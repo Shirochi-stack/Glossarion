@@ -1435,6 +1435,8 @@ class _InputOutputDialog(QDialog):
         '] sdk stream start (model=',
         '] sdk stream opened in ',
         'sending api call in ',
+        ': sending request via codex api (',
+        ': sending request via anthropic messages api (',
         'gemini safety status:',
     )
     _DIRECT_RESPONSE_PAYLOAD_PREFIX = '[DIRECT_TEXT_RESPONSE_PAYLOAD] '
