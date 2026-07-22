@@ -542,7 +542,7 @@ def test_proxy_status_message_prioritizes_upstream_429_over_final_403():
     assert "Antigravity quota/rate limit detail" in message
 
 
-def test_numbered_antigravity_prefix_forces_account_header(monkeypatch):
+def test_numbered_antigravity_prefix_controls_account_routing(monkeypatch):
     fake_summary = {
         "healthy": True,
         "accounts": [
@@ -562,8 +562,13 @@ def test_numbered_antigravity_prefix_forces_account_header(monkeypatch):
     )
 
     assert antigravity_proxy._extract_antigravity_account_id("antigravity/gemini-2.5-flash") == 1
+    assert antigravity_proxy._extract_antigravity_account_id("antigravity0/gemini-2.5-flash") == 0
     assert antigravity_proxy._extract_antigravity_account_id("antigravity1/gemini-2.5-flash") == 2
     assert antigravity_proxy._extract_antigravity_account_id("antigravity12/gemini-2.5-flash") == 13
+
+    rotating_headers = antigravity_proxy._build_headers(account_id=0)
+    assert "X-Antigravity-Account" not in rotating_headers
+    assert "X-Client-Id" not in rotating_headers
 
     headers = antigravity_proxy._build_headers(account_id=2)
 
@@ -573,6 +578,51 @@ def test_numbered_antigravity_prefix_forces_account_header(monkeypatch):
         antigravity_proxy._account_slot_log_message(2, headers)
         == "🧭 Antigravity: using account slot #2 (second@example.test)"
     )
+
+
+def test_antigravity_zero_prefix_reaches_proxy_without_forced_account(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "rotated"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_log_forwarder", lambda _log: None)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_account_slot_available",
+        lambda account_id, *_args: captured.setdefault("account_id", account_id),
+    )
+
+    def fake_post(_payload, **kwargs):
+        captured["headers"] = kwargs["headers"]
+        return Response()
+
+    monkeypatch.setattr(antigravity_proxy, "_post_chat", fake_post)
+
+    result = antigravity_proxy.send_message(
+        [{"role": "user", "content": "hello"}],
+        model="antigravity0/gemini-2.5-flash",
+        log_fn=lambda _message: None,
+    )
+
+    assert result["content"] == "rotated"
+    assert captured["account_id"] == 0
+    assert "X-Antigravity-Account" not in captured["headers"]
+    assert "X-Client-Id" not in captured["headers"]
+    client = _unified_antigravity_client("antigravity0/gemini-2.5-flash")
+    assert client._extract_antigravity_account_id(client.model) == 0
 
 
 def test_stream_chat_with_httpx_disables_compression(monkeypatch):

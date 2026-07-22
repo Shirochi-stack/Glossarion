@@ -16015,7 +16015,7 @@ Recent translations to summarize:
             accounts = []
 
         if accounts:
-            self.antigravity_login_btn.setText(f"✅ Antigravity ({len(accounts)})")
+            self.antigravity_login_btn.setText(f"➕ Antigravity ({len(accounts)})")
             self.antigravity_login_btn.setToolTip(
                 "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
                 f"{len(accounts)} Google account(s) linked in the local Antigravity proxy.<br>"

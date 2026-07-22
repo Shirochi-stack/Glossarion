@@ -93,6 +93,20 @@ def test_stream_log_breaks_after_html_block_tags_across_deltas():
     ]
 
 
+def test_batch_stream_log_respects_forced_stream_toggle(monkeypatch):
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setenv("BATCH_TRANSLATION", "1")
+    monkeypatch.setenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0")
+    assert authgrok._stream_logging_enabled() is False
+
+    monkeypatch.setenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "1")
+    assert authgrok._stream_logging_enabled() is True
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "0")
+    assert authgrok._stream_logging_enabled() is False
+
+
 def test_parse_responses_sse_uses_deltas_and_completed_usage():
     stream = "\n".join([
         'event: response.output_text.delta',

@@ -3091,7 +3091,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.stream_thinking_logs_checkbox)
     section_v.addWidget(self.allow_batch_stream_logs_checkbox)
 
-    # AuthGPT (ChatGPT Subscription) batch stream log toggle
+    # Forced-stream OAuth providers batch stream log toggle
     section_v.addSpacing(6)
     if not hasattr(self, 'allow_authgpt_batch_stream_logs_var'):
         self.allow_authgpt_batch_stream_logs_var = bool(
@@ -3105,11 +3105,11 @@ def _create_response_handling_section(self, parent):
     except Exception:
         pass
     self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
-        "Allow forced-stream batch log (AuthGPT / AuthGem / AuthCD / Antigravity)"
+        "Allow forced-stream batch log (AuthGPT / AuthGrok / AuthGem / AuthCD / Antigravity)"
     )
     self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "AuthGPT (authgpt/), AuthGem (authgem/), AuthCD (authcd/), and Antigravity (antigravity/) always stream internally. "
+        "AuthGPT (authgpt/), AuthGrok (authgrok/), AuthGem (authgem/), AuthCD (authcd/), and Antigravity (antigravity/) always stream internally. "
         "During batch translation this can flood the log. Enable this to see streaming "
         "tokens in the log during batch mode. Off by default.</p></qt>"
     )
@@ -3127,7 +3127,7 @@ def _create_response_handling_section(self, parent):
     self.allow_authgpt_batch_stream_logs_checkbox.toggled.connect(_on_allow_authgpt_batch_stream_logs_toggle)
     section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
 
-    authgpt_note = QLabel("🔐 AuthGPT, AuthGem, AuthCD, and Antigravity always stream — this controls batch log visibility")
+    authgpt_note = QLabel("🔐 AuthGPT, AuthGrok, AuthGem, AuthCD, and Antigravity always stream — this controls batch log visibility")
     authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
     authgpt_note.setWordWrap(True)
     authgpt_note.setContentsMargins(20, 0, 0, 4)

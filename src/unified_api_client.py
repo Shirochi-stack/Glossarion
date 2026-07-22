@@ -2187,14 +2187,16 @@ class UnifiedClient:
 
     @staticmethod
     def _extract_antigravity_account_id(model: str) -> Optional[int]:
-        """Extract the 1-based saved-account slot from Antigravity prefixes.
+        """Extract the saved-account routing value from Antigravity prefixes.
 
-        ``antigravity/`` is account #1; ``antigravity1/`` is account #2.
+        ``antigravity/`` is account #1; ``antigravity1/`` is account #2;
+        ``antigravity0/`` disables forced-slot routing.
         """
         clean = (model or '').strip()
         numbered = re.match(r'^antigravity(\d{1,4})(?:/|$)', clean, re.IGNORECASE)
         if numbered:
-            return int(numbered.group(1)) + 1
+            prefix_number = int(numbered.group(1))
+            return 0 if prefix_number == 0 else prefix_number + 1
         if re.match(r'^antigravity(?:/|-|$)', clean, re.IGNORECASE):
             return 1
         return None
@@ -25505,8 +25507,8 @@ class UnifiedClient:
         Google Cloud Code through an OpenAI-compatible API. Models are prefixed
         with 'antigravity/' or 'antigravityN/' (e.g.
         antigravity/claude-sonnet-4-6, antigravity1/gemini-3-flash).
-        The unnumbered prefix forces account #1; numbered variants force
-        subsequent account slots.
+        The unnumbered prefix forces account #1; positive numbered variants
+        force subsequent account slots; antigravity0/ uses automatic rotation.
         """
         if self._should_abort_retry():
             if _antigravity_cancel_stream is not None:
@@ -25540,7 +25542,9 @@ class UnifiedClient:
                 error_type="cancelled",
             )
 
-        account_id = self._extract_antigravity_account_id(self.model) or 1
+        account_id = self._extract_antigravity_account_id(self.model)
+        if account_id is None:
+            account_id = 1
         actual_model = self._strip_antigravity_model_prefix(self.model)
         if not actual_model:
             actual_model = 'claude-sonnet-4-6'  # sensible default

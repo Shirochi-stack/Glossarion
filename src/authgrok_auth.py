@@ -1164,6 +1164,18 @@ def _stream_with_requests(
     return _parse_sse_responses("\n".join(lines))
 
 
+def _stream_logging_enabled() -> bool:
+    """Return whether forced AuthGrok stream chunks should be shown in the log."""
+    enabled = os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+    if os.getenv("BATCH_TRANSLATION", "0") == "1":
+        enabled = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in (
+            "0", "false", "no", "off"
+        )
+    return enabled
+
+
 def send_chat_completion(
     access_token: str,
     messages: List[Dict[str, Any]],
@@ -1185,9 +1197,7 @@ def send_chat_completion(
     output = log_fn or print
     logger.info("AuthGrok: POST %s model=%s", url, model)
     reset_cancel()
-    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in (
-        "0", "false", "no", "off"
-    )
+    log_stream = _stream_logging_enabled()
 
     try:
         import httpx

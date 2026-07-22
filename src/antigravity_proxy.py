@@ -1022,16 +1022,18 @@ def _get_proxy_port() -> int:
 
 
 def _extract_antigravity_account_id(model: str) -> Optional[int]:
-    """Return the 1-based saved-account slot for Antigravity prefixes.
+    """Return the saved-account routing value for Antigravity prefixes.
 
     ``antigravity/`` forces the first linked proxy account. Numbered prefixes
     are additional slots, so ``antigravity1/`` forces account #2,
-    ``antigravity2/`` forces account #3, and so on.
+    ``antigravity2/`` forces account #3, and so on. ``antigravity0/`` returns
+    zero to disable forced-slot routing and let the proxy rotate accounts.
     """
     clean = (model or "").strip()
     numbered = re.match(r"^antigravity(\d{1,4})(?:/|$)", clean, re.IGNORECASE)
     if numbered:
-        return int(numbered.group(1)) + 1
+        prefix_number = int(numbered.group(1))
+        return 0 if prefix_number == 0 else prefix_number + 1
     if re.match(r"^antigravity(?:/|-|$)", clean, re.IGNORECASE):
         return 1
     return None
@@ -2383,7 +2385,10 @@ def send_message(
     _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
-    account_id = account_id or _extract_antigravity_account_id(model) or 1
+    if account_id is None:
+        account_id = _extract_antigravity_account_id(model)
+    if account_id is None:
+        account_id = 1
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=False)
 
     _log = log_fn or _log_noop
@@ -2606,7 +2611,10 @@ def send_message_stream(
     _raise_if_cancelled()
     proxy_url = get_proxy_url()
     url = f"{proxy_url}{CHAT_COMPLETIONS_ENDPOINT}"
-    account_id = account_id or _extract_antigravity_account_id(model) or 1
+    if account_id is None:
+        account_id = _extract_antigravity_account_id(model)
+    if account_id is None:
+        account_id = 1
     payload = _payload_for_openai_chat(messages, model, temperature, max_tokens, stream=True)
 
     _log = log_fn or _log_noop
