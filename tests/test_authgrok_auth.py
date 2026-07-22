@@ -107,6 +107,57 @@ def test_batch_stream_log_respects_forced_stream_toggle(monkeypatch):
     assert authgrok._stream_logging_enabled() is False
 
 
+def test_reasoning_summary_stream_is_separate_from_response_text(monkeypatch):
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "1")
+    state = authgrok._new_stream_display_state()
+    logged = []
+    events = [
+        {"type": "response.reasoning_summary_text.delta", "delta": "Check the "},
+        {"type": "response.reasoning_summary_text.delta", "delta": "translation.\nPreserve HTML."},
+        {"type": "response.output_text.delta", "delta": "<p>Translated text.</p>"},
+    ]
+    for event in events:
+        authgrok._process_stream_event(event, state, logged.append, log_stream=True)
+
+    lines = [f"data: {json.dumps(event)}" for event in events]
+    lines.append(
+        'data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[]}}'
+    )
+    result = authgrok._finalize_stream_result(lines, state, logged.append, log_stream=True)
+
+    assert result["content"] == "<p>Translated text.</p>"
+    assert result["thinking_text"] == "Check the translation.\nPreserve HTML."
+    assert result["thinking_chunks"] == 2
+    assert logged[0] == "🧠 [authgrok] Thinking..."
+    assert "    Check the translation." in logged
+    assert "    Preserve HTML." in logged
+    assert "📡 AuthGrok: Text streaming..." in logged
+    assert "<p>Translated text.</p>" in logged
+    assert not any("Check the translation" in line and "Translated text" in line for line in logged)
+
+
+def test_reasoning_summary_is_captured_but_hidden_when_toggle_is_off(monkeypatch):
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
+    state = authgrok._new_stream_display_state()
+    logged = []
+    authgrok._process_stream_event(
+        {"type": "response.reasoning_text.delta", "delta": "Hidden summary"},
+        state,
+        logged.append,
+        log_stream=True,
+    )
+    authgrok._process_stream_event(
+        {"type": "response.output_text.delta", "delta": "Visible answer"},
+        state,
+        logged.append,
+        log_stream=True,
+    )
+    result = authgrok._finalize_stream_result([], state, logged.append, log_stream=True)
+
+    assert result["thinking_text"] == "Hidden summary"
+    assert logged == ["Visible answer"]
+
+
 def test_parse_responses_sse_uses_deltas_and_completed_usage():
     stream = "\n".join([
         'event: response.output_text.delta',

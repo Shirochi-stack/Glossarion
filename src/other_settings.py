@@ -3046,7 +3046,7 @@ def _create_response_handling_section(self, parent):
     self.stream_thinking_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
-        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGem, and Antigravity. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, AuthGem, and Antigravity. "
         "Disable to suppress thinking output and only show final text.</p></qt>"
     )
     try:

@@ -1073,6 +1073,145 @@ def _flush_stream_log_buffer(text_buffer: List[str], log_fn, log_stream: bool = 
     text_buffer.clear()
 
 
+_REASONING_DELTA_EVENT_TYPES = {
+    "response.reasoning_text.delta",
+    "response.reasoning_summary_text.delta",
+}
+
+
+def _stream_thinking_logging_enabled() -> bool:
+    return os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+
+
+def _new_stream_display_state() -> Dict[str, Any]:
+    return {
+        "text_buffer": [],
+        "thinking_buffer": "",
+        "thinking_parts": [],
+        "thinking_chunks": 0,
+        "thinking_start_ts": None,
+        "thinking_phase_complete": False,
+        "text_started": False,
+        "display_phase": None,
+    }
+
+
+def _flush_thinking_display_buffer(
+    state: Dict[str, Any],
+    log_fn,
+    force: bool = False,
+) -> None:
+    buf = str(state.get("thinking_buffer") or "")
+    if not buf:
+        return
+
+    def emit(value: str) -> None:
+        for item in value.splitlines():
+            safe = item.replace("\x1f", "\\x1F").strip()
+            if safe:
+                log_fn(f"    {safe}")
+
+    while "\n" in buf:
+        line, buf = buf.split("\n", 1)
+        emit(line)
+
+    if force:
+        emit(buf)
+        state["thinking_buffer"] = ""
+        return
+
+    # Keep reasoning summaries readable instead of printing token fragments.
+    max_buffer = 220
+    while len(buf) >= max_buffer:
+        boundary = max(buf.rfind(mark, 0, max_buffer) for mark in (". ", "? ", "! ", "; ", ": "))
+        if boundary >= 80:
+            cut = boundary + 1
+        else:
+            cut = buf.rfind(" ", 0, max_buffer)
+            if cut < 120:
+                cut = max_buffer
+        emit(buf[:cut])
+        buf = buf[cut:].lstrip()
+    state["thinking_buffer"] = buf
+
+
+def _finish_thinking_display(state: Dict[str, Any], log_fn) -> None:
+    if state.get("display_phase") != "thinking":
+        return
+    _flush_thinking_display_buffer(state, log_fn, force=True)
+    if not state.get("thinking_phase_complete"):
+        started = state.get("thinking_start_ts") or time.time()
+        log_fn(
+            f"🧠 [authgrok] Thinking summary complete "
+            f"({state.get('thinking_chunks', 0)} chunks, {time.time() - started:.1f}s)"
+        )
+        state["thinking_phase_complete"] = True
+
+
+def _process_stream_event(
+    event: Dict[str, Any],
+    state: Dict[str, Any],
+    log_fn,
+    log_stream: bool,
+) -> None:
+    event_type = str(event.get("type") or "")
+    if event_type in _REASONING_DELTA_EVENT_TYPES:
+        delta = str(event.get("delta") or "").replace("\\n", "\n")
+        if not delta:
+            return
+        if state.get("thinking_start_ts") is None:
+            state["thinking_start_ts"] = time.time()
+        state["thinking_parts"].append(delta)
+        state["thinking_chunks"] += 1
+
+        if not log_stream or not _stream_thinking_logging_enabled():
+            return
+        if state.get("display_phase") != "thinking":
+            _flush_stream_log_buffer(state["text_buffer"], log_fn, log_stream)
+            if state.get("text_started"):
+                log_fn("─" * 50)
+            log_fn("🧠 [authgrok] Thinking...")
+            state["display_phase"] = "thinking"
+            state["thinking_phase_complete"] = False
+        state["thinking_buffer"] += delta
+        _flush_thinking_display_buffer(state, log_fn)
+        return
+
+    if event_type != "response.output_text.delta":
+        return
+    delta = str(event.get("delta") or "")
+    if not delta:
+        return
+    if log_stream and state.get("display_phase") == "thinking":
+        _finish_thinking_display(state, log_fn)
+        log_fn("─" * 50)
+        log_fn("📡 AuthGrok: Text streaming...")
+        state["display_phase"] = "text"
+    state["text_started"] = True
+    _append_stream_log_delta(state["text_buffer"], delta, log_fn, log_stream)
+
+
+def _finalize_stream_result(
+    lines: List[str],
+    state: Dict[str, Any],
+    log_fn,
+    log_stream: bool,
+) -> Dict[str, Any]:
+    if log_stream and state.get("display_phase") == "thinking":
+        _finish_thinking_display(state, log_fn)
+    _flush_stream_log_buffer(state["text_buffer"], log_fn, log_stream)
+    result = _parse_sse_responses("\n".join(lines))
+    if state.get("thinking_parts"):
+        result["thinking_text"] = "".join(state["thinking_parts"])
+        result["thinking_chunks"] = state["thinking_chunks"]
+        started = state.get("thinking_start_ts")
+        if started is not None:
+            result["thinking_duration"] = max(0.0, time.time() - started)
+    return result
+
+
 def _stream_with_httpx(
     httpx_module,
     url: str,
@@ -1084,7 +1223,7 @@ def _stream_with_httpx(
     log_stream: bool = True,
 ) -> Dict[str, Any]:
     lines: List[str] = []
-    text_buffer: List[str] = []
+    state = _new_stream_display_state()
     http_timeout = httpx_module.Timeout(timeout, connect=connect_timeout)
     with httpx_module.stream(
         "POST",
@@ -1107,13 +1246,11 @@ def _stream_with_httpx(
                     event = json.loads(line[5:].strip())
                 except ValueError:
                     event = None
-                if isinstance(event, dict) and event.get("type") == "response.output_text.delta":
-                    delta = str(event.get("delta") or "")
-                    _append_stream_log_delta(text_buffer, delta, log_fn, log_stream)
+                if isinstance(event, dict):
+                    _process_stream_event(event, state, log_fn, log_stream)
             if _is_terminal_sse_line(line):
                 break
-    _flush_stream_log_buffer(text_buffer, log_fn, log_stream)
-    return _parse_sse_responses("\n".join(lines))
+    return _finalize_stream_result(lines, state, log_fn, log_stream)
 
 
 def _stream_with_requests(
@@ -1137,7 +1274,7 @@ def _stream_with_requests(
     if response.status_code >= 400:
         raise RuntimeError(f"AuthGrok HTTP {response.status_code}: {_safe_error_detail(response.text)}")
     lines: List[str] = []
-    text_buffer: List[str] = []
+    state = _new_stream_display_state()
     for raw_line in response.iter_lines(chunk_size=1):
         if is_cancelled():
             response.close()
@@ -1151,17 +1288,11 @@ def _stream_with_requests(
                 event = json.loads(line[5:].strip())
             except ValueError:
                 event = None
-            if isinstance(event, dict) and event.get("type") == "response.output_text.delta":
-                _append_stream_log_delta(
-                    text_buffer,
-                    str(event.get("delta") or ""),
-                    log_fn,
-                    log_stream,
-                )
+            if isinstance(event, dict):
+                _process_stream_event(event, state, log_fn, log_stream)
         if _is_terminal_sse_line(line):
             break
-    _flush_stream_log_buffer(text_buffer, log_fn, log_stream)
-    return _parse_sse_responses("\n".join(lines))
+    return _finalize_stream_result(lines, state, log_fn, log_stream)
 
 
 def _stream_logging_enabled() -> bool:
