@@ -1538,6 +1538,27 @@ class _InputOutputDialog(QDialog):
         self._message_bookmark_controls_timer.timeout.connect(
             self._update_message_bookmark_controls
         )
+        # Keep an explicit logical bookmark selection after an arrow click.
+        # Near the end of a conversation several card anchors can share the
+        # same clamped scrollbar position, so scroll geometry alone cannot
+        # distinguish (for example) bookmark 7 from 8 or 9.
+        self._message_bookmark_navigation_index = None
+        self._message_bookmark_tail_cleanup_timer = QTimer(self)
+        self._message_bookmark_tail_cleanup_timer.setSingleShot(True)
+        self._message_bookmark_tail_cleanup_timer.setInterval(140)
+        self._message_bookmark_tail_cleanup_timer.timeout.connect(
+            self._remove_message_bookmark_navigation_tail
+        )
+        self._input_bookmark_popup = None
+        self._input_bookmark_list = None
+        self._input_bookmark_popup_title = None
+        self._input_bookmark_popup_signature = None
+        self._input_bookmark_hide_timer = QTimer(self)
+        self._input_bookmark_hide_timer.setSingleShot(True)
+        self._input_bookmark_hide_timer.setInterval(110)
+        self._input_bookmark_hide_timer.timeout.connect(
+            self._hide_input_bookmark_preview_if_unused
+        )
         self._inline_response_resize_timer = QTimer(self)
         self._inline_response_resize_timer.setSingleShot(True)
         self._inline_response_resize_timer.setInterval(140)
@@ -1546,6 +1567,8 @@ class _InputOutputDialog(QDialog):
         )
         self._chat_sidebar_hidden = False
         self._assistant_message_active = False
+        self._active_request_next_number = self._next_conversation_request_number()
+        self._active_response_timestamp = ""
         self._pending_glossary_approval = None
         self._active_request_segments = []
         self._request_segment_by_thread = {}
@@ -1651,6 +1674,14 @@ class _InputOutputDialog(QDialog):
             "padding: 0 3px 1px 3px; background: transparent; }"
             "QLabel#directBookmarkPosition { color: #94a3b8; font-size: 8.5pt; "
             "padding: 0 2px 1px 2px; background: transparent; }"
+            "QToolButton#directBookmarkMenuButton { background: transparent; "
+            "color: #94a3b8; border: none; border-radius: 4px; "
+            "min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px; "
+            "padding: 0; font-size: 12pt; }"
+            "QToolButton#directBookmarkMenuButton:hover { background: #303641; "
+            "color: white; }"
+            "QToolButton#directBookmarkMenuButton:disabled { color: #4b5563; "
+            "background: transparent; }"
             "QToolButton#directBookmarkButton { background: transparent; "
             "color: #cbd5e1; border: 1px solid #4a5568; border-radius: 4px; "
             "min-width: 24px; max-width: 24px; min-height: 22px; max-height: 22px; "
@@ -1659,6 +1690,18 @@ class _InputOutputDialog(QDialog):
             "border-color: #5a9fd4; color: white; }"
             "QToolButton#directBookmarkButton:disabled { color: #596171; "
             "border-color: #343a46; background: transparent; }"
+            "QFrame#directInputBookmarkPopup { background: #2d2d2d; "
+            "border: 1px solid #4a5568; border-radius: 10px; }"
+            "QLabel#directInputBookmarkPopupTitle { color: #cbd5e1; "
+            "font-weight: 650; padding: 2px 4px 4px 4px; }"
+            "QListWidget#directInputBookmarkList { background: transparent; "
+            "color: white; border: none; outline: none; padding: 2px; }"
+            "QListWidget#directInputBookmarkList::item { border-radius: 7px; "
+            "padding: 9px 10px; margin: 1px 0; }"
+            "QListWidget#directInputBookmarkList::item:hover { "
+            "background: #3a3a3a; }"
+            "QListWidget#directInputBookmarkList::item:selected { "
+            "background: #404040; color: white; }"
             "QPushButton#sidebarToggleButton { min-width: 74px; max-width: 86px; "
             "min-height: 34px; max-height: 34px; padding: 0; font-size: 11pt; }"
             "QTabWidget#directTextTabs::pane { border: none; background: transparent; }"
@@ -1900,8 +1943,30 @@ class _InputOutputDialog(QDialog):
         self.bookmark_position_label.setAccessibleName(
             "Conversation message bookmarks"
         )
+        self.bookmark_position_label.setToolTip(
+            "Hover to preview every input, or use the arrows to move one card"
+        )
+        self.bookmark_position_label.installEventFilter(self)
         zoom_row.addWidget(
             self.bookmark_position_label, 0, Qt.AlignRight | Qt.AlignVCenter
+        )
+        self.input_bookmark_menu_button = QToolButton()
+        self.input_bookmark_menu_button.setObjectName(
+            "directBookmarkMenuButton"
+        )
+        self.input_bookmark_menu_button.setText("☰")
+        self.input_bookmark_menu_button.setToolTip(
+            "Hover to preview and jump directly to any input"
+        )
+        self.input_bookmark_menu_button.setAccessibleName(
+            "Open conversation input navigator"
+        )
+        self.input_bookmark_menu_button.installEventFilter(self)
+        self.input_bookmark_menu_button.clicked.connect(
+            self._show_input_bookmark_preview
+        )
+        zoom_row.addWidget(
+            self.input_bookmark_menu_button, 0, Qt.AlignVCenter
         )
         self.previous_bookmark_button = QToolButton()
         self.previous_bookmark_button.setObjectName("directBookmarkButton")
@@ -2533,6 +2598,13 @@ class _InputOutputDialog(QDialog):
         }
 
     @staticmethod
+    def _direct_response_timestamp():
+        """Return a compact, timezone-aware creation time for persisted cards."""
+        from datetime import datetime
+
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    @staticmethod
     def _resolve_chat_history_path():
         """Locate the durable Direct Text history file beside app configuration."""
         override = os.environ.get("GLOSSARION_DIRECT_TEXT_HISTORY")
@@ -2697,6 +2769,9 @@ class _InputOutputDialog(QDialog):
                 normalized[key] = max(0, int(storage.get(key, 0) or 0))
             except (TypeError, ValueError):
                 normalized[key] = 0
+        created_at = str(storage.get("created_at", "") or "").strip()
+        if created_at:
+            normalized["created_at"] = created_at[:64]
         return normalized
 
     def _history_file_reference(self, path):
@@ -2729,6 +2804,75 @@ class _InputOutputDialog(QDialog):
         ):
             return message[6]
         return {}
+
+    def _assistant_message_with_timestamp(self, message, created_at=""):
+        """Return an assistant tuple with durable creation metadata."""
+        values = list(message[:6])
+        while len(values) < 6:
+            values.append("")
+        storage = self._normalize_message_storage(
+            message[6] if len(message) > 6 else None
+        )
+        if not storage.get("created_at"):
+            storage["created_at"] = (
+                str(created_at or "").strip()
+                or self._direct_response_timestamp()
+            )
+        return tuple(values + [storage])
+
+    def _assistant_timestamp_label(self, message):
+        """Format a response timestamp unobtrusively for the card header."""
+        from datetime import datetime
+
+        raw = str(
+            self._assistant_storage_for(message).get("created_at", "") or ""
+        ).strip()
+        if not raw:
+            return ""
+        try:
+            created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if created.tzinfo is not None:
+                created = created.astimezone()
+            now = datetime.now().astimezone()
+            if created.date() == now.date():
+                return created.strftime("%H:%M")
+            if created.year == now.year:
+                return created.strftime("%b %d · %H:%M")
+            return created.strftime("%Y %b %d · %H:%M")
+        except (TypeError, ValueError):
+            return ""
+
+    def _next_conversation_request_number(self):
+        """Return the next request number across the entire active chat."""
+        import re
+
+        request_count = 0
+        for message in self._chat_messages:
+            if (
+                not isinstance(message, (list, tuple))
+                or not message
+                or str(message[0] or "") != "assistant"
+                or len(message) <= 5
+            ):
+                continue
+            if re.search(
+                r"\bRequest\s+\d+\b",
+                str(message[5] or ""),
+                flags=re.IGNORECASE,
+            ):
+                request_count += 1
+        return request_count + 1
+
+    def _allocate_active_request_number(self):
+        """Reserve one conversation-wide request number for the active run."""
+        try:
+            request_number = int(self._active_request_next_number)
+        except (AttributeError, TypeError, ValueError):
+            request_number = 0
+        if request_number < 1:
+            request_number = self._next_conversation_request_number()
+        self._active_request_next_number = request_number + 1
+        return request_number
 
     def _assistant_message_char_count(self, message, kind="content"):
         inline_index = 2 if kind == "thinking" else 1
@@ -3933,6 +4077,32 @@ class _InputOutputDialog(QDialog):
         except RuntimeError:
             inline_editor = None
             inline_editor_viewport = None
+        bookmark_label = getattr(self, "bookmark_position_label", None)
+        bookmark_button = getattr(self, "input_bookmark_menu_button", None)
+        bookmark_popup = getattr(self, "_input_bookmark_popup", None)
+        bookmark_list = getattr(self, "_input_bookmark_list", None)
+        try:
+            bookmark_list_viewport = (
+                bookmark_list.viewport() if bookmark_list is not None else None
+            )
+        except RuntimeError:
+            bookmark_list = None
+            bookmark_list_viewport = None
+        if watched in (bookmark_label, bookmark_button):
+            if event.type() == QEvent.Enter:
+                self._input_bookmark_hide_timer.stop()
+                self._show_input_bookmark_preview()
+            elif event.type() == QEvent.Leave:
+                self._schedule_input_bookmark_preview_hide()
+        elif watched in (
+            bookmark_popup,
+            bookmark_list,
+            bookmark_list_viewport,
+        ):
+            if event.type() == QEvent.Enter:
+                self._input_bookmark_hide_timer.stop()
+            elif event.type() == QEvent.Leave:
+                self._schedule_input_bookmark_preview_hide()
         if watched in (
             inline_editor,
             inline_editor_viewport,
@@ -3945,6 +4115,7 @@ class _InputOutputDialog(QDialog):
                 if event.modifiers() & Qt.ControlModifier:
                     self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
                 elif output_box is not None:
+                    self._clear_message_bookmark_navigation()
                     # The inline editor is fitted to its document height, so it
                     # has no useful independent scrolling. Route an ordinary
                     # wheel gesture to the conversation viewport instead.
@@ -3978,23 +4149,27 @@ class _InputOutputDialog(QDialog):
                     event.accept()
                     return True
             elif watched in (output_box, output_viewport):
+                self._clear_message_bookmark_navigation()
                 # Let QTextBrowser perform the wheel movement first, then make
                 # that user-selected position the new persistent stream lock.
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_scrollbar:
             if event.type() == QEvent.MouseButtonPress:
+                self._clear_message_bookmark_navigation()
                 self._output_scrollbar_drag_active = True
                 self._output_viewport_lock_anchor = None
             elif event.type() == QEvent.MouseButtonRelease:
                 self._output_scrollbar_drag_active = False
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
             elif event.type() == QEvent.Wheel:
+                self._clear_message_bookmark_navigation()
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_box and event.type() == QEvent.KeyRelease:
             if event.key() in (
                 Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown,
                 Qt.Key_Home, Qt.Key_End, Qt.Key_Space,
             ):
+                self._clear_message_bookmark_navigation()
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_viewport and event.type() == QEvent.Resize:
             QTimer.singleShot(0, self._position_inline_response_editor)
@@ -4171,9 +4346,245 @@ class _InputOutputDialog(QDialog):
             return 0
         return 1
 
+    @staticmethod
+    def _input_bookmark_preview_text(message):
+        """Return one compact, plain-text preview for an input card."""
+        import html as html_lib
+
+        role = str(message[0] if message else "")
+        content = str(message[1] if len(message) > 1 else "")
+        if role == "user_file":
+            prompt = str(message[4] if len(message) > 4 else "").strip()
+            content = (
+                f"📎 {content} — {prompt}"
+                if prompt
+                else f"📎 {content}"
+            )
+        content = re.sub(r"(?i)<br\s*/?>", " ", content)
+        content = re.sub(r"<[^>]+>", " ", content)
+        content = html_lib.unescape(content)
+        content = re.sub(r"\s+", " ", content).strip()
+        return content or "(empty input)"
+
+    def _input_message_bookmarks(self):
+        """Return every persisted user input and its one-line preview."""
+        inputs = []
+        for message_index, message in enumerate(self._chat_messages):
+            if not isinstance(message, (list, tuple)) or not message:
+                continue
+            if str(message[0] or "") not in ("user", "user_file"):
+                continue
+            inputs.append(
+                (
+                    message_index,
+                    self._input_bookmark_preview_text(message),
+                )
+            )
+        return inputs
+
+    def _ensure_input_bookmark_popup(self):
+        """Create the reusable hover navigator for conversation inputs."""
+        popup = getattr(self, "_input_bookmark_popup", None)
+        if popup is not None:
+            return popup
+
+        from PySide6.QtWidgets import QListWidget
+
+        # Qt.Popup grabs native popup/activation state. For a hover-driven
+        # interactive panel that causes the trigger to receive a synthetic
+        # Leave event, repeatedly hiding and reopening the panel. A child tool
+        # window stays interactive without stealing activation from the dialog.
+        popup = QFrame(
+            self,
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowDoesNotAcceptFocus,
+        )
+        popup.setObjectName("directInputBookmarkPopup")
+        popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        popup.setFocusPolicy(Qt.NoFocus)
+        popup.setMouseTracking(True)
+        popup.installEventFilter(self)
+        popup_layout = QVBoxLayout(popup)
+        popup_layout.setContentsMargins(10, 9, 10, 10)
+        popup_layout.setSpacing(4)
+
+        title = QLabel("Jump to input")
+        title.setObjectName("directInputBookmarkPopupTitle")
+        popup_layout.addWidget(title)
+
+        input_list = QListWidget()
+        input_list.setObjectName("directInputBookmarkList")
+        input_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        input_list.setTextElideMode(Qt.ElideRight)
+        input_list.setUniformItemSizes(True)
+        input_list.setFocusPolicy(Qt.NoFocus)
+        input_list.setMouseTracking(True)
+        input_list.installEventFilter(self)
+        input_list.viewport().installEventFilter(self)
+        input_list.itemClicked.connect(self._jump_to_input_bookmark_preview)
+        input_list.itemActivated.connect(self._jump_to_input_bookmark_preview)
+        popup_layout.addWidget(input_list)
+
+        self._input_bookmark_popup = popup
+        self._input_bookmark_popup_title = title
+        self._input_bookmark_list = input_list
+        return popup
+
+    def _show_input_bookmark_preview(self):
+        """Show all input previews beside the hybrid bookmark controls."""
+        inputs = self._input_message_bookmarks()
+        if not inputs:
+            return
+        popup = self._ensure_input_bookmark_popup()
+        input_list = self._input_bookmark_list
+        popup_signature = tuple(inputs)
+        if popup_signature != self._input_bookmark_popup_signature:
+            input_list.clear()
+            for input_ordinal, (message_index, preview) in enumerate(
+                inputs, start=1
+            ):
+                item_text = f"{input_ordinal}.  {preview}"
+                input_list.addItem(item_text)
+                item = input_list.item(input_list.count() - 1)
+                item.setData(Qt.UserRole, message_index)
+                item.setToolTip(preview)
+            self._input_bookmark_popup_signature = popup_signature
+
+        self._input_bookmark_popup_title.setText(
+            f"Jump to input  ·  {len(inputs)}"
+        )
+
+        bookmark_indices = self._message_bookmark_indices()
+        selected_index = getattr(
+            self, "_message_bookmark_navigation_index", None
+        )
+        if selected_index not in bookmark_indices:
+            selected_index = self._message_bookmark_index_from_view(
+                self._visible_message_bookmark_positions()
+            )
+        selected_row = 0
+        for row, (message_index, _preview) in enumerate(inputs):
+            if message_index <= (
+                selected_index if selected_index is not None else -1
+            ):
+                selected_row = row
+            else:
+                break
+        if input_list.count():
+            input_list.setCurrentRow(selected_row)
+            input_list.scrollToItem(input_list.item(selected_row))
+
+        popup_width = max(320, min(460, int(self.width() * 0.34)))
+        visible_rows = min(8, len(inputs))
+        row_height = max(36, input_list.sizeHintForRow(0))
+        popup_height = 47 + (visible_rows * row_height)
+        popup.resize(popup_width, popup_height)
+
+        anchor = self.input_bookmark_menu_button
+        anchor_bottom = anchor.mapToGlobal(anchor.rect().bottomRight())
+        anchor_top = anchor.mapToGlobal(anchor.rect().topRight())
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        popup_x = anchor_bottom.x() - popup_width
+        popup_y = anchor_bottom.y() + 6
+        if available is not None:
+            popup_x = max(
+                available.left() + 6,
+                min(popup_x, available.right() - popup_width - 6),
+            )
+            if popup_y + popup_height > available.bottom() - 6:
+                popup_y = max(
+                    available.top() + 6,
+                    anchor_top.y() - popup_height - 6,
+                )
+        popup.move(popup_x, popup_y)
+        self._input_bookmark_hide_timer.stop()
+        popup.show()
+        popup.raise_()
+
+    def _schedule_input_bookmark_preview_hide(self):
+        """Give the pointer time to move from the controls into the popup."""
+        popup = getattr(self, "_input_bookmark_popup", None)
+        if popup is not None and popup.isVisible():
+            self._input_bookmark_hide_timer.start()
+
+    def _hide_input_bookmark_preview_if_unused(self):
+        """Hide the preview only after the pointer leaves both hover regions."""
+        from PySide6.QtGui import QCursor
+
+        popup = getattr(self, "_input_bookmark_popup", None)
+        button = getattr(self, "input_bookmark_menu_button", None)
+        label = getattr(self, "bookmark_position_label", None)
+        input_list = getattr(self, "_input_bookmark_list", None)
+        if popup is None or not popup.isVisible():
+            return
+
+        cursor_position = QCursor.pos()
+
+        def cursor_inside(widget):
+            try:
+                return bool(
+                    widget is not None
+                    and widget.isVisible()
+                    and widget.rect().contains(
+                        widget.mapFromGlobal(cursor_position)
+                    )
+                )
+            except RuntimeError:
+                return False
+
+        list_viewport = None
+        if input_list is not None:
+            try:
+                list_viewport = input_list.viewport()
+            except RuntimeError:
+                pass
+        if (
+            cursor_inside(button)
+            or cursor_inside(label)
+            or cursor_inside(popup)
+            or cursor_inside(input_list)
+            or cursor_inside(list_viewport)
+        ):
+            return
+        popup.hide()
+
+    def _jump_to_input_bookmark_preview(self, item):
+        """Jump directly to the input selected from the hover navigator."""
+        if item is None:
+            return
+        try:
+            message_index = int(item.data(Qt.UserRole))
+        except (TypeError, ValueError):
+            return
+        popup = getattr(self, "_input_bookmark_popup", None)
+        if popup is not None:
+            popup.hide()
+        self._scroll_to_message_bookmark(message_index)
+        self.output_box.setFocus(Qt.OtherFocusReason)
+
+    def _message_bookmark_indices(self):
+        """Return only message indices that render as Input/Output cards."""
+        indices = []
+        for message_index, message in enumerate(self._chat_messages):
+            if not isinstance(message, (list, tuple)) or not message:
+                continue
+            role = str(message[0] or "")
+            if role in ("user", "user_file", "assistant"):
+                indices.append(message_index)
+        active_start = len(self._chat_messages)
+        indices.extend(
+            range(
+                active_start,
+                active_start + self._active_message_bookmark_count(),
+            )
+        )
+        return indices
+
     def _message_bookmark_total_count(self):
         """Return saved inputs/outputs plus any currently streaming outputs."""
-        return len(self._chat_messages) + self._active_message_bookmark_count()
+        return len(self._message_bookmark_indices())
 
     def _message_bookmark_role_label(self, message_index):
         """Describe one bookmark as an input or output."""
@@ -4185,7 +4596,7 @@ class _InputOutputDialog(QDialog):
             message = self._chat_messages[message_index]
             role = str(message[0] if message else "")
             return "Input" if role in ("user", "user_file") else "Output"
-        if message_index < self._message_bookmark_total_count():
+        if message_index in self._message_bookmark_indices():
             return "Output"
         return "Message"
 
@@ -4202,9 +4613,10 @@ class _InputOutputDialog(QDialog):
                     len(self._chat_messages),
                 ),
             )
-            total = self._message_bookmark_total_count()
             positions = []
-            for message_index in range(first_index, total):
+            for message_index in self._message_bookmark_indices():
+                if message_index < first_index:
+                    continue
                 cursor = document.find(
                     self._message_row_start_marker(message_index)
                 )
@@ -4225,10 +4637,56 @@ class _InputOutputDialog(QDialog):
         if timer is not None and not timer.isActive():
             timer.start()
 
+    def _clear_message_bookmark_navigation(self, *_args):
+        """Let manual scrolling choose the current bookmark from geometry again."""
+        had_explicit_navigation = (
+            self._message_bookmark_navigation_index is not None
+        )
+        self._message_bookmark_navigation_index = None
+        if had_explicit_navigation:
+            # Arrow navigation temporarily gives the document enough tail room
+            # to align its final cards. Remove that room after the user's
+            # manual wheel/scrollbar gesture has settled.
+            self._message_bookmark_tail_cleanup_timer.start()
+        self._schedule_message_bookmark_controls_update()
+
+    def _remove_message_bookmark_navigation_tail(self):
+        """Remove temporary jump-only tail room without disturbing active input."""
+        if self._message_bookmark_navigation_index is not None:
+            return
+        if getattr(self, "_output_scrollbar_drag_active", False):
+            self._message_bookmark_tail_cleanup_timer.start()
+            return
+        self._render_output(preserve_viewport=True)
+
+    def _message_bookmark_index_from_view(self, positions):
+        """Resolve the nearest rendered bookmark from the current viewport."""
+        if not positions:
+            return None
+        scrollbar = self.output_box.verticalScrollBar()
+        scroll_value = int(scrollbar.value())
+        tolerance = 24
+        at_bottom = scroll_value >= max(
+            int(scrollbar.minimum()),
+            int(scrollbar.maximum()) - tolerance,
+        )
+        if at_bottom:
+            return positions[-1][0]
+        current_index = positions[0][0]
+        for message_index, anchor_y in positions:
+            if anchor_y <= scroll_value + tolerance:
+                current_index = message_index
+            else:
+                break
+        return current_index
+
     def _update_message_bookmark_controls(self):
         """Reflect the nearest input/output bookmark and available directions."""
         previous_button = getattr(self, "previous_bookmark_button", None)
         next_button = getattr(self, "next_bookmark_button", None)
+        input_menu_button = getattr(
+            self, "input_bookmark_menu_button", None
+        )
         position_label = getattr(self, "bookmark_position_label", None)
         if (
             previous_button is None
@@ -4238,56 +4696,46 @@ class _InputOutputDialog(QDialog):
         ):
             return
 
-        total = self._message_bookmark_total_count()
+        bookmark_indices = self._message_bookmark_indices()
+        total = len(bookmark_indices)
         positions = self._visible_message_bookmark_positions()
         if total <= 0 or not positions:
+            self._message_bookmark_navigation_index = None
             position_label.setText("Bookmarks")
             position_label.setToolTip(
                 "Inputs and outputs will appear here as message bookmarks"
             )
+            if input_menu_button is not None:
+                input_menu_button.setEnabled(False)
             previous_button.setEnabled(False)
             next_button.setEnabled(False)
             return
 
-        scrollbar = self.output_box.verticalScrollBar()
-        scroll_value = int(scrollbar.value())
-        tolerance = 24
-        at_bottom = scroll_value >= max(
-            int(scrollbar.minimum()),
-            int(scrollbar.maximum()) - tolerance,
+        selected_index = getattr(
+            self, "_message_bookmark_navigation_index", None
         )
-        if at_bottom:
-            # The final card usually cannot be aligned with the viewport top:
-            # the scrollbar reaches its maximum first. Treat the physical
-            # bottom of the conversation as the final visible bookmark.
-            current_index = positions[-1][0]
+        if selected_index in bookmark_indices:
+            current_index = selected_index
         else:
+            self._message_bookmark_navigation_index = None
+            current_index = self._message_bookmark_index_from_view(positions)
+        if current_index not in bookmark_indices:
             current_index = positions[0][0]
-            for message_index, anchor_y in positions:
-                if anchor_y <= scroll_value + tolerance:
-                    current_index = message_index
-                else:
-                    break
+        current_ordinal = bookmark_indices.index(current_index)
         role_label = self._message_bookmark_role_label(current_index)
         position_label.setText(
-            f"{role_label} · {current_index + 1}/{total}"
+            f"{role_label} · {current_ordinal + 1}/{total}"
         )
         position_label.setToolTip(
             f"Nearest bookmark: {role_label.lower()} "
-            f"{current_index + 1} of {total}"
+            f"{current_ordinal + 1} of {total}. "
+            "Hover to preview and jump to any input."
         )
 
-        has_hidden_earlier = int(self._history_visible_start) > 0
-        has_previous = has_hidden_earlier or any(
-            anchor_y < scroll_value - tolerance
-            for _message_index, anchor_y in positions
-        )
-        has_next = not at_bottom and any(
-            anchor_y > scroll_value + tolerance
-            for _message_index, anchor_y in positions
-        )
-        previous_button.setEnabled(has_previous)
-        next_button.setEnabled(has_next)
+        if input_menu_button is not None:
+            input_menu_button.setEnabled(bool(self._input_message_bookmarks()))
+        previous_button.setEnabled(current_ordinal > 0)
+        next_button.setEnabled(current_ordinal + 1 < total)
 
     def _scroll_to_message_bookmark(self, message_index):
         """Place one message-card anchor at the top of the conversation view."""
@@ -4295,8 +4743,13 @@ class _InputOutputDialog(QDialog):
             message_index = int(message_index)
         except (TypeError, ValueError):
             return
-        if not (0 <= message_index < self._message_bookmark_total_count()):
+        if message_index not in self._message_bookmark_indices():
             return
+        navigation_tail_missing = (
+            self._message_bookmark_navigation_index is None
+        )
+        self._message_bookmark_navigation_index = message_index
+        self._message_bookmark_tail_cleanup_timer.stop()
 
         def finish_jump():
             self.output_box.scrollToAnchor(
@@ -4305,7 +4758,8 @@ class _InputOutputDialog(QDialog):
             self._refresh_output_viewport_lock_anchor()
             self._update_message_bookmark_controls()
 
-        if message_index < int(self._history_visible_start):
+        history_expanded = message_index < int(self._history_visible_start)
+        if history_expanded:
             self._history_visible_start = max(
                 0,
                 min(
@@ -4314,40 +4768,33 @@ class _InputOutputDialog(QDialog):
                     - int(self._history_page_size),
                 ),
             )
+        if navigation_tail_missing or history_expanded:
             self._render_output(preserve_viewport=True)
         # QTextDocument resolves anchor geometry after the current event turn.
         QTimer.singleShot(0, finish_jump)
 
     def _jump_to_message_bookmark(self, direction):
-        """Jump to the previous or next rendered input/output boundary."""
+        """Move exactly one logical Input/Output bookmark in either direction."""
         direction = -1 if int(direction) < 0 else 1
+        bookmark_indices = self._message_bookmark_indices()
+        if not bookmark_indices:
+            self._update_message_bookmark_controls()
+            return
         positions = self._visible_message_bookmark_positions()
-        scroll_value = int(self.output_box.verticalScrollBar().value())
-        tolerance = 24
-
-        if direction < 0:
-            candidates = [
-                (message_index, anchor_y)
-                for message_index, anchor_y in positions
-                if anchor_y < scroll_value - tolerance
-            ]
-            if candidates:
-                self._scroll_to_message_bookmark(candidates[-1][0])
-                return
-            if int(self._history_visible_start) > 0:
-                self._scroll_to_message_bookmark(
-                    int(self._history_visible_start) - 1
-                )
-                return
-        else:
-            candidates = [
-                (message_index, anchor_y)
-                for message_index, anchor_y in positions
-                if anchor_y > scroll_value + tolerance
-            ]
-            if candidates:
-                self._scroll_to_message_bookmark(candidates[0][0])
-                return
+        selected_index = getattr(
+            self, "_message_bookmark_navigation_index", None
+        )
+        if selected_index not in bookmark_indices:
+            selected_index = self._message_bookmark_index_from_view(positions)
+        if selected_index not in bookmark_indices:
+            selected_index = bookmark_indices[0]
+        selected_ordinal = bookmark_indices.index(selected_index)
+        target_ordinal = selected_ordinal + direction
+        if 0 <= target_ordinal < len(bookmark_indices):
+            self._scroll_to_message_bookmark(
+                bookmark_indices[target_ordinal]
+            )
+            return
         self._update_message_bookmark_controls()
 
     def _schedule_conversation_scroll_to_bottom(self):
@@ -4379,6 +4826,13 @@ class _InputOutputDialog(QDialog):
         session = self._chat_sessions[self._current_chat_index]
         self._chat_messages = session["messages"]
         self._assistant_message_active = False
+        self._message_bookmark_navigation_index = None
+        self._message_bookmark_tail_cleanup_timer.stop()
+        popup = getattr(self, "_input_bookmark_popup", None)
+        if popup is not None:
+            popup.hide()
+        self._active_request_next_number = self._next_conversation_request_number()
+        self._active_response_timestamp = ""
         self._active_request_segments = []
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
@@ -6703,6 +7157,11 @@ class _InputOutputDialog(QDialog):
         ).strip().lower()
         if attachment_prompt_role not in {'system', 'assistant', 'user'}:
             attachment_prompt_role = 'user'
+        # A newly submitted turn owns the tail of the conversation. Discard a
+        # prior arrow-selected bookmark so the counter can follow the new
+        # input and its live response normally.
+        self._message_bookmark_navigation_index = None
+        self._message_bookmark_tail_cleanup_timer.stop()
         if attachment:
             self._chat_messages.append(
                 (
@@ -6722,6 +7181,8 @@ class _InputOutputDialog(QDialog):
             current_session["attachment"] = None
         self._refresh_output_viewport_lock_anchor()
         self._assistant_message_active = True
+        self._active_request_next_number = self._next_conversation_request_number()
+        self._active_response_timestamp = self._direct_response_timestamp()
         self._expanded_processing_messages.discard(len(self._chat_messages))
         self.input_box.clear()
         self._pending_attachment = None
@@ -7170,11 +7631,15 @@ class _InputOutputDialog(QDialog):
             )
             self._active_request_segments.remove(thread_target)
 
-        if not self._run_source_is_attachment:
-            plain_request_number = int(
-                target.get("request_number", 0) or request_number or 1
-            )
-            label = f"Request {plain_request_number}"
+        target_request_number = int(
+            target.get("request_number", 0)
+            or self._allocate_active_request_number()
+        )
+        target["request_number"] = target_request_number
+        if label.lower().startswith("request "):
+            # Provider payload numbers are local to one backend invocation.
+            # The Direct Text card number is conversation-wide.
+            label = f"Request {target_request_number}"
 
         previous_tokens = int(target.get("text_tokens", 0) or 0)
         previous_thinking_tokens = int(
@@ -7214,11 +7679,6 @@ class _InputOutputDialog(QDialog):
             )
         ):
             target["label"] = label
-        if request_number is not None:
-            # Chapter/chunk identity and request sequence are independent.
-            # Keep both so completion payloads cannot replace one with the
-            # other when the response card is rendered.
-            target["request_number"] = request_number
         target["content"] = content
         target["text_tokens"] = current_tokens
         if thinking:
@@ -7383,9 +7843,12 @@ class _InputOutputDialog(QDialog):
                 if (existing_generic and not incoming_generic) or order_key_improved:
                     self._sort_active_request_segments()
                 return existing
+        conversation_request_number = self._allocate_active_request_number()
+        if incoming_generic:
+            request_label = f"Request {conversation_request_number}"
         segment = {
             "label": request_label,
-            "request_number": segment_number,
+            "request_number": conversation_request_number,
             "thread": thread_key,
             "content": "",
             "thinking": "",
@@ -7397,6 +7860,7 @@ class _InputOutputDialog(QDialog):
             # promotes it to a real response card.
             "status_only": True,
             "complete": False,
+            "created_at": self._direct_response_timestamp(),
             "order_key": self._request_order_from_log(
                 line, segment_number
             ),
@@ -7450,6 +7914,8 @@ class _InputOutputDialog(QDialog):
                 )
         elif not response_label and request_number > 0:
             response_label = f"Request {request_number}"
+        created_at = str(segment.get("created_at", "") or "").strip()
+        storage = {"created_at": created_at} if created_at else {}
         return (
             "assistant",
             str(segment.get("content", "") or ""),
@@ -7457,6 +7923,7 @@ class _InputOutputDialog(QDialog):
             processing_label,
             str(output_folder or ""),
             response_label,
+            storage,
         )
 
     def _schedule_stream_render(self, immediate=False):
@@ -8322,14 +8789,25 @@ class _InputOutputDialog(QDialog):
         previous_scroll = scrollbar.value()
         horizontal_scrollbar = self.output_box.horizontalScrollBar()
         previous_horizontal_scroll = horizontal_scrollbar.value()
-        viewport_anchor = (
-            self._output_viewport_anchor_for_render()
-            if self._output_auto_scroll_disabled
-            else None
+        bookmark_navigation_active = (
+            self._message_bookmark_navigation_index
+            in self._message_bookmark_indices()
         )
-        freeze_viewport = bool(
+        hold_viewport = bool(
             self._output_auto_scroll_disabled
-            and self.output_box.updatesEnabled()
+            or bookmark_navigation_active
+        )
+        if self._output_auto_scroll_disabled:
+            viewport_anchor = self._output_viewport_anchor_for_render()
+        elif bookmark_navigation_active:
+            # A bookmark jump is an explicit viewport choice even when normal
+            # follow-tail scrolling is enabled. Keep that card fixed while a
+            # live response continues to replace its stream fragment.
+            viewport_anchor = self._capture_output_viewport_anchor()
+        else:
+            viewport_anchor = None
+        freeze_viewport = bool(
+            hold_viewport and self.output_box.updatesEnabled()
         )
         if freeze_viewport:
             self.output_box.setUpdatesEnabled(False)
@@ -8346,7 +8824,7 @@ class _InputOutputDialog(QDialog):
                     self._ACTIVE_STREAM_END_MARKER
                 )
             )
-            if self._output_auto_scroll_disabled:
+            if hold_viewport:
                 self._settle_output_document_layout()
                 if not self._restore_output_viewport_anchor(viewport_anchor):
                     scrollbar.setSliderPosition(
@@ -8373,6 +8851,7 @@ class _InputOutputDialog(QDialog):
 
     def _render_output(self, active_only=False, preserve_viewport=False):
         import html as html_lib
+        import re
 
         current_session = self._current_chat_session()
         current_session_id = (
@@ -8401,7 +8880,7 @@ class _InputOutputDialog(QDialog):
             elif not glossary_approval_pending:
                 # The run remains active while the inline glossary gate waits
                 # for Edit/Yes/No, but there is no translation request in
-                # flight yet.  Do not invent a blank Request 1/Processing card
+                # flight yet.  Do not invent a blank request/processing card
                 # above the decision card during that pause.
                 active_messages.append(
                     (
@@ -8410,7 +8889,10 @@ class _InputOutputDialog(QDialog):
                         self._thinking_stream_text,
                         self._processing_label_text,
                         "",
-                        "Request 1",
+                        f"Request {self._active_request_next_number}",
+                        {
+                            "created_at": self._active_response_timestamp,
+                        },
                     )
                 )
         if active_only:
@@ -8423,6 +8905,19 @@ class _InputOutputDialog(QDialog):
             messages = list(self._chat_messages[history_start:])
             messages.extend(active_messages)
             first_message_index = history_start
+
+        saved_request_ordinals = {}
+        request_ordinal = 0
+        for saved_index, saved_message in enumerate(self._chat_messages):
+            saved_label = str(
+                saved_message[5]
+                if isinstance(saved_message, (list, tuple))
+                and len(saved_message) > 5
+                else ""
+            )
+            if re.search(r"\bRequest\s+\d+\b", saved_label, re.IGNORECASE):
+                request_ordinal += 1
+                saved_request_ordinals[saved_index] = request_ordinal
 
         if self._assistant_avatar_data_uri:
             avatar_source = html_lib.escape(
@@ -8599,6 +9094,16 @@ class _InputOutputDialog(QDialog):
                     else str(message[4] if len(message) > 4 else "")
                 )
                 request_label = str(message[5] if len(message) > 5 else "")
+                displayed_request_number = saved_request_ordinals.get(message_index)
+                if displayed_request_number is not None:
+                    request_label = re.sub(
+                        r"\bRequest\s+\d+\b",
+                        f"Request {displayed_request_number}",
+                        request_label,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                timestamp_label = self._assistant_timestamp_label(message)
                 session = self._current_chat_session()
                 session_id = session.get("id") if session is not None else None
                 is_active_message = bool(
@@ -8735,6 +9240,12 @@ class _InputOutputDialog(QDialog):
                     + (
                         f" <span class='request-label'>· {html_lib.escape(request_label)}</span>"
                         if request_label
+                        else ""
+                    )
+                    + (
+                        f" <span class='message-timestamp'>· "
+                        f"{html_lib.escape(timestamp_label)}</span>"
+                        if timestamp_label
                         else ""
                     )
                     + "</div>"
@@ -8887,6 +9398,8 @@ class _InputOutputDialog(QDialog):
             ".role { color: #cbd5e1; font-size: 0.76em; font-weight: 700; "
             "letter-spacing: 0.08em; margin-bottom: 6px; }"
             ".request-label { color: #8fa2ba; font-weight: 600; letter-spacing: 0; }"
+            ".message-timestamp { color: #687384; font-size: 0.88em; "
+            "font-weight: 400; letter-spacing: 0; }"
             ".user-role { color: #cbd5e1; }"
             ".user-bubble { background-color: #2d2d2d; color: white; "
             "padding: 13px 16px; border-radius: 12px; }"
@@ -8976,6 +9489,8 @@ class _InputOutputDialog(QDialog):
             "code { background: #20242d; padding: 1px 3px; }"
             ".processing-pre, .processing-inline-code { "
             "background: transparent; border: none; margin: 0; padding: 0; }"
+            ".bookmark-navigation-tail, .bookmark-navigation-tail td { "
+            "background: transparent; border: none; margin: 0; padding: 0; }"
             "blockquote { border-left: 3px solid #5a9fd4; "
             "margin-left: 4px; padding-left: 11px; color: #cbd5e1; }"
             "table { border-collapse: collapse; }"
@@ -8984,11 +9499,30 @@ class _InputOutputDialog(QDialog):
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
         )
+        navigation_tail_html = ""
+        if (
+            self._message_bookmark_navigation_index
+            in self._message_bookmark_indices()
+        ):
+            # QTextBrowser cannot normally place one of the final cards at the
+            # top because the document ends first. This temporary, transparent
+            # tail exists only while arrow/preview navigation is active.
+            navigation_tail_height = max(
+                120, int(self.output_box.viewport().height())
+            )
+            navigation_tail_html = (
+                "<table class='bookmark-navigation-tail' width='1' "
+                f"height='{navigation_tail_height}' cellspacing='0' "
+                "cellpadding='0'><tr>"
+                f"<td height='{navigation_tail_height}'>&nbsp;</td>"
+                "</tr></table>"
+            )
         document = (
             "<html><head><style>"
             + style_sheet
             + "</style></head><body>"
             + ''.join(message_html)
+            + navigation_tail_html
             + "</body></html>"
         )
         # setHtml() temporarily resets the viewport before layout completes.
@@ -9096,12 +9630,14 @@ class _InputOutputDialog(QDialog):
             )
         ):
             completion_messages = [
-                tuple(message)
+                self._assistant_message_with_timestamp(tuple(message))
                 for message in completion_message
                 if isinstance(message, (list, tuple)) and message
             ]
         elif completion_message:
-            completion_messages = [completion_message]
+            completion_messages = [
+                self._assistant_message_with_timestamp(completion_message)
+            ]
         else:
             completion_messages = []
         if self._active_request_segments:
@@ -9156,14 +9692,18 @@ class _InputOutputDialog(QDialog):
             )
         else:
             final_processing_label = self._processing_label_text or "Processing"
+        fallback_request_number = self._allocate_active_request_number()
         self._chat_messages.append(
-            (
-                "assistant",
-                content,
-                self._thinking_stream_text,
-                final_processing_label,
-                self._last_output_folder,
-                "Request 1",
+            self._assistant_message_with_timestamp(
+                (
+                    "assistant",
+                    content,
+                    self._thinking_stream_text,
+                    final_processing_label,
+                    self._last_output_folder,
+                    f"Request {fallback_request_number}",
+                ),
+                self._active_response_timestamp,
             )
         )
         self._chat_messages.extend(completion_messages)
@@ -9667,9 +10207,10 @@ class _InputOutputDialog(QDialog):
             None,
         )
         if target is None:
+            response_request_number = self._allocate_active_request_number()
             target = {
                 "label": "Header / TOC translation",
-                "request_number": len(self._active_request_segments) + 1,
+                "request_number": response_request_number,
                 "thread": "",
                 "content": "",
                 "thinking": "",
@@ -9678,6 +10219,7 @@ class _InputOutputDialog(QDialog):
                 "text_tokens": 0,
                 "status_only": False,
                 "complete": True,
+                "created_at": self._direct_response_timestamp(),
                 "order_key": (
                     0,
                     1_000_000,
