@@ -2003,12 +2003,31 @@ class _InputOutputDialog(QDialog):
             "Conversation output bookmarks"
         )
         self.output_bookmark_position_label.setToolTip(
-            "Use the arrows to move between outputs"
+            "Hover to preview every output, or use the arrows to move between outputs"
         )
+        self.output_bookmark_position_label.installEventFilter(self)
         zoom_row.addWidget(
             self.output_bookmark_position_label,
             0,
             Qt.AlignRight | Qt.AlignVCenter,
+        )
+        self.output_bookmark_menu_button = QToolButton()
+        self.output_bookmark_menu_button.setObjectName(
+            "directBookmarkMenuButton"
+        )
+        self.output_bookmark_menu_button.setText("☰")
+        self.output_bookmark_menu_button.setToolTip(
+            "Hover to preview and jump directly to any output"
+        )
+        self.output_bookmark_menu_button.setAccessibleName(
+            "Open conversation output navigator"
+        )
+        self.output_bookmark_menu_button.installEventFilter(self)
+        self.output_bookmark_menu_button.clicked.connect(
+            self._show_output_bookmark_preview
+        )
+        zoom_row.addWidget(
+            self.output_bookmark_menu_button, 0, Qt.AlignVCenter
         )
         self.previous_output_bookmark_button = QToolButton()
         self.previous_output_bookmark_button.setObjectName(
@@ -4129,6 +4148,12 @@ class _InputOutputDialog(QDialog):
             inline_editor_viewport = None
         bookmark_label = getattr(self, "bookmark_position_label", None)
         bookmark_button = getattr(self, "input_bookmark_menu_button", None)
+        output_bookmark_label = getattr(
+            self, "output_bookmark_position_label", None
+        )
+        output_bookmark_button = getattr(
+            self, "output_bookmark_menu_button", None
+        )
         bookmark_popup = getattr(self, "_input_bookmark_popup", None)
         bookmark_list = getattr(self, "_input_bookmark_list", None)
         try:
@@ -4142,6 +4167,12 @@ class _InputOutputDialog(QDialog):
             if event.type() == QEvent.Enter:
                 self._input_bookmark_hide_timer.stop()
                 self._show_input_bookmark_preview()
+            elif event.type() == QEvent.Leave:
+                self._schedule_input_bookmark_preview_hide()
+        elif watched in (output_bookmark_label, output_bookmark_button):
+            if event.type() == QEvent.Enter:
+                self._input_bookmark_hide_timer.stop()
+                self._show_output_bookmark_preview()
             elif event.type() == QEvent.Leave:
                 self._schedule_input_bookmark_preview_hide()
         elif watched in (
@@ -4432,6 +4463,65 @@ class _InputOutputDialog(QDialog):
             )
         return inputs
 
+    def _output_message_bookmarks(self):
+        """Return every rendered assistant output and its one-line preview."""
+        outputs = []
+        for message_index in self._message_bookmark_indices("output"):
+            message = None
+            if 0 <= message_index < len(self._chat_messages):
+                candidate = self._chat_messages[message_index]
+                if (
+                    isinstance(candidate, (list, tuple))
+                    and candidate
+                    and str(candidate[0] or "") == "assistant"
+                ):
+                    message = candidate
+            else:
+                active_offset = message_index - len(self._chat_messages)
+                if 0 <= active_offset < len(self._active_request_segments):
+                    message = self._request_segment_message(
+                        self._active_request_segments[active_offset]
+                    )
+                elif active_offset == 0 and self._assistant_message_active:
+                    message = (
+                        "assistant",
+                        self._streamed_content,
+                        self._thinking_stream_text,
+                        self._processing_label_text,
+                        "",
+                        f"Request {self._active_request_next_number}",
+                    )
+            if message is None:
+                continue
+
+            if message_index < len(self._chat_messages):
+                content = self._assistant_message_text(
+                    message, "content", message_index
+                )
+            else:
+                content = str(message[1] if len(message) > 1 else "")
+            request_label = str(
+                message[5] if len(message) > 5 else ""
+            ).strip()
+            processing_label = str(
+                message[3] if len(message) > 3 else ""
+            ).strip()
+            preview_source = (
+                content.strip()
+                or request_label
+                or processing_label
+                or "Generating output…"
+            )
+            outputs.append(
+                (
+                    message_index,
+                    self._input_bookmark_preview_text(
+                        ("assistant", preview_source)
+                    ),
+                )
+            )
+        return outputs
+
     def _ensure_input_bookmark_popup(self):
         """Create the reusable hover navigator for conversation inputs."""
         popup = getattr(self, "_input_bookmark_popup", None)
@@ -4472,8 +4562,10 @@ class _InputOutputDialog(QDialog):
         input_list.setMouseTracking(True)
         input_list.installEventFilter(self)
         input_list.viewport().installEventFilter(self)
-        input_list.itemClicked.connect(self._jump_to_input_bookmark_preview)
-        input_list.itemActivated.connect(self._jump_to_input_bookmark_preview)
+        input_list.itemClicked.connect(self._jump_to_message_bookmark_preview)
+        input_list.itemActivated.connect(
+            self._jump_to_message_bookmark_preview
+        )
         popup_layout.addWidget(input_list)
 
         self._input_bookmark_popup = popup
@@ -4482,30 +4574,60 @@ class _InputOutputDialog(QDialog):
         return popup
 
     def _show_input_bookmark_preview(self):
-        """Show all input previews beside the hybrid bookmark controls."""
-        inputs = self._input_message_bookmarks()
-        if not inputs:
+        """Show all input previews beside the input bookmark controls."""
+        self._show_message_bookmark_preview("input")
+
+    def _show_output_bookmark_preview(self):
+        """Show all output previews beside the output bookmark controls."""
+        self._show_message_bookmark_preview("output")
+
+    def _show_message_bookmark_preview(self, bookmark_role):
+        """Show role-specific previews beside the matching controls."""
+        import textwrap
+
+        role_name = str(bookmark_role or "").strip().lower()
+        if role_name == "output":
+            bookmarks = self._output_message_bookmarks()
+            anchor = self.output_bookmark_menu_button
+        else:
+            role_name = "input"
+            bookmarks = self._input_message_bookmarks()
+            anchor = self.input_bookmark_menu_button
+        if not bookmarks:
             return
         popup = self._ensure_input_bookmark_popup()
         input_list = self._input_bookmark_list
-        popup_signature = tuple(inputs)
+        popup_signature = (role_name, tuple(bookmarks))
         if popup_signature != self._input_bookmark_popup_signature:
             input_list.clear()
-            for input_ordinal, (message_index, preview) in enumerate(
-                inputs, start=1
+            for bookmark_ordinal, (message_index, preview) in enumerate(
+                bookmarks, start=1
             ):
-                item_text = f"{input_ordinal}.  {preview}"
+                item_text = f"{bookmark_ordinal}.  {preview}"
                 input_list.addItem(item_text)
                 item = input_list.item(input_list.count() - 1)
                 item.setData(Qt.UserRole, message_index)
-                item.setToolTip(preview)
+                tooltip_preview = preview
+                if len(tooltip_preview) > 180:
+                    clipped = tooltip_preview[:181].rsplit(" ", 1)[0].rstrip()
+                    tooltip_preview = (clipped or tooltip_preview[:180]) + "…"
+                item.setToolTip(
+                    "\n".join(
+                        textwrap.wrap(
+                            tooltip_preview,
+                            width=58,
+                            break_long_words=True,
+                            break_on_hyphens=False,
+                        )
+                    )
+                )
             self._input_bookmark_popup_signature = popup_signature
 
         self._input_bookmark_popup_title.setText(
-            f"Jump to input  ·  {len(inputs)}"
+            f"Jump to {role_name}  ·  {len(bookmarks)}"
         )
 
-        bookmark_indices = self._message_bookmark_indices("input")
+        bookmark_indices = self._message_bookmark_indices(role_name)
         selected_index = getattr(
             self, "_message_bookmark_navigation_index", None
         )
@@ -4514,7 +4636,7 @@ class _InputOutputDialog(QDialog):
                 self._visible_message_bookmark_positions(bookmark_indices)
             )
         selected_row = 0
-        for row, (message_index, _preview) in enumerate(inputs):
+        for row, (message_index, _preview) in enumerate(bookmarks):
             if message_index <= (
                 selected_index if selected_index is not None else -1
             ):
@@ -4526,12 +4648,11 @@ class _InputOutputDialog(QDialog):
             input_list.scrollToItem(input_list.item(selected_row))
 
         popup_width = max(320, min(460, int(self.width() * 0.34)))
-        visible_rows = min(8, len(inputs))
+        visible_rows = min(8, len(bookmarks))
         row_height = max(36, input_list.sizeHintForRow(0))
         popup_height = 47 + (visible_rows * row_height)
         popup.resize(popup_width, popup_height)
 
-        anchor = self.input_bookmark_menu_button
         anchor_bottom = anchor.mapToGlobal(anchor.rect().bottomRight())
         anchor_top = anchor.mapToGlobal(anchor.rect().topRight())
         screen = self.screen() or QApplication.primaryScreen()
@@ -4566,6 +4687,12 @@ class _InputOutputDialog(QDialog):
         popup = getattr(self, "_input_bookmark_popup", None)
         button = getattr(self, "input_bookmark_menu_button", None)
         label = getattr(self, "bookmark_position_label", None)
+        output_button = getattr(
+            self, "output_bookmark_menu_button", None
+        )
+        output_label = getattr(
+            self, "output_bookmark_position_label", None
+        )
         input_list = getattr(self, "_input_bookmark_list", None)
         if popup is None or not popup.isVisible():
             return
@@ -4593,6 +4720,8 @@ class _InputOutputDialog(QDialog):
         if (
             cursor_inside(button)
             or cursor_inside(label)
+            or cursor_inside(output_button)
+            or cursor_inside(output_label)
             or cursor_inside(popup)
             or cursor_inside(input_list)
             or cursor_inside(list_viewport)
@@ -4600,8 +4729,8 @@ class _InputOutputDialog(QDialog):
             return
         popup.hide()
 
-    def _jump_to_input_bookmark_preview(self, item):
-        """Jump directly to the input selected from the hover navigator."""
+    def _jump_to_message_bookmark_preview(self, item):
+        """Jump directly to the card selected from the hover navigator."""
         if item is None:
             return
         try:
@@ -4773,6 +4902,9 @@ class _InputOutputDialog(QDialog):
         input_menu_button = getattr(
             self, "input_bookmark_menu_button", None
         )
+        output_menu_button = getattr(
+            self, "output_bookmark_menu_button", None
+        )
         input_position_label = getattr(
             self, "bookmark_position_label", None
         )
@@ -4852,6 +4984,10 @@ class _InputOutputDialog(QDialog):
 
         if input_menu_button is not None:
             input_menu_button.setEnabled(bool(self._input_message_bookmarks()))
+        if output_menu_button is not None:
+            output_menu_button.setEnabled(
+                bool(self._message_bookmark_indices("output"))
+            )
 
     def _scroll_to_message_bookmark(self, message_index):
         """Place one message-card anchor at the top of the conversation view."""
