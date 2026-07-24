@@ -103,7 +103,7 @@
 * **Multi-Key Management** — key pool with rotation, rate limit caching, and per-key health tracking
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
-* **AuthGrok OAuth** — use an xAI/Grok account via browser login, including Google sign-in
+* **AuthGrok Browser Login** — use the `authgrok/` model prefix to sign in to an xAI/Grok account through your browser, including Google sign-in
 
 ---
 
@@ -145,6 +145,8 @@
 | **DeepL** | `deepl` | deepl (traditional translation API) |
 | **Google Translate** | `google-translate*` | google-translate, google-translate-free |
 | **Custom Prefix Routes** | user-defined `prefix/*` | Route custom prefixes to OpenAI-compatible endpoints in Model Manager |
+
+> **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
 
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 

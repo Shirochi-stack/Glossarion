@@ -7900,7 +7900,14 @@ class _InputOutputDialog(QDialog):
             or self._allocate_active_request_number()
         )
         target["request_number"] = target_request_number
-        if label.lower().startswith("request "):
+        if not self._run_source_is_attachment:
+            # Plain Direct Text is translated through a synthetic one-file
+            # document. Structured completion payloads can expose that
+            # adapter's chapter/chunk identity even though no attachment was
+            # submitted. Never persist implementation-only document metadata
+            # on a normal chat response.
+            label = f"Request {target_request_number}"
+        elif label.lower().startswith("request "):
             # Provider payload numbers are local to one backend invocation.
             # The Direct Text card number is conversation-wide.
             label = f"Request {target_request_number}"
@@ -8125,6 +8132,7 @@ class _InputOutputDialog(QDialog):
             "status_only": True,
             "complete": False,
             "created_at": self._direct_response_timestamp(),
+            "source_is_attachment": bool(self._run_source_is_attachment),
             "order_key": self._request_order_from_log(
                 line, segment_number
             ),
@@ -8169,6 +8177,14 @@ class _InputOutputDialog(QDialog):
             request_number = int(segment.get("request_number", 0) or 0)
         except (TypeError, ValueError):
             request_number = 0
+        if (
+            segment.get("source_is_attachment") is False
+            and request_number > 0
+        ):
+            # Defense in depth for every live and committed rendering path.
+            # Only genuine attachment requests may display chapter, filename,
+            # or chunk metadata.
+            response_label = f"Request {request_number}"
         label_is_generic = response_label.lower().startswith("request ")
         label_has_request = " · request " in response_label.lower()
         if response_label and not label_is_generic and not label_has_request:
@@ -8189,6 +8205,26 @@ class _InputOutputDialog(QDialog):
             response_label,
             storage,
         )
+
+    def _assistant_source_is_attachment(self, message_index):
+        """Resolve whether an assistant card belongs to a file-attachment turn."""
+        try:
+            upper_index = min(
+                int(message_index) - 1,
+                len(self._chat_messages) - 1,
+            )
+        except (TypeError, ValueError):
+            return None
+        for prior_index in range(upper_index, -1, -1):
+            prior_message = self._chat_messages[prior_index]
+            if not isinstance(prior_message, (list, tuple)) or not prior_message:
+                continue
+            prior_role = str(prior_message[0] or "").strip().lower()
+            if prior_role == "user_file":
+                return True
+            if prior_role == "user":
+                return False
+        return None
 
     def _schedule_stream_render(self, immediate=False):
         """Coalesce streaming repaints to keep the Qt event loop responsive."""
@@ -9367,6 +9403,32 @@ class _InputOutputDialog(QDialog):
                         count=1,
                         flags=re.IGNORECASE,
                     )
+                if (
+                    self._assistant_source_is_attachment(message_index) is False
+                    and re.search(
+                        r"\b(?:chapter|section|chunk)\b"
+                        r"|\bmerged\s+\d"
+                        r"|\.(?:xhtml|html|htm)\b",
+                        request_label,
+                        flags=re.IGNORECASE,
+                    )
+                ):
+                    # Also sanitize already-saved cards created before the
+                    # source flag was persisted on request segments. Their
+                    # preceding user message is authoritative: a normal text
+                    # turn must never expose the temporary document adapter's
+                    # chapter/chunk/file label.
+                    request_number_match = re.search(
+                        r"\bRequest\s+(\d+)\b",
+                        request_label,
+                        flags=re.IGNORECASE,
+                    )
+                    if displayed_request_number is not None:
+                        request_label = f"Request {displayed_request_number}"
+                    elif request_number_match:
+                        request_label = (
+                            f"Request {int(request_number_match.group(1))}"
+                        )
                 timestamp_label = self._assistant_timestamp_label(message)
                 session = self._current_chat_session()
                 session_id = session.get("id") if session is not None else None
