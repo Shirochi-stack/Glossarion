@@ -4249,14 +4249,25 @@ class _InputOutputDialog(QDialog):
             next_button.setEnabled(False)
             return
 
-        scroll_value = int(self.output_box.verticalScrollBar().value())
+        scrollbar = self.output_box.verticalScrollBar()
+        scroll_value = int(scrollbar.value())
         tolerance = 24
-        current_index = positions[0][0]
-        for message_index, anchor_y in positions:
-            if anchor_y <= scroll_value + tolerance:
-                current_index = message_index
-            else:
-                break
+        at_bottom = scroll_value >= max(
+            int(scrollbar.minimum()),
+            int(scrollbar.maximum()) - tolerance,
+        )
+        if at_bottom:
+            # The final card usually cannot be aligned with the viewport top:
+            # the scrollbar reaches its maximum first. Treat the physical
+            # bottom of the conversation as the final visible bookmark.
+            current_index = positions[-1][0]
+        else:
+            current_index = positions[0][0]
+            for message_index, anchor_y in positions:
+                if anchor_y <= scroll_value + tolerance:
+                    current_index = message_index
+                else:
+                    break
         role_label = self._message_bookmark_role_label(current_index)
         position_label.setText(
             f"{role_label} · {current_index + 1}/{total}"
@@ -4271,7 +4282,7 @@ class _InputOutputDialog(QDialog):
             anchor_y < scroll_value - tolerance
             for _message_index, anchor_y in positions
         )
-        has_next = any(
+        has_next = not at_bottom and any(
             anchor_y > scroll_value + tolerance
             for _message_index, anchor_y in positions
         )

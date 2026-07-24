@@ -28,6 +28,7 @@ from scan_html_folder import (
     generate_reports,
     process_html_file_batch,
     scan_html_folder,
+    update_new_format_progress,
 )
 
 
@@ -543,6 +544,9 @@ def test_quotation_scan_flags_missing_curly_quote_ending_per_paragraph(tmp_path)
     ))
 
     assert "missing_ending_quotation_p1" in results[0]["issues"]
+    assert results[0]["qa_issue_previews"][
+        "missing_ending_quotation_p1"
+    ].endswith("This is insane.")
     assert "quotation_marks_1_missing_(1/2)" in results[0]["issues"]
 
 
@@ -573,7 +577,46 @@ def test_quotation_scan_can_only_check_incomplete_quotes_without_source_counts(t
 
     assert "missing_ending_quotation_p1" in results[0]["issues"]
     assert "missing_ending_quotation_p3" in results[0]["issues"]
+    assert results[0]["qa_issue_previews"] == {
+        "missing_ending_quotation_p1": '"broken',
+        "missing_ending_quotation_p3": "[broken bracket",
+    }
     assert not any("quotation_marks" in issue for issue in results[0]["issues"])
+
+
+def test_missing_quotation_preview_is_saved_with_progress_entry(tmp_path):
+    progress = {
+        "chapters": {
+            "9": {
+                "actual_num": 9,
+                "output_file": "chapter0009.xhtml",
+                "status": "completed",
+            }
+        }
+    }
+    issue_code = "missing_ending_quotation_p125"
+    faulty_chapters = [{
+        "filename": "chapter0009.xhtml",
+        "chapter_num": 9,
+        "issues": [issue_code],
+        "qa_issue_previews": {
+            issue_code: '"This sentence is missing its closing quotation.',
+        },
+    }]
+
+    update_new_format_progress(
+        progress,
+        faulty_chapters,
+        [],
+        lambda _message: None,
+        str(tmp_path),
+    )
+
+    chapter = progress["chapters"]["9"]
+    assert chapter["qa_issues_found"] == [issue_code]
+    assert chapter["qa_issue_previews"] == {
+        issue_code: '"This sentence is missing its closing quotation.',
+    }
 
 
 def test_quotation_scan_can_skip_stylistic_single_quote_pairs(tmp_path):

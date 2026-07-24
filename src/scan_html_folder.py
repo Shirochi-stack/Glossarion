@@ -5010,7 +5010,11 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             chapter_info["qa_issues"] = True
             chapter_info["qa_timestamp"] = time.time()
             _incoming_issues = faulty_row.get("issues", [])
+            _incoming_previews = faulty_row.get("qa_issue_previews", {})
+            if not isinstance(_incoming_previews, dict):
+                _incoming_previews = {}
             chapter_info["qa_issues_found"] = _incoming_issues
+            chapter_info["qa_issue_previews"] = dict(_incoming_previews)
             chapter_info["duplicate_confidence"] = faulty_row.get("duplicate_confidence", 0)
 
             # Ensure output_file is set (use faulty_filename if null)
@@ -5035,6 +5039,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     _sib["qa_issues"] = True
                     _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
                     _sib["qa_issues_found"] = list(_incoming_issues)
+                    _sib["qa_issue_previews"] = dict(_incoming_previews)
                     _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
 
             updated_count += 1
@@ -5097,6 +5102,11 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     "qa_issues": True,
                     "qa_timestamp": time.time(),
                     "qa_issues_found": faulty_row.get("issues", []),
+                    "qa_issue_previews": dict(
+                        faulty_row.get("qa_issue_previews", {})
+                        if isinstance(faulty_row.get("qa_issue_previews", {}), dict)
+                        else {}
+                    ),
                     "duplicate_confidence": faulty_row.get("duplicate_confidence", 0)
                 }
                 log(f"   └─ Created qa_failed entry for chapter {chapter_num}")
@@ -5147,6 +5157,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             chapter_info["status"] = "completed"
             chapter_info["qa_issues"] = False
             chapter_info["qa_issues_found"] = []
+            chapter_info["qa_issue_previews"] = {}
             chapter_info["qa_timestamp"] = time.time()
             chapter_info["duplicate_confidence"] = resolved_row.get("duplicate_confidence", 0)
             # Keep content_hash/output_file untouched
@@ -5174,6 +5185,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     _sib["status"] = "completed"
                     _sib["qa_issues"] = False
                     _sib["qa_issues_found"] = []
+                    _sib["qa_issue_previews"] = {}
                     _sib["qa_timestamp"] = chapter_info["qa_timestamp"]
                     _sib["duplicate_confidence"] = chapter_info["duplicate_confidence"]
 
@@ -7704,8 +7716,11 @@ def process_html_file_batch(args):
         if not qa_settings.get('check_encoding_issues', True):
             artifacts = [a for a in artifacts if a['type'] != 'encoding_issues']
         
-        # Initialize issues list
+        # Initialize issues list and optional display context.  Keep issue codes
+        # machine-readable in ``issues``; the Progress Manager can append these
+        # previews without changing code-based QA handling.
         issues = []
+        qa_issue_previews = {}
 
          # Check for glossary leakage
         check_glossary = qa_settings.get('check_glossary_leakage', True)
@@ -7947,14 +7962,23 @@ def process_html_file_batch(args):
             )
             for missing_ending in missing_ending_quotations:
                 paragraph_index = missing_ending['paragraph_index']
-                paragraph_example = missing_ending.get('text', '')[:160]
+                paragraph_example = re.sub(
+                    r'\s+',
+                    ' ',
+                    missing_ending.get('text', ''),
+                ).strip()
+                if len(paragraph_example) > 160:
+                    paragraph_example = paragraph_example[:157].rstrip() + '...'
+                issue_code = f"missing_ending_quotation_p{paragraph_index}"
                 artifacts.append({
                     'type': 'missing_ending_quotation',
                     'count': 1,
                     'examples': [paragraph_example],
                     'severity': 'medium',
                 })
-                issues.append(f"missing_ending_quotation_p{paragraph_index}")
+                issues.append(issue_code)
+                if paragraph_example:
+                    qa_issue_previews[issue_code] = paragraph_example
 
             if qa_settings.get('only_check_incomplete_quotations', False):
                 matched_quotation_key = None
@@ -8437,6 +8461,7 @@ def process_html_file_batch(args):
             "filename": filename,
             "filepath": full_path,
             "issues": issues,
+            "qa_issue_previews": qa_issue_previews,
             "preview": preview,
             "preview_normalized": preview_normalized,
             "score": 0,

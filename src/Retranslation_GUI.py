@@ -19087,7 +19087,28 @@ class RetranslationMixin:
         if status == 'qa_failed':
             qa_issues = chapter_info.get('qa_issues_found', []) if isinstance(chapter_info, dict) else []
             if qa_issues:
-                issues_display = ', '.join(qa_issues[:2])
+                qa_issue_previews = chapter_info.get('qa_issue_previews', {})
+                if not isinstance(qa_issue_previews, dict):
+                    qa_issue_previews = {}
+
+                def _format_qa_issue(issue):
+                    issue_code = str(issue)
+                    preview = re.sub(
+                        r'\s+',
+                        ' ',
+                        str(qa_issue_previews.get(issue_code, '') or ''),
+                    ).strip()
+                    if len(preview) > 160:
+                        preview = preview[:157].rstrip() + '...'
+                    return (
+                        f'{issue_code} — Preview: {preview}'
+                        if preview
+                        else issue_code
+                    )
+
+                issues_display = ', '.join(
+                    _format_qa_issue(issue) for issue in qa_issues[:2]
+                )
                 if len(qa_issues) > 2:
                     issues_display += f' (+{len(qa_issues)-2} more)'
                 display += f" | {issues_display}"
