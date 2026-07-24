@@ -187,6 +187,7 @@ def test_quotation_check_defaults_off():
     assert settings["ignore_excess_quotation_marks"] is False
     assert settings["only_check_incomplete_quotations"] is False
     assert settings["skip_stylistic_single_quotes"] is False
+    assert settings["include_square_brackets_as_quotations"] is False
 
 
 def test_quotation_counter_handles_styles_entities_and_apostrophes():
@@ -223,6 +224,26 @@ def test_stylistic_toggle_skips_curly_possessive_but_keeps_curly_quote_pair():
 
     assert _count_quotation_marks(text) == 3
     assert _count_quotation_marks(text, skip_stylistic_single_quotes=True) == 2
+
+
+def test_square_brackets_are_optional_quotation_marks():
+    text = "[quoted text]"
+
+    assert _count_quotation_marks(text) == 0
+    assert _count_quotation_marks(text, include_square_brackets=True) == 2
+
+
+def test_square_bracket_option_detects_incomplete_opening_bracket():
+    html = '<p>[complete]</p><p>[missing ending</p>'
+
+    assert _missing_ending_quotation_paragraphs(html) == []
+    missing = _missing_ending_quotation_paragraphs(
+        html,
+        include_square_brackets=True,
+    )
+
+    assert [item["paragraph_index"] for item in missing] == [2]
+    assert missing[0]["missing_marks"] == ["]"]
 
 
 def test_missing_ending_quotation_uses_odd_straight_quote_paragraph_check():
@@ -527,11 +548,15 @@ def test_quotation_scan_flags_missing_curly_quote_ending_per_paragraph(tmp_path)
 
 def test_quotation_scan_can_only_check_incomplete_quotes_without_source_counts(tmp_path):
     chapter_path = tmp_path / "chapter.html"
-    chapter_path.write_text('<p>"broken</p><p>""</p>', encoding="utf-8")
+    chapter_path.write_text(
+        '<p>"broken</p><p>""</p><p>[broken bracket</p>',
+        encoding="utf-8",
+    )
     settings = default_qa_scan_settings()
     settings.update({
         "check_quotation_mismatch": True,
         "only_check_incomplete_quotations": True,
+        "include_square_brackets_as_quotations": True,
         "check_missing_html_tag": False,
         "check_missing_images": False,
         "check_repetition": False,
@@ -547,6 +572,7 @@ def test_quotation_scan_can_only_check_incomplete_quotes_without_source_counts(t
     ))
 
     assert "missing_ending_quotation_p1" in results[0]["issues"]
+    assert "missing_ending_quotation_p3" in results[0]["issues"]
     assert not any("quotation_marks" in issue for issue in results[0]["issues"])
 
 

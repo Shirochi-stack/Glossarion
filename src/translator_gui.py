@@ -1532,6 +1532,12 @@ class _InputOutputDialog(QDialog):
         self._chat_history_save_timer.setSingleShot(True)
         self._chat_history_save_timer.setInterval(450)
         self._chat_history_save_timer.timeout.connect(self._save_chat_history)
+        self._message_bookmark_controls_timer = QTimer(self)
+        self._message_bookmark_controls_timer.setSingleShot(True)
+        self._message_bookmark_controls_timer.setInterval(35)
+        self._message_bookmark_controls_timer.timeout.connect(
+            self._update_message_bookmark_controls
+        )
         self._inline_response_resize_timer = QTimer(self)
         self._inline_response_resize_timer.setSingleShot(True)
         self._inline_response_resize_timer.setInterval(140)
@@ -1643,6 +1649,16 @@ class _InputOutputDialog(QDialog):
             "QLabel#directSubtitle, QLabel#directMuted { color: #cbd5e1; }"
             "QLabel#directZoomIndicator { color: #94a3b8; font-size: 8.5pt; "
             "padding: 0 3px 1px 3px; background: transparent; }"
+            "QLabel#directBookmarkPosition { color: #94a3b8; font-size: 8.5pt; "
+            "padding: 0 2px 1px 2px; background: transparent; }"
+            "QToolButton#directBookmarkButton { background: transparent; "
+            "color: #cbd5e1; border: 1px solid #4a5568; border-radius: 4px; "
+            "min-width: 24px; max-width: 24px; min-height: 22px; max-height: 22px; "
+            "padding: 0; font-size: 8pt; }"
+            "QToolButton#directBookmarkButton:hover { background: #303641; "
+            "border-color: #5a9fd4; color: white; }"
+            "QToolButton#directBookmarkButton:disabled { color: #596171; "
+            "border-color: #343a46; background: transparent; }"
             "QPushButton#sidebarToggleButton { min-width: 74px; max-width: 86px; "
             "min-height: 34px; max-height: 34px; padding: 0; font-size: 11pt; }"
             "QTabWidget#directTextTabs::pane { border: none; background: transparent; }"
@@ -1877,8 +1893,43 @@ class _InputOutputDialog(QDialog):
         timeline_layout.setSpacing(2)
         zoom_row = QHBoxLayout()
         zoom_row.setContentsMargins(0, 0, 2, 0)
-        zoom_row.setSpacing(0)
+        zoom_row.setSpacing(4)
         zoom_row.addStretch(1)
+        self.bookmark_position_label = QLabel("Bookmarks")
+        self.bookmark_position_label.setObjectName("directBookmarkPosition")
+        self.bookmark_position_label.setAccessibleName(
+            "Conversation message bookmarks"
+        )
+        zoom_row.addWidget(
+            self.bookmark_position_label, 0, Qt.AlignRight | Qt.AlignVCenter
+        )
+        self.previous_bookmark_button = QToolButton()
+        self.previous_bookmark_button.setObjectName("directBookmarkButton")
+        self.previous_bookmark_button.setText("▲")
+        self.previous_bookmark_button.setToolTip(
+            "Jump to the previous input or output"
+        )
+        self.previous_bookmark_button.setAccessibleName(
+            "Previous conversation message bookmark"
+        )
+        self.previous_bookmark_button.clicked.connect(
+            lambda: self._jump_to_message_bookmark(-1)
+        )
+        zoom_row.addWidget(self.previous_bookmark_button, 0, Qt.AlignVCenter)
+        self.next_bookmark_button = QToolButton()
+        self.next_bookmark_button.setObjectName("directBookmarkButton")
+        self.next_bookmark_button.setText("▼")
+        self.next_bookmark_button.setToolTip(
+            "Jump to the next input or output"
+        )
+        self.next_bookmark_button.setAccessibleName(
+            "Next conversation message bookmark"
+        )
+        self.next_bookmark_button.clicked.connect(
+            lambda: self._jump_to_message_bookmark(1)
+        )
+        zoom_row.addWidget(self.next_bookmark_button, 0, Qt.AlignVCenter)
+        zoom_row.addSpacing(7)
         self.zoom_indicator = QLabel("Zoom 100%")
         self.zoom_indicator.setObjectName("directZoomIndicator")
         self.zoom_indicator.setAccessibleName("Conversation zoom: 100 percent")
@@ -1894,6 +1945,9 @@ class _InputOutputDialog(QDialog):
         self.output_box.anchorClicked.connect(self._handle_output_anchor)
         self.output_box.verticalScrollBar().valueChanged.connect(
             self._position_inline_response_editor
+        )
+        self.output_box.verticalScrollBar().valueChanged.connect(
+            self._schedule_message_bookmark_controls_update
         )
         self.output_box.horizontalScrollBar().valueChanged.connect(
             self._position_inline_response_editor
@@ -4107,6 +4161,184 @@ class _InputOutputDialog(QDialog):
             visible_characters += message_size
         self._history_visible_start = start
 
+    def _active_message_bookmark_count(self):
+        """Return the number of live response cards currently in the timeline."""
+        if not self._assistant_message_active:
+            return 0
+        if self._active_request_segments:
+            return len(self._active_request_segments)
+        if isinstance(self._pending_glossary_approval, dict):
+            return 0
+        return 1
+
+    def _message_bookmark_total_count(self):
+        """Return saved inputs/outputs plus any currently streaming outputs."""
+        return len(self._chat_messages) + self._active_message_bookmark_count()
+
+    def _message_bookmark_role_label(self, message_index):
+        """Describe one bookmark as an input or output."""
+        try:
+            message_index = int(message_index)
+        except (TypeError, ValueError):
+            return "Message"
+        if 0 <= message_index < len(self._chat_messages):
+            message = self._chat_messages[message_index]
+            role = str(message[0] if message else "")
+            return "Input" if role in ("user", "user_file") else "Output"
+        if message_index < self._message_bookmark_total_count():
+            return "Output"
+        return "Message"
+
+    def _visible_message_bookmark_positions(self):
+        """Return rendered message anchors and their absolute vertical positions."""
+        try:
+            document = self.output_box.document()
+            scrollbar = self.output_box.verticalScrollBar()
+            scroll_value = int(scrollbar.value())
+            first_index = max(
+                0,
+                min(
+                    int(self._history_visible_start),
+                    len(self._chat_messages),
+                ),
+            )
+            total = self._message_bookmark_total_count()
+            positions = []
+            for message_index in range(first_index, total):
+                cursor = document.find(
+                    self._message_row_start_marker(message_index)
+                )
+                if cursor.isNull():
+                    continue
+                cursor.setPosition(cursor.selectionStart())
+                viewport_y = int(self.output_box.cursorRect(cursor).top())
+                positions.append(
+                    (message_index, scroll_value + viewport_y)
+                )
+            return positions
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return []
+
+    def _schedule_message_bookmark_controls_update(self, *_args):
+        """Coalesce bookmark-state updates during wheel and stream movement."""
+        timer = getattr(self, "_message_bookmark_controls_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _update_message_bookmark_controls(self):
+        """Reflect the nearest input/output bookmark and available directions."""
+        previous_button = getattr(self, "previous_bookmark_button", None)
+        next_button = getattr(self, "next_bookmark_button", None)
+        position_label = getattr(self, "bookmark_position_label", None)
+        if (
+            previous_button is None
+            or next_button is None
+            or position_label is None
+            or not hasattr(self, "output_box")
+        ):
+            return
+
+        total = self._message_bookmark_total_count()
+        positions = self._visible_message_bookmark_positions()
+        if total <= 0 or not positions:
+            position_label.setText("Bookmarks")
+            position_label.setToolTip(
+                "Inputs and outputs will appear here as message bookmarks"
+            )
+            previous_button.setEnabled(False)
+            next_button.setEnabled(False)
+            return
+
+        scroll_value = int(self.output_box.verticalScrollBar().value())
+        tolerance = 24
+        current_index = positions[0][0]
+        for message_index, anchor_y in positions:
+            if anchor_y <= scroll_value + tolerance:
+                current_index = message_index
+            else:
+                break
+        role_label = self._message_bookmark_role_label(current_index)
+        position_label.setText(
+            f"{role_label} · {current_index + 1}/{total}"
+        )
+        position_label.setToolTip(
+            f"Nearest bookmark: {role_label.lower()} "
+            f"{current_index + 1} of {total}"
+        )
+
+        has_hidden_earlier = int(self._history_visible_start) > 0
+        has_previous = has_hidden_earlier or any(
+            anchor_y < scroll_value - tolerance
+            for _message_index, anchor_y in positions
+        )
+        has_next = any(
+            anchor_y > scroll_value + tolerance
+            for _message_index, anchor_y in positions
+        )
+        previous_button.setEnabled(has_previous)
+        next_button.setEnabled(has_next)
+
+    def _scroll_to_message_bookmark(self, message_index):
+        """Place one message-card anchor at the top of the conversation view."""
+        try:
+            message_index = int(message_index)
+        except (TypeError, ValueError):
+            return
+        if not (0 <= message_index < self._message_bookmark_total_count()):
+            return
+
+        def finish_jump():
+            self.output_box.scrollToAnchor(
+                f"direct-message-{message_index}"
+            )
+            self._refresh_output_viewport_lock_anchor()
+            self._update_message_bookmark_controls()
+
+        if message_index < int(self._history_visible_start):
+            self._history_visible_start = max(
+                0,
+                min(
+                    message_index,
+                    int(self._history_visible_start)
+                    - int(self._history_page_size),
+                ),
+            )
+            self._render_output(preserve_viewport=True)
+        # QTextDocument resolves anchor geometry after the current event turn.
+        QTimer.singleShot(0, finish_jump)
+
+    def _jump_to_message_bookmark(self, direction):
+        """Jump to the previous or next rendered input/output boundary."""
+        direction = -1 if int(direction) < 0 else 1
+        positions = self._visible_message_bookmark_positions()
+        scroll_value = int(self.output_box.verticalScrollBar().value())
+        tolerance = 24
+
+        if direction < 0:
+            candidates = [
+                (message_index, anchor_y)
+                for message_index, anchor_y in positions
+                if anchor_y < scroll_value - tolerance
+            ]
+            if candidates:
+                self._scroll_to_message_bookmark(candidates[-1][0])
+                return
+            if int(self._history_visible_start) > 0:
+                self._scroll_to_message_bookmark(
+                    int(self._history_visible_start) - 1
+                )
+                return
+        else:
+            candidates = [
+                (message_index, anchor_y)
+                for message_index, anchor_y in positions
+                if anchor_y > scroll_value + tolerance
+            ]
+            if candidates:
+                self._scroll_to_message_bookmark(candidates[0][0])
+                return
+        self._update_message_bookmark_controls()
+
     def _schedule_conversation_scroll_to_bottom(self):
         """Open the selected conversation at its newest visible message."""
         session = self._current_chat_session()
@@ -4122,6 +4354,7 @@ class _InputOutputDialog(QDialog):
             scrollbar = self.output_box.verticalScrollBar()
             scrollbar.setSliderPosition(scrollbar.maximum())
             self._refresh_output_viewport_lock_anchor()
+            self._update_message_bookmark_controls()
 
         # QTextBrowser finalizes document geometry on the next event-loop turn.
         # Deferring the move avoids calculating against the old conversation's
@@ -8124,6 +8357,7 @@ class _InputOutputDialog(QDialog):
             self._schedule_output_viewport_anchor_restore(viewport_anchor)
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
+        self._schedule_message_bookmark_controls_update()
         return True
 
     def _render_output(self, active_only=False, preserve_viewport=False):
@@ -8801,6 +9035,7 @@ class _InputOutputDialog(QDialog):
             self._schedule_output_viewport_anchor_restore(viewport_anchor)
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
+        self._schedule_message_bookmark_controls_update()
 
     def _commit_active_request_phase(self):
         """Persist real request cards without ending the ongoing Direct Text run."""

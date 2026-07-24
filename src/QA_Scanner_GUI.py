@@ -524,6 +524,7 @@ class QAScannerMixin:
                     'ignore_excess_quotation_marks': False,
                     'only_check_incomplete_quotations': False,
                     'skip_stylistic_single_quotes': False,
+                    'include_square_brackets_as_quotations': False,
                     'check_glossary_leakage': True,
                     'min_file_length': 0,
                     'report_format': 'detailed',
@@ -3321,6 +3322,23 @@ class QAScannerMixin:
             skip_stylistic_single_quotes_layout.addStretch()
             detection_layout.addWidget(skip_stylistic_single_quotes_widget)
 
+            include_square_brackets_widget = QWidget()
+            include_square_brackets_layout = QHBoxLayout(include_square_brackets_widget)
+            include_square_brackets_layout.setContentsMargins(20, 0, 0, 5)
+            include_square_brackets_checkbox = self._create_styled_checkbox(
+                "Treat square brackets [ ] as quotation marks"
+            )
+            include_square_brackets_checkbox.setChecked(
+                qa_settings.get('include_square_brackets_as_quotations', False)
+            )
+            include_square_brackets_checkbox.setToolTip(
+                "Includes [ and ] in source/output quotation totals and flags an unmatched "
+                "[ as an incomplete quotation."
+            )
+            include_square_brackets_layout.addWidget(include_square_brackets_checkbox)
+            include_square_brackets_layout.addStretch()
+            detection_layout.addWidget(include_square_brackets_widget)
+
             def toggle_quotation_suboptions(_enabled=None):
                 enabled = check_quotation_checkbox.isChecked()
                 count_comparison_enabled = (
@@ -3329,6 +3347,7 @@ class QAScannerMixin:
                 only_check_incomplete_quotations_checkbox.setEnabled(enabled)
                 ignore_excess_quotation_checkbox.setEnabled(count_comparison_enabled)
                 skip_stylistic_single_quotes_checkbox.setEnabled(count_comparison_enabled)
+                include_square_brackets_checkbox.setEnabled(enabled)
 
             check_quotation_checkbox.toggled.connect(toggle_quotation_suboptions)
             only_check_incomplete_quotations_checkbox.toggled.connect(
@@ -5043,6 +5062,7 @@ class QAScannerMixin:
                         'ignore_excess_quotation_marks': (ignore_excess_quotation_checkbox, lambda x: x.isChecked()),
                         'only_check_incomplete_quotations': (only_check_incomplete_quotations_checkbox, lambda x: x.isChecked()),
                         'skip_stylistic_single_quotes': (skip_stylistic_single_quotes_checkbox, lambda x: x.isChecked()),
+                        'include_square_brackets_as_quotations': (include_square_brackets_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                         'check_potential_truncation': (check_potential_truncation_checkbox, lambda x: x.isChecked()),
                         'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
@@ -5455,6 +5475,7 @@ class QAScannerMixin:
                     ('ignore_excess_quotation_marks', ignore_excess_quotation_checkbox, False),
                     ('only_check_incomplete_quotations', only_check_incomplete_quotations_checkbox, False),
                     ('skip_stylistic_single_quotes', skip_stylistic_single_quotes_checkbox, False),
+                    ('include_square_brackets_as_quotations', include_square_brackets_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
                     ('check_potential_truncation', check_potential_truncation_checkbox, False),
                     ('check_missing_images', check_missing_images_checkbox, True),
@@ -5625,6 +5646,7 @@ class QAScannerMixin:
                     ignore_excess_quotation_checkbox.setChecked(False)
                     only_check_incomplete_quotations_checkbox.setChecked(False)
                     skip_stylistic_single_quotes_checkbox.setChecked(False)
+                    include_square_brackets_checkbox.setChecked(False)
 
                     # Word count analysis defaults
                     check_word_count_checkbox.setChecked(True)

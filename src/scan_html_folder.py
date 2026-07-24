@@ -2146,7 +2146,11 @@ def _normalize_quotation_entities(text):
     return html_lib.unescape(normalized)
 
 
-def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
+def _count_quotation_marks(
+    text,
+    skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
+):
     """Count quotation delimiters while ignoring ordinary word apostrophes."""
     decoded = _normalize_quotation_entities(text)
     skipped_stylistic_indexes = set()
@@ -2170,7 +2174,12 @@ def _count_quotation_marks(text, skip_stylistic_single_quotes=False):
 
     count = 0
     for index, char in enumerate(decoded):
-        if char not in _EXPLICIT_QUOTATION_MARKS and unicodedata.category(char) not in ('Pi', 'Pf'):
+        is_square_bracket = include_square_brackets and char in '[]'
+        if (
+            not is_square_bracket
+            and char not in _EXPLICIT_QUOTATION_MARKS
+            and unicodedata.category(char) not in ('Pi', 'Pf')
+        ):
             continue
 
         if index in skipped_stylistic_indexes:
@@ -2194,7 +2203,11 @@ def _visible_text_for_quotation_check(html_content, allow_plain_text=False):
     return soup.get_text(separator='\n')
 
 
-def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
+def _missing_ending_quotation_paragraphs(
+    html_content,
+    allow_plain_text=False,
+    include_square_brackets=False,
+):
     """Return paragraphs missing a straight, directional, or CJK closing quote."""
     normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
     soup = BeautifulSoup(normalized_html, 'html.parser')
@@ -2215,7 +2228,10 @@ def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
             missing_marks.append('"')
 
         decoded_text = _normalize_quotation_entities(paragraph_text)
-        for opening_mark, closing_mark in _DIRECTIONAL_QUOTATION_PAIRS:
+        directional_pairs = _DIRECTIONAL_QUOTATION_PAIRS
+        if include_square_brackets:
+            directional_pairs += (('[', ']'),)
+        for opening_mark, closing_mark in directional_pairs:
             opening_count = 0
             closing_count = 0
             for index, char in enumerate(decoded_text):
@@ -2242,7 +2258,12 @@ def _missing_ending_quotation_paragraphs(html_content, allow_plain_text=False):
     return missing
 
 
-def extract_epub_quotation_info(epub_path, log=print, skip_stylistic_single_quotes=False):
+def extract_epub_quotation_info(
+    epub_path,
+    log=print,
+    skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
+):
     """Extract quotation counts in EPUB spine order without changing ?! logic."""
     quotation_info = {}
     spine_files = {}
@@ -2305,6 +2326,7 @@ def extract_epub_quotation_info(epub_path, log=print, skip_stylistic_single_quot
                         'quotation_marks': _count_quotation_marks(
                             visible_text,
                             skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
                         ),
                         'filename': os.path.basename(file_path),
                         'spine_index': spine_index,
@@ -2326,6 +2348,7 @@ def extract_epub_quotation_info(epub_path, log=print, skip_stylistic_single_quot
                         'quotation_marks': _count_quotation_marks(
                             _visible_text_for_quotation_check(content),
                             skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
                         ),
                         'filename': os.path.basename(file_path),
                         'spine_index': index,
@@ -2343,6 +2366,7 @@ def detect_quotation_mismatch(
     original_quotation_info,
     ignore_excess=False,
     skip_stylistic_single_quotes=False,
+    include_square_brackets=False,
 ):
     """Compare total source and translated quotation delimiters for one chapter."""
     try:
@@ -2353,6 +2377,7 @@ def detect_quotation_mismatch(
         translated_count = _count_quotation_marks(
             translated_text,
             skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+            include_square_brackets=include_square_brackets,
         )
         if translated_count == original_count:
             return False, []
@@ -7915,6 +7940,10 @@ def process_html_file_batch(args):
             missing_ending_quotations = _missing_ending_quotation_paragraphs(
                 raw_file_content,
                 allow_plain_text=text_file_mode,
+                include_square_brackets=qa_settings.get(
+                    'include_square_brackets_as_quotations',
+                    False,
+                ),
             )
             for missing_ending in missing_ending_quotations:
                 paragraph_index = missing_ending['paragraph_index']
@@ -7962,6 +7991,10 @@ def process_html_file_batch(args):
                     ignore_excess=qa_settings.get('ignore_excess_quotation_marks', False),
                     skip_stylistic_single_quotes=qa_settings.get(
                         'skip_stylistic_single_quotes',
+                        False,
+                    ),
+                    include_square_brackets=qa_settings.get(
+                        'include_square_brackets_as_quotations',
                         False,
                     ),
                 )
@@ -8580,6 +8613,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ignore_excess_quotation_marks': False,
             'only_check_incomplete_quotations': False,
             'skip_stylistic_single_quotes': False,
+            'include_square_brackets_as_quotations': False,
             'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
@@ -8755,6 +8789,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'skip_stylistic_single_quotes',
             False,
         )
+        include_square_brackets = qa_settings.get(
+            'include_square_brackets_as_quotations',
+            False,
+        )
         if text_file_mode:
             word_count_folder = os.path.join(folder_path, 'word_count')
             if os.path.exists(word_count_folder):
@@ -8776,6 +8814,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             'quotation_marks': _count_quotation_marks(
                                 source_text,
                                 skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                                include_square_brackets=include_square_brackets,
                             ),
                             'filename': chunk_file,
                         }
@@ -8810,6 +8849,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         'quotation_marks': _count_quotation_marks(
                             source_content,
                             skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
                         ),
                         'filename': source_key,
                     }
@@ -8825,6 +8865,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         'quotation_marks': _count_quotation_marks(
                             source_text,
                             skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                            include_square_brackets=include_square_brackets,
                         ),
                         'filename': os.path.basename(epub_path),
                     }
@@ -8837,6 +8878,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 epub_path,
                 log,
                 skip_stylistic_single_quotes=skip_stylistic_single_quotes,
+                include_square_brackets=include_square_brackets,
             )
 
         if original_quotation_info:
