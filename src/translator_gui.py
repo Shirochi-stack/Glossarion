@@ -1938,13 +1938,13 @@ class _InputOutputDialog(QDialog):
         zoom_row.setContentsMargins(0, 0, 2, 0)
         zoom_row.setSpacing(4)
         zoom_row.addStretch(1)
-        self.bookmark_position_label = QLabel("Bookmarks")
+        self.bookmark_position_label = QLabel("Input · 0/0")
         self.bookmark_position_label.setObjectName("directBookmarkPosition")
         self.bookmark_position_label.setAccessibleName(
-            "Conversation message bookmarks"
+            "Conversation input bookmarks"
         )
         self.bookmark_position_label.setToolTip(
-            "Hover to preview every input, or use the arrows to move one card"
+            "Hover to preview every input, or use the arrows to move between inputs"
         )
         self.bookmark_position_label.installEventFilter(self)
         zoom_row.addWidget(
@@ -1972,28 +1972,78 @@ class _InputOutputDialog(QDialog):
         self.previous_bookmark_button.setObjectName("directBookmarkButton")
         self.previous_bookmark_button.setText("▲")
         self.previous_bookmark_button.setToolTip(
-            "Jump to the previous input or output"
+            "Jump to the previous input"
         )
         self.previous_bookmark_button.setAccessibleName(
-            "Previous conversation message bookmark"
+            "Previous conversation input bookmark"
         )
         self.previous_bookmark_button.clicked.connect(
-            lambda: self._jump_to_message_bookmark(-1)
+            lambda: self._jump_to_message_bookmark(-1, "input")
         )
         zoom_row.addWidget(self.previous_bookmark_button, 0, Qt.AlignVCenter)
         self.next_bookmark_button = QToolButton()
         self.next_bookmark_button.setObjectName("directBookmarkButton")
         self.next_bookmark_button.setText("▼")
         self.next_bookmark_button.setToolTip(
-            "Jump to the next input or output"
+            "Jump to the next input"
         )
         self.next_bookmark_button.setAccessibleName(
-            "Next conversation message bookmark"
+            "Next conversation input bookmark"
         )
         self.next_bookmark_button.clicked.connect(
-            lambda: self._jump_to_message_bookmark(1)
+            lambda: self._jump_to_message_bookmark(1, "input")
         )
         zoom_row.addWidget(self.next_bookmark_button, 0, Qt.AlignVCenter)
+        zoom_row.addSpacing(7)
+        self.output_bookmark_position_label = QLabel("Output · 0/0")
+        self.output_bookmark_position_label.setObjectName(
+            "directBookmarkPosition"
+        )
+        self.output_bookmark_position_label.setAccessibleName(
+            "Conversation output bookmarks"
+        )
+        self.output_bookmark_position_label.setToolTip(
+            "Use the arrows to move between outputs"
+        )
+        zoom_row.addWidget(
+            self.output_bookmark_position_label,
+            0,
+            Qt.AlignRight | Qt.AlignVCenter,
+        )
+        self.previous_output_bookmark_button = QToolButton()
+        self.previous_output_bookmark_button.setObjectName(
+            "directBookmarkButton"
+        )
+        self.previous_output_bookmark_button.setText("▲")
+        self.previous_output_bookmark_button.setToolTip(
+            "Jump to the previous output"
+        )
+        self.previous_output_bookmark_button.setAccessibleName(
+            "Previous conversation output bookmark"
+        )
+        self.previous_output_bookmark_button.clicked.connect(
+            lambda: self._jump_to_message_bookmark(-1, "output")
+        )
+        zoom_row.addWidget(
+            self.previous_output_bookmark_button, 0, Qt.AlignVCenter
+        )
+        self.next_output_bookmark_button = QToolButton()
+        self.next_output_bookmark_button.setObjectName(
+            "directBookmarkButton"
+        )
+        self.next_output_bookmark_button.setText("▼")
+        self.next_output_bookmark_button.setToolTip(
+            "Jump to the next output"
+        )
+        self.next_output_bookmark_button.setAccessibleName(
+            "Next conversation output bookmark"
+        )
+        self.next_output_bookmark_button.clicked.connect(
+            lambda: self._jump_to_message_bookmark(1, "output")
+        )
+        zoom_row.addWidget(
+            self.next_output_bookmark_button, 0, Qt.AlignVCenter
+        )
         zoom_row.addSpacing(7)
         self.zoom_indicator = QLabel("Zoom 100%")
         self.zoom_indicator.setObjectName("directZoomIndicator")
@@ -4455,13 +4505,13 @@ class _InputOutputDialog(QDialog):
             f"Jump to input  ·  {len(inputs)}"
         )
 
-        bookmark_indices = self._message_bookmark_indices()
+        bookmark_indices = self._message_bookmark_indices("input")
         selected_index = getattr(
             self, "_message_bookmark_navigation_index", None
         )
         if selected_index not in bookmark_indices:
             selected_index = self._message_bookmark_index_from_view(
-                self._visible_message_bookmark_positions()
+                self._visible_message_bookmark_positions(bookmark_indices)
             )
         selected_row = 0
         for row, (message_index, _preview) in enumerate(inputs):
@@ -4564,22 +4614,31 @@ class _InputOutputDialog(QDialog):
         self._scroll_to_message_bookmark(message_index)
         self.output_box.setFocus(Qt.OtherFocusReason)
 
-    def _message_bookmark_indices(self):
-        """Return only message indices that render as Input/Output cards."""
+    def _message_bookmark_indices(self, bookmark_role=None):
+        """Return rendered card indices, optionally restricted by card role."""
+        role_filter = str(bookmark_role or "").strip().lower()
+        if role_filter not in ("input", "output"):
+            role_filter = ""
         indices = []
         for message_index, message in enumerate(self._chat_messages):
             if not isinstance(message, (list, tuple)) or not message:
                 continue
             role = str(message[0] or "")
-            if role in ("user", "user_file", "assistant"):
+            if (
+                role in ("user", "user_file")
+                and role_filter != "output"
+            ):
                 indices.append(message_index)
-        active_start = len(self._chat_messages)
-        indices.extend(
-            range(
-                active_start,
-                active_start + self._active_message_bookmark_count(),
+            elif role == "assistant" and role_filter != "input":
+                indices.append(message_index)
+        if role_filter != "input":
+            active_start = len(self._chat_messages)
+            indices.extend(
+                range(
+                    active_start,
+                    active_start + self._active_message_bookmark_count(),
+                )
             )
-        )
         return indices
 
     def _message_bookmark_total_count(self):
@@ -4600,7 +4659,7 @@ class _InputOutputDialog(QDialog):
             return "Output"
         return "Message"
 
-    def _visible_message_bookmark_positions(self):
+    def _visible_message_bookmark_positions(self, bookmark_indices=None):
         """Return rendered message anchors and their absolute vertical positions."""
         try:
             document = self.output_box.document()
@@ -4614,7 +4673,9 @@ class _InputOutputDialog(QDialog):
                 ),
             )
             positions = []
-            for message_index in self._message_bookmark_indices():
+            if bookmark_indices is None:
+                bookmark_indices = self._message_bookmark_indices()
+            for message_index in bookmark_indices:
                 if message_index < first_index:
                     continue
                 cursor = document.find(
@@ -4639,16 +4700,33 @@ class _InputOutputDialog(QDialog):
 
     def _clear_message_bookmark_navigation(self, *_args):
         """Let manual scrolling choose the current bookmark from geometry again."""
-        had_explicit_navigation = (
-            self._message_bookmark_navigation_index is not None
+        had_navigation_tail = self._message_bookmark_requires_navigation_tail(
+            self._message_bookmark_navigation_index
         )
         self._message_bookmark_navigation_index = None
-        if had_explicit_navigation:
+        if had_navigation_tail:
             # Arrow navigation temporarily gives the document enough tail room
             # to align its final cards. Remove that room after the user's
             # manual wheel/scrollbar gesture has settled.
             self._message_bookmark_tail_cleanup_timer.start()
         self._schedule_message_bookmark_controls_update()
+
+    def _message_bookmark_requires_navigation_tail(self, message_index):
+        """Return whether a non-final role bookmark needs temporary tail room."""
+        try:
+            message_index = int(message_index)
+        except (TypeError, ValueError):
+            return False
+        if message_index in self._message_bookmark_indices("input"):
+            role_indices = self._message_bookmark_indices("input")
+        elif message_index in self._message_bookmark_indices("output"):
+            role_indices = self._message_bookmark_indices("output")
+        else:
+            return False
+        # The last Input and last Output should clamp naturally against the
+        # actual document bottom. Giving either one an artificial tail creates
+        # a large blank viewport after its card.
+        return bool(role_indices and message_index != role_indices[-1])
 
     def _remove_message_bookmark_navigation_tail(self):
         """Remove temporary jump-only tail room without disturbing active input."""
@@ -4681,61 +4759,99 @@ class _InputOutputDialog(QDialog):
         return current_index
 
     def _update_message_bookmark_controls(self):
-        """Reflect the nearest input/output bookmark and available directions."""
-        previous_button = getattr(self, "previous_bookmark_button", None)
-        next_button = getattr(self, "next_bookmark_button", None)
+        """Update independent input and output bookmark navigators."""
+        input_previous_button = getattr(
+            self, "previous_bookmark_button", None
+        )
+        input_next_button = getattr(self, "next_bookmark_button", None)
+        output_previous_button = getattr(
+            self, "previous_output_bookmark_button", None
+        )
+        output_next_button = getattr(
+            self, "next_output_bookmark_button", None
+        )
         input_menu_button = getattr(
             self, "input_bookmark_menu_button", None
         )
-        position_label = getattr(self, "bookmark_position_label", None)
+        input_position_label = getattr(
+            self, "bookmark_position_label", None
+        )
+        output_position_label = getattr(
+            self, "output_bookmark_position_label", None
+        )
         if (
-            previous_button is None
-            or next_button is None
-            or position_label is None
+            input_previous_button is None
+            or input_next_button is None
+            or output_previous_button is None
+            or output_next_button is None
+            or input_position_label is None
+            or output_position_label is None
             or not hasattr(self, "output_box")
         ):
             return
 
-        bookmark_indices = self._message_bookmark_indices()
-        total = len(bookmark_indices)
-        positions = self._visible_message_bookmark_positions()
-        if total <= 0 or not positions:
-            self._message_bookmark_navigation_index = None
-            position_label.setText("Bookmarks")
-            position_label.setToolTip(
-                "Inputs and outputs will appear here as message bookmarks"
-            )
-            if input_menu_button is not None:
-                input_menu_button.setEnabled(False)
-            previous_button.setEnabled(False)
-            next_button.setEnabled(False)
-            return
-
+        all_indices = self._message_bookmark_indices()
         selected_index = getattr(
             self, "_message_bookmark_navigation_index", None
         )
-        if selected_index in bookmark_indices:
-            current_index = selected_index
-        else:
+        if selected_index not in all_indices:
             self._message_bookmark_navigation_index = None
-            current_index = self._message_bookmark_index_from_view(positions)
-        if current_index not in bookmark_indices:
-            current_index = positions[0][0]
-        current_ordinal = bookmark_indices.index(current_index)
-        role_label = self._message_bookmark_role_label(current_index)
-        position_label.setText(
-            f"{role_label} · {current_ordinal + 1}/{total}"
+            selected_index = None
+
+        def update_role_controls(
+            role_name,
+            position_label,
+            previous_button,
+            next_button,
+        ):
+            bookmark_indices = self._message_bookmark_indices(role_name)
+            total = len(bookmark_indices)
+            positions = self._visible_message_bookmark_positions(
+                bookmark_indices
+            )
+            display_name = role_name.capitalize()
+            if total <= 0 or not positions:
+                position_label.setText(f"{display_name} · 0/{total}")
+                position_label.setToolTip(
+                    f"No visible conversation {role_name} bookmarks"
+                )
+                previous_button.setEnabled(False)
+                next_button.setEnabled(False)
+                return
+
+            if selected_index in bookmark_indices:
+                current_index = selected_index
+            else:
+                current_index = self._message_bookmark_index_from_view(
+                    positions
+                )
+            if current_index not in bookmark_indices:
+                current_index = positions[0][0]
+            current_ordinal = bookmark_indices.index(current_index)
+            position_label.setText(
+                f"{display_name} · {current_ordinal + 1}/{total}"
+            )
+            position_label.setToolTip(
+                f"Nearest {role_name}: {current_ordinal + 1} of {total}"
+            )
+            previous_button.setEnabled(current_ordinal > 0)
+            next_button.setEnabled(current_ordinal + 1 < total)
+
+        update_role_controls(
+            "input",
+            input_position_label,
+            input_previous_button,
+            input_next_button,
         )
-        position_label.setToolTip(
-            f"Nearest bookmark: {role_label.lower()} "
-            f"{current_ordinal + 1} of {total}. "
-            "Hover to preview and jump to any input."
+        update_role_controls(
+            "output",
+            output_position_label,
+            output_previous_button,
+            output_next_button,
         )
 
         if input_menu_button is not None:
             input_menu_button.setEnabled(bool(self._input_message_bookmarks()))
-        previous_button.setEnabled(current_ordinal > 0)
-        next_button.setEnabled(current_ordinal + 1 < total)
 
     def _scroll_to_message_bookmark(self, message_index):
         """Place one message-card anchor at the top of the conversation view."""
@@ -4745,10 +4861,16 @@ class _InputOutputDialog(QDialog):
             return
         if message_index not in self._message_bookmark_indices():
             return
-        navigation_tail_missing = (
-            self._message_bookmark_navigation_index is None
+        previous_navigation_index = self._message_bookmark_navigation_index
+        previous_tail_enabled = (
+            self._message_bookmark_requires_navigation_tail(
+                previous_navigation_index
+            )
         )
         self._message_bookmark_navigation_index = message_index
+        target_tail_enabled = (
+            self._message_bookmark_requires_navigation_tail(message_index)
+        )
         self._message_bookmark_tail_cleanup_timer.stop()
 
         def finish_jump():
@@ -4768,19 +4890,25 @@ class _InputOutputDialog(QDialog):
                     - int(self._history_page_size),
                 ),
             )
-        if navigation_tail_missing or history_expanded:
+        if (
+            previous_navigation_index is None
+            or previous_tail_enabled != target_tail_enabled
+            or history_expanded
+        ):
             self._render_output(preserve_viewport=True)
         # QTextDocument resolves anchor geometry after the current event turn.
         QTimer.singleShot(0, finish_jump)
 
-    def _jump_to_message_bookmark(self, direction):
-        """Move exactly one logical Input/Output bookmark in either direction."""
+    def _jump_to_message_bookmark(self, direction, bookmark_role=None):
+        """Move one logical input or output bookmark in either direction."""
         direction = -1 if int(direction) < 0 else 1
-        bookmark_indices = self._message_bookmark_indices()
+        bookmark_indices = self._message_bookmark_indices(bookmark_role)
         if not bookmark_indices:
             self._update_message_bookmark_controls()
             return
-        positions = self._visible_message_bookmark_positions()
+        positions = self._visible_message_bookmark_positions(
+            bookmark_indices
+        )
         selected_index = getattr(
             self, "_message_bookmark_navigation_index", None
         )
@@ -9500,9 +9628,8 @@ class _InputOutputDialog(QDialog):
             "img { max-width: 100%; }"
         )
         navigation_tail_html = ""
-        if (
+        if self._message_bookmark_requires_navigation_tail(
             self._message_bookmark_navigation_index
-            in self._message_bookmark_indices()
         ):
             # QTextBrowser cannot normally place one of the final cards at the
             # top because the document ends first. This temporary, transparent
