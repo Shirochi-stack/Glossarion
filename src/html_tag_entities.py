@@ -39,10 +39,11 @@ _ATTR_ASSIGN_RE = re.compile(
 )
 
 
-def looks_like_valid_html_tag(inner: str) -> bool:
+def looks_like_valid_html_tag(inner: str, valid_tags=None) -> bool:
     """Return True only for real HTML-like tag syntax, not prose in angle brackets."""
     if not isinstance(inner, str):
         return False
+    valid_tags = VALID_ENTITY_TAGS if valid_tags is None else valid_tags
     stripped = inner.strip()
     if not stripped or stripped.startswith(('!', '?')):
         return False
@@ -55,7 +56,7 @@ def looks_like_valid_html_tag(inner: str) -> bool:
             return False
         tag_name = match.group(1).lower()
         remainder = tag_bits[match.end():].strip()
-        return tag_name in VALID_ENTITY_TAGS and not remainder
+        return tag_name.rsplit(':', 1)[-1] in valid_tags and not remainder
 
     self_closing = stripped.endswith('/')
     tag_bits = stripped[:-1].rstrip() if self_closing else stripped
@@ -65,7 +66,7 @@ def looks_like_valid_html_tag(inner: str) -> bool:
     tag_name = match.group(1).lower()
     if tag_name.endswith('/'):
         tag_name = tag_name[:-1]
-    if tag_name not in VALID_ENTITY_TAGS:
+    if tag_name.rsplit(':', 1)[-1] not in valid_tags:
         return False
 
     remainder = tag_bits[match.end():].strip()

@@ -32,7 +32,7 @@ except ImportError:
 
 from _empty_attr_fix import fix_empty_attr_tags
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
-from html_tag_entities import unescape_valid_html_tag_entities
+from html_tag_entities import looks_like_valid_html_tag, unescape_valid_html_tag_entities
 
 # Standard HTML / SVG / MathML / common legacy tag names. Used by
 # ``_protect_non_html_angle_brackets`` to decide whether an angle-bracket
@@ -70,7 +70,6 @@ _STANDARD_HTML_TAG_NAMES = frozenset([
 
 # Pattern for angle-bracket content. Used by _protect_non_html_angle_brackets.
 _ANGLE_BRACKET_RE = re.compile(r'<([^<>]+)>')
-_TAG_NAME_TOKEN_RE = re.compile(r'([^\s>/]+)')
 
 
 class EnhancedTextExtractor:
@@ -452,20 +451,9 @@ class EnhancedTextExtractor:
             # carry free-form content after the leading token by design.
             if stripped[0] in ('!', '?'):
                 return m.group(0)
-            # Closing tag "/tagname..." -> skip the leading slash for
-            # standard-tag lookup.
-            if stripped.startswith('/'):
-                stripped = stripped[1:].lstrip()
-            if not stripped:
-                return m.group(0)
-            name_match = _TAG_NAME_TOKEN_RE.match(stripped)
-            if not name_match:
-                return m.group(0)
-            tagname = name_match.group(1).rstrip('/').lower()
-            # Strip namespace prefix (svg:rect -> rect, epub:type -> type).
-            if ':' in tagname:
-                tagname = tagname.split(':', 1)[1]
-            if tagname in _STANDARD_HTML_TAG_NAMES:
+            # A valid tag name alone is not enough: prose such as
+            # ``<A spatial quake ...>`` begins with "a" but is not an anchor.
+            if looks_like_valid_html_tag(inner, _STANDARD_HTML_TAG_NAMES):
                 return m.group(0)
             # Custom/story tag -> protect with the shared Unicode markers.
             return f"‹{inner}›"

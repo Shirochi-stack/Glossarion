@@ -4179,6 +4179,7 @@ class ProgressManager:
             elif chapter_obj.get('original_filename'):
                 info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
         self.prog["chapters"][chapter_key] = info
+        return chapter_key
 
     def update_tts_status(self, idx, actual_num, content_hash, output_file, tts_status, chapter_obj=None, tts_file=None, error=None):
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -16486,8 +16487,15 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
                     progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
-                    progress_manager.update_refinement_status(idx, actual_num, new_hash, output_file, "refined", chapter_obj=chapter)
-                    progress_manager.prog["chapters"][progress_manager._get_chapter_key(actual_num, output_file, chapter, new_hash)]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    refinement_key = progress_manager.update_refinement_status(
+                        idx,
+                        actual_num,
+                        new_hash,
+                        output_file,
+                        "refined",
+                        chapter_obj=chapter,
+                    )
+                    progress_manager.prog["chapters"][refinement_key]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
                     progress_manager.save()
                 if multipass_partial_mode:
                     return "processed", (
@@ -16929,7 +16937,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         status="completed",
                         chapter_obj=item["chapter"],
                     )
-                    progress_manager.update_refinement_status(
+                    refinement_key = progress_manager.update_refinement_status(
                         item["idx"],
                         item["actual_num"],
                         new_hash,
@@ -16937,14 +16945,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         "refined",
                         chapter_obj=item["chapter"],
                     )
-                    progress_manager.prog["chapters"][
-                        progress_manager._get_chapter_key(
-                            item["actual_num"],
-                            item["output_file"],
-                            item["chapter"],
-                            new_hash,
-                        )
-                    ]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    progress_manager.prog["chapters"][refinement_key]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
                     progress_manager.save()
                 _record_result((
                     "processed",

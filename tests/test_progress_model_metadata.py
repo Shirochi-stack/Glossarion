@@ -291,6 +291,45 @@ def test_refinement_completion_preserves_refined_status_and_model(tmp_path):
     assert "refined_at" in entry
 
 
+def test_refinement_status_returns_existing_chapter_zero_output_key(tmp_path):
+    progress = ProgressManager(str(tmp_path))
+    progress.prog["chapters"] = {
+        "0": {
+            "actual_num": 0,
+            "output_file": "response_chapter_notice0000.html",
+            "status": "completed",
+        },
+        "0_chapter_notice0001": {
+            "actual_num": 0,
+            "output_file": "response_chapter_notice0001.html",
+            "status": "completed",
+            "refinement_status": "not_refined",
+        },
+    }
+
+    resolved_key = progress.update_refinement_status(
+        1,
+        0,
+        "hash-notice-0001-refined",
+        "response_chapter_notice0001.html",
+        "refined",
+        chapter_obj={
+            "spine_order": 2,
+            "original_basename": "chapter_notice0001.xhtml",
+        },
+    )
+
+    assert resolved_key == "0_chapter_notice0001"
+    assert "0@2" not in progress.prog["chapters"]
+    progress.prog["chapters"][resolved_key]["unrefined_backup_file"] = (
+        "_unrefined/response_chapter_notice0001.html"
+    )
+    assert progress.prog["chapters"][resolved_key]["refinement_status"] == "refined"
+    assert progress.prog["chapters"][resolved_key]["unrefined_backup_file"] == (
+        "_unrefined/response_chapter_notice0001.html"
+    )
+
+
 def test_fallback_temp_client_receives_pre_send_callback_context():
     source = UnifiedClient.__new__(UnifiedClient)
     source._thread_local = threading.local()

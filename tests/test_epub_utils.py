@@ -8,6 +8,7 @@ import pytest
 
 import epub_converter
 from QA_Scanner_GUI import _normalize_qa_dialog_path
+from enhanced_text_extractor import EnhancedTextExtractor
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
 from qa_scan_runtime import (
@@ -700,6 +701,16 @@ def test_valid_html_tag_entities_preserve_angle_bracket_prose():
     prose = "&lt;A talent possessing both a clean character and noble integrity. Who exactly is Riyan?&gt;"
 
     assert unescape_valid_html_tag_entities(prose) == prose
+
+
+def test_html2text_multipass_preserves_entity_angle_prose_starting_with_a():
+    extractor = EnhancedTextExtractor()
+    text, _, _ = extractor.extract_chapter_content(
+        "<html><body><p>&lt;A spatial quake is a simple means.&gt;</p></body></html>",
+        "full",
+    )
+
+    assert text == "<A spatial quake is a simple means.>"
 
 
 def test_valid_html_tag_entities_rehydrate_real_markup():
