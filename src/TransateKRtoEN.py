@@ -15400,7 +15400,7 @@ def _strip_refinement_code_fence(text):
 
 
 def _partial_refinement_tag_inner_html(tag):
-    return "".join(str(child) for child in getattr(tag, "contents", []))
+    return tag.decode_contents(formatter="minimal")
 
 
 def _partial_refinement_tag_outer_html(tag):
@@ -16189,10 +16189,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 str(refinement_entry_num) == "0"
                 and refinement_entry.get("output_file") == output_file
                 and refinement_state in ("refined", "completed")
+                and not preserve_multipass_qa_status
             ):
-                # This chapter-0 special file's own progress row is already refined:
-                # never re-send it, even when multipass QA preservation is active.
-                # Failed/not_refined/missing chapter-0 rows stay eligible.
+                # Skip a clean refined special file; an active multipass QA
+                # failure remains eligible even if this flag is stale.
                 return "skipped", None, {
                     "kind": "already_refined",
                     "chapter": actual_num,
@@ -16664,6 +16664,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 str(_b2_entry_num) == "0"
                 and pre_existing_entry.get("output_file") == output_file
                 and _b2_refinement_state in ("refined", "completed")
+                and not (
+                    pre_existing_qa_source_entry is not None
+                    and pre_existing_has_foreign_qa_issue
+                )
             ):
                 return "skipped", None, {
                     "kind": "already_refined",
