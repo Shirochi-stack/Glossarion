@@ -14,6 +14,7 @@ import re
 import stat
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -41,6 +42,7 @@ DEFAULT_SUBTITLE_TRANSLATION_PROMPT = (
     "breaks. Output no markdown fences, explanations, or extra fields.\n"
 )
 SUBTITLE_PLACEHOLDER_RE = re.compile(r"\[\[SUB_TAG_\d{6}_\d{4}\]\]")
+_SUBTITLE_TOKEN_COUNTERS = threading.local()
 _SRT_TIMESTAMP_RE = re.compile(
     r"^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
     r"\d{1,3}:\d{2}:\d{2}[,.]\d{3}(?:\s+.*)?$"
@@ -506,9 +508,16 @@ def _count_tokens(text: str) -> int:
     try:
         from chapter_splitter import ChapterSplitter
 
-        return ChapterSplitter(
-            model_name=os.getenv("MODEL", "gpt-3.5-turbo")
-        ).count_tokens(text)
+        model_name = os.getenv("MODEL", "gpt-3.5-turbo")
+        counters = getattr(_SUBTITLE_TOKEN_COUNTERS, "by_model", None)
+        if counters is None:
+            counters = {}
+            _SUBTITLE_TOKEN_COUNTERS.by_model = counters
+        counter = counters.get(model_name)
+        if counter is None:
+            counter = ChapterSplitter(model_name=model_name)
+            counters[model_name] = counter
+        return counter.count_tokens(text)
     except Exception:
         return max(1, len(text) // 4)
 
@@ -544,18 +553,42 @@ def _batch_body(segments: List[Dict[str, Any]]) -> str:
 def _pack_batches(
     segments: List[Dict[str, Any]], available_tokens: int
 ) -> List[List[Dict[str, Any]]]:
+    """Pack the largest exact token-fitting slices without quadratic rescans."""
     batches: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
-    for segment in segments:
-        candidate = current + [segment]
-        if current and _count_tokens(_batch_body(candidate)) > available_tokens:
-            batches.append(current)
-            current = [segment]
-        else:
-            current = candidate
-    if current:
-        batches.append(current)
+    start = 0
+    segment_count = len(segments)
+    while start < segment_count:
+        # A single oversized cue must still make forward progress.
+        low = start + 1
+        high = segment_count
+        best_end = low
+        while low <= high:
+            candidate_end = (low + high) // 2
+            candidate_tokens = _count_tokens(
+                _batch_body(segments[start:candidate_end])
+            )
+            if candidate_tokens <= available_tokens:
+                best_end = candidate_end
+                low = candidate_end + 1
+            else:
+                high = candidate_end - 1
+        batches.append(segments[start:best_end])
+        start = best_end
     return batches
+
+
+def _subtitle_extraction_worker_count(source_count: int) -> int:
+    if source_count <= 1:
+        return 1
+    try:
+        configured = int(
+            os.getenv("SUBTITLE_EXTRACTION_WORKERS", "0") or "0"
+        )
+    except (TypeError, ValueError):
+        configured = 0
+    if configured <= 0:
+        configured = min(8, max(2, int(os.cpu_count() or 4)))
+    return max(1, min(int(source_count), configured))
 
 
 def extract_subtitle_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
@@ -696,9 +729,33 @@ def extract_subtitle_bundle_to_chapters(
     bundle_files: List[Dict[str, Any]] = []
     total_segments = 0
 
-    for source_index, source_path in enumerate(source_paths, start=1):
+    def _extract_bundle_source(source_item):
+        source_index, source_path = source_item
         source_dir = os.path.join(source_manifest_root, f"source_{source_index:05d}")
         result = extract_subtitle_to_chapters(source_path, source_dir)
+        return source_index, source_path, result
+
+    indexed_sources = list(enumerate(source_paths, start=1))
+    extraction_workers = _subtitle_extraction_worker_count(len(indexed_sources))
+    if extraction_workers > 1:
+        print(
+            f"Preparing {len(indexed_sources)} subtitle files with "
+            f"{extraction_workers} parallel extraction workers"
+        )
+        with ThreadPoolExecutor(
+            max_workers=extraction_workers,
+            thread_name_prefix="SubtitleExtract",
+        ) as executor:
+            extracted_sources = list(
+                executor.map(_extract_bundle_source, indexed_sources)
+            )
+    else:
+        extracted_sources = [
+            _extract_bundle_source(source_item)
+            for source_item in indexed_sources
+        ]
+
+    for source_index, source_path, result in extracted_sources:
         with open(result["manifest_path"], "r", encoding="utf-8") as source:
             manifest = json.load(source)
         with open(result["chapters_path"], "r", encoding="utf-8") as source:

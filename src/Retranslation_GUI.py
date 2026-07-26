@@ -10899,7 +10899,12 @@ class RetranslationMixin:
         dialog_layout.addWidget(loading_widget)
         return dialog, dialog_layout, loading_widget, loading_label
 
-    def _show_retranslation_shell_then_build(self, file_path, show_special_files_state=False):
+    def _show_retranslation_shell_then_build(
+        self,
+        file_path,
+        show_special_files_state=False,
+        resolved_output_dir=None,
+    ):
         dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog("Progress Manager")
         file_key = os.path.abspath(file_path)
 
@@ -10927,9 +10932,13 @@ class RetranslationMixin:
                     tab_frame=content,
                     show_special_files_state=show_special_files_state,
                     _loading_label=loading_label,
+                    resolved_output_dir=resolved_output_dir,
                 )
                 if not result:
                     dialog.hide()
+                    pending = getattr(self, '_subtitle_bundle_progress_shell', None)
+                    if isinstance(pending, dict) and pending.get('dialog') is dialog:
+                        self._subtitle_bundle_progress_shell = None
                     return
 
                 timer = getattr(dialog, '_loading_icon_timer', None)
@@ -10943,6 +10952,9 @@ class RetranslationMixin:
                 if not hasattr(self, '_retranslation_dialog_cache'):
                     self._retranslation_dialog_cache = {}
                 self._retranslation_dialog_cache[file_key] = result
+                pending = getattr(self, '_subtitle_bundle_progress_shell', None)
+                if isinstance(pending, dict) and pending.get('dialog') is dialog:
+                    self._subtitle_bundle_progress_shell = None
                 QTimer.singleShot(50, lambda: self._populate_progress_listbox_streamed(result))
             except Exception as e:
                 print(f"Failed to build progress manager contents: {e}")
@@ -10953,12 +10965,163 @@ class RetranslationMixin:
                     loading_label.show()
                 except Exception:
                     pass
+                pending = getattr(self, '_subtitle_bundle_progress_shell', None)
+                if isinstance(pending, dict) and pending.get('dialog') is dialog:
+                    self._subtitle_bundle_progress_shell = None
 
         QTimer.singleShot(50, _build_dialog_contents)
+        return dialog
+
+    def _selected_subtitle_bundle_progress_target(self, selected_files=None):
+        """Resolve extracted members from one subtitle ZIP to one PM target."""
+        files = list(
+            selected_files
+            if selected_files is not None
+            else (getattr(self, 'selected_files', None) or [])
+        )
+        if not files:
+            return None
+
+        output_info_for = getattr(self, '_subtitle_zip_output_info', None)
+        if not callable(output_info_for):
+            return None
+
+        infos = []
+        for file_path in files:
+            info = output_info_for(file_path)
+            if not isinstance(info, dict):
+                return None
+            infos.append(info)
+
+        def _normalized(path):
+            return os.path.normcase(os.path.abspath(str(path or "")))
+
+        bundle_ids = {
+            _normalized(info.get('bundle_id') or info.get('archive_path'))
+            for info in infos
+            if info.get('bundle_id') or info.get('archive_path')
+        }
+        if len(bundle_ids) != 1:
+            return None
+
+        expected_members = {
+            _normalized(member)
+            for info in infos
+            for member in (info.get('bundle_files') or [])
+            if member
+        }
+        selected_members = {_normalized(file_path) for file_path in files}
+        # Do not collapse an intentional subset or a mixed selection. Translation
+        # expands a ZIP to the complete bundle, so an exact match identifies the
+        # race that previously produced one Progress Manager tab per subtitle.
+        if expected_members and selected_members != expected_members:
+            return None
+
+        output_dirs = {
+            _normalized(info.get('output_dir'))
+            for info in infos
+            if info.get('output_dir')
+        }
+        if len(output_dirs) != 1:
+            return None
+
+        first = infos[0]
+        archive_path = first.get('archive_path') or first.get('bundle_id')
+        if not archive_path:
+            return None
+        bundle_files = list(first.get('bundle_files') or files)
+        return {
+            'bundle_id': next(iter(bundle_ids)),
+            'archive_path': os.path.abspath(str(archive_path)),
+            'output_dir': os.path.abspath(str(first.get('output_dir'))),
+            'group_name': str(first.get('group_name') or ''),
+            'bundle_files': [os.path.abspath(str(path)) for path in bundle_files],
+        }
+
+    def _open_subtitle_bundle_progress_manager(self, target):
+        """Open or refresh the single Progress Manager for a subtitle ZIP."""
+        archive_path = os.path.abspath(str(target['archive_path']))
+        output_dir = os.path.abspath(str(target['output_dir']))
+        file_key = archive_path
+
+        # A multi-file window may have been created immediately before the ZIP
+        # extraction mapping became available. Retire it so it cannot reappear
+        # with one tab per extracted subtitle.
+        old_multi_dialog = getattr(self, '_multi_file_retranslation_dialog', None)
+        if old_multi_dialog is not None:
+            try:
+                old_multi_dialog.hide()
+            except Exception:
+                pass
+            try:
+                old_multi_dialog.deleteLater()
+            except Exception:
+                pass
+            self._multi_file_retranslation_dialog = None
+            self._multi_file_selection_key = None
+
+        cache = getattr(self, '_retranslation_dialog_cache', None)
+        cached_data = cache.get(file_key) if isinstance(cache, dict) else None
+        if isinstance(cached_data, dict) and cached_data.get('dialog'):
+            cached_output = cached_data.get('output_dir')
+            if cached_output and os.path.normcase(os.path.abspath(cached_output)) == os.path.normcase(output_dir):
+                dialog = cached_data['dialog']
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+
+                def _refresh_cached_bundle():
+                    refresh_func = cached_data.get('refresh_func')
+                    if callable(refresh_func):
+                        try:
+                            refresh_func()
+                            return
+                        except Exception:
+                            pass
+                    self._refresh_retranslation_data(cached_data)
+
+                QTimer.singleShot(50, _refresh_cached_bundle)
+                return dialog
+            try:
+                cached_data.get('dialog').hide()
+                cached_data.get('dialog').deleteLater()
+            except Exception:
+                pass
+            cache.pop(file_key, None)
+            self._subtitle_bundle_progress_shell = None
+
+        pending = getattr(self, '_subtitle_bundle_progress_shell', None)
+        if isinstance(pending, dict) and pending.get('file_key') == file_key:
+            pending_dialog = pending.get('dialog')
+            if pending_dialog is not None:
+                try:
+                    pending_dialog.show()
+                    pending_dialog.raise_()
+                    pending_dialog.activateWindow()
+                    return pending_dialog
+                except RuntimeError:
+                    self._subtitle_bundle_progress_shell = None
+
+        dialog = self._show_retranslation_shell_then_build(
+            archive_path,
+            show_special_files_state=True,
+            resolved_output_dir=output_dir,
+        )
+        self._subtitle_bundle_progress_shell = {
+            'file_key': file_key,
+            'dialog': dialog,
+            'output_dir': output_dir,
+        }
+        return dialog
 
     def force_retranslation(self):
         """Force retranslation of specific chapters or images with improved display"""
-        
+
+        subtitle_bundle_target = self._selected_subtitle_bundle_progress_target()
+        if subtitle_bundle_target:
+            self._open_subtitle_bundle_progress_manager(subtitle_bundle_target)
+            return
+
         # Check for multiple file selection first
         if hasattr(self, 'selected_files') and len(self.selected_files) > 1:
             self._force_retranslation_multiple_files()
@@ -11088,7 +11251,15 @@ class RetranslationMixin:
         self._show_retranslation_shell_then_build(input_path, show_special_files_state=show_special)
 
 
-    def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None, show_special_files_state=False, _loading_label=None):
+    def _force_retranslation_epub_or_text(
+        self,
+        file_path,
+        parent_dialog=None,
+        tab_frame=None,
+        show_special_files_state=False,
+        _loading_label=None,
+        resolved_output_dir=None,
+    ):
         """
         Shared logic for force retranslation of EPUB/text files with OPF support
         Can be used standalone or embedded in a tab
@@ -11099,6 +11270,7 @@ class RetranslationMixin:
             tab_frame: If provided, will render into this frame instead of creating dialog
             show_special_files_state: Initial state for showing special files toggle
             _loading_label: Optional QLabel to update with progress messages during loading
+            resolved_output_dir: Optional authoritative output directory
         
         Returns:
             dict: Contains all the UI elements and data for external access
@@ -11126,7 +11298,9 @@ class RetranslationMixin:
         if not override_dir and hasattr(self, 'config'):
             override_dir = self.config.get('output_directory')
             
-        if override_dir:
+        if resolved_output_dir:
+            output_dir = os.path.abspath(str(resolved_output_dir))
+        elif override_dir:
             output_dir = os.path.join(override_dir, epub_base)
         else:
             output_dir = epub_base
@@ -15892,6 +16066,11 @@ class RetranslationMixin:
             'selection_count_label': selection_count_label,
             'dialog': dialog,
             'container': container,
+            'fixed_output_dir': (
+                os.path.abspath(str(resolved_output_dir))
+                if resolved_output_dir
+                else None
+            ),
             'show_special_files_state': show_special_files[0],  # Store current toggle state
             'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
             'show_model_info_state': show_model_info[0],
@@ -16790,7 +16969,11 @@ class RetranslationMixin:
                                     old_dlg.deleteLater()
                                 except Exception:
                                     pass
-                            self._show_retranslation_shell_then_build(file_path, show_special_files_state=show_special)
+                            self._show_retranslation_shell_then_build(
+                                file_path,
+                                show_special_files_state=show_special,
+                                resolved_output_dir=data.get('fixed_output_dir'),
+                            )
                         except Exception as e:
                             print(f"Error during rebuild: {e}")
 
@@ -17769,7 +17952,7 @@ class RetranslationMixin:
             # re-resolve output_dir/progress_file so we don't keep reading the old progress JSON.
             try:
                 file_path = data.get('file_path')
-                if file_path:
+                if file_path and not data.get('fixed_output_dir'):
                     epub_base = os.path.splitext(os.path.basename(file_path))[0]
                     override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
                     if not override_dir and hasattr(self, 'config'):
@@ -19961,7 +20144,12 @@ class RetranslationMixin:
         """Handle force retranslation when multiple files are selected - now uses shared logic"""
         try:
             print(f"[DEBUG] _force_retranslation_multiple_files called with {len(self.selected_files)} files")
-            
+
+            subtitle_bundle_target = self._selected_subtitle_bundle_progress_target()
+            if subtitle_bundle_target:
+                self._open_subtitle_bundle_progress_manager(subtitle_bundle_target)
+                return
+
             # First, check if all selected files are images from the same folder
             # This handles the case where folder selection results in individual file selections
             if len(self.selected_files) > 1:

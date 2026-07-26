@@ -32,6 +32,44 @@ def _translated_batch(chapter, translations):
     )
 
 
+def test_subtitle_batch_packing_avoids_per_cue_full_rescans(monkeypatch):
+    import subtitle_processor
+
+    segments = [
+        {
+            "id": str(index),
+            "source_text": f"Dialogue {index}",
+        }
+        for index in range(1, 1001)
+    ]
+    token_calls = []
+
+    def count_records(payload):
+        token_calls.append(len(payload))
+        return payload.count('"id"')
+
+    monkeypatch.setattr(subtitle_processor, "_count_tokens", count_records)
+    batches = subtitle_processor._pack_batches(segments, 40)
+
+    assert [len(batch) for batch in batches] == [40] * 25
+    assert [
+        segment["id"]
+        for batch in batches
+        for segment in batch
+    ] == [str(index) for index in range(1, 1001)]
+    assert len(token_calls) < 400
+
+
+def test_subtitle_extraction_worker_count_is_bounded(monkeypatch):
+    import subtitle_processor
+
+    monkeypatch.setenv("SUBTITLE_EXTRACTION_WORKERS", "3")
+
+    assert subtitle_processor._subtitle_extraction_worker_count(1) == 1
+    assert subtitle_processor._subtitle_extraction_worker_count(2) == 2
+    assert subtitle_processor._subtitle_extraction_worker_count(20) == 3
+
+
 def test_srt_round_trip_preserves_timing_numbers_tags_and_crlf(tmp_path):
     source = tmp_path / "sample.srt"
     source.write_bytes(
@@ -882,6 +920,101 @@ def test_subtitle_prompt_profile_is_built_in_and_mirrored():
     )
     assert '"Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT' in app_source
     assert '"Subtitle Translation"' in discord_source
+
+
+def test_progress_manager_collapses_extracted_zip_members_to_one_bundle(
+    tmp_path,
+):
+    from Retranslation_GUI import RetranslationMixin
+
+    archive = tmp_path / "season.zip"
+    output_dir = tmp_path / "season"
+    extracted = [
+        tmp_path / "extract" / "episode_01.srt",
+        tmp_path / "extract" / "episode_02.srt",
+    ]
+    bundle_files = [str(path) for path in extracted]
+    mappings = {
+        os.path.normcase(os.path.abspath(path)): {
+            "archive_path": str(archive),
+            "bundle_id": os.path.normcase(os.path.abspath(archive)),
+            "bundle_files": bundle_files,
+            "group_name": "season",
+            "output_dir": str(output_dir),
+        }
+        for path in extracted
+    }
+    gui = RetranslationMixin()
+    gui.selected_files = bundle_files
+    gui._subtitle_zip_output_info = lambda path: mappings.get(
+        os.path.normcase(os.path.abspath(path))
+    )
+
+    target = gui._selected_subtitle_bundle_progress_target()
+
+    assert target["archive_path"] == os.path.abspath(archive)
+    assert target["output_dir"] == os.path.abspath(output_dir)
+    assert target["bundle_files"] == [
+        os.path.abspath(path) for path in extracted
+    ]
+
+
+def test_progress_manager_does_not_collapse_partial_subtitle_bundle(tmp_path):
+    from Retranslation_GUI import RetranslationMixin
+
+    archive = tmp_path / "season.zip"
+    output_dir = tmp_path / "season"
+    extracted = [
+        tmp_path / "extract" / "episode_01.srt",
+        tmp_path / "extract" / "episode_02.srt",
+    ]
+    bundle_files = [str(path) for path in extracted]
+    info = {
+        "archive_path": str(archive),
+        "bundle_id": os.path.normcase(os.path.abspath(archive)),
+        "bundle_files": bundle_files,
+        "group_name": "season",
+        "output_dir": str(output_dir),
+    }
+    gui = RetranslationMixin()
+    gui.selected_files = [bundle_files[0]]
+    gui._subtitle_zip_output_info = lambda _path: info
+
+    assert gui._selected_subtitle_bundle_progress_target() is None
+
+
+def test_force_retranslation_routes_complete_subtitle_bundle_before_multifile(
+    tmp_path,
+):
+    from Retranslation_GUI import RetranslationMixin
+
+    archive = tmp_path / "season.zip"
+    output_dir = tmp_path / "season"
+    extracted = [
+        tmp_path / "extract" / "episode_01.srt",
+        tmp_path / "extract" / "episode_02.srt",
+    ]
+    bundle_files = [str(path) for path in extracted]
+    info = {
+        "archive_path": str(archive),
+        "bundle_id": os.path.normcase(os.path.abspath(archive)),
+        "bundle_files": bundle_files,
+        "group_name": "season",
+        "output_dir": str(output_dir),
+    }
+    gui = RetranslationMixin()
+    gui.selected_files = bundle_files
+    gui._subtitle_zip_output_info = lambda _path: info
+    opened = []
+    gui._open_subtitle_bundle_progress_manager = opened.append
+    gui._force_retranslation_multiple_files = lambda: pytest.fail(
+        "subtitle ZIP members must not use the multi-file dialog"
+    )
+
+    gui.force_retranslation()
+
+    assert len(opened) == 1
+    assert opened[0]["archive_path"] == os.path.abspath(archive)
 
 
 def test_subtitle_zip_grouping_is_exported_to_translation_backend():
