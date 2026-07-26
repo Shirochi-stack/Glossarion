@@ -21237,9 +21237,37 @@ def main(log_callback=None, stop_callback=None):
         os.environ["AUTO_GLOSSARY_MODE"] = "off"
         print("📑 Skipping auto glossary extraction for Audio output mode")
     
-    # Structured subtitle batches and glossary-like files should not be used
-    # as raw material for automatic glossary extraction.
-    if input_path.lower().endswith(('.csv', '.json', '.md', '.srt', '.ass', '.lrc')):
+    # Subtitle glossary extraction is handled by the GUI before the structured
+    # subtitle translation phase. Report that handoff accurately instead of
+    # claiming the completed extraction was skipped.
+    if is_subtitle_file:
+        available_subtitle_glossary = find_glossary_file(out)
+        subtitle_auto_mode = (
+            os.getenv("AUTO_GLOSSARY_MODE", "off")
+            .strip()
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+        )
+        if available_subtitle_glossary and subtitle_auto_mode in {
+            "balanced",
+            "full",
+        }:
+            print("📑 Glossary extraction completed before subtitle translation")
+            print(
+                "📑 Using pre-extracted glossary: "
+                f"{os.path.basename(available_subtitle_glossary)}"
+            )
+        elif available_subtitle_glossary:
+            print(
+                "📑 Using existing glossary for subtitle translation: "
+                f"{os.path.basename(available_subtitle_glossary)}"
+            )
+        else:
+            print("📑 No glossary configured for subtitle translation")
+    # Glossary-like source files should not themselves be used as raw material
+    # for automatic glossary extraction.
+    elif input_path.lower().endswith(('.csv', '.json', '.md')):
         print("📑 Skipping glossary generation for this structured/plain-text format")
         print("   Manual glossaries can still be applied during translation")
     else:

@@ -1294,6 +1294,25 @@ def test_translation_glossary_lookup_never_falls_back_to_unrelated_book(
     assert find_glossary_file(str(output_dir)) is None
 
 
+def test_subtitle_glossary_phase_log_reports_preextraction_not_skipping():
+    translation_source = (
+        Path(__file__).resolve().parents[1] / "src" / "TransateKRtoEN.py"
+    ).read_text(encoding="utf-8")
+    branch_start = translation_source.index(
+        "if is_subtitle_file:",
+        translation_source.index("GLOSSARY GENERATION PHASE"),
+    )
+    branch_end = translation_source.index(
+        "elif input_path.lower().endswith(('.csv', '.json', '.md'))",
+        branch_start,
+    )
+    subtitle_branch = translation_source[branch_start:branch_end]
+
+    assert "Glossary extraction completed before subtitle translation" in subtitle_branch
+    assert "Using pre-extracted glossary" in subtitle_branch
+    assert "Skipping glossary generation" not in subtitle_branch
+
+
 def test_subtitle_prompt_profile_is_built_in_and_mirrored():
     source_root = Path(__file__).resolve().parents[1] / "src"
     gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
