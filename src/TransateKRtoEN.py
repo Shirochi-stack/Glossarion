@@ -309,6 +309,187 @@ def _sdlxliff_json_records(text):
     return data if isinstance(data, list) else None
 
 
+def _clean_structured_batch_output(text):
+    """Remove an accidental JSON/HTML markdown fence around structured output."""
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(
+        r"^```(?:json|html)?\s*(?:\r?\n)?",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"(?:\r?\n)?```\s*$",
+        "",
+        cleaned,
+        count=1,
+    )
+    return cleaned.strip()
+
+
+def _json_error_context(text, position, radius=70):
+    """Return a compact one-line excerpt around a JSON parser error."""
+    value = str(text or "")
+    try:
+        position = max(0, min(len(value), int(position)))
+    except (TypeError, ValueError):
+        position = 0
+    start = max(0, position - int(radius))
+    end = min(len(value), position + int(radius))
+    excerpt = value[start:end]
+    excerpt = excerpt.replace("\r", "\\r").replace("\n", "\\n")
+    if start:
+        excerpt = "…" + excerpt
+    if end < len(value):
+        excerpt += "…"
+    return excerpt
+
+
+def _validate_structured_batch_output_details(chapter, text):
+    """Validate structured output and return (ok, issue code, precise detail)."""
+    try:
+        source_data = json.loads(str((chapter or {}).get("body") or ""))
+    except json.JSONDecodeError as exc:
+        return (
+            False,
+            "INVALID_SOURCE_JSON",
+            "source JSON parse error: "
+            f"{exc.msg} at line {exc.lineno}, column {exc.colno} "
+            f"(character {exc.pos})",
+        )
+    except Exception as exc:
+        return False, "INVALID_SOURCE_JSON", f"source JSON error: {exc}"
+    if not isinstance(source_data, list):
+        return (
+            False,
+            "INVALID_SOURCE_JSON",
+            "source JSON top level must be an array, "
+            f"got {type(source_data).__name__}",
+        )
+
+    cleaned = _clean_structured_batch_output(text)
+    try:
+        target_data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        context = _json_error_context(cleaned, exc.pos)
+        return (
+            False,
+            "INVALID_TARGET_JSON",
+            f"{exc.msg} at line {exc.lineno}, column {exc.colno} "
+            f"(character {exc.pos}); near: {context!r}",
+        )
+    except Exception as exc:
+        return False, "INVALID_TARGET_JSON", f"target JSON error: {exc}"
+    if not isinstance(target_data, list):
+        return (
+            False,
+            "INVALID_TARGET_JSON",
+            "output JSON top level must be an array, "
+            f"got {type(target_data).__name__}",
+        )
+
+    expected = {}
+    expected_order = []
+    for index, item in enumerate(source_data):
+        if not isinstance(item, dict) or "id" not in item or "source" not in item:
+            return (
+                False,
+                "INVALID_SOURCE_FIELDS",
+                f"source item {index + 1} must contain id and source fields",
+            )
+        segment_id = str(item.get("id"))
+        if segment_id in expected:
+            return (
+                False,
+                "DUPLICATE_SOURCE_ID",
+                f"source id {segment_id!r} appears more than once",
+            )
+        expected[segment_id] = STRUCTURED_PLACEHOLDER_RE.findall(
+            str(item.get("source", ""))
+        )
+        expected_order.append(segment_id)
+
+    seen = {}
+    seen_order = []
+    for index, item in enumerate(target_data):
+        if not isinstance(item, dict):
+            return (
+                False,
+                "INVALID_TARGET_FIELDS",
+                f"output item {index + 1} must be an object, "
+                f"got {type(item).__name__}",
+            )
+        if set(item.keys()) != {"id", "target"}:
+            return (
+                False,
+                "INVALID_TARGET_FIELDS",
+                f"output item {index + 1} has fields "
+                f"{sorted(str(key) for key in item.keys())}; "
+                "expected exactly ['id', 'target']",
+            )
+        segment_id = str(item.get("id"))
+        if segment_id in seen:
+            return (
+                False,
+                "DUPLICATE_TARGET_ID",
+                f"output id {segment_id!r} appears more than once",
+            )
+        if segment_id not in expected:
+            return (
+                False,
+                "EXTRA_TARGET_ID",
+                f"unexpected output id {segment_id!r}",
+            )
+        target = item.get("target")
+        if not isinstance(target, str):
+            return (
+                False,
+                "INVALID_TARGET_TEXT",
+                f"target for id {segment_id!r} must be a string, "
+                f"got {type(target).__name__}",
+            )
+        actual_placeholders = STRUCTURED_PLACEHOLDER_RE.findall(target)
+        if actual_placeholders != expected[segment_id]:
+            return (
+                False,
+                "PLACEHOLDER_MISMATCH",
+                f"id {segment_id!r} placeholders differ; expected "
+                f"{expected[segment_id]!r}, got {actual_placeholders!r}",
+            )
+        seen[segment_id] = True
+        seen_order.append(segment_id)
+
+    missing = [segment_id for segment_id in expected_order if segment_id not in seen]
+    if missing:
+        preview = ", ".join(repr(segment_id) for segment_id in missing[:10])
+        suffix = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+        return (
+            False,
+            "MISSING_TARGET_ID",
+            f"missing output id(s): {preview}{suffix}",
+        )
+    if seen_order != expected_order:
+        mismatch_index = next(
+            (
+                index
+                for index, (actual, wanted) in enumerate(
+                    zip(seen_order, expected_order)
+                )
+                if actual != wanted
+            ),
+            0,
+        )
+        return (
+            False,
+            "ID_ORDER_MISMATCH",
+            f"output order differs at item {mismatch_index + 1}; expected "
+            f"{expected_order[mismatch_index]!r}, got "
+            f"{seen_order[mismatch_index]!r}",
+        )
+    return True, None, None
+
+
 def _is_structured_translation_batch(chapter):
     return bool(
         isinstance(chapter, dict)
@@ -378,47 +559,130 @@ def _sdlxliff_preserved_batch_body(chapter):
 
 
 def _validate_sdlxliff_batch_output(chapter, text):
-    source_records = _sdlxliff_json_records((chapter or {}).get("body"))
-    target_records = _sdlxliff_json_records(text)
-    if source_records is None:
-        return False, "INVALID_SOURCE_JSON"
-    if target_records is None:
-        return False, "INVALID_TARGET_JSON"
+    ok, issue, _detail = _validate_structured_batch_output_details(
+        chapter,
+        text,
+    )
+    return ok, issue
 
-    expected = {}
-    expected_order = []
-    for item in source_records:
-        if not isinstance(item, dict) or "id" not in item or "source" not in item:
-            return False, "INVALID_SOURCE_FIELDS"
-        segment_id = str(item.get("id"))
-        if segment_id in expected:
-            return False, "DUPLICATE_SOURCE_ID"
-        expected[segment_id] = STRUCTURED_PLACEHOLDER_RE.findall(str(item.get("source", "")))
-        expected_order.append(segment_id)
 
-    seen = {}
-    seen_order = []
-    for item in target_records:
-        if not isinstance(item, dict) or set(item.keys()) != {"id", "target"}:
-            return False, "INVALID_TARGET_FIELDS"
-        segment_id = str(item.get("id"))
-        if segment_id in seen:
-            return False, "DUPLICATE_TARGET_ID"
-        if segment_id not in expected:
-            return False, "EXTRA_TARGET_ID"
-        target = item.get("target")
-        if not isinstance(target, str):
-            return False, "INVALID_TARGET_TEXT"
-        if STRUCTURED_PLACEHOLDER_RE.findall(target) != expected[segment_id]:
-            return False, "PLACEHOLDER_MISMATCH"
-        seen[segment_id] = True
-        seen_order.append(segment_id)
+def _structured_json_retry_limit():
+    """Return the GUI/API maximum retry-attempt setting for JSON correction."""
+    try:
+        return max(0, int(str(os.getenv("MAX_RETRIES", "7")).strip()))
+    except (TypeError, ValueError):
+        return 7
 
-    if set(seen.keys()) != set(expected.keys()):
-        return False, "MISSING_TARGET_ID"
-    if seen_order != expected_order:
-        return False, "ID_ORDER_MISMATCH"
-    return True, None
+
+def _with_structured_batch_retry_prompt(messages, chapter, issue, detail):
+    """Strengthen the JSON-only contract for a validation retry."""
+    source_records = _sdlxliff_json_records((chapter or {}).get("body")) or []
+    correction = (
+        "\n\nSTRUCTURED JSON RETRY CORRECTION:\n"
+        f"The prior response failed validation: {issue or 'INVALID_JSON'}"
+        + (f" — {detail}" if detail else "")
+        + ".\n"
+        f"Return exactly {len(source_records)} output object(s), matching every "
+        "input id once and in the original order.\n"
+        "Output only the raw JSON array. Do not use markdown fences, comments, "
+        "prefaces, trailing text, or any fields other than id and target."
+    )
+    updated = [dict(message) for message in (messages or [])]
+    for message in updated:
+        if message.get("role") == "system":
+            message["content"] = str(message.get("content") or "").rstrip() + correction
+            return updated
+    return [{"role": "system", "content": correction.strip()}] + updated
+
+
+def _retry_invalid_structured_batch_output(
+    chapter,
+    initial_text,
+    retry_request,
+    *,
+    batch_label=None,
+    batch_number=None,
+    max_retries=None,
+    stop_check=None,
+    log_fn=print,
+):
+    """Retry a structurally invalid JSON response and return validation state."""
+    if max_retries is None:
+        max_retries = _structured_json_retry_limit()
+    try:
+        max_retries = max(0, int(max_retries))
+    except (TypeError, ValueError):
+        max_retries = 7
+
+    label = str(batch_label or _structured_batch_label(chapter))
+    number = batch_number
+    prefix = f"{label} batch {number}" if number is not None else f"{label} batch"
+    candidate = _clean_structured_batch_output(initial_text)
+    retries_used = 0
+
+    while True:
+        ok, issue, detail = _validate_structured_batch_output_details(
+            chapter,
+            candidate,
+        )
+        if ok:
+            if retries_used:
+                log_fn(
+                    f"✅ {prefix}: structured JSON validated after "
+                    f"{retries_used}/{max_retries} retries"
+                )
+            return {
+                "ok": True,
+                "text": candidate,
+                "issue": None,
+                "detail": None,
+                "retries_used": retries_used,
+                "max_retries": max_retries,
+            }
+
+        attempt_label = (
+            "initial response"
+            if retries_used == 0
+            else f"retry {retries_used}/{max_retries}"
+        )
+        log_fn(
+            f"⚠️ {prefix}: {attempt_label} failed structured JSON validation: "
+            f"{issue} — {detail}"
+        )
+
+        if retries_used >= max_retries:
+            log_fn(
+                f"❌ {prefix}: structured JSON remained invalid after "
+                f"{max_retries} retries: {issue} — {detail}"
+            )
+            return {
+                "ok": False,
+                "text": candidate,
+                "issue": issue,
+                "detail": detail,
+                "retries_used": retries_used,
+                "max_retries": max_retries,
+            }
+
+        if callable(stop_check) and stop_check():
+            return {
+                "ok": False,
+                "text": candidate,
+                "issue": issue,
+                "detail": "retry cancelled by stop request",
+                "retries_used": retries_used,
+                "max_retries": max_retries,
+                "cancelled": True,
+            }
+
+        retries_used += 1
+        log_fn(
+            f"🔄 {prefix}: retrying invalid structured JSON "
+            f"({retries_used}/{max_retries})"
+        )
+        candidate = _clean_structured_batch_output(
+            retry_request(retries_used, issue, detail)
+        )
 
 
 def _materialize_completed_subtitle_bundle_file(chapter, output_dir):
@@ -8163,6 +8427,10 @@ class BatchTranslationProcessor:
                     + [{"role": "user", "content": user_prompt}]
                 )
                 chapter_msgs = _build_single_pass_glossary_messages(chapter_msgs, chunk_html)
+                chapter_msgs = _with_structured_batch_prompt(
+                    chapter_msgs,
+                    chapter,
+                )
 
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
@@ -8644,6 +8912,117 @@ class BatchTranslationProcessor:
                 else:
                     is_truncated = False
                 
+                if (
+                    result
+                    and _is_structured_translation_batch(chapter)
+                    and int(total_chunks or 0) == 1
+                    and not is_truncated
+                ):
+                    structured_retry_state = {}
+
+                    def _retry_structured_batch_request(
+                        retry_number,
+                        validation_issue,
+                        validation_detail,
+                    ):
+                        retry_messages = _with_structured_batch_retry_prompt(
+                            chapter_msgs,
+                            chapter,
+                            validation_issue,
+                            validation_detail,
+                        )
+                        retry_context = dict(chapter_ctx)
+                        retry_context["structured_json_retry"] = retry_number
+                        retry_result, retry_finish_reason, retry_raw_obj = (
+                            send_with_interrupt(
+                                retry_messages,
+                                self.client,
+                                self.config.TEMP,
+                                self.config.MAX_OUTPUT_TOKENS,
+                                local_stop_cb,
+                                chunk_timeout=chunk_timeout,
+                                context='translation',
+                                chapter_context=retry_context,
+                                bypass_graceful_stop=True,
+                                before_dispatch_callback=lambda: (
+                                    self._announce_ordered_request_dispatch(
+                                        chapter.get('_batch_request_order'),
+                                        _direct_text_label_with_source(
+                                            f"Chapter {actual_num} "
+                                            f"(structured JSON retry "
+                                            f"{retry_number})",
+                                            chapter_ctx.get('source_file'),
+                                        ),
+                                    )
+                                ),
+                                before_send_callback=(
+                                    _mark_batch_chunk_progress_on_send
+                                ),
+                                local_cancel_only_check=(
+                                    chunk_abort_event.is_set
+                                ),
+                            )
+                        )
+                        retry_model, retry_key = (
+                            _capture_thread_actual_request_metadata()
+                        )
+                        structured_retry_state.update(
+                            {
+                                "finish_reason": retry_finish_reason,
+                                "raw_obj": retry_raw_obj,
+                                "actual_model": retry_model,
+                                "actual_key": retry_key,
+                            }
+                        )
+                        return retry_result
+
+                    structured_validation = (
+                        _retry_invalid_structured_batch_output(
+                            chapter,
+                            result,
+                            _retry_structured_batch_request,
+                            batch_label=_structured_batch_label(chapter),
+                            batch_number=actual_num,
+                            stop_check=local_stop_cb,
+                        )
+                    )
+                    result = structured_validation["text"]
+                    if structured_retry_state:
+                        finish_reason = structured_retry_state.get(
+                            "finish_reason"
+                        )
+                        raw_obj = structured_retry_state.get("raw_obj")
+                        chunk_actual_model = (
+                            structured_retry_state.get("actual_model")
+                            or chunk_actual_model
+                        )
+                        chunk_actual_key = (
+                            structured_retry_state.get("actual_key")
+                            or chunk_actual_key
+                        )
+                    if not structured_validation["ok"]:
+                        chapter["_structured_validation_failure"] = {
+                            "issue": structured_validation.get("issue"),
+                            "detail": structured_validation.get("detail"),
+                            "retries_used": structured_validation.get(
+                                "retries_used"
+                            ),
+                        }
+                        if structured_validation.get("cancelled"):
+                            return _chunk_result(
+                                None,
+                                raw_obj,
+                                False,
+                                "cancelled",
+                                chunk_actual_model,
+                                chunk_actual_key,
+                            )
+                    else:
+                        chapter.pop(
+                            "_structured_validation_failure",
+                            None,
+                        )
+
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
@@ -9081,7 +9460,7 @@ class BatchTranslationProcessor:
                 raise Exception("No translation result produced")
 
             if _is_structured_translation_batch(chapter):
-                cleaned = str(result or "").strip()
+                cleaned = _clean_structured_batch_output(result)
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 batch_label = _structured_batch_label(chapter)
                 if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
@@ -9102,9 +9481,20 @@ class BatchTranslationProcessor:
                         self.save_progress_fn()
                     return False, actual_num, None, None, None
 
-                ok, issue = _validate_sdlxliff_batch_output(chapter, cleaned)
+                ok, issue, detail = _validate_structured_batch_output_details(
+                    chapter,
+                    cleaned,
+                )
                 if not ok:
-                    print(f"❌ {batch_label} batch {actual_num}: invalid JSON output ({issue})")
+                    retry_failure = chapter.pop(
+                        "_structured_validation_failure",
+                        None,
+                    )
+                    if not retry_failure:
+                        print(
+                            f"❌ {batch_label} batch {actual_num}: structured "
+                            f"JSON validation failed: {issue} — {detail}"
+                        )
                     with self.progress_lock:
                         self.update_progress_fn(
                             chapter_progress_idx,
@@ -25913,6 +26303,79 @@ def main(log_callback=None, stop_callback=None):
                         flags=re.IGNORECASE,
                     )
 
+                if (
+                    result
+                    and _is_structured_translation_batch(c)
+                    and int(total_chunks or 0) == 1
+                    and not chapter_truncated
+                ):
+                    sequential_retry_state = {}
+
+                    def _retry_sequential_structured_batch(
+                        retry_number,
+                        validation_issue,
+                        validation_detail,
+                    ):
+                        retry_messages = _with_structured_batch_retry_prompt(
+                            msgs,
+                            c,
+                            validation_issue,
+                            validation_detail,
+                        )
+                        (
+                            retry_result,
+                            retry_finish_reason,
+                            retry_raw_obj,
+                        ) = translation_processor.translate_with_retry(
+                            retry_messages,
+                            chunk_html,
+                            c,
+                            chunk_idx,
+                            total_chunks,
+                            merge_group_len=merge_group_len,
+                            merged_chapters=merged_chapters,
+                            before_send_callback=(
+                                _mark_sequential_progress_on_send
+                            ),
+                        )
+                        sequential_retry_state.update(
+                            {
+                                "finish_reason": retry_finish_reason,
+                                "raw_obj": retry_raw_obj,
+                            }
+                        )
+                        return retry_result
+
+                    structured_validation = (
+                        _retry_invalid_structured_batch_output(
+                            c,
+                            result,
+                            _retry_sequential_structured_batch,
+                            batch_label=_structured_batch_label(c),
+                            batch_number=actual_num,
+                            stop_check=_sequential_hard_stop_active,
+                        )
+                    )
+                    result = structured_validation["text"]
+                    if sequential_retry_state:
+                        finish_reason = sequential_retry_state.get(
+                            "finish_reason"
+                        )
+                        raw_obj = sequential_retry_state.get("raw_obj")
+                    if not structured_validation["ok"]:
+                        c["_structured_validation_failure"] = {
+                            "issue": structured_validation.get("issue"),
+                            "detail": structured_validation.get("detail"),
+                            "retries_used": structured_validation.get(
+                                "retries_used"
+                            ),
+                        }
+                        if structured_validation.get("cancelled"):
+                            _restore_current_sequential_progress()
+                            return
+                    else:
+                        c.pop("_structured_validation_failure", None)
+
                 translated_chunks.append((result, chunk_idx, total_chunks))
                 
                 chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
@@ -26053,7 +26516,7 @@ def main(log_callback=None, stop_callback=None):
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
             if _is_structured_translation_batch(c):
-                cleaned = str(cleaned or "").strip()
+                cleaned = _clean_structured_batch_output(cleaned)
                 batch_label = _structured_batch_label(c)
                 sdlxliff_finish_reason = str(locals().get("finish_reason") or "").strip().lower()
                 sdlxliff_truncated = bool(locals().get("chapter_truncated", False)) or sdlxliff_finish_reason in [
@@ -26079,9 +26542,20 @@ def main(log_callback=None, stop_callback=None):
                     )
                     progress_manager.save()
                     continue
-                ok, issue = _validate_sdlxliff_batch_output(c, cleaned)
+                ok, issue, detail = _validate_structured_batch_output_details(
+                    c,
+                    cleaned,
+                )
                 if not ok:
-                    print(f"❌ {batch_label} batch {actual_num}: invalid JSON output ({issue})")
+                    retry_failure = c.pop(
+                        "_structured_validation_failure",
+                        None,
+                    )
+                    if not retry_failure:
+                        print(
+                            f"❌ {batch_label} batch {actual_num}: structured "
+                            f"JSON validation failed: {issue} — {detail}"
+                        )
                     progress_manager.update(
                         idx,
                         actual_num,

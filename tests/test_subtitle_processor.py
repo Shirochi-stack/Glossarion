@@ -1449,6 +1449,8 @@ def test_subtitle_zip_grouping_is_exported_to_translation_backend():
 
 def test_translation_pipeline_injects_and_validates_subtitle_json_contract():
     from TransateKRtoEN import (
+        _retry_invalid_structured_batch_output,
+        _validate_structured_batch_output_details,
         _validate_sdlxliff_batch_output,
         _with_structured_batch_prompt,
     )
@@ -1479,4 +1481,81 @@ def test_translation_pipeline_injects_and_validates_subtitle_json_contract():
     assert _validate_sdlxliff_batch_output(chapter, invalid) == (
         False,
         "PLACEHOLDER_MISMATCH",
+    )
+
+    malformed = '[{"id":"1","target":"Bonjour"}'
+    ok, issue, detail = _validate_structured_batch_output_details(
+        chapter,
+        malformed,
+    )
+    assert ok is False
+    assert issue == "INVALID_TARGET_JSON"
+    assert "line 1, column" in detail
+    assert "character" in detail
+    assert "near:" in detail
+
+    fenced_valid = f"```json\n{valid}\n```"
+    assert _validate_sdlxliff_batch_output(chapter, fenced_valid) == (
+        True,
+        None,
+    )
+
+    retry_calls = []
+    retry_logs = []
+
+    def retry_request(attempt, retry_issue, retry_detail):
+        retry_calls.append((attempt, retry_issue, retry_detail))
+        return malformed if attempt == 1 else valid
+
+    retry_result = _retry_invalid_structured_batch_output(
+        chapter,
+        malformed,
+        retry_request,
+        batch_label="subtitle",
+        batch_number=11,
+        max_retries=2,
+        log_fn=retry_logs.append,
+    )
+
+    assert retry_result["ok"] is True
+    assert retry_result["retries_used"] == 2
+    assert [call[0] for call in retry_calls] == [1, 2]
+    assert any("INVALID_TARGET_JSON" in line and "line 1" in line for line in retry_logs)
+    assert any("2/2 retries" in line for line in retry_logs)
+
+
+def test_subtitle_json_validation_exhausts_configured_maximum_retries(
+    monkeypatch,
+):
+    from TransateKRtoEN import _retry_invalid_structured_batch_output
+
+    chapter = {
+        "subtitle_batch": True,
+        "structured_translation_batch": True,
+        "body": json.dumps([{"id": "1", "source": "Hello"}]),
+    }
+    malformed = '[{"id":"1","target":"Bonjour"}'
+    attempts = []
+    logs = []
+    monkeypatch.setenv("MAX_RETRIES", "3")
+
+    result = _retry_invalid_structured_batch_output(
+        chapter,
+        malformed,
+        lambda attempt, _issue, _detail: (
+            attempts.append(attempt) or malformed
+        ),
+        batch_label="subtitle",
+        batch_number=11,
+        log_fn=logs.append,
+    )
+
+    assert result["ok"] is False
+    assert result["issue"] == "INVALID_TARGET_JSON"
+    assert result["retries_used"] == 3
+    assert attempts == [1, 2, 3]
+    assert any(
+        "structured JSON remained invalid after 3 retries" in line
+        and "line 1" in line
+        for line in logs
     )
