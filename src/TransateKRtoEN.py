@@ -55,7 +55,7 @@ def _direct_text_html_source_name(chapter):
     subtitle_basename = os.path.basename(
         str(subtitle_source or "").replace("\\", "/")
     ).strip()
-    if os.path.splitext(subtitle_basename)[1].lower() in (".srt", ".ass"):
+    if os.path.splitext(subtitle_basename)[1].lower() in (".srt", ".ass", ".lrc"):
         return subtitle_basename
     for key in (
         "original_basename",
@@ -5114,7 +5114,7 @@ class ProgressManager:
             if status == "merged":
                 continue
 
-            # Subtitle batch rows share one final SRT/ASS output.  That file is
+            # Subtitle batch rows share one final SRT/ASS/LRC output. That file is
             # intentionally absent until every batch for the source subtitle
             # has completed, so its absence cannot be used to delete an
             # individual completed batch while Progress Manager is open.
@@ -19894,9 +19894,9 @@ def main(log_callback=None, stop_callback=None):
         input_path = sys.argv[1]
     
     is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
-    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass'))
+    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass', '.lrc'))
     is_text_file = input_path.lower().endswith(
-        ('.txt', '.csv', '.json', '.md', '.srt', '.ass')
+        ('.txt', '.csv', '.json', '.md', '.srt', '.ass', '.lrc')
     ) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
     subtitle_bundle_files = []
@@ -19922,7 +19922,7 @@ def main(log_callback=None, stop_callback=None):
             if isinstance(parsed_bundle_files, list):
                 seen_bundle_files = set()
                 for path in parsed_bundle_files:
-                    if not str(path or "").lower().endswith((".srt", ".ass")):
+                    if not str(path or "").lower().endswith((".srt", ".ass", ".lrc")):
                         continue
                     absolute_path = os.path.abspath(str(path))
                     normalized_path = os.path.normcase(absolute_path)
@@ -20005,7 +20005,7 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is OFF - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].lower().endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].lower().endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
@@ -20017,9 +20017,9 @@ def main(log_callback=None, stop_callback=None):
         os.environ["EPUB_PATH"] = input_path
     
     is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
-    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass'))
+    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass', '.lrc'))
     is_text_file = input_path.lower().endswith(
-        ('.txt', '.csv', '.json', '.md', '.srt', '.ass')
+        ('.txt', '.csv', '.json', '.md', '.srt', '.ass', '.lrc')
     ) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
     
@@ -20930,7 +20930,7 @@ def main(log_callback=None, stop_callback=None):
         or not config.TRANSLATE_BOOK_TITLE
     )
     _non_book_ext = input_path.lower().endswith(
-        ('.csv', '.json', '.md', '.sdlxliff', '.srt', '.ass')
+        ('.csv', '.json', '.md', '.sdlxliff', '.srt', '.ass', '.lrc')
     )
     is_txt = input_path.lower().endswith(('.txt',))
     skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
@@ -21224,7 +21224,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Structured subtitle batches and glossary-like files should not be used
     # as raw material for automatic glossary extraction.
-    if input_path.lower().endswith(('.csv', '.json', '.md', '.srt', '.ass')):
+    if input_path.lower().endswith(('.csv', '.json', '.md', '.srt', '.ass', '.lrc')):
         print("📑 Skipping glossary generation for this structured/plain-text format")
         print("   Manual glossaries can still be applied during translation")
     else:

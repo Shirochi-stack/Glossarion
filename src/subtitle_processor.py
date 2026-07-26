@@ -1,8 +1,9 @@
-"""Structured SRT/ASS subtitle extraction and round-trip writing.
+"""Structured SRT/ASS/LRC subtitle extraction and round-trip writing.
 
-Only subtitle dialogue is sent for translation.  Cue timing, numbering, ASS
-headers/styles/event fields, line endings, and inline formatting tokens remain
-in the original template and are restored locally.
+Only subtitle dialogue or timed lyrics are sent for translation. Cue timing,
+numbering, ASS headers/styles/event fields, LRC timestamps/metadata, line
+endings, and inline formatting tokens remain in the original template and are
+restored locally.
 """
 
 from __future__ import annotations
@@ -19,12 +20,14 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-SUBTITLE_EXTENSIONS = {".srt", ".ass"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".lrc"}
 SUBTITLE_PROMPT_PROFILE_NAME = "Subtitle Translation"
 DEFAULT_SUBTITLE_TRANSLATION_PROMPT = (
-    "You are a professional subtitle translator. Translate every source value "
+    "You are a professional subtitle and synchronized-lyrics translator. "
+    "Translate every source value "
     "to {target_lang}.\n"
-    "- Write concise, natural spoken dialogue suitable for on-screen subtitles.\n"
+    "- Write concise, natural spoken dialogue or lyrics suitable for the "
+    "source format.\n"
     "- Preserve the complete meaning, tone, emotion, humor, relationships, "
     "character voice, and level of formality without unnecessary expansion.\n"
     "- Do not summarize, censor, embellish, explain, or add translator notes.\n"
@@ -49,6 +52,13 @@ _SRT_TIMESTAMP_RE = re.compile(
     # while still recognizing the cue as translatable dialogue.
     r"^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*"
     r"\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}(?:\s+.*)?$"
+)
+_LRC_LEADING_TIMESTAMPS_RE = re.compile(
+    # Standard LRC uses [mm:ss.xx]. Some producers emit milliseconds, comma
+    # fractions, optional hours, or multiple timestamps for one lyric line.
+    r"^(?:\ufeff?\s*)(?:"
+    r"\[(?:\d{1,3}:)?\d{1,3}:\d{2}(?:[.,]\d{1,3})?\]"
+    r")+"
 )
 _PROTECTED_TOKEN_RE = re.compile(
     r"<[^>\r\n]+>|\{[^{}\r\n]*\}|\\[Nnh]",
@@ -189,7 +199,7 @@ def extract_subtitle_archive(
     max_single_file_bytes: int = 32 * 1024 * 1024,
     max_total_bytes: int = 256 * 1024 * 1024,
 ) -> Dict[str, Any]:
-    """Safely extract SRT/ASS members from a ZIP without using extractall."""
+    """Safely extract SRT/ASS/LRC members from a ZIP without extractall."""
     os.makedirs(extraction_root, exist_ok=True)
     root = os.path.abspath(extraction_root)
     selected: List[Tuple[zipfile.ZipInfo, List[str]]] = []
@@ -507,6 +517,27 @@ def _extract_ass_spans(text: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
+def _extract_lrc_spans(text: str) -> List[Tuple[int, int, str]]:
+    """Extract lyric text while leaving timestamps and metadata untouched."""
+    spans: List[Tuple[int, int, str]] = []
+    for line in _line_records(text):
+        line_text = str(line["text"])
+        timestamp_prefix = _LRC_LEADING_TIMESTAMPS_RE.match(line_text)
+        if timestamp_prefix is None:
+            # LRC metadata such as [ar:], [ti:], [al:], [by:], and [offset:]
+            # intentionally never enters the translation payload.
+            continue
+        local_start = timestamp_prefix.end()
+        lyric_text = line_text[local_start:]
+        if not lyric_text.strip():
+            continue
+        start = int(line["start"]) + local_start
+        end = int(line["content_end"])
+        if end > start:
+            spans.append((start, end, text[start:end]))
+    return spans
+
+
 def _count_tokens(text: str) -> int:
     try:
         from chapter_splitter import ChapterSplitter
@@ -601,11 +632,12 @@ def extract_subtitle_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
 
     os.makedirs(output_dir, exist_ok=True)
     source_text, source_encoding = _decode_subtitle(path)
-    raw_spans = (
-        _extract_srt_spans(source_text)
-        if extension == ".srt"
-        else _extract_ass_spans(source_text)
-    )
+    if extension == ".srt":
+        raw_spans = _extract_srt_spans(source_text)
+    elif extension == ".ass":
+        raw_spans = _extract_ass_spans(source_text)
+    else:
+        raw_spans = _extract_lrc_spans(source_text)
 
     segments: List[Dict[str, Any]] = []
     for start, end, original_text in raw_spans:
@@ -1354,7 +1386,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Write translated SRT/ASS from Glossarion JSON batches."
+        description="Write translated SRT/ASS/LRC from Glossarion JSON batches."
     )
     parser.add_argument("output_dir")
     parser.add_argument("--manifest", default=None)

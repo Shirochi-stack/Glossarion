@@ -10193,7 +10193,7 @@ class RetranslationMixin:
 
     @staticmethod
     def _is_subtitle_progress_entry(entry, output_file=''):
-        """Return True when a progress entry represents an SRT/ASS batch."""
+        """Return True when a progress entry represents an SRT/ASS/LRC batch."""
         if not isinstance(entry, dict):
             return False
         if (
@@ -10208,7 +10208,7 @@ class RetranslationMixin:
             entry.get('output_file'),
             entry.get('original_basename'),
         ):
-            if os.path.splitext(str(candidate or ''))[1].lower() in ('.srt', '.ass'):
+            if os.path.splitext(str(candidate or ''))[1].lower() in ('.srt', '.ass', '.lrc'):
                 return True
         return False
 
@@ -10458,7 +10458,7 @@ class RetranslationMixin:
         data = data if isinstance(data, dict) else {}
         file_path = str(data.get('file_path') or '')
         extension = os.path.splitext(file_path)[1].lower()
-        if extension in ('.srt', '.ass'):
+        if extension in ('.srt', '.ass', '.lrc'):
             return True
 
         prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
@@ -11289,7 +11289,7 @@ class RetranslationMixin:
         # Get current toggle state if it exists, or default based on file type
         # Subtitle files and subtitle ZIPs are non-EPUB progress sources.
         show_special_extensions = (
-            '.txt', '.pdf', '.csv', '.json', '.srt', '.ass', '.zip'
+            '.txt', '.pdf', '.csv', '.json', '.srt', '.ass', '.lrc', '.zip'
         )
         show_special = input_path.lower().endswith(show_special_extensions)
         
@@ -11425,14 +11425,14 @@ class RetranslationMixin:
                     if isinstance(ch, dict) and ch.get("output_file")
                 }
                 subtitle_auto_index = 0
-                subtitle_source = file_path.lower().endswith(('.srt', '.ass', '.zip'))
+                subtitle_source = file_path.lower().endswith(('.srt', '.ass', '.lrc', '.zip'))
                 for fname in sorted(files):
                     fname_path_key = os.path.normcase(
                         os.path.abspath(os.path.join(output_dir, fname))
                     )
                     is_subtitle_output = (
                         subtitle_source
-                        and os.path.splitext(fname)[1].lower() in ('.srt', '.ass')
+                        and os.path.splitext(fname)[1].lower() in ('.srt', '.ass', '.lrc')
                     )
                     if is_subtitle_output:
                         subtitle_auto_index += 1
@@ -18151,12 +18151,12 @@ class RetranslationMixin:
                         ]
                         subtitle_auto_index = 0
                         subtitle_source = str(data.get('file_path') or '').lower().endswith(
-                            ('.srt', '.ass', '.zip')
+                            ('.srt', '.ass', '.lrc', '.zip')
                         )
                         for fname in sorted(files):
                             is_subtitle_output = (
                                 subtitle_source
-                                and os.path.splitext(fname)[1].lower() in ('.srt', '.ass')
+                                and os.path.splitext(fname)[1].lower() in ('.srt', '.ass', '.lrc')
                             )
                             if is_subtitle_output:
                                 subtitle_auto_index += 1
@@ -20241,7 +20241,7 @@ class RetranslationMixin:
                     folders.append(file_path)
                 elif file_path.lower().endswith('.epub'):
                     epub_files.append(file_path)
-                elif file_path.lower().endswith(('.txt', '.srt', '.ass', '.zip')):
+                elif file_path.lower().endswith(('.txt', '.srt', '.ass', '.lrc', '.zip')):
                     text_files.append(file_path)
                 elif file_path.lower().endswith(image_extensions):
                     image_files.append(file_path)

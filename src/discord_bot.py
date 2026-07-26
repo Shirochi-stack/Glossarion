@@ -498,9 +498,11 @@ DEFAULT_PROFILE_PROMPTS = {
         "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
     ),
     "Subtitle Translation": (
-        "You are a professional subtitle translator. Translate every source value "
+        "You are a professional subtitle and synchronized-lyrics translator. "
+        "Translate every source value "
         "to the requested target language.\n"
-        "- Write concise, natural spoken dialogue suitable for on-screen subtitles.\n"
+        "- Write concise, natural spoken dialogue or lyrics suitable for the "
+        "source format.\n"
         "- Preserve the complete meaning, tone, emotion, humor, relationships, "
         "character voice, and level of formality without unnecessary expansion.\n"
         "- Do not summarize, censor, embellish, explain, or add translator notes.\n"

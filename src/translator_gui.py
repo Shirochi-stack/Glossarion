@@ -3878,7 +3878,7 @@ class _InputOutputDialog(QDialog):
         extension = os.path.splitext(str(path or ''))[1].lower()
         return extension in {
             '.txt', '.epub', '.pdf', '.md', '.markdown', '.html', '.htm',
-            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.ass', '.vtt', '.log',
+            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.ass', '.lrc', '.vtt', '.log',
         } or extension in (
             _InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS
             | _InputOutputDialog._VISION_ARCHIVE_ATTACHMENT_EXTENSIONS
@@ -3957,11 +3957,11 @@ class _InputOutputDialog(QDialog):
             "",
             (
                 "Supported files (*.txt *.epub *.pdf *.cbz *.md *.markdown *.html *.htm "
-                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.ass *.vtt *.log *.png *.jpg "
+                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.ass *.lrc *.vtt *.log *.png *.jpg "
                 "*.jpeg *.gif *.bmp *.webp *.tif *.tiff *.svg *.ico *.heic *.heif "
                 "*.avif *.jxl);;"
                 "Text files (*.txt *.md *.markdown *.html *.htm *.xhtml *.xml *.json "
-                "*.csv *.tsv *.srt *.ass *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
+                "*.csv *.tsv *.srt *.ass *.lrc *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
                 "Comic Book archives (*.cbz);;"
                 "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff "
                 "*.svg *.ico *.heic *.heif *.avif *.jxl)"
@@ -7526,7 +7526,7 @@ class _InputOutputDialog(QDialog):
                 if (
                     attached_extension in {
                         '.txt', '.epub', '.pdf', '.cbz', '.csv', '.json',
-                        '.srt', '.ass',
+                        '.srt', '.ass', '.lrc',
                     }
                     or attached_extension in self._IMAGE_ATTACHMENT_EXTENSIONS
                 ):
@@ -7563,7 +7563,7 @@ class _InputOutputDialog(QDialog):
                 self._temp_root,
                 stem,
                 f"{stem}_translated"
-                f"{self._run_source_extension if self._run_source_extension in {'.srt', '.ass'} else '.txt'}",
+                f"{self._run_source_extension if self._run_source_extension in {'.srt', '.ass', '.lrc'} else '.txt'}",
             )
 
             gui = self.translator
@@ -10341,6 +10341,7 @@ class _InputOutputDialog(QDialog):
             ".pdf": {".pdf": 140, ".epub": 130, ".txt": 100, ".html": 70},
             ".srt": {".srt": 160, ".txt": 70},
             ".ass": {".ass": 160, ".txt": 70},
+            ".lrc": {".lrc": 160, ".txt": 70},
         }
         if self._run_output_mode == 'image':
             preferred = dict(generated_image_scores)
@@ -10831,7 +10832,7 @@ class _InputOutputDialog(QDialog):
         try:
             readable_extensions = {
                 '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
-                '.json', '.csv', '.tsv', '.srt', '.ass', '.vtt', '.log',
+                '.json', '.csv', '.tsv', '.srt', '.ass', '.lrc', '.vtt', '.log',
             }
             if (
                 self._expected_output
@@ -14603,7 +14604,7 @@ Recent translations to summarize:
             if not urls:
                 return
             paths = []
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', '.srt', '.ass',
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', '.srt', '.ass', '.lrc',
                                     '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
                                     '.bmp', '.webp', '.mp4'}
             for url in urls:
@@ -22954,7 +22955,7 @@ Recent translations to summarize:
                         if chunk and total and t and t > 1:
                             chunk_part = f" {chunk}/{total}"
 
-                        if source_file.lower().endswith((".srt", ".ass")):
+                        if source_file.lower().endswith((".srt", ".ass", ".lrc")):
                             return (
                                 f"{source_file} [batch {chapter}]"
                                 f"{chunk_part}{retry_suffix}"
@@ -23091,7 +23092,7 @@ Recent translations to summarize:
                         if chapter is not None:
                             # Build a compact per-chapter token (keep chunk ratio only when total > 1)
                             is_subtitle_source = source_file.lower().endswith(
-                                (".srt", ".ass")
+                                (".srt", ".ass", ".lrc")
                             )
                             token = (
                                 f"{source_file} [{chapter}]"
@@ -26176,7 +26177,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     sdlxliff_files = [f for f in self.selected_files if f.lower().endswith('.sdlxliff')]
                     subtitle_files = [
                         f for f in self.selected_files
-                        if f.lower().endswith(('.srt', '.ass'))
+                        if f.lower().endswith(('.srt', '.ass', '.lrc'))
                     ]
                     
                     if csv_json_files:
@@ -26694,7 +26695,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'}:
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'}:
                         # Process as EPUB/text/PDF/SDLXLIFF/subtitle input.
                         if len(subtitle_bundle_files) > 1:
                             self.append_log(
@@ -28515,7 +28516,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff', '.srt', '.ass')):
+                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff', '.srt', '.ass', '.lrc')):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 
@@ -32475,6 +32476,7 @@ Important rules:
                sdlxliffs = [p for p in files if p.lower().endswith('.sdlxliff')]
                srts = [p for p in files if p.lower().endswith('.srt')]
                asses = [p for p in files if p.lower().endswith('.ass')]
+               lrcs = [p for p in files if p.lower().endswith('.lrc')]
 
                summary_parts = []
                if epubs:
@@ -32495,6 +32497,8 @@ Important rules:
                    summary_parts.append(f"{len(srts)} SRT")
                if asses:
                    summary_parts.append(f"{len(asses)} ASS")
+               if lrcs:
+                   summary_parts.append(f"{len(lrcs)} LRC")
                if images:
                    summary_parts.append(f"{len(images)} images")
 
@@ -34327,7 +34331,7 @@ Important rules:
         paths = []
         supported_extensions = {
             '.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md',
-            '.sdlxliff', '.srt', '.ass', '.png', '.jpg', '.jpeg', '.gif',
+            '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif',
             '.bmp', '.webp', '.mp4',
         }
         for url in urls:
@@ -34469,14 +34473,14 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.lrc *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
             "Text files (*.txt *.json *.csv *.md);;"
-            "Subtitle files (*.srt *.ass);;"
+            "Subtitle and lyric files (*.srt *.ass *.lrc);;"
             "SDLXLIFF files (*.sdlxliff);;"
             "CSV files (*.csv);;"
             "Markdown files (*.md);;"
@@ -34508,7 +34512,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.lrc', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -34532,7 +34536,7 @@ Important rules:
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, SRT, ASS, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, SRT, ASS, LRC, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 
     def clear_file_selection(self):
         """Clear all selected files"""
@@ -34614,7 +34618,7 @@ Important rules:
         self.append_log("🗑️ Cleared file selection")
 
     def _extract_subtitle_zip_input_if_needed(self, path):
-        """Return extracted SRT/ASS paths, None for a non-subtitle ZIP, or [] on error."""
+        """Return extracted SRT/ASS/LRC paths or classify a non-subtitle ZIP."""
         if not path or not str(path).lower().endswith('.zip'):
             return None
 
@@ -35042,6 +35046,7 @@ Important rules:
             pdfs = [p for p in processed_paths if p.lower().endswith('.pdf')]  # Count PDF files
             srts = [p for p in processed_paths if p.lower().endswith('.srt')]
             asses = [p for p in processed_paths if p.lower().endswith('.ass')]
+            lrcs = [p for p in processed_paths if p.lower().endswith('.lrc')]
             
             summary_parts = []
             if epubs:
@@ -35058,6 +35063,8 @@ Important rules:
                 summary_parts.append(f"{len(srts)} SRT")
             if asses:
                 summary_parts.append(f"{len(asses)} ASS")
+            if lrcs:
+                summary_parts.append(f"{len(lrcs)} LRC")
             if images:
                 summary_parts.append(f"{len(images)} images")
             
@@ -35071,7 +35078,7 @@ Important rules:
         # Check if these are image files
         image_files = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
 
-        # ZIP/SRT/ASS and other non-EPUB selections previously bypassed all
+        # ZIP/SRT/ASS/LRC and other non-EPUB selections previously bypassed all
         # glossary mismatch branches, allowing an automatically mapped glossary
         # from the prior novel to leak into the new run. Explicit manual
         # glossaries remain selected until the user clears them.
@@ -36077,7 +36084,7 @@ Important rules:
                 pass
             try:
                 self.config['last_input_files'] = normalized
-                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'))]
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass', '.lrc'))]
                 if source_files:
                     self.config['last_epub_path'] = source_files[0]
                 self.save_config(show_message=False)

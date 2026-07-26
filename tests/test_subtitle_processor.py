@@ -16,6 +16,7 @@ from subtitle_processor import (
     extract_subtitle_bundle_to_chapters,
     extract_subtitle_to_chapters,
     grouped_subtitle_output_layout,
+    is_subtitle_path,
     plan_subtitle_archive_outputs,
 )
 
@@ -68,6 +69,12 @@ def test_subtitle_extraction_worker_count_is_bounded(monkeypatch):
     assert subtitle_processor._subtitle_extraction_worker_count(1) == 1
     assert subtitle_processor._subtitle_extraction_worker_count(2) == 2
     assert subtitle_processor._subtitle_extraction_worker_count(20) == 3
+
+
+@pytest.mark.parametrize("extension", [".srt", ".ass", ".lrc"])
+def test_all_subtitle_extensions_are_first_class(extension):
+    assert is_subtitle_path(f"episode{extension}") is True
+    assert is_subtitle_path(f"EPISODE{extension.upper()}") is True
 
 
 def test_srt_round_trip_preserves_timing_numbers_tags_and_crlf(tmp_path):
@@ -195,6 +202,68 @@ def test_ass_round_trip_changes_only_dialogue_text(tmp_path):
     assert "Style: Default,Arial,24" in output
 
 
+def test_lrc_round_trip_preserves_timestamps_metadata_tags_and_crlf(tmp_path):
+    source = tmp_path / "song.lrc"
+    source.write_bytes(
+        (
+            "[ar:Example Artist]\r\n"
+            "[ti:Example Song]\r\n"
+            "[al:Example Album]\r\n"
+            "[offset:100]\r\n"
+            "[00:01.0]Hello world\r\n"
+            "[00:05.20][00:07.250]<00:05.20>Hello <00:06.00>world\r\n"
+            "[00:09.00]\r\n"
+        ).encode("utf-8")
+    )
+    output_dir = tmp_path / "out"
+
+    result = extract_subtitle_to_chapters(str(source), str(output_dir))
+    chapters = json.loads(
+        Path(result["chapters_path"]).read_text(encoding="utf-8")
+    )
+
+    assert result["segments"] == 2
+    assert len(chapters) == 1
+    records = json.loads(chapters[0]["body"])
+    assert [record["id"] for record in records] == ["1", "2"]
+    assert records[0]["source"] == "Hello world"
+    assert "<00:05.20>" not in records[1]["source"]
+    assert "<00:06.00>" not in records[1]["source"]
+
+    translated = _translated_batch(
+        chapters[0],
+        {
+            "1": lambda _text: "Bonjour le monde",
+            "2": lambda text: text.replace("Hello", "Bonjour").replace(
+                "world",
+                "monde",
+            ),
+        },
+    )
+    (output_dir / "response_section_1.txt").write_text(
+        translated,
+        encoding="utf-8",
+    )
+
+    converted = convert_subtitle(str(output_dir))
+    output_bytes = Path(converted["output_path"]).read_bytes()
+    output = output_bytes.decode("utf-8")
+
+    assert converted["updated"] == 2
+    assert Path(converted["output_path"]).suffix == ".lrc"
+    assert b"\r\n" in output_bytes
+    assert "[ar:Example Artist]\r\n" in output
+    assert "[ti:Example Song]\r\n" in output
+    assert "[al:Example Album]\r\n" in output
+    assert "[offset:100]\r\n" in output
+    assert "[00:01.0]Bonjour le monde\r\n" in output
+    assert (
+        "[00:05.20][00:07.250]<00:05.20>Bonjour "
+        "<00:06.00>monde\r\n"
+    ) in output
+    assert output.endswith("[00:09.00]\r\n")
+
+
 def test_missing_subtitle_placeholder_does_not_create_final_file(tmp_path):
     source = tmp_path / "tagged.srt"
     source.write_text(
@@ -221,7 +290,9 @@ def test_missing_subtitle_placeholder_does_not_create_final_file(tmp_path):
     assert Path(converted["output_path"]).exists() is False
 
 
-def test_subtitle_zip_extracts_all_srt_ass_and_ignores_other_members(tmp_path):
+def test_subtitle_zip_extracts_all_supported_formats_and_ignores_others(
+    tmp_path,
+):
     archive_path = tmp_path / "season.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr(
@@ -233,6 +304,10 @@ def test_subtitle_zip_extracts_all_srt_ass_and_ignores_other_members(tmp_path):
             "[Events]\nFormat: Start, End, Text\n"
             "Dialogue: 0:00:00.00,0:00:01.00,Hello\n",
         )
+        archive.writestr(
+            "episode 03/song.lrc",
+            "[ar:Artist]\n[00:01.00]Hello\n",
+        )
         archive.writestr("notes/readme.txt", "not a subtitle")
 
     extraction_root = tmp_path / "extracted"
@@ -241,13 +316,94 @@ def test_subtitle_zip_extracts_all_srt_ass_and_ignores_other_members(tmp_path):
         str(extraction_root),
     )
 
-    assert result["subtitle_count"] == 2
+    assert result["subtitle_count"] == 3
     assert result["ignored_count"] == 1
-    assert {Path(path).suffix for path in result["files"]} == {".srt", ".ass"}
+    assert {Path(path).suffix for path in result["files"]} == {
+        ".srt",
+        ".ass",
+        ".lrc",
+    }
     for extracted_path in result["files"]:
         resolved = Path(extracted_path).resolve()
         assert resolved.is_relative_to(extraction_root.resolve())
         assert resolved.is_file()
+
+
+def test_subtitle_zip_wrapper_folder_does_not_shift_indices_or_outputs(
+    tmp_path,
+):
+    archive_path = tmp_path / "My Show.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("Season 01/", "")
+        archive.writestr(
+            "Season 01/episode_01.srt",
+            "1\n00:00:00,0 --> 00:00:01,0\nHello\n",
+        )
+        archive.writestr(
+            "Season 01/episode_02.ass",
+            "[Events]\n"
+            "Format: Start, End, Text\n"
+            "Dialogue: 0:00:00.00,0:00:01.00,Goodbye\n",
+        )
+        archive.writestr(
+            "Season 01/theme_song.lrc",
+            "[ti:Theme Song]\n[00:01.00]Sing along\n",
+        )
+
+    extraction_root = tmp_path / "extracted"
+    extracted = extract_subtitle_archive(
+        str(archive_path),
+        str(extraction_root),
+    )
+
+    assert extracted["subtitle_count"] == 3
+    assert [Path(path).name for path in extracted["files"]] == [
+        "episode_01.srt",
+        "episode_02.ass",
+        "theme_song.lrc",
+    ]
+    assert {
+        Path(path).parent.relative_to(extraction_root)
+        for path in extracted["files"]
+    } == {Path("Season 01")}
+
+    output_base = tmp_path / "outputs"
+    plan = plan_subtitle_archive_outputs(
+        str(archive_path),
+        extracted["files"],
+        str(output_base),
+    )
+    output_paths = {
+        source: info["output_path"] for source, info in plan.items()
+    }
+    assert {
+        Path(info["output_dir"]) for info in plan.values()
+    } == {output_base / "My Show"}
+    assert {
+        Path(info["output_path"]).parent for info in plan.values()
+    } == {output_base / "My Show"}
+
+    bundle_work = tmp_path / "bundle_work"
+    bundle = extract_subtitle_bundle_to_chapters(
+        extracted["files"],
+        str(bundle_work),
+        output_paths=output_paths,
+    )
+    chapters = json.loads(
+        Path(bundle["chapters_path"]).read_text(encoding="utf-8")
+    )
+
+    assert bundle["source_count"] == 3
+    assert [chapter["subtitle_bundle_source_index"] for chapter in chapters] == [
+        1,
+        2,
+        3,
+    ]
+    assert [chapter["original_basename"] for chapter in chapters] == [
+        "episode_01.srt",
+        "episode_02.ass",
+        "theme_song.lrc",
+    ]
 
 
 def test_subtitle_zip_rejects_path_traversal_without_writing_outside_root(tmp_path):
@@ -1042,6 +1198,7 @@ def test_subtitle_prompt_profile_is_built_in_and_mirrored():
     discord_source = (source_root / "discord_bot.py").read_text(encoding="utf-8")
 
     assert "concise, natural spoken dialogue" in DEFAULT_SUBTITLE_TRANSLATION_PROMPT
+    assert "or lyrics suitable for the source format" in DEFAULT_SUBTITLE_TRANSLATION_PROMPT
     assert "[[SUB_TAG_000001_0000]]" in DEFAULT_SUBTITLE_TRANSLATION_PROMPT
     assert '"Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT' in gui_source
     assert re.search(

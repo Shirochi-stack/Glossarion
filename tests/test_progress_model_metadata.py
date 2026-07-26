@@ -115,7 +115,7 @@ def test_cleanup_missing_files_uses_one_directory_snapshot(tmp_path, monkeypatch
     assert "6" in progress.prog["chapters"]
 
 
-@pytest.mark.parametrize("extension", [".srt", ".ass"])
+@pytest.mark.parametrize("extension", [".srt", ".ass", ".lrc"])
 def test_progress_manager_does_not_add_metadata_row_for_subtitles(
     tmp_path,
     extension,
