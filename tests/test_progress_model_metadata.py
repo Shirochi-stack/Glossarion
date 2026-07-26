@@ -15,6 +15,7 @@ from Retranslation_GUI import (
     _glossary_progress_filename_keys,
     _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
+    _persist_progress_manager_source_link,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
@@ -922,6 +923,90 @@ def test_progress_path_signature_tracks_mtime_and_size_changes(tmp_path):
 
     progress_path.unlink()
     assert _progress_path_signature(progress_path) is None
+
+
+def test_progress_manager_source_link_updates_epub_library_scan(
+    tmp_path, monkeypatch
+):
+    import epub_library
+
+    library_dir = tmp_path / "Library"
+    output_root = tmp_path / "Output"
+    source_epub = tmp_path / "source.epub"
+    workspace = output_root / source_epub.stem
+    library_dir.mkdir()
+    workspace.mkdir(parents=True)
+
+    with zipfile.ZipFile(source_epub, "w") as epub_zip:
+        epub_zip.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf"/>
+  </rootfiles>
+</container>""",
+        )
+        epub_zip.writestr(
+            "OEBPS/content.opf",
+            """<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf">
+  <manifest>
+    <item id="chapter1" href="Text/chapter0001.xhtml"
+          media-type="application/xhtml+xml"/>
+    <item id="chapter2" href="Text/chapter0002.xhtml"
+          media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter1"/>
+    <itemref idref="chapter2"/>
+  </spine>
+</package>""",
+        )
+
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "metadata": {
+                        "status": "pending",
+                        "output_file": "metadata.json",
+                    }
+                },
+                "chapter_chunks": {},
+                "version": "2.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("TRANSLATE_SPECIAL_FILES", raising=False)
+    monkeypatch.setattr(
+        epub_library, "get_library_dir", lambda: str(library_dir)
+    )
+    monkeypatch.setattr(
+        epub_library,
+        "_resolve_output_roots",
+        lambda _config=None: [str(output_root)],
+    )
+
+    assert _persist_progress_manager_source_link(source_epub, workspace)
+    assert (workspace / "source_epub.txt").read_text(
+        encoding="utf-8"
+    ) == str(source_epub.resolve())
+    assert epub_library.load_library_raw_inputs() == [
+        str(source_epub.resolve())
+    ]
+
+    books = epub_library.scan_output_folders(
+        {"translate_special_files": True}
+    )
+
+    assert len(books) == 1
+    assert books[0]["raw_source_path"] == str(source_epub.resolve())
+    assert books[0]["missing_raw_file"] is False
+    assert books[0]["total_chapters"] == 2
+    assert books[0]["completed_chapters"] == 0
 
 
 def test_initial_spine_matching_has_no_directory_scan_inside_spine_loop():

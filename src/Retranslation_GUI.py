@@ -196,6 +196,81 @@ def _write_progress_snapshot_atomic(path, payload):
                 pass
 
 
+def _persist_progress_manager_source_link(file_path, output_dir):
+    """Persist the raw input used by a Progress Manager workspace.
+
+    Progress Manager can scaffold an output folder before translation starts.
+    The Library scans that folder independently, so it needs the same durable
+    source association that a real translation run writes.  Keep both lookup
+    routes in sync:
+
+      * ``source_epub.txt`` ties this exact workspace to its input.
+      * The Library raw-input registry provides a fallback if the sidecar is
+        later removed or the workspace is relocated.
+
+    Returns True when the workspace has a valid sidecar after this call.
+    Registry failures are intentionally non-fatal: the exact workspace
+    sidecar is sufficient for the Library to recover the EPUB spine.
+    """
+    if not file_path or not output_dir:
+        return False
+    try:
+        source_path = os.path.abspath(str(file_path))
+        workspace = os.path.abspath(str(output_dir))
+    except (TypeError, ValueError, OSError):
+        return False
+    if not os.path.isfile(source_path) or not os.path.isdir(workspace):
+        return False
+
+    sidecar = os.path.join(workspace, "source_epub.txt")
+    linked = False
+    try:
+        current = ""
+        if os.path.isfile(sidecar):
+            with open(sidecar, "r", encoding="utf-8", errors="ignore") as f:
+                current = f.read().strip()
+        if current:
+            current_path = (
+                current
+                if os.path.isabs(current)
+                else os.path.join(workspace, current)
+            )
+            try:
+                linked = (
+                    os.path.normcase(os.path.abspath(current_path))
+                    == os.path.normcase(source_path)
+                )
+            except (TypeError, ValueError, OSError):
+                linked = False
+        if not linked:
+            temp_path = (
+                f"{sidecar}.{os.getpid()}.{threading.get_ident()}."
+                f"{time.time_ns()}.tmp"
+            )
+            try:
+                with open(temp_path, "w", encoding="utf-8") as target:
+                    target.write(source_path)
+                os.replace(temp_path, sidecar)
+                linked = True
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+    except OSError:
+        linked = False
+
+    try:
+        from epub_library import record_library_raw_input
+        record_library_raw_input(source_path)
+    except Exception:
+        # Progress Manager must still open if the optional Library registry
+        # cannot be loaded or written.  The sidecar remains authoritative.
+        pass
+    return linked
+
+
 def _progress_path_signature(path):
     """Cheap signature used to avoid parsing unchanged progress files."""
     try:
@@ -11600,6 +11675,8 @@ class RetranslationMixin:
                         self._show_message('info', "Info", "No progress tracking found. Existing translations will be auto-discovered.")
                         del self._retranslation_dialog_cache[file_key]
                     else:
+                        _persist_progress_manager_source_link(
+                            input_path, output_dir)
                         dialog = cached_data['dialog']
                         dialog.show()
                         dialog.raise_()
@@ -11718,6 +11795,12 @@ class RetranslationMixin:
                 if not parent_dialog:
                     self._show_message('error', "Error", f"Could not create output folder: {e}")
                 return None
+
+        # Opening Progress Manager is enough to create a Library workspace.
+        # Persist its exact raw input now, before OPF parsing, so a Library
+        # scan can recover this EPUB's cover and full spine even when no
+        # translation run has started yet.
+        _persist_progress_manager_source_link(file_path, output_dir)
         
         progress_file = os.path.join(output_dir, "translation_progress.json")
         if not os.path.exists(progress_file):
