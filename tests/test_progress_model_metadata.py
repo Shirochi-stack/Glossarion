@@ -189,6 +189,68 @@ def test_progress_manager_inspects_nested_subtitle_zip_without_session_mapping(
     assert rows == []
 
 
+def test_progress_manager_seeds_every_subtitle_zip_member_before_translation(
+    tmp_path,
+):
+    archive = tmp_path / "season.zip"
+    with zipfile.ZipFile(archive, "w") as subtitle_zip:
+        subtitle_zip.writestr(
+            "Season 01/episode.srt",
+            "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+        )
+        subtitle_zip.writestr(
+            "Season 02/episode.srt",
+            "1\n00:00:00,000 --> 00:00:01,000\nAgain\n",
+        )
+        subtitle_zip.writestr(
+            "Season 02/theme.ass",
+            "[Events]\nDialogue: 0,0:00:00.00,0:00:01.00,"
+            "Default,,0,0,0,,Theme\n",
+        )
+    output_dir = tmp_path / "outputs" / "season"
+    output_dir.mkdir(parents=True)
+    gui = RetranslationMixin()
+    prog = {"chapters": {}, "chapter_chunks": {}, "version": "2.1"}
+
+    changed = gui._seed_subtitle_zip_progress_entries(
+        str(archive),
+        str(output_dir),
+        prog,
+    )
+
+    assert changed is True
+    assert len(prog["chapters"]) == 3
+    assert {
+        entry["status"] for entry in prog["chapters"].values()
+    } == {"not_translated"}
+    assert {
+        Path(entry["output_file"]).name
+        for entry in prog["chapters"].values()
+    } == {"episode.srt", "episode_2.srt", "theme.ass"}
+    assert set(prog["subtitle_files"]) == {
+        "episode.srt",
+        "episode_2.srt",
+        "theme.ass",
+    }
+    assert {
+        summary["status"]
+        for summary in prog["subtitle_files"].values()
+    } == {"not_translated"}
+
+    first_key = "subtitle:episode.srt:1"
+    prog["chapters"][first_key]["status"] = "completed"
+    assert (
+        gui._seed_subtitle_zip_progress_entries(
+            str(archive),
+            str(output_dir),
+            prog,
+        )
+        is True
+    )
+    assert prog["chapters"][first_key]["status"] == "completed"
+    assert prog["subtitle_files"]["episode.srt"]["status"] == "completed"
+
+
 def test_progress_manager_does_not_invent_metadata_for_non_subtitle_zip(
     tmp_path,
 ):

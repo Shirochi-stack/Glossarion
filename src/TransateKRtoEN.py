@@ -704,6 +704,101 @@ def _materialize_completed_subtitle_bundle_file(chapter, output_dir):
         return None
 
 
+def _seed_subtitle_progress(
+    chapters,
+    output_dir,
+    progress_manager,
+    standalone_output_path=None,
+):
+    """Expose every extracted subtitle file before its first API request."""
+    if not isinstance(chapters, list) or not chapters:
+        return 0
+
+    seeded = 0
+    subtitle_files = set()
+    for idx, chapter in enumerate(chapters):
+        if not isinstance(chapter, dict) or not chapter.get("subtitle_batch"):
+            continue
+
+        actual_num = chapter.get(
+            "actual_chapter_num",
+            chapter.get("num", idx + 1),
+        )
+        source_file = str(
+            chapter.get("subtitle_bundle_source_file")
+            or chapter.get("source_file")
+            or ""
+        ).strip()
+        final_output = str(
+            chapter.get("subtitle_output_file")
+            or standalone_output_path
+            or (
+                os.path.join(output_dir, os.path.basename(source_file))
+                if source_file
+                else ""
+            )
+        ).strip()
+        if final_output:
+            final_output = os.path.abspath(final_output)
+            chapter["subtitle_output_file"] = final_output
+        subtitle_files.add(
+            os.path.normcase(
+                os.path.abspath(final_output or source_file)
+            )
+            if (final_output or source_file)
+            else str(chapter.get("subtitle_progress_id") or idx)
+        )
+
+        content_hash = str(
+            chapter.get("content_hash")
+            or ContentProcessor.get_content_hash(chapter.get("body", ""))
+        )
+        batch_output = FileUtilities.create_chapter_filename(
+            chapter,
+            actual_num,
+        )
+        chapter_key = progress_manager._get_chapter_key(
+            actual_num,
+            batch_output,
+            chapter,
+            content_hash,
+        )
+        existing = progress_manager.prog.setdefault("chapters", {}).get(
+            chapter_key
+        )
+        if isinstance(existing, dict) and existing:
+            # Seeding is only for missing rows. Never downgrade restored
+            # completed/failed/in-progress state from the stable output mirror.
+            existing_status = str(
+                existing.get("status") or ""
+            ).strip().lower()
+            if not (
+                existing.get("subtitle_archive_seed")
+                and existing_status
+                in ("not_translated", "not translated", "not_completed")
+            ):
+                continue
+
+        progress_manager.update(
+            idx,
+            actual_num,
+            content_hash,
+            batch_output,
+            status="not_translated",
+            chapter_obj=chapter,
+            prefer_thread_model=False,
+        )
+        seeded += 1
+
+    if seeded:
+        progress_manager.save()
+        print(
+            f"📊 Progress initialized: {len(subtitle_files)} subtitle "
+            f"file(s), {seeded} batch(es) marked Not Translated"
+        )
+    return seeded
+
+
 def _materialize_empty_subtitle_sources(
     extraction_result,
     output_dir,
@@ -20962,6 +21057,12 @@ def main(log_callback=None, stop_callback=None):
                 f"subtitle dialogue cue(s) from "
                 f"{extraction_result.get('source_count', 1)} file(s) into "
                 f"{len(chapters)} parallelizable batch(es)"
+            )
+            _seed_subtitle_progress(
+                chapters,
+                out,
+                progress_manager,
+                standalone_output_path=grouped_subtitle_output_path,
             )
             _materialize_empty_subtitle_sources(
                 extraction_result,

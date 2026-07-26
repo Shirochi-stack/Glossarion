@@ -176,6 +176,26 @@ def _snapshot_progress_output_dir(output_dir):
     return filenames, normalized, mtimes
 
 
+def _write_progress_snapshot_atomic(path, payload):
+    """Atomically persist a Progress Manager snapshot."""
+    progress_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(progress_dir, exist_ok=True)
+    temp_path = (
+        f"{path}.{os.getpid()}.{threading.get_ident()}."
+        f"{time.time_ns()}.tmp"
+    )
+    try:
+        with open(temp_path, "w", encoding="utf-8") as target:
+            json.dump(payload, target, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def _progress_path_signature(path):
     """Cheap signature used to avoid parsing unchanged progress files."""
     try:
@@ -10211,6 +10231,228 @@ class RetranslationMixin:
             return True
         return extension == '.zip' and self._zip_is_subtitle_archive(file_path)
 
+    def _seed_subtitle_zip_progress_entries(self, file_path, output_dir, prog):
+        """Seed one Not Translated row per subtitle ZIP member for the PM."""
+        archive_path = os.path.abspath(str(file_path or ''))
+        if (
+            not archive_path.lower().endswith('.zip')
+            or not self._zip_is_subtitle_archive(archive_path)
+            or not output_dir
+            or not isinstance(prog, dict)
+        ):
+            return False
+
+        try:
+            from pathlib import PurePosixPath
+            from subtitle_processor import (
+                SUBTITLE_EXTENSIONS,
+                _safe_archive_component,
+            )
+
+            planned = []
+            used_output_names = set()
+            with zipfile.ZipFile(archive_path, 'r') as archive:
+                infos = archive.infolist()
+                if len(infos) > 5000:
+                    return False
+                for info in infos:
+                    if info.is_dir():
+                        continue
+                    archive_name = str(info.filename or '').replace('\\', '/')
+                    pure_path = PurePosixPath(archive_name)
+                    parts = list(pure_path.parts)
+                    extension = os.path.splitext(parts[-1] if parts else '')[1]
+                    if extension.lower() not in SUBTITLE_EXTENSIONS:
+                        continue
+                    if (
+                        not parts
+                        or pure_path.is_absolute()
+                        or re.match(r'^[A-Za-z]:', archive_name)
+                        or any(part in ('', '.', '..') for part in parts)
+                    ):
+                        return False
+
+                    safe_name = _safe_archive_component(
+                        parts[-1],
+                        f"subtitle_{len(planned) + 1}{extension.lower()}",
+                    )
+                    safe_stem, safe_extension = os.path.splitext(safe_name)
+                    safe_extension = (
+                        safe_extension
+                        if safe_extension.lower() in SUBTITLE_EXTENSIONS
+                        else extension
+                    )
+                    candidate = f"{safe_stem}{safe_extension}"
+                    suffix = 2
+                    while candidate.casefold() in used_output_names:
+                        candidate = f"{safe_stem}_{suffix}{safe_extension}"
+                        suffix += 1
+                    used_output_names.add(candidate.casefold())
+                    planned.append(
+                        {
+                            'member_name': archive_name,
+                            'source_basename': parts[-1],
+                            'output_name': candidate,
+                            'crc': int(getattr(info, 'CRC', 0) or 0),
+                            'size': int(getattr(info, 'file_size', 0) or 0),
+                        }
+                    )
+        except Exception as exc:
+            print(f"Warning: Could not seed subtitle ZIP progress: {exc}")
+            return False
+
+        if not planned:
+            return False
+
+        output_dir = os.path.abspath(str(output_dir))
+        chapters = prog.setdefault('chapters', {})
+        if not isinstance(chapters, dict):
+            chapters = {}
+            prog['chapters'] = chapters
+        changed = False
+        now = time.time()
+
+        def _normalized(path):
+            value = str(path or '').strip()
+            if not value:
+                return ''
+            if not os.path.isabs(value):
+                value = os.path.join(output_dir, value)
+            return os.path.normcase(os.path.abspath(value))
+
+        for source_index, item in enumerate(planned, start=1):
+            final_output = os.path.abspath(
+                os.path.join(output_dir, item['output_name'])
+            )
+            final_norm = _normalized(final_output)
+            matching = [
+                entry
+                for entry in chapters.values()
+                if isinstance(entry, dict)
+                and self._is_subtitle_progress_entry(entry)
+                and _normalized(
+                    entry.get('subtitle_output_file')
+                    or entry.get('output_file')
+                ) == final_norm
+            ]
+            progress_key = f"subtitle:{item['output_name']}:1"
+            if not matching and progress_key not in chapters:
+                status = (
+                    'completed'
+                    if os.path.isfile(final_output)
+                    else 'not_translated'
+                )
+                chapters[progress_key] = {
+                    'actual_num': source_index,
+                    'content_hash': (
+                        f"zip:{item['crc']:08x}:{item['size']}"
+                    ),
+                    'output_file': final_output,
+                    'status': status,
+                    'last_updated': now,
+                    'original_basename': item['source_basename'],
+                    'subtitle_progress_key': progress_key,
+                    'subtitle_source_file': (
+                        f"{archive_path}!/{item['member_name']}"
+                    ),
+                    'subtitle_source_batch_num': 1,
+                    'subtitle_source_batch_count': 1,
+                    'subtitle_bundle_source_index': source_index,
+                    'subtitle_output_file': final_output,
+                    'subtitle_archive_member': item['member_name'],
+                    'subtitle_archive_seed': True,
+                    **(
+                        {'auto_discovered': True}
+                        if status == 'completed'
+                        else {}
+                    ),
+                }
+                changed = True
+
+        summaries = prog.setdefault('subtitle_files', {})
+        if not isinstance(summaries, dict):
+            summaries = {}
+            prog['subtitle_files'] = summaries
+            changed = True
+        for item in planned:
+            final_output = os.path.abspath(
+                os.path.join(output_dir, item['output_name'])
+            )
+            final_norm = _normalized(final_output)
+            file_entries = [
+                (key, entry)
+                for key, entry in chapters.items()
+                if isinstance(entry, dict)
+                and self._is_subtitle_progress_entry(entry)
+                and _normalized(
+                    entry.get('subtitle_output_file')
+                    or entry.get('output_file')
+                ) == final_norm
+            ]
+            if not file_entries:
+                continue
+            statuses = [
+                str(entry.get('status') or 'not_translated').lower()
+                for _, entry in file_entries
+            ]
+            total_batches = max(
+                [len(file_entries)]
+                + [
+                    int(entry.get('subtitle_source_batch_count') or 0)
+                    for _, entry in file_entries
+                ]
+            )
+            completed_batches = sum(
+                status in ('completed', 'completed_empty', 'completed_image_only')
+                for status in statuses
+            )
+            failed_batches = sum(
+                status in ('qa_failed', 'failed', 'error', 'file_missing')
+                for status in statuses
+            )
+            in_progress_batches = sum(
+                status in ('in_progress', 'queued')
+                for status in statuses
+            )
+            not_translated_batches = sum(
+                status in ('not_translated', 'not translated', 'not_completed')
+                for status in statuses
+            )
+            if failed_batches:
+                summary_status = 'failed'
+            elif total_batches and completed_batches >= total_batches:
+                summary_status = 'completed'
+            elif in_progress_batches or completed_batches:
+                summary_status = 'in_progress'
+            elif total_batches and not_translated_batches >= total_batches:
+                summary_status = 'not_translated'
+            else:
+                summary_status = 'pending'
+            first_entry = file_entries[0][1]
+            summary = {
+                'source_file': first_entry.get('subtitle_source_file', ''),
+                'output_file': final_output,
+                'status': summary_status,
+                'total_batches': total_batches,
+                'completed_batches': completed_batches,
+                'failed_batches': failed_batches,
+                'in_progress_batches': in_progress_batches,
+                'not_translated_batches': not_translated_batches,
+                'pending_batches': max(
+                    0,
+                    total_batches
+                    - completed_batches
+                    - failed_batches
+                    - in_progress_batches
+                    - not_translated_batches,
+                ),
+                'batch_keys': [key for key, _ in file_entries],
+            }
+            if summaries.get(item['output_name']) != summary:
+                summaries[item['output_name']] = summary
+                changed = True
+        return changed
+
     def _sync_metadata_progress_toggle(self, enabled):
         """Immediately refresh open/cached Progress Managers after a toggle change."""
         enabled = bool(enabled)
@@ -11490,6 +11732,20 @@ class RetranslationMixin:
         else:
             with open(progress_file, 'r', encoding='utf-8') as f:
                 prog = json.load(f)
+
+        if self._seed_subtitle_zip_progress_entries(
+            file_path,
+            output_dir,
+            prog,
+        ):
+            try:
+                _write_progress_snapshot_atomic(progress_file, prog)
+                print(
+                    "Seeded subtitle ZIP members in Progress Manager before "
+                    "translation"
+                )
+            except Exception as exc:
+                print(f"Warning: Could not save seeded subtitle progress: {exc}")
 
         # Snapshot the output directory once.  Large EPUBs used to rescan and
         # restat this directory for every spine row, turning a 2,000-file book
@@ -18335,6 +18591,20 @@ class RetranslationMixin:
             # Skipped when a prefetched snapshot was already applied above.
             if _prefetched_prog is None or _prefetched_prog_path != data.get('progress_file'):
                 data['prog'] = _read_progress_json_safely(data['progress_file'])
+                data['_last_good_prog'] = copy.deepcopy(data['prog'])
+
+            if (
+                not bool(data.get('_refresh_read_only'))
+                and self._seed_subtitle_zip_progress_entries(
+                    data.get('file_path'),
+                    data.get('output_dir'),
+                    data['prog'],
+                )
+            ):
+                _write_progress_json_safely(
+                    data['progress_file'],
+                    data['prog'],
+                )
                 data['_last_good_prog'] = copy.deepcopy(data['prog'])
 
             def _progress_has_active_entries(prog):

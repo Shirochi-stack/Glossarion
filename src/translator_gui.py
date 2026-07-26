@@ -38823,12 +38823,6 @@ Important rules:
         else:
             target_name = 'glossary.csv'
         
-        # Determine output directory override (matches translator behavior)
-        try:
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-        except Exception:
-            override_dir = os.environ.get('OUTPUT_DIRECTORY')
-        
         # Resolve input files. Prefer selected_files; otherwise fall back to the
         # path shown in entry_epub (same fallback Retranslation_GUI uses).
         input_files = [p for p in (getattr(self, 'selected_files', []) or []) if p]
@@ -38852,15 +38846,11 @@ Important rules:
                 # RPG Maker .exe uses its own GTool_Translation folder; skip
                 if file_path.lower().endswith('.exe'):
                     continue
-                base_name = os.path.splitext(os.path.basename(file_path))[0]
-                if override_dir:
-                    output_dir = os.path.join(override_dir, base_name)
-                else:
-                    output_dir = base_name
-                
-                # macOS .app bundles may have cwd='/'; resolve relative paths against the input file dir.
-                if sys.platform == 'darwin' and not os.path.isabs(output_dir):
-                    output_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), output_dir)
+                # Use the authoritative resolver so extracted subtitle members
+                # from one ZIP share the archive-level output folder. The old
+                # duplicated basename logic created one directory per member in
+                # Manual Glossary Only mode.
+                output_dir = self._resolve_translation_output_dir(file_path)
                 
                 # Avoid copying multiple times into the same destination
                 abs_out = os.path.abspath(output_dir)

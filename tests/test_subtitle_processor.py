@@ -465,6 +465,47 @@ def test_subtitle_zip_outputs_share_archive_folder_with_isolated_work_dirs(tmp_p
     assert len(set(work_dirs)) == 3
 
 
+def test_manual_glossary_copy_keeps_subtitle_zip_members_in_one_folder(
+    tmp_path,
+):
+    from translator_gui import TranslatorGUI
+
+    archive = tmp_path / "season.zip"
+    first = tmp_path / "extract" / "episode_01.srt"
+    second = tmp_path / "extract" / "episode_02.srt"
+    first.parent.mkdir()
+    first.write_text("subtitle one", encoding="utf-8")
+    second.write_text("subtitle two", encoding="utf-8")
+    output_dir = tmp_path / "outputs" / "season"
+    glossary = tmp_path / "glossary.csv"
+    glossary.write_text("raw_name,translated_name\n", encoding="utf-8")
+    bundle_files = [str(first), str(second)]
+    bundle_id = os.path.normcase(os.path.abspath(archive))
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.selected_files = bundle_files
+    gui.config = {"output_directory": str(tmp_path / "outputs")}
+    gui.logs = []
+    gui.append_log = gui.logs.append
+    gui._subtitle_zip_output_groups = {
+        os.path.normcase(os.path.abspath(member)): {
+            "archive_path": str(archive),
+            "bundle_id": bundle_id,
+            "bundle_files": bundle_files,
+            "group_name": "season",
+            "output_dir": str(output_dir),
+        }
+        for member in bundle_files
+    }
+
+    gui._copy_glossary_to_output_folders(str(glossary))
+
+    assert (output_dir / "glossary.csv").is_file()
+    assert (output_dir / "translation_progress.json").is_file()
+    assert not (tmp_path / "outputs" / "episode_01").exists()
+    assert not (tmp_path / "outputs" / "episode_02").exists()
+    assert sum("Copied glossary to output" in log for log in gui.logs) == 1
+
+
 def test_grouped_subtitle_output_rejects_file_outside_archive_folder(tmp_path):
     with pytest.raises(ValueError, match="must stay inside"):
         grouped_subtitle_output_layout(
@@ -655,6 +696,113 @@ def test_empty_subtitle_bundle_source_is_preserved_and_tracked(tmp_path):
     )
     assert len(chapters) == 1
     assert chapters[0]["subtitle_bundle_source_index"] == 2
+
+
+def test_subtitle_progress_is_seeded_for_every_file_before_translation(
+    tmp_path,
+    monkeypatch,
+):
+    from TransateKRtoEN import ProgressManager, _seed_subtitle_progress
+
+    first = tmp_path / "extracted" / "episode_1.srt"
+    second = tmp_path / "extracted" / "episode_2.ass"
+    first.parent.mkdir()
+    first.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nAgain\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "[Script Info]\n\n[Events]\n"
+        "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Goodbye\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUBTITLE_AVAILABLE_TOKENS", "1000")
+    monkeypatch.setattr(
+        "subtitle_processor._count_tokens",
+        lambda text: 2000 if text.count('"id"') > 1 else 10,
+    )
+    work_dir = tmp_path / "work"
+    first_output = tmp_path / "outputs" / "episode_1.srt"
+    second_output = tmp_path / "outputs" / "episode_2.ass"
+    mirror_path = first_output.parent / "translation_progress.json"
+    monkeypatch.setenv("SUBTITLE_PROGRESS_MIRROR_FILE", str(mirror_path))
+    extraction = extract_subtitle_bundle_to_chapters(
+        [str(first), str(second)],
+        str(work_dir),
+        output_paths={
+            str(first): str(first_output),
+            str(second): str(second_output),
+        },
+    )
+    chapters = json.loads(
+        Path(extraction["chapters_path"]).read_text(encoding="utf-8")
+    )
+    progress = ProgressManager(str(work_dir))
+
+    seeded = _seed_subtitle_progress(chapters, str(work_dir), progress)
+
+    assert seeded == 3
+    assert len(progress.prog["chapters"]) == 3
+    assert {
+        entry["status"]
+        for entry in progress.prog["chapters"].values()
+    } == {"not_translated"}
+    assert set(progress.prog["subtitle_files"]) == {
+        first_output.name,
+        second_output.name,
+    }
+    assert progress.prog["subtitle_files"][first_output.name][
+        "total_batches"
+    ] == 2
+    assert progress.prog["subtitle_files"][first_output.name][
+        "not_translated_batches"
+    ] == 2
+    assert progress.prog["subtitle_files"][second_output.name][
+        "status"
+    ] == "not_translated"
+
+    mirrored = json.loads(mirror_path.read_text(encoding="utf-8"))
+    assert len(mirrored["chapters"]) == 3
+    assert {
+        entry["output_file"]
+        for entry in mirrored["chapters"].values()
+    } == {str(first_output), str(second_output)}
+
+
+def test_subtitle_progress_seeding_does_not_downgrade_existing_state(tmp_path):
+    from TransateKRtoEN import ProgressManager, _seed_subtitle_progress
+
+    source = tmp_path / "episode.srt"
+    output = tmp_path / "outputs" / "episode.srt"
+    chapter = {
+        "num": 1,
+        "body": '[{"id":"1","source":"Hello"}]',
+        "filename": "section_1.txt",
+        "source_file": str(source),
+        "original_basename": source.name,
+        "subtitle_batch": True,
+        "subtitle_progress_id": str(output),
+        "subtitle_output_file": str(output),
+        "subtitle_source_batch_num": 1,
+        "subtitle_source_batch_count": 1,
+    }
+    progress = ProgressManager(str(tmp_path / "work"))
+    progress.update(
+        0,
+        1,
+        "old-hash",
+        "response_episode.txt",
+        status="completed",
+        chapter_obj=chapter,
+    )
+
+    seeded = _seed_subtitle_progress([chapter], str(tmp_path), progress)
+
+    assert seeded == 0
+    entry = progress.prog["chapters"]["subtitle:episode.srt:1"]
+    assert entry["status"] == "completed"
+    assert entry["content_hash"] == "old-hash"
 
 
 def test_bundle_writes_each_file_when_its_batches_finish(tmp_path, monkeypatch):
