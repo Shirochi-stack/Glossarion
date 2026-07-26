@@ -300,6 +300,8 @@ class GlossarionWeb:
         self.glossary_extraction_thread = None
         
         # Default prompts from the GUI (same as translator_gui.py)
+        from subtitle_processor import DEFAULT_SUBTITLE_TRANSLATION_PROMPT
+
         self.default_prompts = {
             "Universal": (
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
@@ -475,7 +477,8 @@ class GlossarionWeb:
                 "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
                 "- Do not add, remove, duplicate, reorder, or translate placeholder tokens.\n"
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
-            )
+            ),
+            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
         }
         
         # Load profiles from config and merge with defaults

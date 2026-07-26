@@ -43,9 +43,20 @@ _single_pass_glossary_active_indices = set()
 
 
 def _direct_text_html_source_name(chapter):
-    """Return the EPUB HTML basename used for a Direct Text request card."""
+    """Return a useful source basename for request/progress labels."""
     if not isinstance(chapter, dict):
         return ""
+    subtitle_source = ""
+    if chapter.get("subtitle_batch"):
+        subtitle_source = (
+            chapter.get("subtitle_bundle_source_file")
+            or chapter.get("source_file")
+        )
+    subtitle_basename = os.path.basename(
+        str(subtitle_source or "").replace("\\", "/")
+    ).strip()
+    if os.path.splitext(subtitle_basename)[1].lower() in (".srt", ".ass"):
+        return subtitle_basename
     for key in (
         "original_basename",
         "original_filename",
@@ -229,6 +240,9 @@ def _log_antigravity_token_clamp(model, name, requested, clamped):
 MULTIPASS_REFINEMENT_MODES = ("full", "full_with_raw", "failed", "partial", "partial.b", "partial.b2")
 REFINEMENT_RAW_PROMPT_ROLES = ("assistant", "system", "user")
 SDLXLIFF_PLACEHOLDER_RE = re.compile(r"\[\[XLIFF_TAG_\d{6}_\d{4}\]\]")
+STRUCTURED_PLACEHOLDER_RE = re.compile(
+    r"\[\[(?:XLIFF|SUB)_TAG_\d{6}_\d{4}\]\]"
+)
 
 
 def _normalize_refinement_raw_prompt_role(role):
@@ -295,6 +309,59 @@ def _sdlxliff_json_records(text):
     return data if isinstance(data, list) else None
 
 
+def _is_structured_translation_batch(chapter):
+    return bool(
+        isinstance(chapter, dict)
+        and (
+            chapter.get("structured_translation_batch")
+            or chapter.get("sdlxliff_batch")
+            or chapter.get("subtitle_batch")
+        )
+    )
+
+
+def _structured_batch_label(chapter):
+    return "subtitle" if (chapter or {}).get("subtitle_batch") else "SDLXLIFF"
+
+
+def _structured_batch_invalid_issue(chapter):
+    return (
+        "INVALID_SUBTITLE_JSON"
+        if (chapter or {}).get("subtitle_batch")
+        else "INVALID_SDLXLIFF_JSON"
+    )
+
+
+def _with_structured_batch_prompt(messages, chapter):
+    """Append a strict JSON contract for structured segment translation."""
+    if not _is_structured_translation_batch(chapter):
+        return messages
+    target_language = (
+        os.getenv("OUTPUT_LANGUAGE")
+        or os.getenv("GLOSSARY_TARGET_LANGUAGE")
+        or "the requested target language"
+    )
+    kind = _structured_batch_label(chapter)
+    addition = (
+        f"FORMAT OVERRIDE — {kind} structured translation batch:\n"
+        f"Translate every source value to {target_language}.\n"
+        "- Input is a JSON array of objects with exactly id and source fields.\n"
+        "- Output ONLY a valid JSON array; no markdown fences or explanations.\n"
+        "- Every output object must have exactly id and target fields.\n"
+        "- Preserve every id exactly once, in the same order.\n"
+        "- Preserve every [[XLIFF_TAG_...]] or [[SUB_TAG_...]] placeholder "
+        "exactly, in the same order, without translation.\n"
+        "- Preserve variables, formatting markers, and meaningful line breaks."
+    )
+    updated = [dict(message) for message in (messages or [])]
+    for message in updated:
+        if message.get("role") == "system":
+            base = str(message.get("content") or "").rstrip()
+            message["content"] = f"{base}\n\n{addition}" if base else addition
+            return updated
+    return [{"role": "system", "content": addition}] + updated
+
+
 def _sdlxliff_preserved_batch_body(chapter):
     records = _sdlxliff_json_records((chapter or {}).get("body"))
     if records is None:
@@ -326,7 +393,7 @@ def _validate_sdlxliff_batch_output(chapter, text):
         segment_id = str(item.get("id"))
         if segment_id in expected:
             return False, "DUPLICATE_SOURCE_ID"
-        expected[segment_id] = SDLXLIFF_PLACEHOLDER_RE.findall(str(item.get("source", "")))
+        expected[segment_id] = STRUCTURED_PLACEHOLDER_RE.findall(str(item.get("source", "")))
         expected_order.append(segment_id)
 
     seen = {}
@@ -342,7 +409,7 @@ def _validate_sdlxliff_batch_output(chapter, text):
         target = item.get("target")
         if not isinstance(target, str):
             return False, "INVALID_TARGET_TEXT"
-        if SDLXLIFF_PLACEHOLDER_RE.findall(target) != expected[segment_id]:
+        if STRUCTURED_PLACEHOLDER_RE.findall(target) != expected[segment_id]:
             return False, "PLACEHOLDER_MISMATCH"
         seen[segment_id] = True
         seen_order.append(segment_id)
@@ -2801,6 +2868,14 @@ class ProgressManager:
     def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
+        mirror_path = os.getenv("SUBTITLE_PROGRESS_MIRROR_FILE", "").strip()
+        self.PROGRESS_MIRROR_FILE = (
+            os.path.abspath(mirror_path)
+            if mirror_path
+            and os.path.normcase(os.path.abspath(mirror_path))
+            != os.path.normcase(os.path.abspath(self.PROGRESS_FILE))
+            else ""
+        )
         self._save_lock = threading.RLock()
         self.prog = self._init_or_load()
         # Disable auto-dedup unless explicitly enabled; dedup can drop distinct chapters sharing filenames
@@ -3202,6 +3277,23 @@ class ProgressManager:
                 return None
             return f"{num}@{spine_pos}"
 
+        if chapter_obj and chapter_obj.get("subtitle_batch"):
+            progress_id = (
+                chapter_obj.get("subtitle_progress_id")
+                or chapter_obj.get("subtitle_bundle_source_file")
+                or chapter_obj.get("source_file")
+                or chapter_obj.get("original_basename")
+                or "subtitle"
+            )
+            progress_name = os.path.basename(
+                str(progress_id).replace("\\", "/")
+            ).strip()
+            progress_name = re.sub(r"[^A-Za-z0-9._-]+", "_", progress_name)
+            local_batch = chapter_obj.get(
+                "subtitle_source_batch_num", actual_num
+            )
+            return f"subtitle:{progress_name or 'subtitle'}:{local_batch}"
+
         spine_pos = None
         if chapter_obj:
             spine_pos = chapter_obj.get('spine_order')
@@ -3341,6 +3433,114 @@ class ProgressManager:
         self._listing_cache = (output_dir, mtime, names, norm_map)
         return names, norm_map
 
+    def _refresh_subtitle_file_progress(self):
+        """Aggregate subtitle batch rows into per-source-file progress."""
+        summaries = {}
+        for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
+            if not isinstance(chapter_info, dict):
+                continue
+            source_file = str(
+                chapter_info.get("subtitle_source_file") or ""
+            ).strip()
+            output_file = str(
+                chapter_info.get("subtitle_output_file") or ""
+            ).strip()
+            if not source_file and not output_file:
+                continue
+            summary_key = os.path.basename(
+                output_file or source_file
+            ) or str(chapter_key)
+            summary = summaries.setdefault(
+                summary_key,
+                {
+                    "source_file": source_file,
+                    "output_file": output_file,
+                    "total_batches": 0,
+                    "completed_batches": 0,
+                    "failed_batches": 0,
+                    "in_progress_batches": 0,
+                    "pending_batches": 0,
+                    "batch_keys": [],
+                },
+            )
+            summary["total_batches"] = max(
+                int(summary.get("total_batches") or 0),
+                int(chapter_info.get("subtitle_source_batch_count") or 0),
+            )
+            summary["batch_keys"].append(str(chapter_key))
+            status = str(chapter_info.get("status") or "pending").lower()
+            if status in ("completed", "completed_empty", "completed_image_only"):
+                summary["completed_batches"] += 1
+            elif status in ("qa_failed", "failed", "error", "file_missing"):
+                summary["failed_batches"] += 1
+            elif status in ("in_progress", "queued"):
+                summary["in_progress_batches"] += 1
+            else:
+                summary["pending_batches"] += 1
+
+        for summary in summaries.values():
+            observed = len(summary["batch_keys"])
+            summary["total_batches"] = max(
+                int(summary["total_batches"] or 0), observed
+            )
+            if summary["failed_batches"]:
+                summary["status"] = "failed"
+            elif (
+                summary["total_batches"] > 0
+                and summary["completed_batches"] >= summary["total_batches"]
+            ):
+                summary["status"] = "completed"
+            elif summary["in_progress_batches"] or summary["completed_batches"]:
+                summary["status"] = "in_progress"
+            else:
+                summary["status"] = "pending"
+
+        if summaries:
+            self.prog["subtitle_files"] = summaries
+        else:
+            self.prog.pop("subtitle_files", None)
+
+    @staticmethod
+    def _write_progress_snapshot(path, progress_data, max_retries=5):
+        """Atomically write one progress snapshot."""
+        progress_dir = os.path.dirname(path)
+        if progress_dir:
+            os.makedirs(progress_dir, exist_ok=True)
+        temp_path = (
+            f"{path}.{os.getpid()}.{threading.get_ident()}."
+            f"{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            for attempt in range(max_retries):
+                try:
+                    with open(temp_path, "w", encoding="utf-8") as target:
+                        json.dump(
+                            progress_data,
+                            target,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    break
+                except PermissionError:
+                    if attempt >= max_retries - 1:
+                        raise
+                    time.sleep(0.1 * (2 ** attempt))
+            for attempt in range(max_retries):
+                try:
+                    os.replace(temp_path, path)
+                    temp_path = None
+                    break
+                except PermissionError:
+                    if attempt >= max_retries - 1:
+                        raise
+                    time.sleep(0.1 * (2 ** attempt))
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
     def save(self):
         """Save progress to file with retry logic for Windows file locks"""
         temp_file = None
@@ -3368,6 +3568,7 @@ class ProgressManager:
                     self.restore_all_in_progress_for_hard_stop()
 
                 self._preserve_disk_previous_progress_entries()
+                self._refresh_subtitle_file_progress()
 
                 self.prog["completed_list"] = []
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
@@ -3378,7 +3579,10 @@ class ProgressManager:
                         self.prog["completed_list"].append({
                             "num": actual_num,
                             "idx": 0,  # idx is not used anymore
-                            "title": f"Chapter {actual_num}",
+                            "title": (
+                                chapter_info.get("original_basename")
+                                or f"Chapter {actual_num}"
+                            ),
                             "file": chapter_info.get("output_file", ""),
                             "key": chapter_key
                         })
@@ -3412,6 +3616,46 @@ class ProgressManager:
                             time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
                         else:
                             raise
+
+                mirror_path = getattr(self, "PROGRESS_MIRROR_FILE", "")
+                if mirror_path:
+                    try:
+                        mirror_progress = copy.deepcopy(self.prog)
+                        for mirror_info in mirror_progress.get(
+                            "chapters", {}
+                        ).values():
+                            if not isinstance(mirror_info, dict):
+                                continue
+                            final_subtitle = mirror_info.get(
+                                "subtitle_output_file"
+                            )
+                            if final_subtitle:
+                                mirror_info["batch_output_file"] = (
+                                    mirror_info.get("output_file")
+                                )
+                                mirror_info["output_file"] = final_subtitle
+                        for completed_item in mirror_progress.get(
+                            "completed_list", []
+                        ):
+                            if not isinstance(completed_item, dict):
+                                continue
+                            mirror_info = mirror_progress.get(
+                                "chapters", {}
+                            ).get(str(completed_item.get("key")), {})
+                            if mirror_info.get("subtitle_output_file"):
+                                completed_item["file"] = mirror_info[
+                                    "subtitle_output_file"
+                                ]
+                        self._write_progress_snapshot(
+                            mirror_path,
+                            mirror_progress,
+                            max_retries=max_retries,
+                        )
+                    except Exception as mirror_error:
+                        print(
+                            "Warning: Failed to mirror subtitle "
+                            f"progress: {mirror_error}"
+                        )
             except Exception as e:
                 print(f"⚠️ Warning: Failed to save progress: {e}")
                 if temp_file and os.path.exists(temp_file):
@@ -3778,6 +4022,27 @@ class ProgressManager:
                 chapter_info["original_basename"] = chapter_obj['original_basename']
             elif chapter_obj.get('original_filename'):
                 chapter_info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+            if chapter_obj.get("subtitle_batch"):
+                chapter_info["subtitle_progress_key"] = chapter_key
+                subtitle_source = (
+                    chapter_obj.get("subtitle_bundle_source_file")
+                    or chapter_obj.get("source_file")
+                )
+                if subtitle_source:
+                    chapter_info["subtitle_source_file"] = os.path.abspath(
+                        str(subtitle_source)
+                    )
+                    chapter_info["original_basename"] = os.path.basename(
+                        str(subtitle_source)
+                    )
+                for source_key in (
+                    "subtitle_source_batch_num",
+                    "subtitle_source_batch_count",
+                    "subtitle_bundle_source_index",
+                    "subtitle_output_file",
+                ):
+                    if chapter_obj.get(source_key) is not None:
+                        chapter_info[source_key] = chapter_obj[source_key]
         
         # Add raw number tracking
         if raw_num is not None:
@@ -4613,7 +4878,14 @@ class ProgressManager:
         for old_key, chapter_info in self.prog["chapters"].items():
             out = chapter_info.get("output_file")
             is_metadata = is_metadata_progress_entry(old_key, chapter_info)
-            norm = old_key if is_metadata else _normalize_out(out)
+            subtitle_progress_key = chapter_info.get(
+                "subtitle_progress_key"
+            )
+            norm = (
+                subtitle_progress_key
+                if subtitle_progress_key
+                else old_key if is_metadata else _normalize_out(out)
+            )
             if not norm:
                 norm = old_key  # fallback to key to avoid losing entry
 
@@ -4641,7 +4913,9 @@ class ProgressManager:
             actual_num = chapter_info.get("actual_num")
             key_candidate = None
             # Prefer numeric key when available
-            if chapter_info.get("special_type") == "metadata":
+            if chapter_info.get("subtitle_progress_key"):
+                key_candidate = str(chapter_info["subtitle_progress_key"])
+            elif chapter_info.get("special_type") == "metadata":
                 key_candidate = chapter_info.get("metadata_progress_key") or norm
             elif actual_num is not None:
                 key_candidate = str(actual_num)
@@ -6378,6 +6652,7 @@ class TranslationProcessor:
         
         original_max_tokens = self.config.MAX_OUTPUT_TOKENS
         original_temp = self.config.TEMP
+        msgs = _with_structured_batch_prompt(msgs, c)
         original_user_prompt = msgs[-1]["content"]
         msgs = _build_single_pass_glossary_messages(msgs, chunk_html)
 
@@ -7808,7 +8083,10 @@ class BatchTranslationProcessor:
                 except Exception:
                     retry_truncated_enabled = False
 
-                char_ratio_enabled = os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
+                char_ratio_enabled = (
+                    os.getenv("CHAR_RATIO_TRUNCATION_ENABLED", "1") == "1"
+                    and not _is_structured_translation_batch(c)
+                )
                 if retry_truncated_enabled and char_ratio_enabled:
                     has_base64_image = ('data:image' in chunk_html) or ('base64,' in chunk_html)
                     used_fallback = getattr(self.client, '_used_fallback_key', False)
@@ -8472,13 +8750,14 @@ class BatchTranslationProcessor:
             if not result:
                 raise Exception("No translation result produced")
 
-            if chapter.get("sdlxliff_batch"):
+            if _is_structured_translation_batch(chapter):
                 cleaned = str(result or "").strip()
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                batch_label = _structured_batch_label(chapter)
                 if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
                     qa_issue = ["TRUNCATED"] if (chapter_truncated or chapter_truncated_event.is_set()) else ["PARTIAL"]
                     qa_label = "truncated" if (chapter_truncated or chapter_truncated_event.is_set()) else "partial"
-                    print(f"⚠️ SDLXLIFF batch {actual_num}: {qa_label} output rejected")
+                    print(f"⚠️ {batch_label} batch {actual_num}: {qa_label} output rejected")
                     with self.progress_lock:
                         self.update_progress_fn(
                             chapter_progress_idx,
@@ -8495,7 +8774,7 @@ class BatchTranslationProcessor:
 
                 ok, issue = _validate_sdlxliff_batch_output(chapter, cleaned)
                 if not ok:
-                    print(f"❌ SDLXLIFF batch {actual_num}: invalid JSON output ({issue})")
+                    print(f"❌ {batch_label} batch {actual_num}: invalid JSON output ({issue})")
                     with self.progress_lock:
                         self.update_progress_fn(
                             chapter_progress_idx,
@@ -8504,7 +8783,9 @@ class BatchTranslationProcessor:
                             fname,
                             status="qa_failed",
                             ai_features=ai_features,
-                            qa_issues_found=[issue or "INVALID_SDLXLIFF_JSON"],
+                            qa_issues_found=[
+                                issue or _structured_batch_invalid_issue(chapter)
+                            ],
                             chapter_obj=chapter,
                         )
                         self.save_progress_fn()
@@ -8523,7 +8804,7 @@ class BatchTranslationProcessor:
                     )
                     self.save_progress_fn()
                     self.chapters_completed += 1
-                print(f"💾 Saved SDLXLIFF JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
                 return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
 
             # Enhanced mode workflow (same as non-batch):
@@ -15565,6 +15846,97 @@ def _partial_b2_entries_per_request(config):
     return max(1, int(entries_per_request)), max_output_tokens, compression_factor, available_tokens, True
 
 
+def _partial_b2_batch_worker_count(use_batch, batch_size, batch_count):
+    """Return the bounded worker count for Partial.b2 JSON API calls."""
+    try:
+        batch_count = max(0, int(batch_count))
+    except Exception:
+        batch_count = 0
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = 1
+    if not use_batch or batch_count <= 1 or batch_size <= 1:
+        return 1
+    return min(batch_size, batch_count)
+
+
+def _run_partial_b2_request_batches(
+    request_batches,
+    *,
+    use_batch,
+    batch_size,
+    stop_requested,
+    send_batch,
+):
+    """Send Partial.b2 JSON batches concurrently and return results in input order."""
+    batches = list(request_batches or [])
+    if not batches:
+        return []
+
+    worker_count = _partial_b2_batch_worker_count(
+        use_batch,
+        batch_size,
+        len(batches),
+    )
+    if worker_count == 1:
+        ordered_results = []
+        for batch_index, batch_requests in enumerate(batches, start=1):
+            if stop_requested():
+                raise RuntimeError(
+                    "Partial.b2 refinement stopped before all JSON batches completed"
+                )
+            ordered_results.append(send_batch(batch_index, batch_requests))
+        return ordered_results
+
+    executor = ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="PartialB2Worker",
+    )
+    futures = {
+        executor.submit(send_batch, batch_index, batch_requests): batch_index
+        for batch_index, batch_requests in enumerate(batches, start=1)
+    }
+    pending = set(futures)
+    results_by_index = {}
+    stopped = False
+    try:
+        while pending:
+            if stop_requested():
+                stopped = True
+                for future in pending:
+                    future.cancel()
+                raise RuntimeError(
+                    "Partial.b2 refinement stopped before all JSON batches completed"
+                )
+
+            done, pending = wait(
+                pending,
+                timeout=0.25,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+            for future in done:
+                batch_index = futures[future]
+                try:
+                    results_by_index[batch_index] = future.result()
+                except Exception:
+                    for pending_future in pending:
+                        pending_future.cancel()
+                    raise
+    finally:
+        executor.shutdown(
+            wait=not stopped,
+            cancel_futures=stopped,
+        )
+
+    return [
+        results_by_index[batch_index]
+        for batch_index in range(1, len(batches) + 1)
+    ]
+
+
 def _partial_refinement_qa_prompt_text(qa_entry) -> str:
     qa_issues_text = _qa_issues_for_refinement_prompt(qa_entry)
     return f"QA issue(s) to address: {qa_issues_text}" if qa_issues_text else ""
@@ -16872,8 +17244,18 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 progress_manager.save()
 
         try:
-            refined_by_id = {}
-            for batch_index, batch_requests in enumerate(request_batches, start=1):
+            partial_b2_workers = _partial_b2_batch_worker_count(
+                use_batch,
+                batch_size,
+                len(request_batches),
+            )
+            if partial_b2_workers > 1:
+                print(
+                    f"⚡ Partial.b2 batch mode: {partial_b2_workers} parallel JSON workers "
+                    f"for {len(request_batches)} API call(s)"
+                )
+
+            def _send_partial_b2_batch(batch_index, batch_requests):
                 if _force_stop_requested():
                     raise RuntimeError("Partial.b2 refinement stopped before all JSON batches completed")
                 messages = _build_refinement_messages(
@@ -16904,7 +17286,21 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         f"Partial.b2 refinement returned no usable JSON for batch "
                         f"{batch_index}/{len(request_batches)} (finish_reason={finish_reason})"
                     )
-                refined_by_id.update(_partial_refinement_json_response_map(refined_batch, batch_requests))
+                return _partial_refinement_json_response_map(
+                    refined_batch,
+                    batch_requests,
+                )
+
+            refined_by_id = {}
+            batch_results = _run_partial_b2_request_batches(
+                request_batches,
+                use_batch=use_batch,
+                batch_size=batch_size,
+                stop_requested=_force_stop_requested,
+                send_batch=_send_partial_b2_batch,
+            )
+            for refined_batch_map in batch_results:
+                refined_by_id.update(refined_batch_map)
 
             missing_refined_ids = [request_id for request_id in request_ids if request_id not in refined_by_id]
             if missing_refined_ids:
@@ -19164,8 +19560,72 @@ def main(log_callback=None, stop_callback=None):
         input_path = sys.argv[1]
     
     is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md')) or is_sdlxliff_file
+    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass'))
+    is_text_file = input_path.lower().endswith(
+        ('.txt', '.csv', '.json', '.md', '.srt', '.ass')
+    ) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
+    subtitle_bundle_files = []
+    subtitle_bundle_outputs = {}
+    subtitle_bundle_work_dir = ""
+    if is_subtitle_file:
+        try:
+            try:
+                import large_env
+
+                def _subtitle_bundle_env(name):
+                    return large_env.get_env(name, "") or ""
+            except Exception:
+                def _subtitle_bundle_env(name):
+                    return os.getenv(name, "") or ""
+
+            parsed_bundle_files = json.loads(
+                _subtitle_bundle_env("SUBTITLE_BUNDLE_FILES_JSON") or "[]"
+            )
+            parsed_bundle_outputs = json.loads(
+                _subtitle_bundle_env("SUBTITLE_BUNDLE_OUTPUTS_JSON") or "{}"
+            )
+            if isinstance(parsed_bundle_files, list):
+                seen_bundle_files = set()
+                for path in parsed_bundle_files:
+                    if not str(path or "").lower().endswith((".srt", ".ass")):
+                        continue
+                    absolute_path = os.path.abspath(str(path))
+                    normalized_path = os.path.normcase(absolute_path)
+                    if normalized_path in seen_bundle_files:
+                        continue
+                    seen_bundle_files.add(normalized_path)
+                    subtitle_bundle_files.append(absolute_path)
+            if isinstance(parsed_bundle_outputs, dict):
+                subtitle_bundle_outputs = {
+                    os.path.abspath(str(source_path)): os.path.abspath(
+                        str(output_path)
+                    )
+                    for source_path, output_path in parsed_bundle_outputs.items()
+                    if source_path and output_path
+                }
+            configured_bundle_work_dir = _subtitle_bundle_env(
+                "SUBTITLE_BUNDLE_WORK_DIR"
+            ).strip()
+            subtitle_bundle_work_dir = (
+                os.path.abspath(configured_bundle_work_dir)
+                if configured_bundle_work_dir
+                else ""
+            )
+        except Exception as exc:
+            print(f"⚠️ Ignoring invalid subtitle bundle configuration: {exc}")
+            subtitle_bundle_files = []
+            subtitle_bundle_outputs = {}
+            subtitle_bundle_work_dir = ""
+    is_subtitle_bundle = (
+        len(subtitle_bundle_files) > 1
+        and os.path.normcase(os.path.abspath(input_path))
+        in {
+            os.path.normcase(path)
+            for path in subtitle_bundle_files
+        }
+        and bool(subtitle_bundle_work_dir)
+    )
 
     if not is_pdf_file:
         for _pdf_env_key in ("VISION_OCR_SOURCE_PDF", "GLOSSARY_COMPRESSION_SOURCE_PDF", "QA_VISION_OCR_SOURCE_PDF"):
@@ -19211,7 +19671,7 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is OFF - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].lower().endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].lower().endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
@@ -19223,7 +19683,10 @@ def main(log_callback=None, stop_callback=None):
         os.environ["EPUB_PATH"] = input_path
     
     is_sdlxliff_file = input_path.lower().endswith('.sdlxliff')
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md')) or is_sdlxliff_file
+    is_subtitle_file = input_path.lower().endswith(('.srt', '.ass'))
+    is_text_file = input_path.lower().endswith(
+        ('.txt', '.csv', '.json', '.md', '.srt', '.ass')
+    ) or is_sdlxliff_file
     is_pdf_file = input_path.lower().endswith('.pdf')
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
@@ -19248,7 +19711,52 @@ def main(log_callback=None, stop_callback=None):
             # If we can't create the root, fall back to relative output.
             output_root = ""
 
-    out = os.path.join(output_root, file_base) if output_root else file_base
+    grouped_subtitle_output_path = None
+    subtitle_output_group_dir = (
+        os.getenv("SUBTITLE_OUTPUT_GROUP_DIR", "").strip()
+        if is_subtitle_file
+        else ""
+    )
+    requested_subtitle_output_path = (
+        os.getenv("SUBTITLE_OUTPUT_FILE", "").strip()
+        if is_subtitle_file
+        else ""
+    )
+    requested_subtitle_work_dir = (
+        os.getenv("SUBTITLE_WORK_DIR", "").strip()
+        if is_subtitle_file
+        else ""
+    )
+    if is_subtitle_bundle:
+        out = subtitle_bundle_work_dir
+        print(
+            f"📦 Subtitle ZIP parallel bundle → "
+            f"{len(subtitle_bundle_files)} source file(s)"
+        )
+    elif subtitle_output_group_dir and requested_subtitle_output_path:
+        try:
+            from subtitle_processor import grouped_subtitle_output_layout
+
+            subtitle_layout = grouped_subtitle_output_layout(
+                input_path,
+                subtitle_output_group_dir,
+                requested_subtitle_output_path,
+                work_dir=requested_subtitle_work_dir or None,
+            )
+            out = subtitle_layout["work_dir"]
+            grouped_subtitle_output_path = subtitle_layout["output_path"]
+            print(
+                f"📦 Subtitle ZIP output group → "
+                f"{subtitle_layout['output_group_dir']}"
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Invalid grouped subtitle output configuration; "
+                f"using the regular per-file folder ({exc})"
+            )
+            out = os.path.join(output_root, file_base) if output_root else file_base
+    else:
+        out = os.path.join(output_root, file_base) if output_root else file_base
     # On macOS .app bundles, cwd can be '/' (read-only root).
     # Resolve relative output paths against the input file's directory.
     # Only on macOS — on Windows this would change the output dir and break progress tracking.
@@ -19670,6 +20178,57 @@ def main(log_callback=None, stop_callback=None):
             if log_callback:
                 log_callback(f"❌ Error processing PDF file: {e}")
             return
+    elif is_subtitle_file:
+        print("📄 Processing subtitle file...")
+        try:
+            try:
+                subtitle_max_output = config.get_effective_output_limit()
+                subtitle_compression = config.get_effective_compression_factor()
+                subtitle_available = max(
+                    1000,
+                    int(
+                        (subtitle_max_output - 500)
+                        / max(subtitle_compression, 0.000000000001)
+                    ),
+                )
+                os.environ["SUBTITLE_AVAILABLE_TOKENS"] = str(
+                    subtitle_available
+                )
+            except Exception:
+                pass
+            if is_subtitle_bundle:
+                from subtitle_processor import extract_subtitle_bundle_to_chapters
+
+                extraction_result = extract_subtitle_bundle_to_chapters(
+                    subtitle_bundle_files,
+                    out,
+                    output_paths=subtitle_bundle_outputs,
+                )
+            else:
+                from subtitle_processor import extract_subtitle_to_chapters
+
+                extraction_result = extract_subtitle_to_chapters(input_path, out)
+            chapters_path = extraction_result.get("chapters_path") or os.path.join(
+                out, "chapters_full.json"
+            )
+            with open(chapters_path, "r", encoding="utf-8") as subtitle_file:
+                chapters = json.load(subtitle_file)
+            metadata = extraction_result.get("metadata") or {
+                "title": os.path.splitext(os.path.basename(input_path))[0],
+                "type": "subtitle",
+                "chapter_count": len(chapters),
+            }
+            print(
+                f"📄 Extracted {extraction_result.get('segments', 0)} "
+                f"subtitle dialogue cue(s) from "
+                f"{extraction_result.get('source_count', 1)} file(s) into "
+                f"{len(chapters)} parallelizable batch(es)"
+            )
+        except Exception as e:
+            print(f"❌ Error processing subtitle file: {e}")
+            if log_callback:
+                log_callback(f"❌ Error processing subtitle file: {e}")
+            return
     elif is_sdlxliff_file:
         print("📄 Processing SDLXLIFF file...")
         try:
@@ -20030,7 +20589,9 @@ def main(log_callback=None, stop_callback=None):
         (config.OUTPUT_MODE == "image" and not is_text_file)
         or not config.TRANSLATE_BOOK_TITLE
     )
-    _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md', '.sdlxliff'))
+    _non_book_ext = input_path.lower().endswith(
+        ('.csv', '.json', '.md', '.sdlxliff', '.srt', '.ass')
+    )
     is_txt = input_path.lower().endswith(('.txt',))
     skip_txt_title = os.getenv('SKIP_TXT_TITLE_TRANSLATION', '1') == '1'
     title_translation_allowed = not _non_book_ext and not (is_txt and skip_txt_title)
@@ -20321,10 +20882,11 @@ def main(log_callback=None, stop_callback=None):
         os.environ["AUTO_GLOSSARY_MODE"] = "off"
         print("📑 Skipping auto glossary extraction for Audio output mode")
     
-    # Skip glossary generation for CSV/JSON/MD files (they are typically glossaries themselves)
-    if input_path.lower().endswith(('.csv', '.json', '.md')):
-        print("📑 Skipping glossary generation for CSV/JSON/MD file")
-        print("   CSV/JSON/MD files are treated as plain text and typically don't need glossaries")
+    # Structured subtitle batches and glossary-like files should not be used
+    # as raw material for automatic glossary extraction.
+    if input_path.lower().endswith(('.csv', '.json', '.md', '.srt', '.ass')):
+        print("📑 Skipping glossary generation for this structured/plain-text format")
+        print("   Manual glossaries can still be applied during translation")
     else:
         print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
         print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
@@ -22445,6 +23007,11 @@ def main(log_callback=None, stop_callback=None):
     if chapters_to_process == 0:
         if is_sdlxliff_file:
             print("\nℹ️ SDLXLIFF has no segments requiring model translation; protected-only segments will be restored locally.")
+        elif is_subtitle_file:
+            print(
+                "\nℹ️ Subtitle file has no dialogue requiring model "
+                "translation; its structure will be copied unchanged."
+            )
         elif start is not None and end is not None:
             # Check if chapters in the range exist but are already completed
             if chapters:
@@ -24893,13 +25460,22 @@ def main(log_callback=None, stop_callback=None):
                 if chunk_abort:
                     break
 
-                if config.REMOVE_AI_ARTIFACTS != "off":
+                if (
+                    not _is_structured_translation_batch(c)
+                    and config.REMOVE_AI_ARTIFACTS != "off"
+                ):
                     result = ContentProcessor.clean_ai_artifacts(result, config.REMOVE_AI_ARTIFACTS)
 
-                if config.EMERGENCY_RESTORE:
+                if (
+                    not _is_structured_translation_batch(c)
+                    and config.EMERGENCY_RESTORE
+                ):
                     result = ContentProcessor.emergency_restore_paragraphs(result, chunk_html)
 
-                if config.REMOVE_AI_ARTIFACTS != "off":
+                if (
+                    not _is_structured_translation_batch(c)
+                    and config.REMOVE_AI_ARTIFACTS != "off"
+                ):
                     lines = result.split('\n')
                     
                     json_line_count = 0
@@ -24918,7 +25494,13 @@ def main(log_callback=None, stop_callback=None):
                             result = remaining
                             print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
 
-                result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
+                if not _is_structured_translation_batch(c):
+                    result = re.sub(
+                        r'\[PART \d+/\d+\]\s*',
+                        '',
+                        result,
+                        flags=re.IGNORECASE,
+                    )
 
                 translated_chunks.append((result, chunk_idx, total_chunks))
                 
@@ -25059,8 +25641,9 @@ def main(log_callback=None, stop_callback=None):
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
-            if c.get("sdlxliff_batch"):
+            if _is_structured_translation_batch(c):
                 cleaned = str(cleaned or "").strip()
+                batch_label = _structured_batch_label(c)
                 sdlxliff_finish_reason = str(locals().get("finish_reason") or "").strip().lower()
                 sdlxliff_truncated = bool(locals().get("chapter_truncated", False)) or sdlxliff_finish_reason in [
                     "length",
@@ -25073,7 +25656,7 @@ def main(log_callback=None, stop_callback=None):
                 if sdlxliff_truncated or is_partial_result:
                     qa_issue = ["TRUNCATED"] if sdlxliff_truncated else ["PARTIAL"]
                     qa_label = "truncated" if sdlxliff_truncated else "partial"
-                    print(f"⚠️ SDLXLIFF batch {actual_num}: {qa_label} output rejected")
+                    print(f"⚠️ {batch_label} batch {actual_num}: {qa_label} output rejected")
                     progress_manager.update(
                         idx,
                         actual_num,
@@ -25087,14 +25670,16 @@ def main(log_callback=None, stop_callback=None):
                     continue
                 ok, issue = _validate_sdlxliff_batch_output(c, cleaned)
                 if not ok:
-                    print(f"❌ SDLXLIFF batch {actual_num}: invalid JSON output ({issue})")
+                    print(f"❌ {batch_label} batch {actual_num}: invalid JSON output ({issue})")
                     progress_manager.update(
                         idx,
                         actual_num,
                         content_hash,
                         fname,
                         status="qa_failed",
-                        qa_issues_found=[issue or "INVALID_SDLXLIFF_JSON"],
+                        qa_issues_found=[
+                            issue or _structured_batch_invalid_issue(c)
+                        ],
                         chapter_obj=c,
                     )
                     progress_manager.save()
@@ -25104,7 +25689,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
-                print(f"💾 Saved SDLXLIFF JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
+                print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
                 continue
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
@@ -25738,6 +26323,7 @@ def main(log_callback=None, stop_callback=None):
     if (
         getattr(config, "MULTIPASS_MODE", False)
         and config.OUTPUT_MODE not in ("refinement", "audio", "image", "video")
+        and not is_subtitle_file
         and os.environ.get('TRANSLATION_CANCELLED') != '1'
         and os.environ.get('GRACEFUL_STOP') != '1'
         and not check_stop()
@@ -25823,6 +26409,56 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
             except Exception:
                 pass
+
+    if is_subtitle_file:
+        try:
+            if is_subtitle_bundle:
+                from subtitle_processor import convert_subtitle_bundle
+
+                result = convert_subtitle_bundle(out)
+                output_paths = list(result.get("outputs") or [])
+                output_path = (
+                    os.path.dirname(output_paths[0])
+                    if output_paths
+                    else subtitle_output_group_dir
+                )
+                print(
+                    f"✅ Subtitle ZIP round-trip complete: "
+                    f"{len(output_paths)} file(s) in {output_path}"
+                )
+            else:
+                from subtitle_processor import convert_subtitle
+
+                result = convert_subtitle(
+                    out,
+                    output_path=grouped_subtitle_output_path,
+                )
+                output_path = result.get("output_path")
+                print(f"✅ Subtitle round-trip complete: {output_path}")
+            print(
+                f"📊 Subtitle cues updated: {result.get('updated', 0)}, "
+                f"preserved: {result.get('skipped', 0)}, "
+                f"missing: {result.get('missing', 0)}"
+            )
+            total_time = time.time() - translation_start_time
+            hours = int(total_time // 3600)
+            minutes = int((total_time % 3600) // 60)
+            seconds = int(total_time % 60)
+            print(
+                f"\n⏱️ Total translation time: "
+                f"{hours}h {minutes}m {seconds}s"
+            )
+            print(f"📊 Subtitle batches completed: {chapters_completed}")
+            if log_callback:
+                log_callback(
+                    f"✅ Subtitle translation complete! Created {output_path}"
+                )
+        except Exception as e:
+            print(f"❌ Error creating translated subtitle: {e}")
+            if log_callback:
+                log_callback(f"❌ Error creating translated subtitle: {e}")
+        print("TRANSLATION_COMPLETE_SIGNAL")
+        return
 
     if is_sdlxliff_file:
         try:

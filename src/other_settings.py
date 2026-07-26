@@ -14636,6 +14636,7 @@ def delete_profile(self):
             "Korean_html2text",
             "Japanese_html2text",
             "Chinese_html2text",
+            "Subtitle Translation",
         }
 
     if name in protected:

@@ -482,6 +482,7 @@ DEFAULT_PROMPT_PROFILES = [
     "test",
     "refinement",
     "SDLXLIFF Editing v2",
+    "Subtitle Translation",
 ]
 
 DEFAULT_PROFILE_PROMPTS = {
@@ -495,7 +496,22 @@ DEFAULT_PROFILE_PROMPTS = {
         "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
         "- Do not add, remove, duplicate, reorder, or translate placeholder tokens.\n"
         "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
-    )
+    ),
+    "Subtitle Translation": (
+        "You are a professional subtitle translator. Translate every source value "
+        "to the requested target language.\n"
+        "- Write concise, natural spoken dialogue suitable for on-screen subtitles.\n"
+        "- Preserve the complete meaning, tone, emotion, humor, relationships, "
+        "character voice, and level of formality without unnecessary expansion.\n"
+        "- Do not summarize, censor, embellish, explain, or add translator notes.\n"
+        "- Do not add speaker names, labels, punctuation, or context that is not "
+        "present in the source.\n"
+        "- Preserve meaningful line breaks and keep each cue independently usable; "
+        "do not merge, split, omit, or reorder cues.\n"
+        "- Output only a valid JSON array with exactly id and target fields.\n"
+        "- Preserve every id and every [[SUB_TAG_...]] placeholder exactly.\n"
+        "- Output no markdown fences, explanations, or extra fields.\n"
+    ),
 }
 
 # Bot setup

@@ -3878,7 +3878,7 @@ class _InputOutputDialog(QDialog):
         extension = os.path.splitext(str(path or ''))[1].lower()
         return extension in {
             '.txt', '.epub', '.pdf', '.md', '.markdown', '.html', '.htm',
-            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+            '.xhtml', '.xml', '.json', '.csv', '.tsv', '.srt', '.ass', '.vtt', '.log',
         } or extension in (
             _InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS
             | _InputOutputDialog._VISION_ARCHIVE_ATTACHMENT_EXTENSIONS
@@ -3957,11 +3957,11 @@ class _InputOutputDialog(QDialog):
             "",
             (
                 "Supported files (*.txt *.epub *.pdf *.cbz *.md *.markdown *.html *.htm "
-                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.vtt *.log *.png *.jpg "
+                "*.xhtml *.xml *.json *.csv *.tsv *.srt *.ass *.vtt *.log *.png *.jpg "
                 "*.jpeg *.gif *.bmp *.webp *.tif *.tiff *.svg *.ico *.heic *.heif "
                 "*.avif *.jxl);;"
                 "Text files (*.txt *.md *.markdown *.html *.htm *.xhtml *.xml *.json "
-                "*.csv *.tsv *.srt *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
+                "*.csv *.tsv *.srt *.ass *.vtt *.log);;EPUB files (*.epub);;PDF files (*.pdf);;"
                 "Comic Book archives (*.cbz);;"
                 "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff "
                 "*.svg *.ico *.heic *.heif *.avif *.jxl)"
@@ -7525,7 +7525,8 @@ class _InputOutputDialog(QDialog):
                 stem = os.path.splitext(os.path.basename(attached_path))[0]
                 if (
                     attached_extension in {
-                        '.txt', '.epub', '.pdf', '.cbz', '.csv', '.json'
+                        '.txt', '.epub', '.pdf', '.cbz', '.csv', '.json',
+                        '.srt', '.ass',
                     }
                     or attached_extension in self._IMAGE_ATTACHMENT_EXTENSIONS
                 ):
@@ -7559,7 +7560,10 @@ class _InputOutputDialog(QDialog):
             import time as _time
             self._run_started_at = _time.time()
             self._expected_output = os.path.join(
-                self._temp_root, stem, f"{stem}_translated.txt"
+                self._temp_root,
+                stem,
+                f"{stem}_translated"
+                f"{self._run_source_extension if self._run_source_extension in {'.srt', '.ass'} else '.txt'}",
             )
 
             gui = self.translator
@@ -10335,6 +10339,8 @@ class _InputOutputDialog(QDialog):
             ".epub": {".epub": 140, ".pdf": 100, ".txt": 80, ".html": 60},
             ".cbz": {".epub": 140, ".pdf": 100, ".txt": 90, ".html": 60},
             ".pdf": {".pdf": 140, ".epub": 130, ".txt": 100, ".html": 70},
+            ".srt": {".srt": 160, ".txt": 70},
+            ".ass": {".ass": 160, ".txt": 70},
         }
         if self._run_output_mode == 'image':
             preferred = dict(generated_image_scores)
@@ -10825,7 +10831,7 @@ class _InputOutputDialog(QDialog):
         try:
             readable_extensions = {
                 '.txt', '.md', '.markdown', '.html', '.htm', '.xhtml', '.xml',
-                '.json', '.csv', '.tsv', '.srt', '.vtt', '.log',
+                '.json', '.csv', '.tsv', '.srt', '.ass', '.vtt', '.log',
             }
             if (
                 self._expected_output
@@ -11243,6 +11249,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "RPGMaker_GTool_Image",
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
+            "Subtitle Translation",
         }
         return protected
 
@@ -12262,6 +12269,8 @@ Text to analyze:
             "Return only the translated text. Preserve the Markdown paragraph, heading, list, table, blockquote, emphasis, and line-break structure.\n\n"
             "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
         )
+        from subtitle_processor import DEFAULT_SUBTITLE_TRANSLATION_PROMPT
+
         self.default_prompts = {
             "Universal": (
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
@@ -12522,7 +12531,8 @@ Text to analyze:
                 "- Preserve every placeholder token exactly as written, including tokens like [[XLIFF_TAG_000001_0000]].\n"
                 "- Do not add, remove, duplicate, reorder, or translate placeholder tokens.\n"
                 "- Preserve variables, formatting markers, accelerator keys, punctuation that functions as markup, and line breaks where meaningful.\n"
-            )
+            ),
+            "Subtitle Translation": DEFAULT_SUBTITLE_TRANSLATION_PROMPT,
         }
 
         self._init_variables()
@@ -13106,6 +13116,32 @@ Text to analyze:
                         "temporary CBZ cleanup",
                         lambda temp_root=temp_root: shutil.rmtree(temp_root, ignore_errors=True)
                     )
+            except Exception:
+                pass
+            # Remove safely extracted subtitle ZIP inputs. Translated outputs
+            # live in the normal output directory, not in this temporary tree.
+            try:
+                subtitle_temp_root = getattr(self, 'subtitle_zip_temp_root', None)
+                if subtitle_temp_root and os.path.isdir(subtitle_temp_root):
+                    subtitle_temp_root = os.path.abspath(subtitle_temp_root)
+                    system_temp_root = os.path.abspath(tempfile.gettempdir())
+                    is_expected_temp_root = (
+                        os.path.basename(subtitle_temp_root).startswith(
+                            'glossarion_subtitle_zip_'
+                        )
+                        and subtitle_temp_root != system_temp_root
+                        and os.path.commonpath(
+                            (system_temp_root, subtitle_temp_root)
+                        ) == system_temp_root
+                    )
+                    if is_expected_temp_root:
+                        _submit_shutdown_task(
+                            "temporary subtitle ZIP cleanup",
+                            lambda subtitle_temp_root=subtitle_temp_root: shutil.rmtree(
+                                subtitle_temp_root,
+                                ignore_errors=True,
+                            ),
+                        )
             except Exception:
                 pass
 
@@ -14148,6 +14184,7 @@ Recent translations to summarize:
             "RPGMaker_GTool_Image",
             "NanoBanana_Image",
             "SDLXLIFF Editing v2",
+            "Subtitle Translation",
         ]
         
         # Add missing required profiles while preserving existing profile positions
@@ -14566,7 +14603,7 @@ Recent translations to summarize:
             if not urls:
                 return
             paths = []
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff',
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.sdlxliff', '.srt', '.ass',
                                     '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
                                     '.bmp', '.webp', '.mp4'}
             for url in urls:
@@ -21465,8 +21502,59 @@ Recent translations to summarize:
                 return input_dir
         return script_dir
 
+    def _subtitle_zip_output_info(self, input_file: str):
+        """Return the session-only archive output mapping for an extracted subtitle."""
+        mappings = getattr(self, '_subtitle_zip_output_groups', None)
+        if not isinstance(mappings, dict) or not input_file:
+            return None
+        key = os.path.normcase(os.path.abspath(str(input_file)))
+        info = mappings.get(key)
+        return info if isinstance(info, dict) else None
+
+    def _clear_automatic_glossary_for_non_epub_selection(self, input_paths):
+        """Drop a stale auto-selected glossary when switching away from EPUB input."""
+        paths = [str(path or "") for path in (input_paths or []) if path]
+        if any(path.lower().endswith(".epub") for path in paths):
+            return False
+
+        glossary_path = str(
+            getattr(self, "manual_glossary_path", "") or ""
+        ).strip()
+        if (
+            not glossary_path
+            or getattr(self, "manual_glossary_manually_loaded", False)
+        ):
+            return False
+
+        self.manual_glossary_path = None
+        self.manual_glossary_manually_loaded = False
+        self.auto_loaded_glossary_path = None
+        self.auto_loaded_glossary_for_file = None
+        self._last_glossary_log = ""
+        try:
+            self.config["manual_glossary_path"] = ""
+        except Exception:
+            pass
+        os.environ.pop("MANUAL_GLOSSARY", None)
+        try:
+            self.append_log(
+                "📑 Cleared automatically selected glossary for new "
+                f"non-EPUB input: {os.path.basename(glossary_path)}"
+            )
+        except Exception:
+            pass
+        try:
+            self._update_manual_glossary_status()
+        except Exception:
+            pass
+        return True
+
     def _resolve_translation_output_dir(self, input_file: str) -> str:
         """Return the expected translation output directory for one input file."""
+        subtitle_group = self._subtitle_zip_output_info(input_file)
+        if subtitle_group and subtitle_group.get('output_dir'):
+            return os.path.abspath(str(subtitle_group['output_dir']))
+
         base_name = os.path.splitext(os.path.basename(input_file))[0]
         override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
         if override_dir:
@@ -21817,6 +21905,20 @@ Recent translations to summarize:
             output_path = self._resolve_open_output_folder_for_file(file_path)
             self._open_single_output_folder(output_path)
             return
+
+        # Several subtitle members from one ZIP intentionally share one
+        # archive-level destination. Open it directly instead of displaying one
+        # menu row per extracted member.
+        unique_output_paths = {}
+        for file_path in files:
+            candidate = self._resolve_open_output_folder_for_file(file_path)
+            unique_output_paths.setdefault(
+                os.path.normcase(os.path.abspath(candidate)),
+                candidate,
+            )
+        if len(unique_output_paths) == 1:
+            self._open_single_output_folder(next(iter(unique_output_paths.values())))
+            return
         
         # ── Multiple files — show picker dialog ──────────────────────
         self._show_output_folder_picker(files, override_dir)
@@ -21870,10 +21972,21 @@ Recent translations to summarize:
         """)
         
         existing_paths = []
+        seen_output_paths = set()
         
         for file_path in files:
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
             output_path = self._resolve_open_output_folder_for_file(file_path)
+            normalized_output_path = os.path.normcase(os.path.abspath(output_path))
+            if normalized_output_path in seen_output_paths:
+                continue
+            seen_output_paths.add(normalized_output_path)
+
+            subtitle_group = self._subtitle_zip_output_info(file_path)
+            base_name = (
+                str(subtitle_group.get('group_name'))
+                if subtitle_group and subtitle_group.get('group_name')
+                else os.path.splitext(os.path.basename(file_path))[0]
+            )
             
             exists = os.path.exists(output_path)
             icon = "📂" if exists else "📁"
@@ -22788,6 +22901,9 @@ Recent translations to summarize:
                     chunk = entry.get("chunk")
                     total = entry.get("total_chunks")
                     ctx = entry.get("context")
+                    source_file = os.path.basename(
+                        str(entry.get("source_file") or "").replace("\\", "/")
+                    ).strip()
                     merged = entry.get("merged_chapters")
                     retry = entry.get("retry_count")
                     retry_suffix = f" (retry {retry})" if retry and int(retry) > 0 else ""
@@ -22821,6 +22937,12 @@ Recent translations to summarize:
                         chunk_part = ""
                         if chunk and total and t and t > 1:
                             chunk_part = f" {chunk}/{total}"
+
+                        if source_file.lower().endswith((".srt", ".ass")):
+                            return (
+                                f"{source_file} [batch {chapter}]"
+                                f"{chunk_part}{retry_suffix}"
+                            )
 
                         # Context suffix removed (redundant in this UI)
                         return f"Chapter {chapter}{chunk_part}{retry_suffix}"
@@ -22915,12 +23037,16 @@ Recent translations to summarize:
                     return out
 
                 chapter_items = []
+                subtitle_items = []
                 merged_items = []
                 other_items = []
 
                 for e in subset:
                     try:
                         chapter = e.get("chapter")
+                        source_file = os.path.basename(
+                            str(e.get("source_file") or "").replace("\\", "/")
+                        ).strip()
                         merged = e.get("merged_chapters")
                         
                         # Handle merged chapters separately
@@ -22948,7 +23074,14 @@ Recent translations to summarize:
                         
                         if chapter is not None:
                             # Build a compact per-chapter token (keep chunk ratio only when total > 1)
-                            token = str(chapter)
+                            is_subtitle_source = source_file.lower().endswith(
+                                (".srt", ".ass")
+                            )
+                            token = (
+                                f"{source_file} [{chapter}]"
+                                if is_subtitle_source
+                                else str(chapter)
+                            )
                             try:
                                 chunk = e.get("chunk")
                                 total = e.get("total_chunks")
@@ -22958,8 +23091,13 @@ Recent translations to summarize:
                             except Exception:
                                 pass
 
-                            if token not in chapter_items:
-                                chapter_items.append(token)
+                            target_items = (
+                                subtitle_items
+                                if is_subtitle_source
+                                else chapter_items
+                            )
+                            if token not in target_items:
+                                target_items.append(token)
                         else:
                             other_items.append(_compact_entry_label(e))
                     except Exception:
@@ -22968,6 +23106,13 @@ Recent translations to summarize:
                 # Show merged items first, then regular chapters
                 if merged_items:
                     active_bits.append(", ".join(merged_items))
+                if subtitle_items:
+                    active_bits.append(
+                        "Subtitle(s) "
+                        + ", ".join(
+                            _compress_redundant_labels(subtitle_items)
+                        )
+                    )
                 if chapter_items:
                     active_bits.append("Chapter(s) " + ", ".join(_compress_redundant_labels(chapter_items)))
 
@@ -25599,6 +25744,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.auto_loaded_glossary_for_file = None
         else:
             self.selected_files = self._normalize_windows_input_filenames(self.selected_files)
+
+        # Re-check at run time as well as selection time. This covers restored
+        # sessions and paths edited before the worker starts.
+        self._clear_automatic_glossary_for_non_epub_selection(
+            self.selected_files
+        )
         
         # Record every selected raw input in the Library's raw-inputs
         # registry so the library dialog can find it later (even if the
@@ -26007,6 +26158,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
                     image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in image_extensions]
                     sdlxliff_files = [f for f in self.selected_files if f.lower().endswith('.sdlxliff')]
+                    subtitle_files = [
+                        f for f in self.selected_files
+                        if f.lower().endswith(('.srt', '.ass'))
+                    ]
                     
                     if csv_json_files:
                         self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
@@ -26014,8 +26169,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("🖼️ Skipping post-translation scanning for image files")
                     if sdlxliff_files:
                         self.append_log("SDLXLIFF: skipping post-translation scanner")
+                    if subtitle_files:
+                        self.append_log("Subtitles: skipping post-translation scanner")
                     current_run_output_mode = self._active_translation_output_mode()
-                    if csv_json_files or image_files or sdlxliff_files:
+                    if csv_json_files or image_files or sdlxliff_files or subtitle_files:
                         pass
                     elif current_run_output_mode == 'refinement':
                         self.append_log("✨ Skipping post-translation scanning for refinement mode")
@@ -26433,10 +26590,28 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.append_log(f"📁 Created combined output directory: {combined_image_output_dir}")
             
+            processed_subtitle_bundle_ids = set()
             for i, file_path in enumerate(self.selected_files):
                 if self.stop_requested:
                     # Suppress per-file stop spam; summary will be shown later
                     break
+
+                subtitle_output_info = self._subtitle_zip_output_info(file_path)
+                subtitle_bundle_id = (
+                    str(subtitle_output_info.get('bundle_id') or '')
+                    if subtitle_output_info
+                    else ''
+                )
+                subtitle_bundle_files = (
+                    list(subtitle_output_info.get('bundle_files') or [])
+                    if subtitle_output_info
+                    else []
+                )
+                if (
+                    subtitle_bundle_id
+                    and subtitle_bundle_id in processed_subtitle_bundle_ids
+                ):
+                    continue
 
                 # Apply per-file glossary mapping (if present)
                 try:
@@ -26503,10 +26678,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff'}:
-                        # Process as EPUB/TXT/CSV/JSON/PDF/MD/SDLXLIFF
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'}:
+                        # Process as EPUB/text/PDF/SDLXLIFF/subtitle input.
+                        if len(subtitle_bundle_files) > 1:
+                            self.append_log(
+                                f"📦 Translating {len(subtitle_bundle_files)} subtitle "
+                                "file(s) from this ZIP as one parallel batch job"
+                            )
                         result = self._process_text_file(file_path)
-                        if result:
+                        if subtitle_bundle_id and len(subtitle_bundle_files) > 1:
+                            processed_subtitle_bundle_ids.add(subtitle_bundle_id)
+                            if result:
+                                successful += len(subtitle_bundle_files)
+                            else:
+                                failed += len(subtitle_bundle_files)
+                        elif result:
                             successful += 1
                         else:
                             failed += 1
@@ -28313,7 +28499,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff')):
+                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.sdlxliff', '.srt', '.ass')):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 
@@ -28867,6 +29053,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
             force_balanced_request_merging=(output_mode == 'vision' and auto_glossary_mode == 'balanced')
         )
         output_override_for_env = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        subtitle_output_info = self._subtitle_zip_output_info(epub_path)
+        subtitle_bundle_files = (
+            list(subtitle_output_info.get('bundle_files') or [])
+            if subtitle_output_info
+            else []
+        )
+        subtitle_bundle_outputs = {}
+        for subtitle_bundle_file in subtitle_bundle_files:
+            bundle_member_info = self._subtitle_zip_output_info(
+                subtitle_bundle_file
+            )
+            if bundle_member_info and bundle_member_info.get('output_path'):
+                subtitle_bundle_outputs[
+                    os.path.abspath(str(subtitle_bundle_file))
+                ] = os.path.abspath(str(bundle_member_info['output_path']))
         if output_override_for_env:
             glossary_shared_dir = os.path.join(os.path.abspath(output_override_for_env), 'Glossary')
         else:
@@ -28992,6 +29193,48 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'EPUB_OUTPUT_DIR': _get_app_dir(),
             'OUTPUT_DIRECTORY': os.path.abspath(output_override_for_env) if output_override_for_env else '',
             'OUTPUT_DIR': os.path.abspath(output_override_for_env) if output_override_for_env else '',
+            'SUBTITLE_OUTPUT_GROUP_DIR': (
+                os.path.abspath(str(subtitle_output_info.get('output_dir')))
+                if subtitle_output_info and subtitle_output_info.get('output_dir')
+                else ''
+            ),
+            'SUBTITLE_OUTPUT_FILE': (
+                os.path.abspath(str(subtitle_output_info.get('output_path')))
+                if subtitle_output_info and subtitle_output_info.get('output_path')
+                else ''
+            ),
+            'SUBTITLE_WORK_DIR': (
+                os.path.abspath(str(subtitle_output_info.get('work_dir')))
+                if subtitle_output_info and subtitle_output_info.get('work_dir')
+                else ''
+            ),
+            'SUBTITLE_BUNDLE_FILES_JSON': (
+                json.dumps(subtitle_bundle_files, ensure_ascii=False)
+                if len(subtitle_bundle_files) > 1
+                else ''
+            ),
+            'SUBTITLE_BUNDLE_OUTPUTS_JSON': (
+                json.dumps(subtitle_bundle_outputs, ensure_ascii=False)
+                if len(subtitle_bundle_files) > 1
+                else ''
+            ),
+            'SUBTITLE_BUNDLE_WORK_DIR': (
+                os.path.abspath(str(subtitle_output_info.get('bundle_work_dir')))
+                if (
+                    subtitle_output_info
+                    and len(subtitle_bundle_files) > 1
+                    and subtitle_output_info.get('bundle_work_dir')
+                )
+                else ''
+            ),
+            'SUBTITLE_PROGRESS_MIRROR_FILE': (
+                os.path.join(
+                    os.path.abspath(str(subtitle_output_info.get('output_dir'))),
+                    'translation_progress.json',
+                )
+                if subtitle_output_info and subtitle_output_info.get('output_dir')
+                else ''
+            ),
             'GLOSSARY_SHARED_DIR': glossary_shared_dir,
             'SAVE_GLOSSARY_IN_OUTPUT': '1' if self.config.get('save_glossary_in_output', False) else '0',
             'GLOSSARY_OUTPUT_BACKUP_DIR': self._output_side_glossary_backup_dir_for_source(epub_path) if self.config.get('save_glossary_in_output', False) else '',
@@ -32214,6 +32457,8 @@ Important rules:
                jsons = [p for p in files if p.lower().endswith('.json')]
                csvs = [p for p in files if p.lower().endswith('.csv')]
                sdlxliffs = [p for p in files if p.lower().endswith('.sdlxliff')]
+               srts = [p for p in files if p.lower().endswith('.srt')]
+               asses = [p for p in files if p.lower().endswith('.ass')]
 
                summary_parts = []
                if epubs:
@@ -32230,6 +32475,10 @@ Important rules:
                    summary_parts.append(f"{len(csvs)} CSV")
                if sdlxliffs:
                    summary_parts.append(f"{len(sdlxliffs)} SDLXLIFF")
+               if srts:
+                   summary_parts.append(f"{len(srts)} SRT")
+               if asses:
+                   summary_parts.append(f"{len(asses)} ASS")
                if images:
                    summary_parts.append(f"{len(images)} images")
 
@@ -34060,9 +34309,11 @@ Important rules:
         if not urls:
             return
         paths = []
-        supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json',
-                                '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
-                                '.bmp', '.webp', '.mp4'}
+        supported_extensions = {
+            '.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md',
+            '.sdlxliff', '.srt', '.ass', '.png', '.jpg', '.jpeg', '.gif',
+            '.bmp', '.webp', '.mp4',
+        }
         for url in urls:
             local = url.toLocalFile()
             if not local:
@@ -34202,13 +34453,14 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.sdlxliff *.srt *.ass *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
             "Text files (*.txt *.json *.csv *.md);;"
+            "Subtitle files (*.srt *.ass);;"
             "SDLXLIFF files (*.sdlxliff);;"
             "CSV files (*.csv);;"
             "Markdown files (*.md);;"
@@ -34240,7 +34492,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.sdlxliff', '.srt', '.ass', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -34264,7 +34516,7 @@ Important rules:
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, SDLXLIFF, SRT, ASS, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP, MP4")
 
     def clear_file_selection(self):
         """Clear all selected files"""
@@ -34274,6 +34526,7 @@ Important rules:
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
+        self._subtitle_zip_output_groups = {}
 
         # Clear any per-input glossary mapping
         try:
@@ -34343,6 +34596,103 @@ Important rules:
         except Exception:
             pass
         self.append_log("🗑️ Cleared file selection")
+
+    def _extract_subtitle_zip_input_if_needed(self, path):
+        """Return extracted SRT/ASS paths, None for a non-subtitle ZIP, or [] on error."""
+        if not path or not str(path).lower().endswith('.zip'):
+            return None
+
+        try:
+            from subtitle_processor import (
+                SubtitleArchiveError,
+                extract_subtitle_archive,
+                plan_subtitle_archive_outputs,
+            )
+        except Exception as exc:
+            self.append_log(f"❌ Subtitle ZIP support is unavailable: {exc}")
+            return []
+
+        try:
+            from image_archive_epub import is_epub_zip
+
+            # EPUB files are ZIP containers too. Keep EPUB resolution ahead of
+            # any incidental subtitle resources stored inside the book.
+            if is_epub_zip(path):
+                return None
+
+            temp_root = getattr(self, 'subtitle_zip_temp_root', None)
+            if not temp_root:
+                temp_root = tempfile.mkdtemp(prefix='glossarion_subtitle_zip_')
+                self.subtitle_zip_temp_root = temp_root
+
+            archive_stem = os.path.splitext(os.path.basename(path))[0]
+            safe_stem = re.sub(r'[^A-Za-z0-9._-]+', '_', archive_stem).strip('._')
+            extraction_dir = tempfile.mkdtemp(
+                prefix=f"{safe_stem or 'subtitles'}_",
+                dir=temp_root,
+            )
+            result = extract_subtitle_archive(path, extraction_dir)
+            subtitle_files = list(result.get('files') or [])
+            if not subtitle_files:
+                try:
+                    os.rmdir(extraction_dir)
+                except OSError:
+                    pass
+                return None
+
+            override_dir = (
+                os.environ.get('OUTPUT_DIRECTORY')
+                or self.config.get('output_directory')
+            )
+            output_base_dir = (
+                os.path.abspath(override_dir)
+                if override_dir
+                else self._get_output_base_dir(path)
+            )
+            output_plan = plan_subtitle_archive_outputs(
+                path,
+                subtitle_files,
+                output_base_dir,
+                work_base_dir=os.path.join(
+                    extraction_dir,
+                    ".glossarion_subtitle_work",
+                ),
+            )
+            if not hasattr(self, '_subtitle_zip_output_groups'):
+                self._subtitle_zip_output_groups = {}
+            bundle_id = os.path.normcase(os.path.abspath(path))
+            bundle_files = [os.path.abspath(item) for item in subtitle_files]
+            bundle_work_dir = os.path.join(
+                extraction_dir,
+                ".glossarion_subtitle_bundle",
+            )
+            for member_info in output_plan.values():
+                member_info["bundle_id"] = bundle_id
+                member_info["bundle_files"] = bundle_files
+                member_info["bundle_work_dir"] = bundle_work_dir
+            self._subtitle_zip_output_groups.update(output_plan)
+            output_group = next(iter(output_plan.values()), {})
+
+            ignored = int(result.get('ignored_count') or 0)
+            ignored_note = (
+                f"; ignored {ignored} non-subtitle member(s)" if ignored else ""
+            )
+            self.append_log(
+                f"📦 Extracted {len(subtitle_files)} subtitle file(s) from "
+                f"{os.path.basename(path)} into one output folder "
+                f"'{output_group.get('group_name', 'Subtitles')}'{ignored_note}"
+            )
+            return subtitle_files
+        except SubtitleArchiveError as exc:
+            self.append_log(
+                f"❌ Subtitle ZIP rejected: {os.path.basename(path)} — {exc}"
+            )
+            return []
+        except Exception as exc:
+            self.append_log(
+                f"❌ Could not inspect subtitle ZIP {os.path.basename(path)}: {exc}"
+            )
+            return []
 
     def _convert_zip_input_to_epub_if_needed(self, path):
         """Resolve a selected ZIP/CBZ image archive to EPUB in a worker-safe way."""
@@ -34466,25 +34816,46 @@ Important rules:
         return path
 
     def _resolve_zip_inputs_for_translation(self):
-        """Convert selected ZIP inputs to EPUBs before glossary/translation work."""
+        """Expand subtitle ZIPs or convert image/EPUB ZIPs before processing."""
         files = list(getattr(self, 'selected_files', []) or [])
         if not files:
             self._zip_inputs_resolved_for_current_run = True
             return files
 
         resolved = []
+        persisted_inputs = []
+        replacement_pairs = []
         changed = False
         for path in files:
             if getattr(self, 'stop_requested', False):
                 resolved.append(path)
+                persisted_inputs.append(path)
+                replacement_pairs.append((path, path))
+                continue
+
+            subtitle_paths = self._extract_subtitle_zip_input_if_needed(path)
+            if subtitle_paths is not None:
+                if subtitle_paths:
+                    resolved.extend(subtitle_paths)
+                    replacement_pairs.extend(
+                        (path, subtitle_path) for subtitle_path in subtitle_paths
+                    )
+                    changed = True
+                else:
+                    # Keep a rejected archive visible so the run reports the
+                    # invalid input instead of silently dropping the selection.
+                    resolved.append(path)
+                    replacement_pairs.append((path, path))
+                persisted_inputs.append(path)
                 continue
 
             new_path = self._convert_zip_input_to_epub_if_needed(path)
             resolved.append(new_path)
+            persisted_inputs.append(new_path)
+            replacement_pairs.append((path, new_path))
             changed = changed or (new_path != path)
 
         if changed:
-            old_files = files
             self.selected_files = resolved
             self.file_path = resolved[0] if resolved else None
 
@@ -34492,7 +34863,7 @@ Important rules:
                 manual_map = getattr(self, 'manual_glossary_map', None)
                 if isinstance(manual_map, dict) and manual_map:
                     updated_map = dict(manual_map)
-                    for old_path, new_path in zip(old_files, resolved):
+                    for old_path, new_path in replacement_pairs:
                         if old_path == new_path:
                             continue
                         old_keys = {
@@ -34513,7 +34884,9 @@ Important rules:
                 pass
 
             try:
-                self.config['last_input_files'] = resolved
+                # Temporary subtitle members are valid only for this app
+                # session. Persist their source ZIP so startup can re-extract.
+                self.config['last_input_files'] = persisted_inputs
                 epub_files = [p for p in resolved if str(p).lower().endswith('.epub')]
                 if epub_files:
                     self.selected_epub_path = epub_files[0]
@@ -34537,6 +34910,7 @@ Important rules:
         if not paths:
             return
         paths = self._normalize_windows_input_filenames(paths)
+        self._subtitle_zip_output_groups = {}
         
         # Initialize conversion tracking if not exists
         if not hasattr(self, 'json_conversions'):
@@ -34553,11 +34927,11 @@ Important rules:
                 # Direct PDF processing
                 processed_paths.append(path)
             elif lower.endswith('.zip'):
-                # Keep ZIP selection lightweight; image/archive inspection can
-                # be expensive and is resolved inside the translation worker.
+                # Keep ZIP selection lightweight; subtitle extraction and
+                # image/archive inspection run inside the worker.
                 processed_paths.append(path)
                 self.append_log(
-                    f"📦 ZIP selected; conversion will run in the background when translation or glossary extraction starts: "
+                    f"📦 ZIP selected; archive inspection will run in the background when translation or glossary extraction starts: "
                     f"{os.path.basename(path)}"
                 )
             elif lower.endswith('.cbz'):
@@ -34650,6 +35024,8 @@ Important rules:
             txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions and p not in self.pdf_conversions]
             jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
             pdfs = [p for p in processed_paths if p.lower().endswith('.pdf')]  # Count PDF files
+            srts = [p for p in processed_paths if p.lower().endswith('.srt')]
+            asses = [p for p in processed_paths if p.lower().endswith('.ass')]
             
             summary_parts = []
             if epubs:
@@ -34662,6 +35038,10 @@ Important rules:
                 summary_parts.append(f"{len(txts)} TXT")
             if jsons:
                 summary_parts.append(f"{len(jsons)} JSON")
+            if srts:
+                summary_parts.append(f"{len(srts)} SRT")
+            if asses:
+                summary_parts.append(f"{len(asses)} ASS")
             if images:
                 summary_parts.append(f"{len(images)} images")
             
@@ -34674,6 +35054,12 @@ Important rules:
         
         # Check if these are image files
         image_files = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
+
+        # ZIP/SRT/ASS and other non-EPUB selections previously bypassed all
+        # glossary mismatch branches, allowing an automatically mapped glossary
+        # from the prior novel to leak into the new run. Explicit manual
+        # glossaries remain selected until the user clears them.
+        self._clear_automatic_glossary_for_non_epub_selection(processed_paths)
         
         if image_files:
             # Image translation runs implicitly for direct image files — no need to toggle the UI checkbox
@@ -35675,7 +36061,7 @@ Important rules:
                 pass
             try:
                 self.config['last_input_files'] = normalized
-                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff'))]
+                source_files = [p for p in normalized if isinstance(p, str) and p.lower().endswith(('.epub', '.txt', '.pdf', '.md', '.sdlxliff', '.srt', '.ass'))]
                 if source_files:
                     self.config['last_epub_path'] = source_files[0]
                 self.save_config(show_message=False)

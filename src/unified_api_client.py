@@ -432,7 +432,8 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                           total_chunks: Optional[Any] = None,
                           label: Optional[str] = None,
                           queued: bool = False,
-                          merged_chapters: Optional[List[Any]] = None) -> None:
+                          merged_chapters: Optional[List[Any]] = None,
+                          source_file: Optional[str] = None) -> None:
     """Track queued requests; only count in-flight after mark_in_flight."""
     global _api_watchdog_in_flight, _api_watchdog_peak, _api_watchdog_last_change_ts
     global _api_watchdog_last_start_ts, _api_watchdog_last_context, _api_watchdog_last_model
@@ -441,6 +442,9 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
         chap = _api_watchdog_norm_chapter(chapter)
         ch = _api_watchdog_norm_int(chunk)
         total = _api_watchdog_norm_int(total_chunks)
+        source_name = os.path.basename(
+            str(source_file or "").replace("\\", "/")
+        ).strip()
         
         # Build merged chapter range label if merged_chapters provided
         merged_label = None
@@ -468,6 +472,11 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     label = f"{_chapter_term()} {chap}"
             elif context:
                 label = str(context)
+        if (
+            source_name
+            and source_name.lower() not in str(label or "").lower()
+        ):
+            label = f"{source_name} - {label or context or 'request'}"
         with _api_watchdog_lock:
             if not queued:
                 _api_watchdog_in_flight += 1
@@ -489,6 +498,7 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     "start_ts": now,
                     "status": "queued" if queued else "in_flight",
                     "merged_chapters": merged_chapters,
+                    "source_file": source_name or None,
                 }
         _api_watchdog_external_write(get_api_watchdog_state())
     except Exception:
@@ -6803,6 +6813,7 @@ class UnifiedClient:
             chunk = None
             total_chunks = None
             merged_chapters = None
+            source_file = None
             label = None
             try:
                 tls = self._get_thread_local_client()
@@ -6814,6 +6825,7 @@ class UnifiedClient:
                     chunk = ctx.get("chunk")
                     total_chunks = ctx.get("total_chunks")
                     merged_chapters = ctx.get("merged_chapters")
+                    source_file = ctx.get("source_file")
             except Exception:
                 pass
             try:
@@ -6849,7 +6861,7 @@ class UnifiedClient:
             # Queue the request; it'll flip to in-flight right before HTTP send
             _api_watchdog_started(watchdog_context, model=getattr(self, 'model', None), request_id=request_id,
                                   chapter=chapter, chunk=chunk, total_chunks=total_chunks, label=label, queued=True,
-                                  merged_chapters=merged_chapters)
+                                  merged_chapters=merged_chapters, source_file=source_file)
             watchdog_started = True
             
             # Multi-key retry wrapper
@@ -10521,6 +10533,7 @@ class UnifiedClient:
                     total_chunks=source_chapter_context.get('total_chunks'),
                     merged_chapters=source_chapter_context.get('merged_chapters'),
                     dispatch_order=source_chapter_context.get('dispatch_order'),
+                    source_file=source_chapter_context.get('source_file'),
                 )
             except Exception:
                 try:
@@ -11490,6 +11503,7 @@ class UnifiedClient:
                                 total_chunks=src_ctx.get('total_chunks'),
                                 merged_chapters=src_ctx.get('merged_chapters'),
                                 dispatch_order=src_ctx.get('dispatch_order'),
+                                source_file=src_ctx.get('source_file'),
                             )
                     except Exception:
                         pass

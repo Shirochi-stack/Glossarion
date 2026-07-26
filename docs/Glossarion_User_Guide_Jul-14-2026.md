@@ -615,6 +615,11 @@ Besides translating from scratch, Glossarion can **edit and review existing tran
 | **HTML** | Translate/scan folders of HTML chapters. |
 | **CBZ / images** | Manga & comics (in the `N_` builds). |
 | **SDLXLIFF** (`.sdlxliff`) | Professional bilingual translation files (see below). |
+| **Subtitles** (`.srt`, `.ass`) | Translates dialogue while preserving cue timing, numbering, ASS styles/event fields, line endings, and inline formatting tags. |
+
+For subtitle input, choose the file through **Input File(s)** as usual. The built-in **Subtitle Translation** prompt profile provides concise, natural subtitle dialogue while retaining tone, character voice, meaningful line breaks, and protected formatting placeholders. Glossarion writes a matching `*_translated.srt` or `*_translated.ass` file in the input's output folder. If a model returns malformed structured output or drops a protected formatting token, the affected cue is kept in its original form instead of risking a damaged subtitle file.
+
+You can also select a `.zip` containing one or more `.srt` or `.ass` files. When translation or glossary processing starts, Glossarion safely inspects the archive and extracts every subtitle member to a temporary folder. The members are exposed as chapters of one combined translation job, so **Batch mode** can translate different subtitle files concurrently up to the configured batch size. Other archive members are ignored. EPUB-formatted ZIPs continue through the EPUB workflow, while encrypted subtitle entries, unsafe paths, and archives beyond the extraction limits are rejected. All translated subtitles from the archive are emitted into one subfolder named after the ZIP; duplicate subtitle basenames receive stable numeric suffixes. That shared folder also receives a `translation_progress.json` containing per-batch rows and a per-subtitle-file summary. Selecting ZIP/SRT/ASS input clears a glossary that Glossarion automatically selected for the previous EPUB, but preserves a glossary explicitly loaded by the user. Glossarion does not create a new translated ZIP.
 
 ### The SDLXLIFF reviewer / editor
 
