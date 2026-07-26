@@ -10499,8 +10499,15 @@ def find_glossary_file(output_dir):
     def _matching_glossary_candidates(glossary_dir):
         if not glossary_dir or not os.path.isdir(glossary_dir):
             return []
-        epub_path = os.getenv("EPUB_PATH", "")
-        base = os.path.splitext(os.path.basename(epub_path))[0] if epub_path else ""
+        source_path = (
+            os.getenv("GLOSSARY_SOURCE_PATH", "").strip()
+            or os.getenv("EPUB_PATH", "").strip()
+        )
+        base = (
+            os.path.splitext(os.path.basename(source_path))[0]
+            if source_path
+            else ""
+        )
         if not base and output_dir:
             base = os.path.basename(os.path.abspath(output_dir))
         base_cf = base.casefold()
@@ -10530,7 +10537,15 @@ def find_glossary_file(output_dir):
                         continue
                     if preferred and stem_cf in preferred:
                         direct.append((parent_rank, preferred.index(stem_cf), ext_priority.index(ext_l), full))
-                    elif "glossary" in stem_cf:
+                    elif (
+                        base_cf
+                        and parent_cf == base_cf
+                        and stem_cf in {
+                            "glossary",
+                            base_cf,
+                            f"{base_cf}_glossary",
+                        }
+                    ):
                         fallback.append((parent_rank, ext_priority.index(ext_l), full))
         except Exception:
             return []

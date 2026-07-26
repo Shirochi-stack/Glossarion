@@ -29071,6 +29071,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
         )
         output_override_for_env = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
         subtitle_output_info = self._subtitle_zip_output_info(epub_path)
+        glossary_source_path = str(epub_path or '')
+        if subtitle_output_info:
+            archive_path = str(
+                subtitle_output_info.get('archive_path') or ''
+            ).strip()
+            if archive_path:
+                glossary_source_path = os.path.abspath(archive_path)
         subtitle_bundle_files = (
             list(subtitle_output_info.get('bundle_files') or [])
             if subtitle_output_info
@@ -29172,6 +29179,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         env_vars = {
             'EPUB_PATH': epub_path,
+            # Keep the archive identity while EPUB_PATH changes to an extracted
+            # SRT/ASS/LRC member inside the translation engine.
+            'GLOSSARY_SOURCE_PATH': glossary_source_path,
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
@@ -37313,15 +37323,24 @@ Important rules:
             # Determine glossary base dir
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             if override_dir:
-                glossary_base_dir = os.path.join(override_dir, "Glossary")
+                glossary_base_dir = os.path.join(
+                    os.path.abspath(override_dir),
+                    "Glossary",
+                )
             else:
-                glossary_base_dir = "Glossary"
-            # On macOS .app bundles, cwd can be '/' (read-only root).
-            if not os.path.isabs(glossary_base_dir) and hasattr(self, 'selected_files') and self.selected_files:
-                glossary_base_dir = os.path.join(os.path.dirname(os.path.abspath(self.selected_files[0])), glossary_base_dir)
+                # Glossary extraction writes text/subtitle glossaries beside
+                # the application, not beside temporary ZIP members.
+                glossary_base_dir = os.path.join(_get_app_dir(), "Glossary")
             
             if not os.path.isdir(glossary_base_dir):
                 self.append_log(f"📑 No Glossary folder found after extraction")
+                if not getattr(self, 'manual_glossary_manually_loaded', False):
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
+                    self.manual_glossary_map = {}
+                    self.config['manual_glossary_path'] = ''
+                    os.environ.pop('MANUAL_GLOSSARY', None)
                 return ""
             
             # Build a set of candidate names to match against glossary filenames.
@@ -37330,11 +37349,12 @@ Important rules:
             # glossaries are named {folder_name}_glossary.json/csv
             image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             match_names = set()
+            glossary_source_file = files[0]
             
             for file_path in files:
                 base = os.path.splitext(os.path.basename(file_path))[0]
-                match_names.add(base.casefold())
                 ext = os.path.splitext(file_path)[1].lower()
+                subtitle_archive_matched = False
 
                 # Subtitle ZIP extraction replaces the selected archive with
                 # temporary member paths. Include the original archive name so
@@ -37346,11 +37366,16 @@ Important rules:
                             subtitle_info.get('archive_path') or ''
                         ).strip()
                         if archive_path:
+                            subtitle_archive_matched = True
+                            glossary_source_file = archive_path
                             match_names.add(
                                 os.path.splitext(
                                     os.path.basename(archive_path)
                                 )[0].casefold()
                             )
+
+                if not subtitle_archive_matched:
+                    match_names.add(base.casefold())
 
                 # For images, also add the parent folder name.
                 if ext in image_extensions:
@@ -37390,10 +37415,25 @@ Important rules:
                         ):
                             continue
                         
-                        # Match against any candidate name
+                        # Match exact source identities only. Substring matches
+                        # can map short subtitle/member names to an unrelated
+                        # book glossary.
                         stem_cf = stem.casefold()
+                        parent_cf = os.path.basename(root).casefold()
                         for name_cf in match_names:
-                            if name_cf in stem_cf or stem_cf in name_cf or f"{name_cf}_glossary" == stem_cf:
+                            expected_stems = {
+                                name_cf,
+                                f"{name_cf}_glossary",
+                            }
+                            parent_match = (
+                                parent_cf == name_cf
+                                and stem_cf in {
+                                    "glossary",
+                                    name_cf,
+                                    f"{name_cf}_glossary",
+                                }
+                            )
+                            if stem_cf in expected_stems or parent_match:
                                 mtime = os.path.getmtime(full)
                                 # Prefer most recent, and CSV over JSON
                                 priority = (1 if ext_l == '.csv' else 0)
@@ -37407,14 +37447,36 @@ Important rules:
             if best_match and os.path.exists(best_match):
                 self.manual_glossary_path = best_match
                 self.manual_glossary_manually_loaded = False
+                self.auto_loaded_glossary_path = best_match
+                self.auto_loaded_glossary_for_file = glossary_source_file
+                # A stale multi-EPUB mapping must not suppress the one glossary
+                # selected for the current subtitle archive.
+                self.manual_glossary_map = {}
                 self.config['manual_glossary_path'] = best_match
                 os.environ['MANUAL_GLOSSARY'] = best_match
                 self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
                 return best_match  # Loaded successfully
             
+            if not getattr(self, 'manual_glossary_manually_loaded', False):
+                self.manual_glossary_path = None
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+                self.manual_glossary_map = {}
+                self.config['manual_glossary_path'] = ''
+                os.environ.pop('MANUAL_GLOSSARY', None)
             self.append_log(f"📑 No matching glossary found in {glossary_base_dir}")
             return ""
         except Exception as e:
+            if not getattr(self, 'manual_glossary_manually_loaded', False):
+                self.manual_glossary_path = None
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+                self.manual_glossary_map = {}
+                try:
+                    self.config['manual_glossary_path'] = ''
+                except Exception:
+                    pass
+                os.environ.pop('MANUAL_GLOSSARY', None)
             self.append_log(f"⚠️ Failed to auto-load glossary: {e}")
             return ""
 

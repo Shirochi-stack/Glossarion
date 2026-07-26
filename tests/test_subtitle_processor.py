@@ -1191,6 +1191,109 @@ def test_non_epub_selection_clears_environment_only_stale_glossary(
     assert gui.logs
 
 
+def test_subtitle_zip_glossary_autoload_uses_archive_identity(
+    tmp_path,
+    monkeypatch,
+):
+    import translator_gui
+    from translator_gui import TranslatorGUI
+
+    app_dir = tmp_path / "app"
+    glossary_root = app_dir / "Glossary"
+    archive = tmp_path / "Current Season.zip"
+    archive.write_bytes(b"zip")
+    member = tmp_path / "extracted" / "episode01.lrc"
+    member.parent.mkdir()
+    member.write_text("[00:01.00]Dialogue", encoding="utf-8")
+
+    expected_dir = glossary_root / "Current Season"
+    expected_dir.mkdir(parents=True)
+    expected = expected_dir / "Current Season_glossary.csv"
+    expected.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    unrelated_dir = glossary_root / "122279"
+    unrelated_dir.mkdir()
+    unrelated = unrelated_dir / "122279_glossary.csv"
+    unrelated.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    member_decoy_dir = glossary_root / "episode01"
+    member_decoy_dir.mkdir()
+    member_decoy = member_decoy_dir / "episode01_glossary.csv"
+    member_decoy.write_text(
+        "type,raw_name,translated_name\n",
+        encoding="utf-8",
+    )
+
+    member_key = os.path.normcase(os.path.abspath(str(member)))
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.selected_files = [str(member)]
+    gui.config = {}
+    gui.manual_glossary_path = str(unrelated)
+    gui.manual_glossary_manually_loaded = False
+    gui.auto_loaded_glossary_path = str(unrelated)
+    gui.auto_loaded_glossary_for_file = "old.epub"
+    gui.manual_glossary_map = {"old.epub": str(unrelated)}
+    gui._subtitle_zip_output_groups = {
+        member_key: {
+            "archive_path": str(archive),
+            "bundle_id": str(archive),
+        }
+    }
+    gui.logs = []
+    gui.append_log = gui.logs.append
+
+    monkeypatch.setattr(translator_gui, "_get_app_dir", lambda: str(app_dir))
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    monkeypatch.setenv("MANUAL_GLOSSARY", str(unrelated))
+
+    loaded = gui._auto_load_glossary_after_extraction()
+
+    assert os.path.abspath(loaded) == os.path.abspath(expected)
+    assert os.path.abspath(gui.manual_glossary_path) == os.path.abspath(expected)
+    assert os.path.abspath(os.environ["MANUAL_GLOSSARY"]) == os.path.abspath(expected)
+    assert gui.manual_glossary_map == {}
+    assert all("122279" not in message for message in gui.logs)
+    assert os.path.abspath(loaded) != os.path.abspath(member_decoy)
+
+    expected.unlink()
+    assert gui._auto_load_glossary_after_extraction() == ""
+    assert gui.manual_glossary_path is None
+    assert "MANUAL_GLOSSARY" not in os.environ
+
+
+def test_translation_glossary_lookup_never_falls_back_to_unrelated_book(
+    tmp_path,
+    monkeypatch,
+):
+    from TransateKRtoEN import find_glossary_file
+
+    shared = tmp_path / "Glossary"
+    current_dir = shared / "Current Season"
+    current_dir.mkdir(parents=True)
+    current = current_dir / "Current Season_glossary.csv"
+    current.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    unrelated_dir = shared / "122279"
+    unrelated_dir.mkdir()
+    unrelated = unrelated_dir / "122279_glossary.csv"
+    unrelated.write_text("type,raw_name,translated_name\n", encoding="utf-8")
+    output_dir = tmp_path / "subtitle-work"
+    output_dir.mkdir()
+
+    monkeypatch.setenv("AUTO_GLOSSARY_MODE", "balanced")
+    monkeypatch.setenv("GLOSSARY_SHARED_DIR", str(shared))
+    monkeypatch.setenv("GLOSSARY_SOURCE_PATH", str(tmp_path / "Current Season.zip"))
+    monkeypatch.setenv("EPUB_PATH", str(tmp_path / "episode01.lrc"))
+    monkeypatch.delenv("MANUAL_GLOSSARY", raising=False)
+    monkeypatch.delenv("OUTPUT_DIRECTORY", raising=False)
+    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+
+    assert os.path.abspath(find_glossary_file(str(output_dir))) == os.path.abspath(
+        current
+    )
+
+    current.unlink()
+
+    assert find_glossary_file(str(output_dir)) is None
+
+
 def test_subtitle_prompt_profile_is_built_in_and_mirrored():
     source_root = Path(__file__).resolve().parents[1] / "src"
     gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
