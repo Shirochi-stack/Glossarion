@@ -421,6 +421,25 @@ def _validate_sdlxliff_batch_output(chapter, text):
     return True, None
 
 
+def _materialize_completed_subtitle_bundle_file(chapter, output_dir):
+    """Write a ZIP subtitle immediately after its own batches are complete."""
+    if not isinstance(chapter, dict) or not chapter.get("subtitle_bundle"):
+        return None
+    try:
+        from subtitle_processor import convert_subtitle_bundle_source
+
+        result = convert_subtitle_bundle_source(
+            output_dir,
+            int(chapter["subtitle_bundle_source_index"]),
+        )
+        if result.get("created"):
+            print(f"✅ Subtitle ready: {result.get('output_path')}")
+        return result
+    except Exception as exc:
+        print(f"⚠️ Could not create the completed subtitle immediately: {exc}")
+        return None
+
+
 from sdlxliff_sidecar_writer import (
     _html_sdlxliff_enabled,
     _html_sdlxliff_lang_code,
@@ -8804,6 +8823,10 @@ class BatchTranslationProcessor:
                     )
                     self.save_progress_fn()
                     self.chapters_completed += 1
+                _materialize_completed_subtitle_bundle_file(
+                    chapter,
+                    self.out_dir,
+                )
                 print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
                 return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
 
@@ -25689,6 +25712,7 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
+                _materialize_completed_subtitle_bundle_file(c, out)
                 print(f"💾 Saved {batch_label} JSON batch {actual_num}: {fname} ({len(cleaned)} chars)")
                 continue
 
@@ -26422,17 +26446,33 @@ def main(log_callback=None, stop_callback=None):
                     if output_paths
                     else subtitle_output_group_dir
                 )
-                print(
-                    f"✅ Subtitle ZIP round-trip complete: "
-                    f"{len(output_paths)} file(s) in {output_path}"
-                )
+                incomplete_files = int(result.get("incomplete_files") or 0)
+                total_files = int(result.get("total_files") or 0)
+                if incomplete_files:
+                    print(
+                        "⚠️ Subtitle ZIP finished with "
+                        f"{len(output_paths)}/{total_files} valid file(s); "
+                        f"{incomplete_files} incomplete file(s) were not "
+                        "created"
+                    )
+                else:
+                    print(
+                        f"✅ Subtitle ZIP round-trip complete: "
+                        f"{len(output_paths)} file(s) in {output_path}"
+                    )
             else:
                 from subtitle_processor import convert_subtitle
 
                 result = convert_subtitle(
                     out,
                     output_path=grouped_subtitle_output_path,
+                    require_complete=True,
                 )
+                if not result.get("ready"):
+                    raise RuntimeError(
+                        "Subtitle batches are incomplete or invalid; no final "
+                        "subtitle was created"
+                    )
                 output_path = result.get("output_path")
                 print(f"✅ Subtitle round-trip complete: {output_path}")
             print(
@@ -26450,9 +26490,16 @@ def main(log_callback=None, stop_callback=None):
             )
             print(f"📊 Subtitle batches completed: {chapters_completed}")
             if log_callback:
-                log_callback(
-                    f"✅ Subtitle translation complete! Created {output_path}"
-                )
+                if result.get("success"):
+                    log_callback(
+                        "✅ Subtitle translation complete! "
+                        f"Created {output_path}"
+                    )
+                else:
+                    log_callback(
+                        "⚠️ Subtitle translation finished with incomplete "
+                        "files; invalid final subtitles were not created"
+                    )
         except Exception as e:
             print(f"❌ Error creating translated subtitle: {e}")
             if log_callback:

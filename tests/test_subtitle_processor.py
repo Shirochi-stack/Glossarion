@@ -10,6 +10,7 @@ from subtitle_processor import (
     SubtitleArchiveError,
     convert_subtitle,
     convert_subtitle_bundle,
+    convert_subtitle_bundle_source,
     extract_subtitle_archive,
     extract_subtitle_bundle_to_chapters,
     extract_subtitle_to_chapters,
@@ -114,7 +115,7 @@ def test_ass_round_trip_changes_only_dialogue_text(tmp_path):
     assert "Style: Default,Arial,24" in output
 
 
-def test_missing_subtitle_placeholder_preserves_original_cue(tmp_path):
+def test_missing_subtitle_placeholder_does_not_create_final_file(tmp_path):
     source = tmp_path / "tagged.srt"
     source.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n<i>Hello</i>\n",
@@ -134,10 +135,10 @@ def test_missing_subtitle_placeholder_preserves_original_cue(tmp_path):
     )
 
     converted = convert_subtitle(str(output_dir))
-    output = Path(converted["output_path"]).read_text(encoding="utf-8")
     assert converted["updated"] == 0
     assert converted["skipped"] == 1
-    assert "<i>Hello</i>" in output
+    assert converted["ready"] is False
+    assert Path(converted["output_path"]).exists() is False
 
 
 def test_subtitle_zip_extracts_all_srt_ass_and_ignores_other_members(tmp_path):
@@ -207,6 +208,11 @@ def test_subtitle_zip_outputs_share_archive_folder_with_isolated_work_dirs(tmp_p
     assert output_dirs == {str((tmp_path / "outputs" / "My Show").resolve())}
     output_paths = [Path(info["output_path"]) for info in plan.values()]
     assert len({path.name.casefold() for path in output_paths}) == 3
+    assert [path.name for path in output_paths] == [
+        "dialogue.srt",
+        "dialogue_2.srt",
+        "final.ass",
+    ]
     assert all(path.parent == tmp_path / "outputs" / "My Show" for path in output_paths)
 
     work_dirs = []
@@ -275,9 +281,9 @@ def test_grouped_subtitle_round_trip_writes_final_file_to_archive_folder(tmp_pat
     )
     final_path = Path(converted["output_path"])
     assert final_path.parent == tmp_path / "outputs" / "Season 1"
-    assert final_path.name == "episode_translated.srt"
+    assert final_path.name == "episode.srt"
     assert "Bonjour" in final_path.read_text(encoding="utf-8")
-    assert not (Path(layout["work_dir"]) / "episode_translated.srt").exists()
+    assert not (Path(layout["work_dir"]) / "episode.srt").exists()
 
 
 def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tmp_path):
@@ -293,8 +299,8 @@ def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tm
         encoding="utf-8",
     )
     output_dir = tmp_path / "bundle_work"
-    first_output = tmp_path / "outputs" / "Show" / "episode_1_translated.srt"
-    second_output = tmp_path / "outputs" / "Show" / "episode_2_translated.srt"
+    first_output = tmp_path / "outputs" / "Show" / "episode_1.srt"
+    second_output = tmp_path / "outputs" / "Show" / "episode_2.srt"
 
     extraction = extract_subtitle_bundle_to_chapters(
         [str(first), str(second)],
@@ -346,11 +352,97 @@ def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tm
     assert "Au revoir" in second_output.read_text(encoding="utf-8")
 
 
+def test_bundle_writes_each_file_when_its_batches_finish(tmp_path, monkeypatch):
+    source = tmp_path / "extracted" / "episode.srt"
+    source.parent.mkdir()
+    source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nGoodbye\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUBTITLE_AVAILABLE_TOKENS", "1000")
+    monkeypatch.setattr(
+        "subtitle_processor._count_tokens",
+        lambda text: 2000 if text.count('"id"') > 1 else 10,
+    )
+    output_dir = tmp_path / "bundle_work"
+    final_output = tmp_path / "outputs" / "Show" / "episode.srt"
+    extraction = extract_subtitle_bundle_to_chapters(
+        [str(source)],
+        str(output_dir),
+        output_paths={str(source): str(final_output)},
+    )
+    chapters = json.loads(
+        Path(extraction["chapters_path"]).read_text(encoding="utf-8")
+    )
+    assert len(chapters) == 2
+
+    first_response = _translated_batch(
+        chapters[0],
+        {"1": lambda text: text.replace("Hello", "Bonjour")},
+    )
+    (output_dir / "response_section_1.txt").write_text(
+        first_response,
+        encoding="utf-8",
+    )
+    (output_dir / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "first": {
+                        "status": "completed",
+                        "output_file": "response_section_1.txt",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    waiting = convert_subtitle_bundle_source(str(output_dir), 1)
+    assert waiting["ready"] is False
+    assert final_output.exists() is False
+
+    second_response = _translated_batch(
+        chapters[1],
+        {"2": lambda text: text.replace("Goodbye", "Au revoir")},
+    )
+    (output_dir / "response_section_2.txt").write_text(
+        second_response,
+        encoding="utf-8",
+    )
+    (output_dir / "translation_progress.json").write_text(
+        json.dumps(
+            {
+                "chapters": {
+                    "first": {
+                        "status": "completed",
+                        "output_file": "response_section_1.txt",
+                    },
+                    "second": {
+                        "status": "completed",
+                        "output_file": "response_section_2.txt",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = convert_subtitle_bundle_source(str(output_dir), 1)
+    assert completed["ready"] is True
+    assert completed["created"] is True
+    assert "Bonjour" in final_output.read_text(encoding="utf-8")
+    assert "Au revoir" in final_output.read_text(encoding="utf-8")
+
+    final_pass = convert_subtitle_bundle(str(output_dir))
+    assert final_pass["files"] == 1
+    assert final_pass["results"][0]["already_exists"] is True
+
+
 def test_subtitle_progress_uses_source_file_identity(tmp_path, monkeypatch):
     from TransateKRtoEN import ProgressManager, _direct_text_html_source_name
 
     source = tmp_path / "episode_07.srt"
-    output = tmp_path / "Show" / "episode_07_translated.srt"
+    output = tmp_path / "Show" / "episode_07.srt"
     mirror_path = output.parent / "translation_progress.json"
     monkeypatch.setenv(
         "SUBTITLE_PROGRESS_MIRROR_FILE",
@@ -376,7 +468,7 @@ def test_subtitle_progress_uses_source_file_identity(tmp_path, monkeypatch):
         chapter,
         "hash",
     )
-    assert key == "subtitle:episode_07_translated.srt:2"
+    assert key == "subtitle:episode_07.srt:2"
     assert _direct_text_html_source_name(chapter) == "episode_07.srt"
 
     manager.update(

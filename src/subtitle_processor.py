@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import threading
 import zipfile
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -102,10 +103,10 @@ def plan_subtitle_archive_outputs(
             if source_extension.lower() in SUBTITLE_EXTENSIONS
             else ".srt"
         )
-        candidate = f"{safe_stem}_translated{extension}"
+        candidate = f"{safe_stem}{extension}"
         counter = 2
         while candidate.casefold() in used_output_names:
-            candidate = f"{safe_stem}_translated_{counter}{extension}"
+            candidate = f"{safe_stem}_{counter}{extension}"
             counter += 1
         used_output_names.add(candidate.casefold())
         final_output = os.path.join(group_dir, candidate)
@@ -719,7 +720,7 @@ def extract_subtitle_bundle_to_chapters(
             )
             output_path = os.path.join(
                 output_dir,
-                f"{source_stem}_translated{source_extension or '.srt'}",
+                f"{source_stem}{source_extension or '.srt'}",
             )
         updated_batches = []
         for local_batch, chapter in zip(
@@ -912,6 +913,7 @@ def convert_subtitle(
     manifest_path: Optional[str] = None,
     output_path: Optional[str] = None,
     manifest_data: Optional[Dict[str, Any]] = None,
+    require_complete: bool = True,
 ) -> Dict[str, Any]:
     if manifest_data is None:
         manifest_path = manifest_path or os.path.join(
@@ -973,17 +975,31 @@ def convert_subtitle(
             (int(segment["start"]), int(segment["end"]), restored)
         )
 
+    if output_path is None:
+        stem, extension = os.path.splitext(os.path.basename(source_file))
+        output_path = os.path.join(
+            output_dir, f"{stem}{extension or '.srt'}"
+        )
+
+    if require_complete and (missing or invalid_batches or skipped):
+        return {
+            "success": False,
+            "ready": False,
+            "created": False,
+            "output_path": output_path,
+            "updated": len(replacements),
+            "skipped": skipped,
+            "missing": missing,
+            "invalid_batches": invalid_batches,
+            "output_encoding": None,
+        }
+
     rebuilt = source_text
     for start, end, replacement in sorted(
         replacements, key=lambda item: item[0], reverse=True
     ):
         rebuilt = rebuilt[:start] + replacement + rebuilt[end:]
 
-    if output_path is None:
-        stem, extension = os.path.splitext(os.path.basename(source_file))
-        output_path = os.path.join(
-            output_dir, f"{stem}_translated{extension or '.srt'}"
-        )
     output_encoding = _write_subtitle(
         output_path,
         rebuilt,
@@ -991,6 +1007,8 @@ def convert_subtitle(
     )
     return {
         "success": True,
+        "ready": True,
+        "created": True,
         "output_path": output_path,
         "updated": len(replacements),
         "skipped": skipped,
@@ -998,6 +1016,128 @@ def convert_subtitle(
         "invalid_batches": invalid_batches,
         "output_encoding": output_encoding,
     }
+
+
+_BUNDLE_CONVERSION_LOCK = threading.RLock()
+_BUNDLE_CONVERSION_SIGNATURES: Dict[
+    Tuple[str, int], Tuple[Tuple[str, int, int], ...]
+] = {}
+
+
+def _completed_batch_signature(
+    output_dir: str,
+    manifest: Dict[str, Any],
+) -> Optional[Tuple[Tuple[str, int, int], ...]]:
+    """Identify the exact completed response files used for one subtitle."""
+    completed_outputs = _completed_outputs(output_dir)
+    signature: List[Tuple[str, int, int]] = []
+    for batch in manifest.get("batches", []):
+        completed_path = None
+        for candidate in _batch_output_candidates(
+            output_dir,
+            str(batch.get("filename") or ""),
+        ):
+            if not os.path.isfile(candidate):
+                continue
+            if (
+                completed_outputs is not None
+                and os.path.basename(candidate).casefold()
+                not in completed_outputs
+            ):
+                continue
+            completed_path = candidate
+            break
+        if completed_path is None:
+            return None
+        file_stat = os.stat(completed_path)
+        signature.append(
+            (
+                os.path.normcase(os.path.abspath(completed_path)),
+                int(file_stat.st_mtime_ns),
+                int(file_stat.st_size),
+            )
+        )
+    return tuple(signature)
+
+
+def convert_subtitle_bundle_source(
+    output_dir: str,
+    source_index: int,
+    manifest_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rebuild one bundle subtitle as soon as all of its batches are complete."""
+    manifest_path = os.path.abspath(
+        manifest_path
+        or os.path.join(output_dir, "subtitle_bundle_manifest.json")
+    )
+    try:
+        selected_index = int(source_index)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Subtitle bundle source index must be an integer") from exc
+    if selected_index < 1:
+        raise ValueError("Subtitle bundle source index must be at least 1")
+
+    with _BUNDLE_CONVERSION_LOCK:
+        with open(manifest_path, "r", encoding="utf-8") as source:
+            bundle_manifest = json.load(source)
+        if bundle_manifest.get("type") != "subtitle_archive_bundle":
+            raise ValueError("Invalid subtitle archive bundle manifest")
+        files = bundle_manifest.get("files", [])
+        if not isinstance(files, list) or selected_index > len(files):
+            raise IndexError(
+                f"Subtitle bundle source index {selected_index} is out of range"
+            )
+        item = files[selected_index - 1]
+        if not isinstance(item, dict) or not isinstance(
+            item.get("manifest"), dict
+        ):
+            raise ValueError(
+                "Subtitle archive bundle contains an invalid file entry"
+            )
+        output_path = str(item.get("output_path") or "").strip()
+        if not output_path:
+            raise ValueError(
+                "Subtitle archive bundle contains a file without an output path"
+            )
+
+        signature = _completed_batch_signature(
+            output_dir,
+            item["manifest"],
+        )
+        cache_key = (manifest_path, selected_index)
+        if (
+            signature is not None
+            and _BUNDLE_CONVERSION_SIGNATURES.get(cache_key) == signature
+            and os.path.isfile(output_path)
+        ):
+            return {
+                "success": True,
+                "ready": True,
+                "created": False,
+                "already_exists": True,
+                "output_path": output_path,
+                "updated": int(item["manifest"].get("segment_count") or 0),
+                "skipped": 0,
+                "missing": 0,
+                "invalid_batches": 0,
+            }
+
+        result = convert_subtitle(
+            output_dir,
+            output_path=output_path,
+            manifest_data=item["manifest"],
+            require_complete=True,
+        )
+        result["source_index"] = selected_index
+        result["source_file"] = item.get("source_file")
+        if result.get("ready"):
+            completed_signature = _completed_batch_signature(
+                output_dir,
+                item["manifest"],
+            )
+            if completed_signature is not None:
+                _BUNDLE_CONVERSION_SIGNATURES[cache_key] = completed_signature
+        return result
 
 
 def convert_subtitle_bundle(
@@ -1014,26 +1154,29 @@ def convert_subtitle_bundle(
     if bundle_manifest.get("type") != "subtitle_archive_bundle":
         raise ValueError("Invalid subtitle archive bundle manifest")
 
-    results = []
-    for item in bundle_manifest.get("files", []):
-        if not isinstance(item, dict) or not isinstance(item.get("manifest"), dict):
-            raise ValueError("Subtitle archive bundle contains an invalid file entry")
-        output_path = str(item.get("output_path") or "").strip()
-        if not output_path:
-            raise ValueError(
-                "Subtitle archive bundle contains a file without an output path"
-            )
-        results.append(
-            convert_subtitle(
-                output_dir,
-                output_path=output_path,
-                manifest_data=item["manifest"],
-            )
+    bundle_files = bundle_manifest.get("files", [])
+    if not isinstance(bundle_files, list):
+        raise ValueError("Subtitle archive bundle files must be a list")
+    results = [
+        convert_subtitle_bundle_source(
+            output_dir,
+            source_index,
+            manifest_path=manifest_path,
         )
+        for source_index in range(1, len(bundle_files) + 1)
+    ]
+    ready_results = [result for result in results if result.get("ready")]
+    incomplete_results = [
+        result for result in results if not result.get("ready")
+    ]
     return {
-        "success": True,
-        "files": len(results),
-        "outputs": [result.get("output_path") for result in results],
+        "success": not incomplete_results,
+        "files": len(ready_results),
+        "total_files": len(results),
+        "incomplete_files": len(incomplete_results),
+        "outputs": [
+            result.get("output_path") for result in ready_results
+        ],
         "updated": sum(int(result.get("updated") or 0) for result in results),
         "skipped": sum(int(result.get("skipped") or 0) for result in results),
         "missing": sum(int(result.get("missing") or 0) for result in results),

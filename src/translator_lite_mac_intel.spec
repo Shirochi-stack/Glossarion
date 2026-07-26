@@ -85,6 +85,7 @@ app_files = [
     
     # Translation modules
     ('TransateKRtoEN.py', '.'),
+    ('subtitle_processor.py', '.'),
     ('refinement_prompts.py', '.'),
     ('unified_api_client.py', '.'),
     ('google_free_translate.py', '.'),
@@ -206,6 +207,7 @@ datas.append(('enable_debug_mode.py', '.'))
 # Application modules
 app_modules = [
     'TransateKRtoEN',
+    'subtitle_processor',
     'language_options',
     'metadata_progress',
     'refinement_prompts',
