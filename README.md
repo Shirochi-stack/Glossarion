@@ -8,6 +8,8 @@
 
 Subtitle ZIP archives are also accepted through **Input File(s)**. Glossarion safely extracts every `.srt`, `.ass`, and `.lrc` member into one combined translation job while ignoring unrelated archive contents, allowing subtitle files to use the normal parallel batch pool. Each valid subtitle or synchronized-lyrics file is written under its original filename as soon as its own API batches finish, and all translated files from one ZIP are placed in a single output folder named after the archive alongside file-level `translation_progress.json` tracking. Incomplete or malformed subtitle batches do not produce a misleading final file. Changing to ZIP/subtitle input clears a stale automatically selected EPUB glossary while preserving a glossary the user explicitly loaded. A built-in **Subtitle Translation** prompt profile is available for concise, natural dialogue and lyrics.
 
+**Extract Glossary** also accepts direct `.srt`, `.ass`, and `.lrc` files plus nested subtitle ZIPs. Only visible dialogue or lyrics are analyzed; timestamps, cue numbers, ASS headers/styles, LRC metadata, drawing commands, and formatting tags are excluded. A subtitle ZIP creates one archive-level glossary while its member files remain independently batchable glossary chapters.
+
 <p align="center">
   <a href="docs/Glossarion_User_Guide_Jul-14-2026.md"><strong>📖 Read the Complete User Guide →</strong></a><br/>
   <em>Every button and setting explained in plain language — including how to translate for free.</em>

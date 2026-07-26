@@ -1,6 +1,12 @@
 import json
+import zipfile
 
-from extract_glossary_from_epub import parse_api_response, skip_duplicate_entries
+from extract_glossary_from_epub import (
+    extract_chapters_from_subtitle,
+    is_subtitle_glossary_source,
+    parse_api_response,
+    skip_duplicate_entries,
+)
 
 
 def _set_glossary_env(monkeypatch):
@@ -84,3 +90,92 @@ def test_dedup_keeps_later_description_when_description_is_active(monkeypatch):
 
     assert len(result) == 1
     assert result[0]["description"] == "A device created by Damian."
+
+
+def test_glossary_extracts_only_dialogue_from_nested_subtitle_zip(tmp_path):
+    archive = tmp_path / "season.zip"
+    with zipfile.ZipFile(archive, "w") as subtitle_zip:
+        subtitle_zip.writestr(
+            "Season 01/episode.srt",
+            "1\n"
+            "00:00:01,000 --> 00:00:03,000\n"
+            "<i>Alice</i> visits <b>Wonderland</b>\n",
+        )
+        subtitle_zip.writestr(
+            "Season 01/episode.ass",
+            "[Script Info]\n"
+            "Title: Do not include\n"
+            "[Events]\n"
+            "Format: Start, End, Text\n"
+            r"Dialogue: 0:00:01.00,0:00:03.00,{\an8}Bob\NArcadia"
+            "\n",
+        )
+        subtitle_zip.writestr(
+            "Season 01/theme.lrc",
+            "[ar:Do not include]\n"
+            "[00:01.00]<00:01.10>Carol in Dreamland\n",
+        )
+        subtitle_zip.writestr("Season 01/readme.txt", "Ignore this file")
+
+    assert is_subtitle_glossary_source(str(archive)) is True
+    chapters = extract_chapters_from_subtitle(
+        str(archive),
+        return_metadata=True,
+    )
+
+    assert [filename for _text, filename in chapters] == [
+        "Season 01/episode.srt",
+        "Season 01/episode.ass",
+        "Season 01/theme.lrc",
+    ]
+    assert chapters[0][0] == "Alice visits Wonderland"
+    assert chapters[1][0] == "Bob\nArcadia"
+    assert chapters[2][0] == "Carol in Dreamland"
+    combined = "\n".join(text for text, _filename in chapters)
+    assert "-->" not in combined
+    assert "Dialogue:" not in combined
+    assert "[ar:" not in combined
+    assert "<i>" not in combined
+    assert r"{\an8}" not in combined
+    assert "<00:01.10>" not in combined
+
+
+def test_glossary_accepts_direct_srt_ass_and_lrc_sources(tmp_path):
+    cases = {
+        "episode.srt": (
+            "1\n00:00:01,000 --> 00:00:03,000\n<i>Alice</i>\n",
+            "Alice",
+        ),
+        "episode.ass": (
+            "[Events]\n"
+            "Format: Start, End, Text\n"
+            r"Dialogue: 0:00:01.00,0:00:03.00,{\an8}Bob"
+            "\n",
+            "Bob",
+        ),
+        "theme.lrc": (
+            "[ar:Ignore]\n[00:01.00]<00:01.10>Carol\n",
+            "Carol",
+        ),
+    }
+
+    for filename, (source_text, expected_text) in cases.items():
+        source = tmp_path / filename
+        source.write_text(source_text, encoding="utf-8")
+
+        assert is_subtitle_glossary_source(str(source)) is True
+        assert extract_chapters_from_subtitle(
+            str(source),
+            return_metadata=True,
+        ) == [(expected_text, filename)]
+
+
+def test_epub_shaped_zip_is_not_a_subtitle_glossary_source(tmp_path):
+    archive = tmp_path / "book.zip"
+    with zipfile.ZipFile(archive, "w") as epub_zip:
+        epub_zip.writestr("mimetype", "application/epub+zip")
+        epub_zip.writestr("META-INF/container.xml", "<container/>")
+        epub_zip.writestr("OEBPS/content.opf", "<package/>")
+        epub_zip.writestr("OEBPS/media/captions.srt", "incidental")
+
+    assert is_subtitle_glossary_source(str(archive)) is False

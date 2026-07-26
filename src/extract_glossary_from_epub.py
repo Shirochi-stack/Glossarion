@@ -3223,6 +3223,106 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 print(f"[Error] Failed to save CSV: {e2}")
         _mirror_glossary_outputs_to_backup(output_path)
             
+def is_subtitle_glossary_source(path: str) -> bool:
+    """Return whether a direct file or non-EPUB ZIP contains subtitles."""
+    extension = os.path.splitext(str(path or ""))[1].lower()
+    try:
+        from subtitle_processor import SUBTITLE_EXTENSIONS
+    except Exception:
+        SUBTITLE_EXTENSIONS = {".srt", ".ass", ".lrc"}
+    if extension in SUBTITLE_EXTENSIONS:
+        return True
+    if extension != ".zip" or not os.path.isfile(path):
+        return False
+    try:
+        from image_archive_epub import is_epub_zip
+
+        if is_epub_zip(path):
+            return False
+    except Exception:
+        pass
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            infos = archive.infolist()
+            if len(infos) > 5000:
+                return False
+            return any(
+                not info.is_dir()
+                and os.path.splitext(str(info.filename or ""))[1].lower()
+                in SUBTITLE_EXTENSIONS
+                for info in infos
+            )
+    except Exception:
+        return False
+
+
+def extract_chapters_from_subtitle(
+    source_path: str,
+    return_metadata: bool = False,
+    stop_check=None,
+) -> List:
+    """Extract dialogue/lyrics as one glossary chapter per subtitle file."""
+    from subtitle_processor import (
+        SUBTITLE_EXTENSIONS,
+        extract_subtitle_archive,
+        extract_subtitle_text_segments,
+    )
+
+    should_stop = stop_check if callable(stop_check) else is_stop_requested
+    source_path = os.path.abspath(str(source_path))
+    extension = os.path.splitext(source_path)[1].lower()
+    temporary_root = None
+    if extension in SUBTITLE_EXTENSIONS:
+        subtitle_files = [source_path]
+        labels = {os.path.normcase(source_path): os.path.basename(source_path)}
+    elif extension == ".zip":
+        temporary_root = tempfile.mkdtemp(prefix="glossarion_glossary_subtitles_")
+        try:
+            result = extract_subtitle_archive(source_path, temporary_root)
+        except Exception:
+            shutil.rmtree(temporary_root, ignore_errors=True)
+            raise
+        subtitle_files = list(result.get("files") or [])
+        labels = {
+            os.path.normcase(os.path.abspath(path)): os.path.relpath(
+                path,
+                temporary_root,
+            ).replace(os.sep, "/")
+            for path in subtitle_files
+        }
+        print(
+            f"Subtitle archive source extracted: {len(subtitle_files)} file(s)"
+        )
+    else:
+        raise ValueError(f"Unsupported subtitle glossary source: {extension}")
+
+    chapters = []
+    try:
+        for subtitle_path in subtitle_files:
+            if should_stop():
+                break
+            segments = extract_subtitle_text_segments(subtitle_path)
+            dialogue = "\n".join(
+                segment.strip()
+                for segment in segments
+                if str(segment or "").strip()
+            ).strip()
+            if not dialogue:
+                continue
+            label = labels.get(
+                os.path.normcase(os.path.abspath(subtitle_path)),
+                os.path.basename(subtitle_path),
+            )
+            chapters.append((dialogue, label) if return_metadata else dialogue)
+        print(
+            f"Subtitle dialogue extracted: {len(chapters)} non-empty file(s)"
+        )
+        return chapters
+    finally:
+        if temporary_root:
+            shutil.rmtree(temporary_root, ignore_errors=True)
+
+
 def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) -> List:
     """Extract chapters from EPUB for glossary extraction.
     
@@ -6754,8 +6854,14 @@ def main(log_callback=None, stop_callback=None):
     # Handle both command line and GUI calls
     if '--epub' in sys.argv:
         # Command line mode
-        parser = argparse.ArgumentParser(description='Extract glossary from EPUB/TXT/SDLXLIFF')
-        parser.add_argument('--epub', required=True, help='Path to EPUB/TXT/SDLXLIFF file')
+        parser = argparse.ArgumentParser(
+            description='Extract glossary from EPUB/TXT/PDF/SDLXLIFF/subtitles'
+        )
+        parser.add_argument(
+            '--epub',
+            required=True,
+            help='Path to EPUB/TXT/PDF/SDLXLIFF/SRT/ASS/LRC/subtitle ZIP file',
+        )
         parser.add_argument('--output', required=True, help='Output glossary path')
         parser.add_argument('--config', help='Config file path')
         
@@ -6777,8 +6883,20 @@ def main(log_callback=None, stop_callback=None):
     is_text_file = epub_path.lower().endswith('.txt')
     is_pdf_file = epub_path.lower().endswith('.pdf')
     is_sdlxliff_file = epub_path.lower().endswith('.sdlxliff')
+    is_subtitle_source = is_subtitle_glossary_source(epub_path)
     
-    if is_sdlxliff_file:
+    if is_subtitle_source:
+        _raw_chapters = extract_chapters_from_subtitle(
+            epub_path,
+            return_metadata=True,
+            stop_check=check_stop,
+        )
+        chapters = [text for text, _fn in _raw_chapters]
+        _chapter_filenames = {
+            idx: fn for idx, (_text, fn) in enumerate(_raw_chapters)
+        }
+        file_base = os.path.splitext(os.path.basename(epub_path))[0]
+    elif is_sdlxliff_file:
         chapters = _extract_sdlxliff_chapters_for_glossary(epub_path, check_stop)
         _chapter_filenames = {}
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
@@ -6808,7 +6926,13 @@ def main(log_callback=None, stop_callback=None):
     _chapter_positions = {}  # idx → chapter number for range filtering
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
 
-    if _chapter_filenames and not is_text_file and not is_pdf_file and not is_sdlxliff_file:
+    if (
+        _chapter_filenames
+        and not is_text_file
+        and not is_pdf_file
+        and not is_sdlxliff_file
+        and not is_subtitle_source
+    ):
         if use_spine_order:
             # ── Spine order mode: build OPF offset positions from within the EPUB ──
             # Same logic as TransateKRtoEN.py's _spine_pos_by_idx
@@ -7298,7 +7422,12 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Using default extraction prompt")
 
-    if is_sdlxliff_file:
+    if is_subtitle_source:
+        # Subtitle input was already read above. ZIP extraction uses a
+        # temporary directory, so retain the in-memory chapters and filenames
+        # instead of extracting the archive a second time.
+        pass
+    elif is_sdlxliff_file:
         chapters = _extract_sdlxliff_chapters_for_glossary(args.epub, check_stop)
         _chapter_filenames = {}
     elif is_text_file:
@@ -7316,7 +7445,13 @@ def main(log_callback=None, stop_callback=None):
     
     # Rebuild chapter positions from the final chapter list
     # (this is the definitive load used for processing)
-    if _chapter_filenames and not is_text_file and not is_pdf_file and not is_sdlxliff_file:
+    if (
+        _chapter_filenames
+        and not is_text_file
+        and not is_pdf_file
+        and not is_sdlxliff_file
+        and not is_subtitle_source
+    ):
         _chapter_positions = {}
         if use_spine_order:
             # Spine order positions were already built from OPF above

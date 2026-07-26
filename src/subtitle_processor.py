@@ -538,6 +538,56 @@ def _extract_lrc_spans(text: str) -> List[Tuple[int, int, str]]:
     return spans
 
 
+def _extract_subtitle_spans(
+    source_text: str,
+    extension: str,
+) -> List[Tuple[int, int, str]]:
+    """Dispatch structured dialogue extraction for a supported subtitle type."""
+    if extension == ".srt":
+        return _extract_srt_spans(source_text)
+    if extension == ".ass":
+        return _extract_ass_spans(source_text)
+    if extension == ".lrc":
+        return _extract_lrc_spans(source_text)
+    raise ValueError(f"Unsupported subtitle extension: {extension}")
+
+
+def _subtitle_text_without_protected_tokens(text: str, segment_index: int) -> str:
+    """Return readable dialogue for analysis without subtitle formatting."""
+    masked_text, protected = _protect_subtitle_text(text, segment_index)
+    for item in protected:
+        token = str(item.get("token") or "")
+        value = str(item.get("value") or "")
+        if re.fullmatch(r"\\[Nn]", value):
+            replacement = "\n"
+        elif value.casefold() == r"\h":
+            replacement = " "
+        else:
+            replacement = ""
+        masked_text = masked_text.replace(token, replacement)
+    return masked_text.strip()
+
+
+def extract_subtitle_text_segments(path: str) -> List[str]:
+    """Read only human-visible dialogue/lyrics from SRT, ASS, or LRC."""
+    extension = os.path.splitext(str(path or ""))[1].lower()
+    if extension not in SUBTITLE_EXTENSIONS:
+        raise ValueError(f"Unsupported subtitle extension: {extension}")
+    source_text, _source_encoding = _decode_subtitle(path)
+    segments: List[str] = []
+    for segment_index, (_start, _end, original_text) in enumerate(
+        _extract_subtitle_spans(source_text, extension),
+        start=1,
+    ):
+        visible_text = _subtitle_text_without_protected_tokens(
+            original_text,
+            segment_index,
+        )
+        if visible_text:
+            segments.append(visible_text)
+    return segments
+
+
 def _count_tokens(text: str) -> int:
     try:
         from chapter_splitter import ChapterSplitter
@@ -632,12 +682,7 @@ def extract_subtitle_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
 
     os.makedirs(output_dir, exist_ok=True)
     source_text, source_encoding = _decode_subtitle(path)
-    if extension == ".srt":
-        raw_spans = _extract_srt_spans(source_text)
-    elif extension == ".ass":
-        raw_spans = _extract_ass_spans(source_text)
-    else:
-        raw_spans = _extract_lrc_spans(source_text)
+    raw_spans = _extract_subtitle_spans(source_text, extension)
 
     segments: List[Dict[str, Any]] = []
     for start, end, original_text in raw_spans:

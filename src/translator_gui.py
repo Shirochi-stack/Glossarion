@@ -29901,6 +29901,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Separate images and text files
             image_files = []
             text_files = []
+            seen_subtitle_bundle_ids = set()
             
             # Track successful items for summary
             successful_items = []
@@ -29909,8 +29910,39 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in image_extensions:
                     image_files.append(file_path)
-                elif ext in {'.epub', '.txt', '.pdf', '.sdlxliff'}:
-                    text_files.append(file_path)
+                elif ext in {
+                    '.epub', '.txt', '.pdf', '.sdlxliff',
+                    '.srt', '.ass', '.lrc',
+                }:
+                    glossary_source = file_path
+                    if ext in {'.srt', '.ass', '.lrc'}:
+                        subtitle_info = self._subtitle_zip_output_info(file_path)
+                        if isinstance(subtitle_info, dict):
+                            archive_path = str(
+                                subtitle_info.get('archive_path') or ''
+                            ).strip()
+                            bundle_id = str(
+                                subtitle_info.get('bundle_id')
+                                or archive_path
+                            ).strip()
+                            normalized_bundle_id = os.path.normcase(
+                                os.path.abspath(bundle_id)
+                            ) if bundle_id else ''
+                            if (
+                                normalized_bundle_id
+                                and normalized_bundle_id
+                                in seen_subtitle_bundle_ids
+                            ):
+                                continue
+                            if normalized_bundle_id:
+                                seen_subtitle_bundle_ids.add(
+                                    normalized_bundle_id
+                                )
+                            if archive_path and os.path.isfile(archive_path):
+                                # One subtitle ZIP produces one shared glossary,
+                                # with one glossary chapter per archive member.
+                                glossary_source = os.path.abspath(archive_path)
+                    text_files.append(glossary_source)
                 else:
                     self.append_log(f"⚠️ Skipping unsupported file type: {ext}")
             
@@ -30883,7 +30915,7 @@ Important rules:
         return os.environ.get('GLOSSARY_CJK_SCRIPT_FILTER', '0') == '1'
 
     def _extract_glossary_from_text_file(self, file_path, force_balanced_request_merging=False):
-        """Extract glossary from EPUB or TXT file using existing glossary extraction"""
+        """Extract a glossary from supported document or subtitle sources."""
         # Skip glossary extraction for traditional APIs
         try:
             api_key = self.api_key_entry.text()
@@ -37302,18 +37334,34 @@ Important rules:
             for file_path in files:
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 match_names.add(base.casefold())
+                ext = os.path.splitext(file_path)[1].lower()
+
+                # Subtitle ZIP extraction replaces the selected archive with
+                # temporary member paths. Include the original archive name so
+                # the one shared archive-level glossary can be auto-loaded.
+                if ext in {'.srt', '.ass', '.lrc'}:
+                    subtitle_info = self._subtitle_zip_output_info(file_path)
+                    if isinstance(subtitle_info, dict):
+                        archive_path = str(
+                            subtitle_info.get('archive_path') or ''
+                        ).strip()
+                        if archive_path:
+                            match_names.add(
+                                os.path.splitext(
+                                    os.path.basename(archive_path)
+                                )[0].casefold()
+                            )
+
+                # For images, also add the parent folder name.
+                if ext in image_extensions:
+                    folder = os.path.dirname(file_path)
+                    folder_name = os.path.basename(folder) if folder else "images"
+                    match_names.add(folder_name.casefold())
             try:
                 from glossary_paths import migrate_all_legacy_glossary_files
                 migrate_all_legacy_glossary_files(glossary_base_dir, logger=self.append_log)
             except Exception:
                 pass
-                
-                # For images, also add the parent folder name
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext in image_extensions:
-                    folder = os.path.dirname(file_path)
-                    folder_name = os.path.basename(folder) if folder else "images"
-                    match_names.add(folder_name.casefold())
             
             # Look for glossary files matching any of the candidate names
             best_match = None
