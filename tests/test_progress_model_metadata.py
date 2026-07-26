@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import textwrap
 import threading
+import zipfile
 
 import pytest
 from bs4 import BeautifulSoup
@@ -162,6 +163,66 @@ def test_progress_manager_does_not_add_metadata_row_for_empty_subtitle_zip(
     )
 
     assert rows == []
+
+
+def test_progress_manager_inspects_nested_subtitle_zip_without_session_mapping(
+    tmp_path,
+):
+    archive = tmp_path / "season.zip"
+    with zipfile.ZipFile(archive, "w") as subtitle_zip:
+        subtitle_zip.writestr(
+            "Season 01/episode.lrc",
+            "[ti:Episode]\n[00:01.00]Hello\n",
+        )
+    gui = RetranslationMixin()
+    rows = []
+    data = {
+        "file_path": str(archive),
+        "output_dir": str(tmp_path / "season"),
+        "prog": {"chapters": {}, "version": "2.1"},
+    }
+
+    assert gui._zip_is_subtitle_archive(str(archive)) is True
+    assert gui._progress_view_is_subtitle(data) is True
+    gui._append_metadata_display_info(data, rows)
+
+    assert rows == []
+
+
+def test_progress_manager_does_not_invent_metadata_for_non_subtitle_zip(
+    tmp_path,
+):
+    archive = tmp_path / "documents.zip"
+    with zipfile.ZipFile(archive, "w") as document_zip:
+        document_zip.writestr("notes/readme.txt", "Not subtitles")
+    gui = RetranslationMixin()
+    rows = []
+    data = {
+        "file_path": str(archive),
+        "output_dir": str(tmp_path / "documents"),
+        "prog": {"chapters": {}, "version": "2.1"},
+    }
+
+    assert gui._zip_is_subtitle_archive(str(archive)) is False
+    assert gui._progress_view_is_subtitle(data) is False
+    gui._append_metadata_display_info(data, rows)
+
+    assert rows == []
+
+
+def test_progress_manager_does_not_treat_epub_shaped_zip_as_subtitle_archive(
+    tmp_path,
+):
+    archive = tmp_path / "book.zip"
+    with zipfile.ZipFile(archive, "w") as epub_zip:
+        epub_zip.writestr("mimetype", "application/epub+zip")
+        epub_zip.writestr("META-INF/container.xml", "<container/>")
+        epub_zip.writestr("OEBPS/content.opf", "<package/>")
+        epub_zip.writestr("OEBPS/media/captions.srt", "incidental resource")
+
+    gui = RetranslationMixin()
+
+    assert gui._zip_is_subtitle_archive(str(archive)) is False
 
 
 def test_disabled_epub_metadata_row_is_still_shown_as_skipped(tmp_path):

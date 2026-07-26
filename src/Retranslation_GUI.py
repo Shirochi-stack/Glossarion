@@ -10126,6 +10126,91 @@ class RetranslationMixin:
         config = getattr(self, 'config', {})
         return bool(config.get('translate_book_title', True)) if isinstance(config, dict) else True
 
+    def _zip_is_subtitle_archive(self, file_path):
+        """Inspect and cache whether a ZIP is a non-EPUB subtitle archive."""
+        path = os.path.abspath(str(file_path or ''))
+        if not path.lower().endswith('.zip') or not os.path.isfile(path):
+            return False
+        try:
+            stat_result = os.stat(path)
+            signature = (
+                int(getattr(stat_result, 'st_mtime_ns', 0)),
+                int(stat_result.st_size),
+            )
+        except OSError:
+            return False
+
+        cache = getattr(self, '_subtitle_zip_classification_cache', None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._subtitle_zip_classification_cache = cache
+        cache_key = os.path.normcase(path)
+        cached = cache.get(cache_key)
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 2
+            and cached[0] == signature
+        ):
+            return bool(cached[1])
+
+        is_subtitle_archive = False
+        try:
+            from subtitle_processor import SUBTITLE_EXTENSIONS
+
+            with zipfile.ZipFile(path, 'r') as archive:
+                infos = archive.infolist()
+                # The subtitle extractor rejects archives beyond this limit,
+                # so Progress Manager must not classify one it cannot process.
+                if len(infos) <= 5000:
+                    normalized_names = {
+                        str(info.filename or '').replace('\\', '/').lstrip('/').casefold()
+                        for info in infos
+                    }
+                    is_epub_container = (
+                        'meta-inf/container.xml' in normalized_names
+                        and any(name.endswith('.opf') for name in normalized_names)
+                    )
+                    if not is_epub_container and 'mimetype' in normalized_names:
+                        mimetype_info = next(
+                            (
+                                info
+                                for info in infos
+                                if str(info.filename or '').replace('\\', '/').lstrip('/').casefold()
+                                == 'mimetype'
+                            ),
+                            None,
+                        )
+                        if mimetype_info is not None:
+                            is_epub_container = (
+                                archive.read(mimetype_info)
+                                .decode('ascii', errors='ignore')
+                                .strip()
+                                == 'application/epub+zip'
+                            )
+                    if not is_epub_container:
+                        is_subtitle_archive = any(
+                            not info.is_dir()
+                            and os.path.splitext(str(info.filename or ''))[1].lower()
+                            in SUBTITLE_EXTENSIONS
+                            for info in infos
+                        )
+        except Exception:
+            is_subtitle_archive = False
+
+        # Keep the cache bounded because this mixin can inspect many selections
+        # over a long-running GUI session.
+        if len(cache) >= 64 and cache_key not in cache:
+            cache.clear()
+        cache[cache_key] = (signature, is_subtitle_archive)
+        return is_subtitle_archive
+
+    def _path_is_subtitle_progress_source(self, file_path):
+        """Return whether a source path should use subtitle progress semantics."""
+        extension = os.path.splitext(str(file_path or ''))[1].lower()
+        if extension in ('.srt', '.ass', '.lrc'):
+            return True
+        return extension == '.zip' and self._zip_is_subtitle_archive(file_path)
+
     def _sync_metadata_progress_toggle(self, enabled):
         """Immediately refresh open/cached Progress Managers after a toggle change."""
         enabled = bool(enabled)
@@ -10456,9 +10541,11 @@ class RetranslationMixin:
     def _progress_view_is_subtitle(self, data):
         """Return whether a Progress Manager dataset belongs to subtitles."""
         data = data if isinstance(data, dict) else {}
+        if data.get('progress_source_is_subtitle') is True:
+            return True
         file_path = str(data.get('file_path') or '')
         extension = os.path.splitext(file_path)[1].lower()
-        if extension in ('.srt', '.ass', '.lrc'):
+        if self._path_is_subtitle_progress_source(file_path):
             return True
 
         prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
@@ -10497,7 +10584,13 @@ class RetranslationMixin:
         """Add each tracked metadata API phase as a selectable row."""
         if self._progress_view_is_subtitle(data):
             return
-        metadata_enabled = self._metadata_progress_tracking_enabled(data.get('file_path'))
+        file_path = str(data.get('file_path') or '')
+        # metadata.json is an EPUB artifact. Raw ZIP, TXT, PDF, subtitle, and
+        # other direct-file progress views must not synthesize a metadata row
+        # that their translation workflow can never create.
+        if not file_path.lower().endswith('.epub'):
+            return
+        metadata_enabled = self._metadata_progress_tracking_enabled(file_path)
         prog = data.get('prog') or {}
         chapters = prog.get('chapters', {})
         rows = []
@@ -11340,6 +11433,14 @@ class RetranslationMixin:
                 QApplication.processEvents(QEventLoop.AllEvents, 15)
             except Exception:
                 pass
+
+        # Classify ZIPs before creating/loading their progress state. This
+        # prevents raw ZIP inputs from being assumed to be subtitle archives,
+        # while allowing a real subtitle ZIP to suppress EPUB-only artifacts
+        # even before extraction has populated its first batch entry.
+        progress_source_is_subtitle = self._path_is_subtitle_progress_source(
+            file_path
+        )
         
         epub_base = os.path.splitext(os.path.basename(file_path))[0]
         
@@ -11425,7 +11526,7 @@ class RetranslationMixin:
                     if isinstance(ch, dict) and ch.get("output_file")
                 }
                 subtitle_auto_index = 0
-                subtitle_source = file_path.lower().endswith(('.srt', '.ass', '.lrc', '.zip'))
+                subtitle_source = progress_source_is_subtitle
                 for fname in sorted(files):
                     fname_path_key = os.path.normcase(
                         os.path.abspath(os.path.join(output_dir, fname))
@@ -12255,7 +12356,12 @@ class RetranslationMixin:
             # Sort by chapter number
             chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
 
-        _display_data = {'prog': prog, 'file_path': file_path, 'output_dir': output_dir}
+        _display_data = {
+            'prog': prog,
+            'file_path': file_path,
+            'output_dir': output_dir,
+            'progress_source_is_subtitle': progress_source_is_subtitle,
+        }
         self._append_metadata_display_info(_display_data, chapter_display_info)
         self._append_pdf_ocr_display_info(_display_data, chapter_display_info)
         self._append_image_gen_display_info(_display_data, chapter_display_info)
@@ -16109,6 +16215,7 @@ class RetranslationMixin:
             'output_dir': output_dir,
             'progress_file': progress_file,
             'prog': prog,
+            'progress_source_is_subtitle': progress_source_is_subtitle,
             'spine_chapters': spine_chapters,
             'opf_chapter_order': opf_chapter_order,
             'chapter_display_info': chapter_display_info,
