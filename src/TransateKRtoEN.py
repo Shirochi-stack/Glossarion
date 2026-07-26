@@ -440,6 +440,115 @@ def _materialize_completed_subtitle_bundle_file(chapter, output_dir):
         return None
 
 
+def _materialize_empty_subtitle_sources(
+    extraction_result,
+    output_dir,
+    progress_manager,
+    standalone_output_path=None,
+):
+    """Preserve and track subtitle files that require no API request."""
+    empty_sources = (
+        extraction_result.get("empty_sources", [])
+        if isinstance(extraction_result, dict)
+        else []
+    )
+    if not isinstance(empty_sources, list) or not empty_sources:
+        return 0
+
+    completed = 0
+    for empty_source in empty_sources:
+        if not isinstance(empty_source, dict):
+            continue
+        try:
+            source_index = max(1, int(empty_source.get("source_index") or 1))
+            source_file = os.path.abspath(
+                str(empty_source.get("source_file") or "")
+            )
+            if not source_file:
+                continue
+
+            if empty_source.get("bundle"):
+                from subtitle_processor import convert_subtitle_bundle_source
+
+                result = convert_subtitle_bundle_source(
+                    output_dir,
+                    source_index,
+                    manifest_path=extraction_result.get("manifest_path"),
+                )
+            else:
+                from subtitle_processor import convert_subtitle
+
+                result = convert_subtitle(
+                    output_dir,
+                    manifest_path=extraction_result.get("manifest_path"),
+                    output_path=standalone_output_path,
+                    require_complete=True,
+                )
+            if not result.get("ready"):
+                continue
+
+            output_path = os.path.abspath(str(result.get("output_path") or ""))
+            if not output_path:
+                continue
+            chapter_obj = {
+                "num": source_index,
+                "filename": f"section_{source_index}.txt",
+                "source_file": source_file,
+                "original_basename": os.path.basename(source_file),
+                "subtitle_batch": True,
+                "subtitle_progress_id": output_path,
+                "subtitle_output_file": output_path,
+                # Synthetic completed checkpoint for a no-op file, not an API
+                # translation batch.
+                "subtitle_source_batch_num": 1,
+                "subtitle_source_batch_count": 1,
+                "subtitle_no_translatable_text": True,
+            }
+            if empty_source.get("bundle"):
+                chapter_obj.update(
+                    {
+                        "subtitle_bundle": True,
+                        "subtitle_bundle_source_index": source_index,
+                        "subtitle_bundle_source_file": source_file,
+                    }
+                )
+
+            content_hash = str(empty_source.get("source_hash") or "")
+            progress_manager.update(
+                source_index - 1,
+                source_index,
+                content_hash,
+                output_path,
+                status="completed",
+                chapter_obj=chapter_obj,
+                prefer_thread_model=False,
+            )
+            progress_key = progress_manager._get_chapter_key(
+                source_index,
+                output_path,
+                chapter_obj,
+                content_hash,
+            )
+            progress_entry = progress_manager.prog.get("chapters", {}).get(
+                progress_key
+            )
+            if isinstance(progress_entry, dict):
+                progress_entry["subtitle_no_translatable_text"] = True
+                progress_entry["model_name"] = "No API needed"
+                progress_entry.pop("key_identifier", None)
+            completed += 1
+            print(
+                "✅ Subtitle preserved unchanged (no translatable dialogue): "
+                f"{output_path}"
+            )
+        except Exception as exc:
+            print(f"⚠️ Could not preserve an empty subtitle source: {exc}")
+
+    if completed:
+        progress_manager.save()
+    return completed
+
+
 from sdlxliff_sidecar_writer import (
     _html_sdlxliff_enabled,
     _html_sdlxliff_lang_code,
@@ -20432,6 +20541,12 @@ def main(log_callback=None, stop_callback=None):
                 f"subtitle dialogue cue(s) from "
                 f"{extraction_result.get('source_count', 1)} file(s) into "
                 f"{len(chapters)} parallelizable batch(es)"
+            )
+            _materialize_empty_subtitle_sources(
+                extraction_result,
+                out,
+                progress_manager,
+                standalone_output_path=grouped_subtitle_output_path,
             )
         except Exception as e:
             print(f"❌ Error processing subtitle file: {e}")

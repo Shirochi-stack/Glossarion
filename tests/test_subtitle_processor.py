@@ -112,6 +112,47 @@ def test_srt_round_trip_preserves_timing_numbers_tags_and_crlf(tmp_path):
     assert output.endswith("Au revoir\r\n")
 
 
+def test_srt_accepts_non_padded_fractional_seconds(tmp_path):
+    source = tmp_path / "non_padded.srt"
+    source.write_text(
+        "1\n"
+        "00:00:07,0 --> 00:00:11,3\n"
+        "向南锦站在浴室门外，段宁迦在浴室内\n"
+        "\n"
+        "2\n"
+        "00:00:11.40 --> 00:00:13.60\n"
+        "向南锦：别睡了，让我进去看看。\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "out"
+
+    result = extract_subtitle_to_chapters(str(source), str(output_dir))
+    chapters = json.loads(
+        Path(result["chapters_path"]).read_text(encoding="utf-8")
+    )
+
+    assert result["segments"] == 2
+    assert result["empty_sources"] == []
+    translated = _translated_batch(
+        chapters[0],
+        {
+            "1": lambda _text: "Outside the bathroom.",
+            "2": lambda _text: "Wake up and let me look.",
+        },
+    )
+    (output_dir / "response_section_1.txt").write_text(
+        translated,
+        encoding="utf-8",
+    )
+    converted = convert_subtitle(str(output_dir))
+    output = Path(converted["output_path"]).read_text(encoding="utf-8")
+
+    assert "00:00:07,0 --> 00:00:11,3" in output
+    assert "00:00:11.40 --> 00:00:13.60" in output
+    assert "Outside the bathroom." in output
+    assert "Wake up and let me look." in output
+
+
 def test_ass_round_trip_changes_only_dialogue_text(tmp_path):
     source_text = (
         "\ufeff[Script Info]\n"
@@ -402,6 +443,60 @@ def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tm
     assert reused["files"] == 2
     assert reused["incomplete_files"] == 0
     assert all(result["already_exists"] for result in reused["results"])
+
+
+def test_empty_subtitle_bundle_source_is_preserved_and_tracked(tmp_path):
+    from TransateKRtoEN import (
+        ProgressManager,
+        _materialize_empty_subtitle_sources,
+    )
+
+    empty_source = tmp_path / "extracted" / "empty.srt"
+    translated_source = tmp_path / "extracted" / "episode.srt"
+    empty_source.parent.mkdir()
+    empty_source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n\n",
+        encoding="utf-8",
+    )
+    translated_source.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "bundle_work"
+    empty_output = tmp_path / "outputs" / "Show" / "empty.srt"
+    translated_output = tmp_path / "outputs" / "Show" / "episode.srt"
+    extraction = extract_subtitle_bundle_to_chapters(
+        [str(empty_source), str(translated_source)],
+        str(output_dir),
+        output_paths={
+            str(empty_source): str(empty_output),
+            str(translated_source): str(translated_output),
+        },
+    )
+    progress = ProgressManager(str(output_dir))
+
+    completed = _materialize_empty_subtitle_sources(
+        extraction,
+        str(output_dir),
+        progress,
+    )
+
+    assert completed == 1
+    assert empty_output.read_text(encoding="utf-8") == (
+        empty_source.read_text(encoding="utf-8")
+    )
+    key = "subtitle:empty.srt:1"
+    entry = progress.prog["chapters"][key]
+    assert entry["status"] == "completed"
+    assert entry["subtitle_bundle_source_index"] == 1
+    assert entry["subtitle_no_translatable_text"] is True
+    assert entry["model_name"] == "No API needed"
+    assert progress.prog["subtitle_files"]["empty.srt"]["status"] == "completed"
+    chapters = json.loads(
+        Path(extraction["chapters_path"]).read_text(encoding="utf-8")
+    )
+    assert len(chapters) == 1
+    assert chapters[0]["subtitle_bundle_source_index"] == 2
 
 
 def test_bundle_writes_each_file_when_its_batches_finish(tmp_path, monkeypatch):

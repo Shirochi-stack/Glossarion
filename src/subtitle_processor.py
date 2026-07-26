@@ -44,8 +44,11 @@ DEFAULT_SUBTITLE_TRANSLATION_PROMPT = (
 SUBTITLE_PLACEHOLDER_RE = re.compile(r"\[\[SUB_TAG_\d{6}_\d{4}\]\]")
 _SUBTITLE_TOKEN_COUNTERS = threading.local()
 _SRT_TIMESTAMP_RE = re.compile(
-    r"^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
-    r"\d{1,3}:\d{2}:\d{2}[,.]\d{3}(?:\s+.*)?$"
+    # Real-world SRT exports do not always zero-pad fractional seconds to
+    # three digits (for example 00:00:07,0). Preserve that syntax verbatim
+    # while still recognizing the cue as translatable dialogue.
+    r"^\s*\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*"
+    r"\d{1,3}:\d{2}:\d{2}[,.]\d{1,3}(?:\s+.*)?$"
 )
 _PROTECTED_TOKEN_RE = re.compile(
     r"<[^>\r\n]+>|\{[^{}\r\n]*\}|\\[Nnh]",
@@ -703,6 +706,19 @@ def extract_subtitle_to_chapters(path: str, output_dir: str) -> Dict[str, Any]:
         "chapters_path": chapters_path,
         "manifest_path": manifest_path,
         "metadata": metadata,
+        "empty_sources": (
+            [
+                {
+                    "source_index": 1,
+                    "source_file": os.path.abspath(path),
+                    "output_path": None,
+                    "source_hash": source_hash,
+                    "bundle": False,
+                }
+            ]
+            if not chapters
+            else []
+        ),
     }
 
 
@@ -727,6 +743,7 @@ def extract_subtitle_bundle_to_chapters(
     }
     chapters: List[Dict[str, Any]] = []
     bundle_files: List[Dict[str, Any]] = []
+    empty_sources: List[Dict[str, Any]] = []
     total_segments = 0
 
     def _extract_bundle_source(source_item):
@@ -811,6 +828,16 @@ def extract_subtitle_bundle_to_chapters(
 
         manifest["batches"] = updated_batches
         manifest["batch_count"] = len(updated_batches)
+        if not updated_batches:
+            empty_sources.append(
+                {
+                    "source_index": source_index,
+                    "source_file": source_path,
+                    "output_path": output_path,
+                    "source_hash": str(manifest.get("source_hash") or ""),
+                    "bundle": True,
+                }
+            )
         bundle_files.append(
             {
                 "source_file": source_path,
@@ -857,6 +884,7 @@ def extract_subtitle_bundle_to_chapters(
         "chapters_path": chapters_path,
         "manifest_path": bundle_manifest_path,
         "metadata": metadata,
+        "empty_sources": empty_sources,
     }
 
 
