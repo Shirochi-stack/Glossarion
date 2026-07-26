@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -336,11 +337,11 @@ def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tm
         chapters[1],
         {"1": lambda text: text.replace("Goodbye", "Au revoir")},
     )
-    (output_dir / "response_section_1.txt").write_text(
+    (output_dir / "response_episode_1.txt").write_text(
         translated_first,
         encoding="utf-8",
     )
-    (output_dir / "response_section_2.txt").write_text(
+    (output_dir / "response_episode_2.txt").write_text(
         translated_second,
         encoding="utf-8",
     )
@@ -350,6 +351,19 @@ def test_subtitle_bundle_exposes_files_as_parallel_chapters_and_rebuilds_each(tm
     assert converted["updated"] == 2
     assert "Bonjour" in first_output.read_text(encoding="utf-8")
     assert "Au revoir" in second_output.read_text(encoding="utf-8")
+
+    # A fresh temporary ZIP work directory may no longer have the old JSON
+    # checkpoints. Matching completed progress can safely reuse final files.
+    (output_dir / "response_episode_1.txt").unlink()
+    (output_dir / "response_episode_2.txt").unlink()
+    reused = convert_subtitle_bundle(
+        str(output_dir),
+        reuse_existing_source_indices={1, 2},
+    )
+    assert reused["success"] is True
+    assert reused["files"] == 2
+    assert reused["incomplete_files"] == 0
+    assert all(result["already_exists"] for result in reused["results"])
 
 
 def test_bundle_writes_each_file_when_its_batches_finish(tmp_path, monkeypatch):
@@ -436,6 +450,264 @@ def test_bundle_writes_each_file_when_its_batches_finish(tmp_path, monkeypatch):
     final_pass = convert_subtitle_bundle(str(output_dir))
     assert final_pass["files"] == 1
     assert final_pass["results"][0]["already_exists"] is True
+
+
+def test_subtitle_checkpoint_names_are_unique_for_multiple_batches(monkeypatch):
+    from TransateKRtoEN import FileUtilities
+
+    monkeypatch.setenv("RETAIN_SOURCE_EXTENSION", "0")
+    first_batch = {
+        "filename": "section_1.txt",
+        "original_basename": "第六期.srt",
+        "subtitle_batch": True,
+        "subtitle_source_batch_num": 1,
+        "subtitle_source_batch_count": 2,
+    }
+    second_batch = dict(
+        first_batch,
+        subtitle_source_batch_num=2,
+    )
+
+    assert FileUtilities.create_chapter_filename(first_batch) == (
+        "response_第六期_batch_1.txt"
+    )
+    assert FileUtilities.create_chapter_filename(second_batch) == (
+        "response_第六期_batch_2.txt"
+    )
+
+
+def test_subtitle_progress_keys_preserve_unicode_identity(tmp_path):
+    from TransateKRtoEN import ProgressManager
+
+    manager = ProgressManager(str(tmp_path / "work"))
+    first = {
+        "subtitle_batch": True,
+        "subtitle_progress_id": str(tmp_path / "第六期.srt"),
+        "subtitle_source_batch_num": 1,
+    }
+    second = {
+        "subtitle_batch": True,
+        "subtitle_progress_id": str(tmp_path / "第七期.srt"),
+        "subtitle_source_batch_num": 1,
+    }
+
+    first_key = manager._get_chapter_key(0, chapter_obj=first)
+    second_key = manager._get_chapter_key(0, chapter_obj=second)
+
+    assert first_key == "subtitle:第六期.srt:1"
+    assert second_key == "subtitle:第七期.srt:1"
+    assert first_key != second_key
+
+
+def test_subtitle_batch_uses_assigned_index_not_digits_in_filename():
+    from TransateKRtoEN import FileUtilities
+
+    chapter = {
+        "subtitle_batch": True,
+        "num": 7,
+        "filename": "section_7.txt",
+        "original_basename": "Audience Affinity 100.srt",
+    }
+
+    assert FileUtilities.extract_actual_chapter_number(chapter) == 7
+
+
+def test_retranslation_progress_builds_one_indexed_subtitle_row(tmp_path):
+    from Retranslation_GUI import RetranslationMixin
+
+    source = tmp_path / "Audience Affinity 100.ass"
+    output = tmp_path / "Show" / source.name
+    entries = [
+        (
+            "subtitle:Audience Affinity 100.ass:1",
+            {
+                "actual_num": 1,
+                "status": "completed",
+                "output_file": str(output),
+                "subtitle_output_file": str(output),
+                "subtitle_source_file": str(source),
+                "subtitle_bundle_source_index": 7,
+                "subtitle_source_batch_num": 1,
+                "subtitle_source_batch_count": 2,
+            },
+        ),
+        (
+            "subtitle:Audience Affinity 100.ass:2",
+            {
+                "actual_num": 2,
+                "status": "in_progress",
+                "output_file": str(output),
+                "subtitle_output_file": str(output),
+                "subtitle_source_file": str(source),
+                "subtitle_bundle_source_index": 7,
+                "subtitle_source_batch_num": 2,
+                "subtitle_source_batch_count": 2,
+            },
+        ),
+    ]
+    prog = {
+        "subtitle_files": {
+            source.name: {
+                "source_file": str(source),
+                "output_file": str(output),
+                "status": "in_progress",
+                "total_batches": 2,
+                "completed_batches": 1,
+            }
+        }
+    }
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    row = mixin._build_subtitle_progress_row(prog, entries, str(output))
+
+    assert row["is_subtitle"] is True
+    assert row["is_special"] is False
+    assert row["num"] == 7
+    assert row["original_filename"] == source.name
+    assert row["output_file"] == str(output)
+    assert row["status"] == "in_progress"
+    assert row["subtitle_completed_batches"] == 1
+    assert row["subtitle_total_batches"] == 2
+    assert row["progress_keys"] == [key for key, _ in entries]
+    assert mixin._progress_entry_needs_special_visibility(row) is False
+    display, display_status = mixin._progress_list_display_text(
+        row,
+        {"show_model_info_state": False},
+        20,
+        25,
+    )
+    assert display_status == "in_progress"
+    assert "Subtitle 007" in display
+    assert source.name in display
+    assert "Batches 1/2" in display
+
+
+def test_cleanup_preserves_completed_subtitle_batch_before_final_file_exists(
+    tmp_path,
+):
+    from TransateKRtoEN import ProgressManager
+
+    output = tmp_path / "Show" / "episode.srt"
+    manager = ProgressManager(str(tmp_path / "work"))
+    manager.prog["chapters"] = {
+        "subtitle:episode.srt:1": {
+            "actual_num": 1,
+            "status": "completed",
+            "output_file": str(output),
+            "subtitle_output_file": str(output),
+            "subtitle_source_file": str(tmp_path / "episode.srt"),
+            "subtitle_progress_key": "subtitle:episode.srt:1",
+            "subtitle_source_batch_num": 1,
+            "subtitle_source_batch_count": 2,
+        }
+    }
+
+    manager.cleanup_missing_files(str(output.parent))
+
+    assert "subtitle:episode.srt:1" in manager.prog["chapters"]
+
+
+def test_fresh_subtitle_work_manager_restores_and_preserves_output_mirror(
+    tmp_path,
+    monkeypatch,
+):
+    from TransateKRtoEN import ProgressManager
+
+    output_dir = tmp_path / "Show"
+    output_dir.mkdir()
+    mirror_path = output_dir / "translation_progress.json"
+    output = output_dir / "episode.srt"
+    chapters = {
+        f"subtitle:episode.srt:{batch_num}": {
+            "actual_num": batch_num,
+            "content_hash": f"hash-{batch_num}",
+            "status": "completed",
+            "output_file": str(output),
+            "batch_output_file": f"response_episode_batch_{batch_num}.txt",
+            "subtitle_output_file": str(output),
+            "subtitle_source_file": str(tmp_path / "episode.srt"),
+            "subtitle_progress_key": f"subtitle:episode.srt:{batch_num}",
+            "subtitle_source_batch_num": batch_num,
+            "subtitle_source_batch_count": 2,
+            "subtitle_bundle_source_index": 1,
+        }
+        for batch_num in (1, 2)
+    }
+    mirror_path.write_text(
+        json.dumps(
+            {
+                "chapters": chapters,
+                "chapter_chunks": {},
+                "subtitle_files": {
+                    output.name: {
+                        "source_file": str(tmp_path / "episode.srt"),
+                        "output_file": str(output),
+                        "status": "completed",
+                        "total_batches": 2,
+                        "completed_batches": 2,
+                    }
+                },
+                "version": "2.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUBTITLE_PROGRESS_MIRROR_FILE", str(mirror_path))
+
+    manager = ProgressManager(str(tmp_path / "fresh-work"))
+
+    assert manager._loaded_subtitle_progress_from_mirror is True
+    assert set(manager.prog["chapters"]) == set(chapters)
+
+    # Even a later partial/empty temporary snapshot must not erase the stable
+    # per-subtitle rows already visible in the output folder.
+    manager.prog["chapters"] = {}
+    manager.prog.pop("subtitle_files", None)
+    manager.save()
+
+    saved_mirror = json.loads(mirror_path.read_text(encoding="utf-8"))
+    assert set(saved_mirror["chapters"]) == set(chapters)
+    assert output.name in saved_mirror["subtitle_files"]
+
+
+def test_completed_mirrored_subtitle_batch_reuses_matching_final_output(
+    tmp_path,
+):
+    from TransateKRtoEN import ProgressManager
+
+    output = tmp_path / "Show" / "episode.srt"
+    output.parent.mkdir()
+    output.write_text("translated subtitle", encoding="utf-8")
+    work_dir = tmp_path / "work"
+    manager = ProgressManager(str(work_dir))
+    chapter = {
+        "num": 1,
+        "subtitle_batch": True,
+        "subtitle_progress_id": str(output),
+        "subtitle_source_batch_num": 1,
+        "subtitle_source_batch_count": 1,
+    }
+    key = manager._get_chapter_key(1, chapter_obj=chapter)
+    manager.prog["chapters"][key] = {
+        "actual_num": 1,
+        "content_hash": "matching-hash",
+        "status": "completed",
+        "output_file": str(output),
+        "subtitle_output_file": str(output),
+        "subtitle_progress_key": key,
+    }
+
+    needs_translation, _, existing_batch = manager.check_chapter_status(
+        0,
+        1,
+        "matching-hash",
+        str(work_dir),
+        chapter_obj=chapter,
+    )
+
+    assert needs_translation is False
+    assert existing_batch is None
+    assert chapter["_subtitle_final_output_reused"] is True
 
 
 def test_subtitle_progress_uses_source_file_identity(tmp_path, monkeypatch):
@@ -559,6 +831,36 @@ def test_zip_selection_has_explicit_automatic_glossary_cleanup():
         "        )"
         in gui_source
     )
+
+
+def test_non_epub_selection_clears_environment_only_stale_glossary(
+    tmp_path,
+    monkeypatch,
+):
+    from translator_gui import TranslatorGUI
+
+    stale_glossary = tmp_path / "old_glossary.csv"
+    stale_glossary.write_text("term,translation\n", encoding="utf-8")
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.config = {"manual_glossary_path": str(stale_glossary)}
+    gui.manual_glossary_path = None
+    gui.manual_glossary_manually_loaded = False
+    gui.auto_loaded_glossary_path = None
+    gui.auto_loaded_glossary_for_file = None
+    gui.logs = []
+    gui.append_log = gui.logs.append
+    gui._update_manual_glossary_status = lambda: None
+    monkeypatch.setenv("MANUAL_GLOSSARY", str(stale_glossary))
+
+    cleared = gui._clear_automatic_glossary_for_non_epub_selection(
+        [str(tmp_path / "subtitles.zip")]
+    )
+
+    assert cleared is True
+    assert "MANUAL_GLOSSARY" not in os.environ
+    assert gui.config["manual_glossary_path"] == ""
+    assert gui.manual_glossary_path is None
+    assert gui.logs
 
 
 def test_subtitle_prompt_profile_is_built_in_and_mirrored():

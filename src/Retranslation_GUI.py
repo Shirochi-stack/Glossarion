@@ -10178,6 +10178,8 @@ class RetranslationMixin:
 
     def _progress_entry_needs_special_visibility(self, info):
         """Return whether a row depends on the special-files visibility toggle."""
+        if isinstance(info, dict) and info.get('is_subtitle'):
+            return False
         if self._is_metadata_progress_info(info):
             nested = info.get('info') if isinstance(info.get('info'), dict) else {}
             enabled = info.get(
@@ -10188,6 +10190,133 @@ class RetranslationMixin:
             # every other skipped special file and follows the visibility toggle.
             return not bool(enabled)
         return self._progress_entry_is_skipped_special(info)
+
+    @staticmethod
+    def _is_subtitle_progress_entry(entry, output_file=''):
+        """Return True when a progress entry represents an SRT/ASS batch."""
+        if not isinstance(entry, dict):
+            return False
+        if (
+            entry.get('subtitle_progress_key')
+            or entry.get('subtitle_source_file')
+            or entry.get('subtitle_output_file')
+            or entry.get('subtitle_bundle_source_index') is not None
+        ):
+            return True
+        for candidate in (
+            output_file,
+            entry.get('output_file'),
+            entry.get('original_basename'),
+        ):
+            if os.path.splitext(str(candidate or ''))[1].lower() in ('.srt', '.ass'):
+                return True
+        return False
+
+    def _build_subtitle_progress_row(self, prog, entries, output_file=''):
+        """Collapse subtitle batches into one stable per-file progress row."""
+        if not entries:
+            return None
+        subtitle_entries = [
+            (key, entry)
+            for key, entry in entries
+            if self._is_subtitle_progress_entry(entry, output_file)
+        ]
+        if not subtitle_entries:
+            return None
+
+        first_key, first_entry = subtitle_entries[0]
+        final_output = next(
+            (
+                str(entry.get('subtitle_output_file') or '').strip()
+                for _, entry in subtitle_entries
+                if str(entry.get('subtitle_output_file') or '').strip()
+            ),
+            str(output_file or first_entry.get('output_file') or '').strip(),
+        )
+        summary = {}
+        subtitle_files = prog.get('subtitle_files', {}) if isinstance(prog, dict) else {}
+        if isinstance(subtitle_files, dict):
+            summary = subtitle_files.get(os.path.basename(final_output), {})
+            if not isinstance(summary, dict):
+                summary = {}
+        if summary.get('output_file'):
+            final_output = str(summary['output_file'])
+
+        source_file = str(summary.get('source_file') or '').strip()
+        if not source_file:
+            source_file = next(
+                (
+                    str(entry.get('subtitle_source_file') or '').strip()
+                    for _, entry in subtitle_entries
+                    if str(entry.get('subtitle_source_file') or '').strip()
+                ),
+                '',
+            )
+        original_filename = os.path.basename(
+            source_file
+            or str(first_entry.get('original_basename') or '')
+            or final_output
+        )
+
+        source_indices = []
+        for _, entry in subtitle_entries:
+            try:
+                source_index = int(entry.get('subtitle_bundle_source_index'))
+            except (TypeError, ValueError):
+                continue
+            if source_index > 0:
+                source_indices.append(source_index)
+        subtitle_index = min(source_indices) if source_indices else 1
+
+        if summary:
+            status = str(summary.get('status') or 'pending').lower()
+            total_batches = int(summary.get('total_batches') or len(subtitle_entries))
+            completed_batches = int(summary.get('completed_batches') or 0)
+        else:
+            statuses = [
+                str(entry.get('status') or 'pending').lower()
+                for _, entry in subtitle_entries
+            ]
+            total_batches = max(
+                [len(subtitle_entries)]
+                + [
+                    int(entry.get('subtitle_source_batch_count') or 0)
+                    for _, entry in subtitle_entries
+                ]
+            )
+            completed_batches = sum(
+                status in ('completed', 'completed_empty', 'completed_image_only')
+                for status in statuses
+            )
+            if any(status in ('qa_failed', 'failed', 'error', 'file_missing') for status in statuses):
+                status = 'failed'
+            elif total_batches > 0 and completed_batches >= total_batches:
+                status = 'completed'
+            elif any(status in ('in_progress', 'queued') for status in statuses) or completed_batches:
+                status = 'in_progress'
+            else:
+                status = 'pending'
+
+        progress_keys = [str(key) for key, _ in subtitle_entries]
+        return {
+            'key': first_key,
+            'num': subtitle_index,
+            'info': first_entry,
+            'output_file': final_output,
+            'status': status,
+            'duplicate_count': 1,
+            'entries': subtitle_entries,
+            'is_special': False,
+            'is_subtitle': True,
+            'original_filename': original_filename,
+            'subtitle_summary': summary,
+            'subtitle_total_batches': total_batches,
+            'subtitle_completed_batches': completed_batches,
+            'progress_key': (
+                first_entry.get('subtitle_progress_key') or first_key
+            ),
+            'progress_keys': progress_keys,
+        }
 
     def _ensure_metadata_progress_entry(self, prog, output_dir, file_path=None):
         """Synchronize special metadata rows with the configured API-call mode."""
@@ -10945,8 +11074,10 @@ class RetranslationMixin:
         
         # For EPUB/text files, use the shared logic
         # Get current toggle state if it exists, or default based on file type
-        # Default to True for .txt, .pdf, .csv, and .json files, False for .epub
-        show_special_extensions = ('.txt', '.pdf', '.csv', '.json')
+        # Subtitle files and subtitle ZIPs are non-EPUB progress sources.
+        show_special_extensions = (
+            '.txt', '.pdf', '.csv', '.json', '.srt', '.ass', '.zip'
+        )
         show_special = input_path.lower().endswith(show_special_extensions)
         
         if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
@@ -11061,11 +11192,26 @@ class RetranslationMixin:
                     and not f.lower().endswith(".cache")
                 ]
                 tracked_output_files = {
-                    ch.get("output_file")
+                    os.path.normcase(os.path.abspath(
+                        ch.get("output_file")
+                        if os.path.isabs(str(ch.get("output_file") or ""))
+                        else os.path.join(output_dir, str(ch.get("output_file") or ""))
+                    ))
                     for ch in prog.get("chapters", {}).values()
                     if isinstance(ch, dict) and ch.get("output_file")
                 }
+                subtitle_auto_index = 0
+                subtitle_source = file_path.lower().endswith(('.srt', '.ass', '.zip'))
                 for fname in sorted(files):
+                    fname_path_key = os.path.normcase(
+                        os.path.abspath(os.path.join(output_dir, fname))
+                    )
+                    is_subtitle_output = (
+                        subtitle_source
+                        and os.path.splitext(fname)[1].lower() in ('.srt', '.ass')
+                    )
+                    if is_subtitle_output:
+                        subtitle_auto_index += 1
                     base = os.path.basename(fname)
                     # Normalize by stripping response_ and all extensions
                     if base.startswith("response_"):
@@ -11078,18 +11224,30 @@ class RetranslationMixin:
 
                     import re
                     m = re.findall(r"(\d+)", base)
-                    chapter_num = int(m[-1]) if m else None
-                    key = str(chapter_num) if chapter_num is not None else f"special_{base}"
+                    chapter_num = (
+                        subtitle_auto_index
+                        if is_subtitle_output
+                        else (int(m[-1]) if m else None)
+                    )
+                    key = (
+                        f"subtitle:auto:{fname}"
+                        if is_subtitle_output
+                        else (
+                            str(chapter_num)
+                            if chapter_num is not None
+                            else f"special_{base}"
+                        )
+                    )
                     actual_num = chapter_num if chapter_num is not None else 0
 
                     if key in prog.get("chapters", {}):
                         continue
                     
                     # Also check if any existing entry already references this output file
-                    if fname in tracked_output_files:
+                    if fname_path_key in tracked_output_files:
                         continue
 
-                    prog.setdefault("chapters", {})[key] = {
+                    discovered_entry = {
                         "actual_num": actual_num,
                         "content_hash": "",
                         "output_file": fname,
@@ -11098,7 +11256,18 @@ class RetranslationMixin:
                         "auto_discovered": True,
                         "original_basename": fname
                     }
-                    tracked_output_files.add(fname)
+                    if is_subtitle_output:
+                        discovered_entry.update({
+                            "subtitle_progress_key": key,
+                            "subtitle_output_file": os.path.abspath(
+                                os.path.join(output_dir, fname)
+                            ),
+                            "subtitle_bundle_source_index": subtitle_auto_index,
+                            "subtitle_source_batch_num": 1,
+                            "subtitle_source_batch_count": 1,
+                        })
+                    prog.setdefault("chapters", {})[key] = discovered_entry
+                    tracked_output_files.add(fname_path_key)
                     updated = True
             except Exception as e:
                 print(f"⚠️ Auto-discovery (no OPF) failed: {e}")
@@ -11781,6 +11950,21 @@ class RetranslationMixin:
             
             for output_file, entries in files_to_entries.items():
                 chapter_key, chapter_info = entries[0]
+
+                subtitle_row = self._build_subtitle_progress_row(
+                    prog,
+                    entries,
+                    output_file,
+                )
+                if subtitle_row is not None:
+                    if subtitle_row['status'] == 'completed':
+                        subtitle_path = subtitle_row['output_file']
+                        if not os.path.isabs(subtitle_path):
+                            subtitle_path = os.path.join(output_dir, subtitle_path)
+                        if not os.path.exists(subtitle_path):
+                            subtitle_row['status'] = 'not_translated'
+                    chapter_display_info.append(subtitle_row)
+                    continue
                 
                 # Get the actual output file (strip placeholder prefix if present)
                 actual_output_file = output_file
@@ -16265,6 +16449,64 @@ class RetranslationMixin:
                     status_reset_count += 1
                     print(f"Reset metadata translation phase to pending: {entry_key}")
                     continue
+
+                if ch_info.get('is_subtitle'):
+                    if ch_info['status'] == 'not_translated':
+                        marked_count += 1
+                        continue
+
+                    subtitle_matches = []
+                    seen_subtitle_keys = set()
+                    for subtitle_key in ch_info.get('progress_keys', []):
+                        subtitle_entry = data['prog'].get('chapters', {}).get(subtitle_key)
+                        if (
+                            subtitle_key not in seen_subtitle_keys
+                            and isinstance(subtitle_entry, dict)
+                        ):
+                            seen_subtitle_keys.add(subtitle_key)
+                            subtitle_matches.append((subtitle_key, subtitle_entry))
+                    for subtitle_key, subtitle_entry in ch_info.get('entries', []):
+                        if (
+                            subtitle_key not in seen_subtitle_keys
+                            and isinstance(subtitle_entry, dict)
+                        ):
+                            seen_subtitle_keys.add(subtitle_key)
+                            subtitle_matches.append((subtitle_key, subtitle_entry))
+
+                    if not subtitle_matches:
+                        print(
+                            f"WARNING: Could not find subtitle progress entries for "
+                            f"{output_file}; skipped deletion and status reset"
+                        )
+                        continue
+
+                    output_path = (
+                        output_file
+                        if os.path.isabs(output_file)
+                        else os.path.join(data['output_dir'], output_file)
+                    )
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                            deleted_count += 1
+                            print(f"Deleted subtitle: {output_path}")
+                    except Exception as e:
+                        print(f"Failed to delete subtitle {output_path}: {e}")
+
+                    for subtitle_key, subtitle_entry in subtitle_matches:
+                        subtitle_entry['status'] = 'pending'
+                        subtitle_entry['failure_reason'] = ''
+                        subtitle_entry['error_message'] = ''
+                        if _clear_refinement_progress_fields(subtitle_entry):
+                            refinement_cleared_count += 1
+                        status_reset_count += 1
+                        print(
+                            f"Reset subtitle batch to pending "
+                            f"(file index: {actual_num}, key: {subtitle_key})"
+                        )
+                    data['prog'].pop('subtitle_files', None)
+                    progress_updated = True
+                    continue
                 
                 if ch_info['status'] != 'not_translated':
                     # Reset status to pending for ALL non-not_translated chapters, but only if we can match the exact progress entry
@@ -17674,7 +17916,17 @@ class RetranslationMixin:
                             and not f.lower().endswith(".epub")
                             and not f.lower().endswith(".cache")
                         ]
-                        for fname in files:
+                        subtitle_auto_index = 0
+                        subtitle_source = str(data.get('file_path') or '').lower().endswith(
+                            ('.srt', '.ass', '.zip')
+                        )
+                        for fname in sorted(files):
+                            is_subtitle_output = (
+                                subtitle_source
+                                and os.path.splitext(fname)[1].lower() in ('.srt', '.ass')
+                            )
+                            if is_subtitle_output:
+                                subtitle_auto_index += 1
                             base = os.path.basename(fname)
                             if base.startswith("response_"):
                                 base = base[len("response_"):]
@@ -17685,12 +17937,24 @@ class RetranslationMixin:
                                 base = new_base
                             import re
                             m = re.findall(r"(\\d+)", base)
-                            chapter_num = int(m[-1]) if m else None
-                            key = str(chapter_num) if chapter_num is not None else f"special_{base}"
+                            chapter_num = (
+                                subtitle_auto_index
+                                if is_subtitle_output
+                                else (int(m[-1]) if m else None)
+                            )
+                            key = (
+                                f"subtitle:auto:{fname}"
+                                if is_subtitle_output
+                                else (
+                                    str(chapter_num)
+                                    if chapter_num is not None
+                                    else f"special_{base}"
+                                )
+                            )
                             actual_num = chapter_num if chapter_num is not None else 0
                             if key in prog.get("chapters", {}):
                                 continue
-                            prog.setdefault("chapters", {})[key] = {
+                            discovered_entry = {
                                 "actual_num": actual_num,
                                 "content_hash": "",
                                 "output_file": fname,
@@ -17699,6 +17963,17 @@ class RetranslationMixin:
                                 "auto_discovered": True,
                                 "original_basename": fname
                             }
+                            if is_subtitle_output:
+                                discovered_entry.update({
+                                    "subtitle_progress_key": key,
+                                    "subtitle_output_file": os.path.abspath(
+                                        os.path.join(output_dir, fname)
+                                    ),
+                                    "subtitle_bundle_source_index": subtitle_auto_index,
+                                    "subtitle_source_batch_num": 1,
+                                    "subtitle_source_batch_count": 1,
+                                })
+                            prog.setdefault("chapters", {})[key] = discovered_entry
                             updated = True
                     except Exception as e:
                         print(f"⚠️ Auto-discovery (refresh no OPF) failed: {e}")
@@ -18209,8 +18484,8 @@ class RetranslationMixin:
             ):
                 continue
             
-            # Include chapters with output files OR in_progress/failed/qa_failed with null output file (legacy)
-            if output_file or status in ["in_progress", "failed", "qa_failed"]:
+            # Include chapters with output files OR transient statuses with null output file (legacy)
+            if output_file or status in ["in_progress", "pending", "failed", "qa_failed"]:
                 # For merged chapters, use a unique key (chapter_key) instead of output_file
                 # This ensures merged chapters appear as separate entries in the list
                 if status == "merged":
@@ -18219,6 +18494,8 @@ class RetranslationMixin:
                     file_key = output_file
                 elif status == "in_progress":
                     file_key = f"_in_progress_{chapter_key}"
+                elif status == "pending":
+                    file_key = f"_pending_{chapter_key}"
                 elif status == "qa_failed":
                     file_key = f"_qa_failed_{chapter_key}"
                 else:  # failed
@@ -18232,10 +18509,31 @@ class RetranslationMixin:
         
         for output_file, entries in files_to_entries.items():
             chapter_key, chapter_info = entries[0]
+
+            subtitle_row = self._build_subtitle_progress_row(
+                prog,
+                entries,
+                output_file,
+            )
+            if subtitle_row is not None:
+                if subtitle_row['status'] == 'completed':
+                    subtitle_path = subtitle_row['output_file']
+                    if not os.path.isabs(subtitle_path):
+                        subtitle_path = os.path.join(output_dir, subtitle_path)
+                    if not os.path.exists(subtitle_path):
+                        subtitle_row['status'] = 'not_translated'
+                chapter_display_info.append(subtitle_row)
+                continue
             
             # Get the actual output file (strip placeholder prefix if present)
             actual_output_file = output_file
-            if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_") or output_file.startswith("_qa_failed_"):
+            if (
+                output_file.startswith("_merged_")
+                or output_file.startswith("_in_progress_")
+                or output_file.startswith("_pending_")
+                or output_file.startswith("_failed_")
+                or output_file.startswith("_qa_failed_")
+            ):
                 # For merged/in_progress/failed/qa_failed, get the actual output_file from chapter_info
                 actual_output_file = chapter_info.get("output_file", "")
                 if not actual_output_file:
@@ -19066,6 +19364,23 @@ class RetranslationMixin:
             display = f"{metadata_label} | {icon} {status_label:11s} | metadata.json -> {output_display}"
         elif info.get('pdf_ocr'):
             display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
+        elif info.get('is_subtitle'):
+            original_file = info.get('original_filename') or os.path.basename(output_file)
+            try:
+                completed_batches = int(info.get('subtitle_completed_batches') or 0)
+                total_batches = int(info.get('subtitle_total_batches') or 0)
+            except (TypeError, ValueError):
+                completed_batches = 0
+                total_batches = 0
+            batch_label = (
+                f" | Batches {completed_batches}/{total_batches}"
+                if total_batches > 1
+                else ""
+            )
+            display = (
+                f"Subtitle {int(chapter_num):03d} | {icon} {status_label:11s} | "
+                f"{original_file} -> {output_display}{batch_label}"
+            )
         elif 'opf_position' in info:
             original_file = info.get('original_filename', '')
             opf_pos = info['opf_position'] + 1
@@ -19118,7 +19433,7 @@ class RetranslationMixin:
             if parent_chapter:
                 display += f" | → Ch.{parent_chapter}"
 
-        if info.get('duplicate_count', 1) > 1:
+        if not info.get('is_subtitle') and info.get('duplicate_count', 1) > 1:
             display += f" | ({info['duplicate_count']} entries)"
 
         return display, status
@@ -19683,7 +19998,7 @@ class RetranslationMixin:
                     folders.append(file_path)
                 elif file_path.lower().endswith('.epub'):
                     epub_files.append(file_path)
-                elif file_path.lower().endswith('.txt'):
+                elif file_path.lower().endswith(('.txt', '.srt', '.ass', '.zip')):
                     text_files.append(file_path)
                 elif file_path.lower().endswith(image_extensions):
                     image_files.append(file_path)

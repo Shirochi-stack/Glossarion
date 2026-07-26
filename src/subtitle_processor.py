@@ -732,6 +732,10 @@ def extract_subtitle_bundle_to_chapters(
             updated_batch = dict(local_batch)
             updated_batch["num"] = global_batch_num
             updated_batch["filename"] = global_filename
+            updated_batch["source_batch_num"] = int(
+                local_batch.get("num") or len(updated_batches) + 1
+            )
+            updated_batch["source_batch_count"] = len(source_batches)
             updated_batches.append(updated_batch)
 
             updated_chapter = dict(chapter)
@@ -799,48 +803,65 @@ def extract_subtitle_bundle_to_chapters(
     }
 
 
-def _batch_output_candidates(output_dir: str, filename: str) -> Iterable[str]:
+def _batch_output_candidates(
+    output_dir: str,
+    filename: str,
+    source_file: Optional[str] = None,
+    source_batch_num: Optional[int] = None,
+    source_batch_count: Optional[int] = None,
+) -> Iterable[str]:
+    """Yield manifest and source-named checkpoint paths for one subtitle batch."""
     candidates = [filename]
     if filename and not os.path.basename(filename).startswith("response_"):
         candidates.append(f"response_{filename}")
+    if source_file:
+        source_stem = os.path.splitext(os.path.basename(source_file))[0]
+        try:
+            local_batch = int(source_batch_num or 1)
+        except (TypeError, ValueError):
+            local_batch = 1
+        try:
+            local_count = int(source_batch_count or 1)
+        except (TypeError, ValueError):
+            local_count = 1
+        checkpoint_stem = (
+            f"{source_stem}_batch_{local_batch}"
+            if local_count > 1
+            else source_stem
+        )
+        candidates.extend(
+            [
+                f"{checkpoint_stem}.txt",
+                f"response_{checkpoint_stem}.txt",
+            ]
+        )
+    yielded = set()
     for candidate in candidates:
-        if candidate:
-            yield os.path.join(output_dir, candidate)
-
-
-def _completed_outputs(output_dir: str) -> Optional[set]:
-    progress_path = os.path.join(output_dir, "translation_progress.json")
-    if not os.path.isfile(progress_path):
-        return None
-    try:
-        with open(progress_path, "r", encoding="utf-8") as source:
-            progress = json.load(source)
-    except Exception:
-        return set()
-    completed = set()
-    for info in (progress.get("chapters") or {}).values():
-        if not isinstance(info, dict):
+        if not candidate:
             continue
-        if str(info.get("status") or "").casefold() != "completed":
+        candidate_path = os.path.join(output_dir, candidate)
+        normalized = os.path.normcase(os.path.abspath(candidate_path))
+        if normalized in yielded:
             continue
-        output_file = info.get("output_file")
-        if output_file:
-            completed.add(os.path.basename(str(output_file)).casefold())
-    return completed
+        yielded.add(normalized)
+        yield candidate_path
 
 
 def _read_completed_batch(
-    output_dir: str, batch: Dict[str, Any], completed_outputs: Optional[set]
+    output_dir: str,
+    batch: Dict[str, Any],
+    source_file: Optional[str] = None,
+    source_batch_num: Optional[int] = None,
+    source_batch_count: Optional[int] = None,
 ) -> Optional[str]:
     for candidate in _batch_output_candidates(
-        output_dir, str(batch.get("filename") or "")
+        output_dir,
+        str(batch.get("filename") or ""),
+        source_file=source_file,
+        source_batch_num=source_batch_num,
+        source_batch_count=source_batch_count,
     ):
         if not os.path.isfile(candidate):
-            continue
-        if (
-            completed_outputs is not None
-            and os.path.basename(candidate).casefold() not in completed_outputs
-        ):
             continue
         with open(candidate, "r", encoding="utf-8") as source:
             return source.read()
@@ -938,16 +959,30 @@ def convert_subtitle(
         for segment in manifest.get("segments", [])
         if isinstance(segment, dict)
     }
-    completed_outputs = _completed_outputs(output_dir)
     translated: Dict[str, str] = {}
     invalid_batches = 0
     missing = 0
-    for batch in manifest.get("batches", []):
+    manifest_batches = manifest.get("batches", [])
+    batch_count = len(manifest_batches)
+    for batch_position, batch in enumerate(manifest_batches, start=1):
         expected_ids = [
             str(segment_id) for segment_id in batch.get("segment_ids", [])
         ]
+        source_batch_num = batch.get("source_batch_num")
+        if source_batch_num is None:
+            source_batch_num = (
+                batch_position
+                if batch_count > 1
+                else 1
+            )
         batch_text = _read_completed_batch(
-            output_dir, batch, completed_outputs
+            output_dir,
+            batch,
+            source_file=source_file,
+            source_batch_num=source_batch_num,
+            source_batch_count=(
+                batch.get("source_batch_count") or batch_count
+            ),
         )
         if batch_text is None:
             missing += len(expected_ids)
@@ -1029,21 +1064,25 @@ def _completed_batch_signature(
     manifest: Dict[str, Any],
 ) -> Optional[Tuple[Tuple[str, int, int], ...]]:
     """Identify the exact completed response files used for one subtitle."""
-    completed_outputs = _completed_outputs(output_dir)
     signature: List[Tuple[str, int, int]] = []
-    for batch in manifest.get("batches", []):
+    manifest_batches = manifest.get("batches", [])
+    batch_count = len(manifest_batches)
+    source_file = str(manifest.get("source_file") or "")
+    for batch_position, batch in enumerate(manifest_batches, start=1):
         completed_path = None
         for candidate in _batch_output_candidates(
             output_dir,
             str(batch.get("filename") or ""),
+            source_file=source_file,
+            source_batch_num=(
+                batch.get("source_batch_num")
+                or (batch_position if batch_count > 1 else 1)
+            ),
+            source_batch_count=(
+                batch.get("source_batch_count") or batch_count
+            ),
         ):
             if not os.path.isfile(candidate):
-                continue
-            if (
-                completed_outputs is not None
-                and os.path.basename(candidate).casefold()
-                not in completed_outputs
-            ):
                 continue
             completed_path = candidate
             break
@@ -1143,6 +1182,7 @@ def convert_subtitle_bundle_source(
 def convert_subtitle_bundle(
     output_dir: str,
     manifest_path: Optional[str] = None,
+    reuse_existing_source_indices: Optional[Iterable[int]] = None,
 ) -> Dict[str, Any]:
     """Rebuild every source subtitle represented by a combined bundle."""
     manifest_path = manifest_path or os.path.join(
@@ -1157,14 +1197,52 @@ def convert_subtitle_bundle(
     bundle_files = bundle_manifest.get("files", [])
     if not isinstance(bundle_files, list):
         raise ValueError("Subtitle archive bundle files must be a list")
-    results = [
-        convert_subtitle_bundle_source(
-            output_dir,
-            source_index,
-            manifest_path=manifest_path,
+    reuse_indices = {
+        int(source_index)
+        for source_index in (reuse_existing_source_indices or [])
+        if str(source_index).strip().isdigit()
+    }
+    results = []
+    for source_index in range(1, len(bundle_files) + 1):
+        item = bundle_files[source_index - 1]
+        existing_output = (
+            str(item.get("output_path") or "").strip()
+            if isinstance(item, dict)
+            else ""
         )
-        for source_index in range(1, len(bundle_files) + 1)
-    ]
+        if source_index in reuse_indices and os.path.isfile(existing_output):
+            item_manifest = (
+                item.get("manifest", {})
+                if isinstance(item, dict)
+                else {}
+            )
+            results.append(
+                {
+                    "success": True,
+                    "ready": True,
+                    "created": False,
+                    "already_exists": True,
+                    "output_path": existing_output,
+                    "source_index": source_index,
+                    "source_file": (
+                        item.get("source_file")
+                        if isinstance(item, dict)
+                        else None
+                    ),
+                    "updated": int(item_manifest.get("segment_count") or 0),
+                    "skipped": 0,
+                    "missing": 0,
+                    "invalid_batches": 0,
+                }
+            )
+            continue
+        results.append(
+            convert_subtitle_bundle_source(
+                output_dir,
+                source_index,
+                manifest_path=manifest_path,
+            )
+        )
     ready_results = [result for result in results if result.get("ready")]
     incomplete_results = [
         result for result in results if not result.get("ready")

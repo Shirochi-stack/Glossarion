@@ -2625,6 +2625,12 @@ class FileUtilities:
     @staticmethod
     def extract_actual_chapter_number(chapter, patterns=None, config=None):
         """Extract actual chapter number from filename using improved logic"""
+
+        # Subtitle batches already have a stable sequence number assigned by
+        # subtitle_processor.  Never parse digits from the subtitle title
+        # (for example, "Episode 100.srt") as though it were a TXT chapter.
+        if chapter.get("subtitle_batch") and chapter.get("num") is not None:
+            return chapter["num"]
         
         # IMPORTANT: Check if this is a pre-split TEXT FILE chunk first
         if (chapter.get('is_chunk', False) and 
@@ -2752,6 +2758,32 @@ class FileUtilities:
         
         # Respect toggle: retain source extension and remove 'response_' prefix
         retain = should_retain_source_extension()
+
+        if chapter.get("subtitle_batch") and chapter.get("original_basename"):
+            subtitle_stem = os.path.splitext(
+                os.path.basename(str(chapter["original_basename"]))
+            )[0]
+            try:
+                subtitle_batch_num = int(
+                    chapter.get("subtitle_source_batch_num") or 1
+                )
+            except (TypeError, ValueError):
+                subtitle_batch_num = 1
+            try:
+                subtitle_batch_count = int(
+                    chapter.get("subtitle_source_batch_count") or 1
+                )
+            except (TypeError, ValueError):
+                subtitle_batch_count = 1
+            if subtitle_batch_count > 1:
+                subtitle_stem = (
+                    f"{subtitle_stem}_batch_{subtitle_batch_num}"
+                )
+            return (
+                f"{subtitle_stem}.txt"
+                if retain
+                else f"response_{subtitle_stem}.txt"
+            )
         
         # Helper to compute full original extension chain (e.g., '.html.xhtml')
         def _full_ext_from_original(ch):
@@ -2896,10 +2928,111 @@ class ProgressManager:
             else ""
         )
         self._save_lock = threading.RLock()
+        local_progress_existed = os.path.isfile(self.PROGRESS_FILE)
         self.prog = self._init_or_load()
+        self._loaded_subtitle_progress_from_mirror = False
+        if not local_progress_existed:
+            self._restore_subtitle_progress_from_mirror()
         # Disable auto-dedup unless explicitly enabled; dedup can drop distinct chapters sharing filenames
         if os.getenv("ENABLE_PROGRESS_DEDUP", "0") == "1":
             self._dedup_by_output()
+
+    @staticmethod
+    def _is_subtitle_progress_info(chapter_info):
+        return bool(
+            isinstance(chapter_info, dict)
+            and (
+                chapter_info.get("subtitle_progress_key")
+                or chapter_info.get("subtitle_source_file")
+                or chapter_info.get("subtitle_output_file")
+                or chapter_info.get("subtitle_bundle_source_index") is not None
+            )
+        )
+
+    def _restore_subtitle_progress_from_mirror(self):
+        """Seed a fresh temporary subtitle manager from its stable output mirror."""
+        mirror_path = getattr(self, "PROGRESS_MIRROR_FILE", "")
+        if not mirror_path or not os.path.isfile(mirror_path):
+            return False
+        try:
+            with open(mirror_path, "r", encoding="utf-8") as source:
+                mirror_progress = json.load(source)
+        except Exception as exc:
+            print(f"Warning: Could not read existing subtitle progress mirror: {exc}")
+            return False
+        if not isinstance(mirror_progress, dict):
+            return False
+        mirror_chapters = mirror_progress.get("chapters", {})
+        if not isinstance(mirror_chapters, dict):
+            return False
+        subtitle_count = sum(
+            self._is_subtitle_progress_info(info)
+            for info in mirror_chapters.values()
+        )
+        if subtitle_count <= 0:
+            return False
+
+        restored = copy.deepcopy(mirror_progress)
+        restored.setdefault("chapters", {})
+        restored.setdefault("chapter_chunks", {})
+        restored.setdefault("image_chunks", {})
+        restored.setdefault("version", "2.1")
+        restored["output_mode"] = self.prog.get(
+            "output_mode",
+            restored.get("output_mode", "text"),
+        )
+        self.prog = restored
+        self._loaded_subtitle_progress_from_mirror = True
+        print(
+            f"Restored {subtitle_count} subtitle progress entr"
+            f"{'y' if subtitle_count == 1 else 'ies'} from: {mirror_path}"
+        )
+        return True
+
+    def _merge_existing_subtitle_mirror_rows(
+        self,
+        mirror_path,
+        mirror_progress,
+    ):
+        """Never let a partial/empty temporary snapshot erase stable subtitle rows."""
+        if not mirror_path or not os.path.isfile(mirror_path):
+            return mirror_progress
+        try:
+            with open(mirror_path, "r", encoding="utf-8") as source:
+                existing_progress = json.load(source)
+        except Exception:
+            return mirror_progress
+        if not isinstance(existing_progress, dict):
+            return mirror_progress
+        existing_chapters = existing_progress.get("chapters", {})
+        outgoing_chapters = mirror_progress.setdefault("chapters", {})
+        if not isinstance(existing_chapters, dict) or not isinstance(
+            outgoing_chapters, dict
+        ):
+            return mirror_progress
+
+        preserved = 0
+        for chapter_key, chapter_info in existing_chapters.items():
+            if (
+                chapter_key not in outgoing_chapters
+                and self._is_subtitle_progress_info(chapter_info)
+            ):
+                outgoing_chapters[chapter_key] = copy.deepcopy(chapter_info)
+                preserved += 1
+
+        existing_files = existing_progress.get("subtitle_files", {})
+        if isinstance(existing_files, dict):
+            outgoing_files = mirror_progress.setdefault("subtitle_files", {})
+            if isinstance(outgoing_files, dict):
+                for file_key, file_info in existing_files.items():
+                    outgoing_files.setdefault(file_key, copy.deepcopy(file_info))
+
+        if preserved:
+            print(
+                f"Preserved {preserved} subtitle progress entr"
+                f"{'y' if preserved == 1 else 'ies'} from the output mirror"
+            )
+        return mirror_progress
         
     def _init_or_load(self):
         """Initialize or load progress tracking with improved structure"""
@@ -3307,7 +3440,11 @@ class ProgressManager:
             progress_name = os.path.basename(
                 str(progress_id).replace("\\", "/")
             ).strip()
-            progress_name = re.sub(r"[^A-Za-z0-9._-]+", "_", progress_name)
+            progress_name = re.sub(
+                r'[<>:"/\\|?*\x00-\x1f]+',
+                "_",
+                progress_name,
+            )
             local_batch = chapter_obj.get(
                 "subtitle_source_batch_num", actual_num
             )
@@ -3665,6 +3802,12 @@ class ProgressManager:
                                 completed_item["file"] = mirror_info[
                                     "subtitle_output_file"
                                 ]
+                        mirror_progress = (
+                            self._merge_existing_subtitle_mirror_rows(
+                                mirror_path,
+                                mirror_progress,
+                            )
+                        )
                         self._write_progress_snapshot(
                             mirror_path,
                             mirror_progress,
@@ -4612,6 +4755,38 @@ class ProgressManager:
             chapter_info = self.prog["chapters"][chapter_key]
             status = chapter_info.get("status")
             status_l = status.lower() if isinstance(status, str) else status or ""
+            if chapter_obj and chapter_obj.get("subtitle_batch"):
+                final_subtitle = str(
+                    chapter_info.get("subtitle_output_file") or ""
+                ).strip()
+                stored_hash = str(
+                    chapter_info.get("content_hash") or ""
+                ).strip()
+                hash_matches = not stored_hash or stored_hash == str(
+                    content_hash or ""
+                )
+                if (
+                    status_l
+                    in ("completed", "completed_empty", "completed_image_only")
+                    and final_subtitle
+                    and os.path.isfile(final_subtitle)
+                    and hash_matches
+                ):
+                    chapter_obj["_subtitle_final_output_reused"] = True
+                    return (
+                        False,
+                        f"Subtitle batch {actual_num} already translated: "
+                        f"{os.path.basename(final_subtitle)}",
+                        None,
+                    )
+                if (
+                    status_l
+                    in ("completed", "completed_empty", "completed_image_only")
+                    and final_subtitle
+                    and os.path.isfile(final_subtitle)
+                    and not hash_matches
+                ):
+                    return True, None, None
             # Failed statuses ALWAYS trigger retranslation
             if status in ["qa_failed", "failed", "error", "file_missing"]:
                 return True, None, None
@@ -4812,6 +4987,17 @@ class ProgressManager:
             # MERGED CHAPTERS FIX: Don't delete merged children in first pass
             # They will be handled in second pass if their parent was deleted
             if status == "merged":
+                continue
+
+            # Subtitle batch rows share one final SRT/ASS output.  That file is
+            # intentionally absent until every batch for the source subtitle
+            # has completed, so its absence cannot be used to delete an
+            # individual completed batch while Progress Manager is open.
+            if (
+                chapter_info.get("subtitle_progress_key")
+                or chapter_info.get("subtitle_source_file")
+                or chapter_info.get("subtitle_output_file")
+            ):
                 continue
             
             # QA_FAILED / FAILED / IN_PROGRESS / PENDING FIX:
@@ -23961,7 +24147,21 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Check if this chapter exists in progress
-            chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
+            if c.get("subtitle_batch"):
+                subtitle_progress_key = progress_manager._get_chapter_key(
+                    actual_num,
+                    chapter_obj=c,
+                    content_hash=content_hash,
+                )
+                chapter_info = progress_manager.prog["chapters"].get(
+                    subtitle_progress_key,
+                    {},
+                )
+            else:
+                chapter_info = progress_manager.prog["chapters"].get(
+                    content_hash,
+                    {},
+                )
             status = chapter_info.get("status")
             
             if status == "qa_failed":
@@ -23981,7 +24181,21 @@ def main(log_callback=None, stop_callback=None):
                     actual_num = c.get('actual_chapter_num', c['num'])
                 
                 content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-                chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
+                if c.get("subtitle_batch"):
+                    subtitle_progress_key = progress_manager._get_chapter_key(
+                        actual_num,
+                        chapter_obj=c,
+                        content_hash=content_hash,
+                    )
+                    chapter_info = progress_manager.prog["chapters"].get(
+                        subtitle_progress_key,
+                        {},
+                    )
+                else:
+                    chapter_info = progress_manager.prog["chapters"].get(
+                        content_hash,
+                        {},
+                    )
                 if chapter_info.get("status") == "qa_failed":
                     qa_failed_chapters.append(actual_num)
             
@@ -26439,7 +26653,36 @@ def main(log_callback=None, stop_callback=None):
             if is_subtitle_bundle:
                 from subtitle_processor import convert_subtitle_bundle
 
-                result = convert_subtitle_bundle(out)
+                subtitle_source_batches = {}
+                for subtitle_chapter in chapters:
+                    if not isinstance(subtitle_chapter, dict):
+                        continue
+                    try:
+                        subtitle_source_index = int(
+                            subtitle_chapter.get(
+                                "subtitle_bundle_source_index"
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    subtitle_source_batches.setdefault(
+                        subtitle_source_index,
+                        [],
+                    ).append(subtitle_chapter)
+                reused_source_indices = {
+                    source_index
+                    for source_index, source_chapters in
+                    subtitle_source_batches.items()
+                    if source_chapters
+                    and all(
+                        chapter.get("_subtitle_final_output_reused")
+                        for chapter in source_chapters
+                    )
+                }
+                result = convert_subtitle_bundle(
+                    out,
+                    reuse_existing_source_indices=reused_source_indices,
+                )
                 output_paths = list(result.get("outputs") or [])
                 output_path = (
                     os.path.dirname(output_paths[0])

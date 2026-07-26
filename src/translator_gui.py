@@ -21520,11 +21520,25 @@ Recent translations to summarize:
         glossary_path = str(
             getattr(self, "manual_glossary_path", "") or ""
         ).strip()
-        if (
-            not glossary_path
-            or getattr(self, "manual_glossary_manually_loaded", False)
-        ):
+        if getattr(self, "manual_glossary_manually_loaded", False):
             return False
+
+        stale_candidates = [
+            glossary_path,
+            str(getattr(self, "auto_loaded_glossary_path", "") or "").strip(),
+            str(os.environ.get("MANUAL_GLOSSARY", "") or "").strip(),
+        ]
+        try:
+            stale_candidates.append(
+                str(self.config.get("manual_glossary_path", "") or "").strip()
+            )
+        except Exception:
+            pass
+        cleared_path = next(
+            (candidate for candidate in stale_candidates if candidate),
+            "",
+        )
+        had_stale_state = bool(cleared_path)
 
         self.manual_glossary_path = None
         self.manual_glossary_manually_loaded = False
@@ -21537,9 +21551,11 @@ Recent translations to summarize:
             pass
         os.environ.pop("MANUAL_GLOSSARY", None)
         try:
+            if not had_stale_state:
+                return False
             self.append_log(
                 "📑 Cleared automatically selected glossary for new "
-                f"non-EPUB input: {os.path.basename(glossary_path)}"
+                f"non-EPUB input: {os.path.basename(cleared_path)}"
             )
         except Exception:
             pass
@@ -21547,7 +21563,7 @@ Recent translations to summarize:
             self._update_manual_glossary_status()
         except Exception:
             pass
-        return True
+        return had_stale_state
 
     def _resolve_translation_output_dir(self, input_file: str) -> str:
         """Return the expected translation output directory for one input file."""
