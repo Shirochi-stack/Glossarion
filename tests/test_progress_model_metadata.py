@@ -115,6 +115,74 @@ def test_cleanup_missing_files_uses_one_directory_snapshot(tmp_path, monkeypatch
     assert "6" in progress.prog["chapters"]
 
 
+@pytest.mark.parametrize("extension", [".srt", ".ass"])
+def test_progress_manager_does_not_add_metadata_row_for_subtitles(
+    tmp_path,
+    extension,
+):
+    source = tmp_path / f"episode{extension}"
+    gui = RetranslationMixin()
+    rows = []
+
+    gui._append_metadata_display_info(
+        {
+            "file_path": str(source),
+            "output_dir": str(tmp_path / "output"),
+            "prog": {"chapters": {}, "version": "2.1"},
+        },
+        rows,
+    )
+
+    assert rows == []
+
+
+def test_progress_manager_does_not_add_metadata_row_for_empty_subtitle_zip(
+    tmp_path,
+):
+    archive = tmp_path / "season.zip"
+    extracted = tmp_path / "extract" / "episode.srt"
+    gui = RetranslationMixin()
+    gui._subtitle_zip_output_groups = {
+        os.path.normcase(os.path.abspath(extracted)): {
+            "archive_path": str(archive),
+            "bundle_id": os.path.normcase(os.path.abspath(archive)),
+            "bundle_files": [str(extracted)],
+            "output_dir": str(tmp_path / "season"),
+        }
+    }
+    rows = []
+
+    gui._append_metadata_display_info(
+        {
+            "file_path": str(archive),
+            "output_dir": str(tmp_path / "season"),
+            "prog": {"chapters": {}, "version": "2.1"},
+        },
+        rows,
+    )
+
+    assert rows == []
+
+
+def test_disabled_epub_metadata_row_is_still_shown_as_skipped(tmp_path):
+    gui = RetranslationMixin()
+    gui.config = {"translate_book_title": False}
+    rows = []
+
+    gui._append_metadata_display_info(
+        {
+            "file_path": str(tmp_path / "book.epub"),
+            "output_dir": str(tmp_path / "book"),
+            "prog": {"chapters": {}, "version": "2.1"},
+        },
+        rows,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["special_type"] == "metadata"
+    assert rows[0]["status"] == "skipped"
+
+
 def test_progress_update_captures_actual_request_model(tmp_path):
     progress = ProgressManager(str(tmp_path))
     set_current_thread_actual_request_model("deepseek-v4", "FALLBACK KEY (deepseek-v4)")

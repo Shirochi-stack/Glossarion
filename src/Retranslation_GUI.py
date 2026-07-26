@@ -10445,8 +10445,50 @@ class RetranslationMixin:
                 changed = True
         return changed or set(old_entries) != {phase['key'] for phase in plan}
 
+    def _progress_view_is_subtitle(self, data):
+        """Return whether a Progress Manager dataset belongs to subtitles."""
+        data = data if isinstance(data, dict) else {}
+        file_path = str(data.get('file_path') or '')
+        extension = os.path.splitext(file_path)[1].lower()
+        if extension in ('.srt', '.ass'):
+            return True
+
+        prog = data.get('prog') if isinstance(data.get('prog'), dict) else {}
+        if isinstance(prog.get('subtitle_files'), dict):
+            return True
+        chapters = prog.get('chapters', {})
+        if isinstance(chapters, dict) and any(
+            self._is_subtitle_progress_entry(entry)
+            for entry in chapters.values()
+            if isinstance(entry, dict)
+        ):
+            return True
+
+        # A newly opened subtitle ZIP can precede its first progress entry.
+        # In that window, use the extraction session's archive mapping rather
+        # than showing an unrelated synthetic metadata row.
+        if extension == '.zip' and file_path:
+            archive_key = os.path.normcase(os.path.abspath(file_path))
+            mappings = getattr(self, '_subtitle_zip_output_groups', None)
+            if isinstance(mappings, dict):
+                for info in mappings.values():
+                    if not isinstance(info, dict):
+                        continue
+                    mapped_archive = (
+                        info.get('archive_path') or info.get('bundle_id')
+                    )
+                    if (
+                        mapped_archive
+                        and os.path.normcase(os.path.abspath(str(mapped_archive)))
+                        == archive_key
+                    ):
+                        return True
+        return False
+
     def _append_metadata_display_info(self, data, chapter_display_info):
         """Add each tracked metadata API phase as a selectable row."""
+        if self._progress_view_is_subtitle(data):
+            return
         metadata_enabled = self._metadata_progress_tracking_enabled(data.get('file_path'))
         prog = data.get('prog') or {}
         chapters = prog.get('chapters', {})
