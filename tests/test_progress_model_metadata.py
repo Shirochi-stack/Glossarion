@@ -968,9 +968,13 @@ def test_progress_manager_source_link_updates_epub_library_scan(
         json.dumps(
             {
                 "chapters": {
-                    "metadata": {
+                    "__metadata__": {
                         "status": "pending",
                         "output_file": "metadata.json",
+                        "original_basename": "metadata.json",
+                        "is_special": True,
+                        "special_type": "metadata",
+                        "metadata_progress_key": "__metadata__",
                     }
                 },
                 "chapter_chunks": {},

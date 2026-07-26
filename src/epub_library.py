@@ -2384,8 +2384,22 @@ def _validate_source_epub_for_workspace(folder: str, source_path: str) -> bool:
             prog = _json.load(f)
         chapters = prog.get("chapters", {}) if isinstance(prog, dict) else {}
         stems: set[str] = set()
-        for ch in chapters.values():
+        for progress_key, ch in chapters.items():
             if isinstance(ch, dict):
+                # Progress Manager scaffolds a synthetic metadata.json row
+                # before any chapter translation begins.  It is not an EPUB
+                # manifest item, so including it in the content-overlap check
+                # makes every valid raw EPUB fail validation while the
+                # workspace contains only that row (the Library then shows
+                # "missing raw" and 0/1).  Ignore every representation used
+                # by metadata_progress.py, including older snapshots that
+                # only carried the reserved progress key.
+                if (
+                    str(progress_key) == "__metadata__"
+                    or str(ch.get("special_type") or "").lower() == "metadata"
+                    or bool(ch.get("metadata_progress_key"))
+                ):
+                    continue
                 ob = ch.get("original_basename")
                 if ob:
                     stems.add(_special_file_stem(str(ob)))
