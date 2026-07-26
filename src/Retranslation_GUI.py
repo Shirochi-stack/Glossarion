@@ -10297,6 +10297,14 @@ class RetranslationMixin:
             else:
                 status = 'pending'
 
+        no_translation_required = all(
+            bool(entry.get('subtitle_no_translatable_text'))
+            for _, entry in subtitle_entries
+        )
+        if no_translation_required:
+            status = 'not_translated'
+            completed_batches = 0
+
         progress_keys = [str(key) for key, _ in subtitle_entries]
         return {
             'key': first_key,
@@ -19476,6 +19484,11 @@ class RetranslationMixin:
 
         for candidate in candidates:
             model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
+            if (
+                candidate.get('subtitle_no_translatable_text')
+                and model_name.lower() == 'no api needed'
+            ):
+                continue
             if model_name:
                 return model_name
         return "(model unknown)"

@@ -519,7 +519,7 @@ def _materialize_empty_subtitle_sources(
                 source_index,
                 content_hash,
                 output_path,
-                status="completed",
+                status="not_translated",
                 chapter_obj=chapter_obj,
                 prefer_thread_model=False,
             )
@@ -534,7 +534,8 @@ def _materialize_empty_subtitle_sources(
             )
             if isinstance(progress_entry, dict):
                 progress_entry["subtitle_no_translatable_text"] = True
-                progress_entry["model_name"] = "No API needed"
+                progress_entry.pop("model_name", None)
+                progress_entry.pop("model", None)
                 progress_entry.pop("key_identifier", None)
             completed += 1
             print(
@@ -3724,6 +3725,7 @@ class ProgressManager:
                     "completed_batches": 0,
                     "failed_batches": 0,
                     "in_progress_batches": 0,
+                    "not_translated_batches": 0,
                     "pending_batches": 0,
                     "batch_keys": [],
                 },
@@ -3734,12 +3736,21 @@ class ProgressManager:
             )
             summary["batch_keys"].append(str(chapter_key))
             status = str(chapter_info.get("status") or "pending").lower()
+            if chapter_info.get("subtitle_no_translatable_text"):
+                if str(chapter_info.get("model_name") or "").strip().lower() == "no api needed":
+                    chapter_info.pop("model_name", None)
+                    chapter_info.pop("key_identifier", None)
+                if status == "completed":
+                    status = "not_translated"
+                    chapter_info["status"] = status
             if status in ("completed", "completed_empty", "completed_image_only"):
                 summary["completed_batches"] += 1
             elif status in ("qa_failed", "failed", "error", "file_missing"):
                 summary["failed_batches"] += 1
             elif status in ("in_progress", "queued"):
                 summary["in_progress_batches"] += 1
+            elif status in ("not_translated", "not translated", "not_completed"):
+                summary["not_translated_batches"] += 1
             else:
                 summary["pending_batches"] += 1
 
@@ -3757,6 +3768,11 @@ class ProgressManager:
                 summary["status"] = "completed"
             elif summary["in_progress_batches"] or summary["completed_batches"]:
                 summary["status"] = "in_progress"
+            elif (
+                summary["total_batches"] > 0
+                and summary["not_translated_batches"] >= summary["total_batches"]
+            ):
+                summary["status"] = "not_translated"
             else:
                 summary["status"] = "pending"
 

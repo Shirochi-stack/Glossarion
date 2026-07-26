@@ -487,11 +487,13 @@ def test_empty_subtitle_bundle_source_is_preserved_and_tracked(tmp_path):
     )
     key = "subtitle:empty.srt:1"
     entry = progress.prog["chapters"][key]
-    assert entry["status"] == "completed"
+    assert entry["status"] == "not_translated"
     assert entry["subtitle_bundle_source_index"] == 1
     assert entry["subtitle_no_translatable_text"] is True
-    assert entry["model_name"] == "No API needed"
-    assert progress.prog["subtitle_files"]["empty.srt"]["status"] == "completed"
+    assert "model_name" not in entry
+    assert progress.prog["subtitle_files"]["empty.srt"]["status"] == (
+        "not_translated"
+    )
     chapters = json.loads(
         Path(extraction["chapters_path"]).read_text(encoding="utf-8")
     )
@@ -713,6 +715,43 @@ def test_retranslation_progress_builds_one_indexed_subtitle_row(tmp_path):
     assert "Subtitle 007" in display
     assert source.name in display
     assert "Batches 1/2" in display
+
+
+def test_legacy_no_api_subtitle_label_displays_not_translated(tmp_path):
+    from Retranslation_GUI import RetranslationMixin
+
+    source = tmp_path / "empty.srt"
+    output = tmp_path / "Show" / source.name
+    entry = {
+        "actual_num": 1,
+        "status": "completed",
+        "output_file": str(output),
+        "subtitle_output_file": str(output),
+        "subtitle_source_file": str(source),
+        "subtitle_bundle_source_index": 1,
+        "subtitle_source_batch_num": 1,
+        "subtitle_source_batch_count": 1,
+        "subtitle_no_translatable_text": True,
+        "model_name": "No API needed",
+    }
+    entries = [("subtitle:empty.srt:1", entry)]
+    mixin = RetranslationMixin.__new__(RetranslationMixin)
+
+    row = mixin._build_subtitle_progress_row({}, entries, str(output))
+    display, status = mixin._progress_list_display_text(
+        row,
+        {
+            "show_model_info_state": True,
+            "prog": {"chapters": {"subtitle:empty.srt:1": entry}},
+        },
+        20,
+        25,
+    )
+
+    assert row["status"] == "not_translated"
+    assert status == "not_translated"
+    assert "Not Translated" in display
+    assert "No API needed" not in display
 
 
 def test_cleanup_preserves_completed_subtitle_batch_before_final_file_exists(
