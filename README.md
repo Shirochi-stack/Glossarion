@@ -171,6 +171,22 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 
 ---
 
+## 📁 Supported Extensions
+
+| Workflow | Extensions | Notes |
+|----------|------------|-------|
+| **Books and documents** | `.epub`, `.txt`, `.pdf`, `.md`, `.json`, `.csv` | Supported by the main translation and batch workflows. |
+| **Translation editing** | `.sdlxliff` | Extract, translate, review, and rebuild SDLXLIFF translation units. |
+| **Subtitles and synchronized lyrics** | `.srt`, `.ass`, `.lrc` | Preserves subtitle timing and structure. Files can be selected directly or stored inside a ZIP, including within nested subfolders. |
+| **Archives and comics** | `.zip`, `.cbz` | ZIP handling depends on its contents; subtitle ZIPs are processed as one bundle, while CBZ archives are handled by the manga workflow. |
+| **Images** | `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp` | Supported by the image and manga translation workflows. |
+| **Video and game integration** | `.mp4`, `.exe` | MP4 video input and RPG Maker game translation through the GTool integration. |
+| **Additional Direct Text attachments** | `.markdown`, `.html`, `.htm`, `.xhtml`, `.xml`, `.tsv`, `.vtt`, `.log`, `.tif`, `.tiff`, `.svg`, `.ico`, `.heic`, `.heif`, `.avif`, `.jxl` | Available when attaching a file in Direct Text. |
+
+Extension matching is case-insensitive. Output formats depend on the selected workflow and its output settings.
+
+---
+
 ## 📦 Installation
 
 ### Prerequisites

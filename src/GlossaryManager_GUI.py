@@ -35,6 +35,43 @@ class GlossaryManagerMixin:
 
     GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
 
+    def _glossary_editor_input_sources(self):
+        """Return the current source identities used by the glossary editor.
+
+        Extracted subtitle members from one ZIP collapse back to the archive
+        path, so the editor uses the one archive-level glossary instead of
+        treating every SRT/ASS/LRC member as a separate book.
+        """
+        try:
+            files = list(getattr(self, 'selected_files', None) or [])
+        except Exception:
+            files = []
+
+        fallback_path = None
+        if not files:
+            try:
+                fallback_path = getattr(self, 'file_path', None)
+            except Exception:
+                fallback_path = None
+        if not files and not fallback_path:
+            try:
+                getter = getattr(self, 'get_current_epub_path', None)
+                fallback_path = getter() if callable(getter) else None
+            except Exception:
+                fallback_path = None
+
+        from glossary_paths import resolve_glossary_input_sources
+
+        return resolve_glossary_input_sources(
+            files,
+            fallback_path=fallback_path,
+            subtitle_info_resolver=getattr(
+                self,
+                '_subtitle_zip_output_info',
+                None,
+            ),
+        )
+
     def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
         """Force hidden glossary settings tabs through their first layout pass."""
         prewarm_start = time.perf_counter()
@@ -682,6 +719,13 @@ class GlossaryManagerMixin:
                 combo.blockSignals(False)
         except Exception:
             pass
+        # Cancel any asynchronous parse for the previously selected input.
+        # Otherwise a slow old glossary can repopulate the tree after a ZIP or
+        # subtitle-format switch.
+        self._editor_load_token = None
+        self._editor_last_mtime = 0.0
+        self._editor_glossary_source_map = {}
+        self._editor_glossary_epub_map = {}
         self.current_glossary_data = None
         self.current_glossary_format = None
         self._glossary_editor_base_stats_text = "No glossary loaded"
@@ -3729,16 +3773,15 @@ Do not stop after the glossary."""
                 if not (hasattr(self, 'append_glossary_checkbox') and self.append_glossary_checkbox.isChecked()):
                     return
 
-                # Determine current EPUB
-                epub_path = None
+                # Subtitle members resolve to their one archive-level source.
+                source_path = None
                 try:
-                    files = list(getattr(self, 'selected_files', []) or [])
-                    epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                    if len(epubs) == 1:
-                        epub_path = epubs[0]
+                    sources = self._glossary_editor_input_sources()
+                    if len(sources) == 1:
+                        source_path = sources[0]
                 except Exception:
                     pass
-                if not epub_path:
+                if not source_path:
                     return
 
                 if checked:
@@ -3772,7 +3815,7 @@ Do not stop after the glossary."""
                             pass
                     else:
                         try:
-                            self.auto_load_glossary_for_file(epub_path)
+                            self.auto_load_glossary_for_file(source_path)
                         except Exception:
                             pass
                 else:
@@ -3788,7 +3831,7 @@ Do not stop after the glossary."""
                     except Exception:
                         pass
                     try:
-                        self.auto_load_glossary_for_file(epub_path)
+                        self.auto_load_glossary_for_file(source_path)
                     except Exception:
                         pass
 
@@ -3802,6 +3845,12 @@ Do not stop after the glossary."""
                             if getattr(self, '_last_editor_switch_log', '') != _log_msg:
                                 self.append_log(_log_msg)
                                 self._last_editor_switch_log = _log_msg
+                except Exception:
+                    pass
+                try:
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
                 except Exception:
                     pass
             except Exception:
@@ -5041,12 +5090,11 @@ Do not stop after the glossary."""
             try:
                 _automap_on = hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
                 _use_subfolder = _automap_on and mode != 'minimal'
-                epub_path = None
-                files = list(getattr(self, 'selected_files', []) or [])
-                epubs = [p for p in files if str(p).lower().endswith('.epub')]
-                if len(epubs) == 1:
-                    epub_path = epubs[0]
-                if epub_path:
+                source_path = None
+                sources = self._glossary_editor_input_sources()
+                if len(sources) == 1:
+                    source_path = sources[0]
+                if source_path:
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
@@ -5055,7 +5103,7 @@ Do not stop after the glossary."""
                         if hasattr(self, '_autofill_glossary_for_current_selection'):
                             self._autofill_glossary_for_current_selection()
                     else:
-                        self.auto_load_glossary_for_file(epub_path)
+                        self.auto_load_glossary_for_file(source_path)
                     if hasattr(self, 'editor_file_entry'):
                         new_path = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
                         if new_path and os.path.exists(new_path):
@@ -5064,6 +5112,9 @@ Do not stop after the glossary."""
                             if getattr(self, '_last_editor_switch_log', '') != _log_msg:
                                 self.append_log(_log_msg)
                                 self._last_editor_switch_log = _log_msg
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
             except Exception:
                 pass
         
@@ -8479,33 +8530,15 @@ Do not stop after the glossary."""
         self._on_editor_combo_changed_slot = _on_editor_combo_changed_impl
 
         # ------------------------------------------------------------------
-        # Auto-select glossary: populates combo for all selected EPUBs
+        # Auto-select glossary: populates the combo for current input sources.
         # ------------------------------------------------------------------
         def auto_select_current_glossary():
             try:
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
 
-                # Collect all selected EPUBs
-                epub_paths = []
-                try:
-                    files = list(getattr(self, 'selected_files', []) or [])
-                    epub_paths = [p for p in files if str(p).lower().endswith('.epub')]
-                except Exception:
-                    pass
-                if not epub_paths:
-                    try:
-                        if hasattr(self, 'get_current_epub_path'):
-                            ep = self.get_current_epub_path()
-                            if ep:
-                                epub_paths = [ep]
-                        if not epub_paths and hasattr(self, 'file_path'):
-                            ep = getattr(self, 'file_path', None)
-                            if ep:
-                                epub_paths = [ep]
-                    except Exception:
-                        pass
+                source_paths = self._glossary_editor_input_sources()
 
-                if not epub_paths:
+                if not source_paths:
                     # The input-file association was cleared. Don't leave stale
                     # auto-loaded entries in the editor. Preserve a glossary the
                     # user explicitly browsed/loaded.
@@ -8552,17 +8585,17 @@ Do not stop after the glossary."""
                 use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full', 'single_pass'))
 
                 found_glossaries = []  # list of (display_name, full_path)
-                found_glossary_epubs = {}
+                found_glossary_sources = {}
 
-                for epub_path in epub_paths:
-                    if not epub_path or not os.path.exists(epub_path):
+                for source_path in source_paths:
+                    if not source_path or not os.path.exists(source_path):
                         continue
-                    base = os.path.splitext(os.path.basename(epub_path))[0]
+                    base = os.path.splitext(os.path.basename(source_path))[0]
 
                     candidates = []
 
                     # Prefer any already-resolved path that looks associated
-                    # with THIS epub (same basename stem).
+                    # with THIS input source (same basename stem).
                     _base_lc = base.lower()
                     for _p in _already_mapped:
                         try:
@@ -8574,8 +8607,8 @@ Do not stop after the glossary."""
                         except Exception:
                             pass
                     # Also try single-selection case: any resolved path when
-                    # there is exactly one EPUB selected.
-                    if len(epub_paths) == 1:
+                    # there is exactly one input source selected.
+                    if len(source_paths) == 1:
                         for _p in _already_mapped:
                             if _p not in candidates:
                                 candidates.append(_p)
@@ -8619,13 +8652,53 @@ Do not stop after the glossary."""
                             candidates.append(auto_path)
                         if manual_path and os.path.exists(manual_path):
                             candidates.append(manual_path)
-                        # Use EPUB's parent dir (not os.getcwd() which is "/" on macOS frozen)
-                        epub_parent = os.path.dirname(os.path.abspath(epub_path))
-                        out_dir = os.path.join(epub_parent, base)
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(out_dir, f"glossary{ext}"))
-                        for ext in ext_priority:
-                            candidates.append(os.path.join(out_dir, 'Glossary', f"glossary{ext}"))
+                        source_parent = os.path.dirname(os.path.abspath(source_path))
+                        output_dirs = [os.path.join(source_parent, base)]
+                        try:
+                            output_base_getter = getattr(self, '_get_output_base_dir', None)
+                            if callable(output_base_getter):
+                                output_dirs.append(
+                                    os.path.join(output_base_getter(source_path), base)
+                                )
+                        except Exception:
+                            pass
+                        for out_dir in output_dirs:
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(out_dir, f"glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(
+                                    os.path.join(out_dir, 'Glossary', f"glossary{ext}")
+                                )
+
+                        shared_dirs = []
+                        for shared_root in (
+                            os.path.join(str(getattr(self, 'base_dir', '') or ''), 'Glossary'),
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary'),
+                            os.path.join(os.getcwd(), 'Glossary'),
+                        ):
+                            if shared_root and shared_root not in shared_dirs:
+                                shared_dirs.append(shared_root)
+                        for glossary_folder in shared_dirs:
+                            for ext in ext_priority:
+                                candidates.append(
+                                    os.path.join(
+                                        glossary_folder,
+                                        base,
+                                        f"{base}_glossary{ext}",
+                                    )
+                                )
+                            for ext in ext_priority:
+                                candidates.append(
+                                    os.path.join(glossary_folder, base, f"{base}{ext}")
+                                )
+                            for ext in ext_priority:
+                                candidates.append(
+                                    os.path.join(glossary_folder, f"{base}_glossary{ext}")
+                                )
+                            for ext in ext_priority:
+                                candidates.append(
+                                    os.path.join(glossary_folder, f"{base}{ext}")
+                                )
 
                     # Pick first match for this book
                     for cand in candidates:
@@ -8633,11 +8706,13 @@ Do not stop after the glossary."""
                             display = self._display_glossary_path(cand)
                             if not any(fp == cand for _, fp in found_glossaries):
                                 found_glossaries.append((display, cand))
-                                found_glossary_epubs[cand] = epub_path
+                                found_glossary_sources[cand] = source_path
                             break
 
                 # Populate combo
-                self._editor_glossary_epub_map = dict(found_glossary_epubs)
+                self._editor_glossary_source_map = dict(found_glossary_sources)
+                # Keep the old attribute as a compatibility alias.
+                self._editor_glossary_epub_map = dict(found_glossary_sources)
                 self.editor_file_combo.blockSignals(True)
                 self.editor_file_combo.clear()
                 for display, fpath in found_glossaries:
@@ -8964,19 +9039,26 @@ Do not stop after the glossary."""
         self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
         self._show_tree_context_menu_slot = show_tree_context_menu
 
-        def _editor_associated_epub_path():
+        def _editor_associated_source_path():
             glossary_path = self.editor_file_entry.text()
             try:
-                mapped = getattr(self, '_editor_glossary_epub_map', {}) or {}
+                mapped = (
+                    getattr(self, '_editor_glossary_source_map', None)
+                    or getattr(self, '_editor_glossary_epub_map', {})
+                    or {}
+                )
                 if glossary_path in mapped and os.path.exists(mapped[glossary_path]):
                     return mapped[glossary_path]
             except Exception:
                 pass
             try:
-                files = list(getattr(self, 'selected_files', []) or [])
-                epub_paths = [p for p in files if str(p).lower().endswith('.epub') and os.path.exists(p)]
-                if len(epub_paths) == 1:
-                    return epub_paths[0]
+                source_paths = [
+                    path
+                    for path in self._glossary_editor_input_sources()
+                    if os.path.exists(path)
+                ]
+                if len(source_paths) == 1:
+                    return source_paths[0]
             except Exception:
                 pass
             for getter_name in ('get_current_epub_path',):
@@ -9030,18 +9112,18 @@ Do not stop after the glossary."""
                 entries.append(entry)
             return entries
 
-        def _editor_output_dir_from_epub(epub_path):
-            if not epub_path:
+        def _editor_output_dir_from_source(source_path):
+            if not source_path:
                 return None
             try:
                 resolver = getattr(self, '_resolve_open_output_folder_for_file', None)
                 if callable(resolver):
-                    resolved = resolver(epub_path)
+                    resolved = resolver(source_path)
                     if resolved and os.path.isdir(resolved):
                         return resolved
             except Exception:
                 pass
-            file_base = os.path.splitext(os.path.basename(epub_path))[0]
+            file_base = os.path.splitext(os.path.basename(source_path))[0]
             candidates = []
             override_dir = None
             try:
@@ -9061,10 +9143,10 @@ Do not stop after the glossary."""
             try:
                 base_dir_getter = getattr(self, '_get_output_base_dir', None)
                 if callable(base_dir_getter):
-                    candidates.append(os.path.join(base_dir_getter(epub_path), file_base))
+                    candidates.append(os.path.join(base_dir_getter(source_path), file_base))
             except Exception:
                 pass
-            candidates.append(os.path.join(os.path.dirname(os.path.abspath(epub_path)), file_base))
+            candidates.append(os.path.join(os.path.dirname(os.path.abspath(source_path)), file_base))
             candidates.append(os.path.abspath(file_base))
             for candidate in candidates:
                 if candidate and os.path.isdir(candidate):
@@ -9075,10 +9157,14 @@ Do not stop after the glossary."""
             if not glossary_path or not os.path.exists(glossary_path):
                 return None
             try:
-                mapped = getattr(self, '_editor_glossary_epub_map', {}) or {}
-                epub_path = mapped.get(glossary_path)
-                if epub_path:
-                    resolved = _editor_output_dir_from_epub(epub_path)
+                mapped = (
+                    getattr(self, '_editor_glossary_source_map', None)
+                    or getattr(self, '_editor_glossary_epub_map', {})
+                    or {}
+                )
+                source_path = mapped.get(glossary_path)
+                if source_path:
+                    resolved = _editor_output_dir_from_source(source_path)
                     if resolved:
                         return resolved
             except Exception:
@@ -9112,9 +9198,11 @@ Do not stop after the glossary."""
             return glossary_dir if os.path.isdir(glossary_dir) else None
 
         def _editor_translated_output_dir():
-            epub_dir = _editor_output_dir_from_epub(_editor_associated_epub_path())
-            if epub_dir:
-                return epub_dir
+            source_dir = _editor_output_dir_from_source(
+                _editor_associated_source_path()
+            )
+            if source_dir:
+                return source_dir
             return _editor_output_dir_from_glossary(self.editor_file_entry.text())
 
         def _editor_translated_output_files(output_dir):

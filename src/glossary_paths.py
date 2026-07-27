@@ -36,6 +36,63 @@ _AUTO_GLOSSARY_RENAME_SUFFIXES = (
 _BACKGROUND_MIGRATION_LOCK = threading.Lock()
 _BACKGROUND_MIGRATION_THREADS = {}
 
+GLOSSARY_INPUT_SOURCE_EXTENSIONS = frozenset(
+    {".epub", ".zip", ".txt", ".pdf", ".srt", ".ass", ".lrc"}
+)
+SUBTITLE_INPUT_EXTENSIONS = frozenset({".srt", ".ass", ".lrc"})
+
+
+def resolve_glossary_input_sources(
+    input_paths,
+    fallback_path=None,
+    subtitle_info_resolver=None,
+):
+    """Return deduplicated input identities used for glossary matching.
+
+    Extracted SRT/ASS/LRC members are mapped back to their source ZIP when the
+    session's subtitle resolver provides an ``archive_path``.
+    """
+    try:
+        paths = [str(path) for path in (input_paths or []) if path]
+    except Exception:
+        paths = []
+    if not paths and fallback_path:
+        paths = [str(fallback_path)]
+
+    sources = []
+    seen = set()
+    for path in paths:
+        source_path = path
+        ext = os.path.splitext(path)[1].lower()
+        if ext in SUBTITLE_INPUT_EXTENSIONS and callable(subtitle_info_resolver):
+            try:
+                info = subtitle_info_resolver(path)
+                archive_path = (
+                    str(info.get("archive_path") or "").strip()
+                    if isinstance(info, dict)
+                    else ""
+                )
+                if archive_path:
+                    source_path = archive_path
+                    ext = os.path.splitext(source_path)[1].lower()
+            except Exception:
+                pass
+
+        if ext not in GLOSSARY_INPUT_SOURCE_EXTENSIONS:
+            continue
+
+        try:
+            source_path = os.path.abspath(source_path)
+            key = os.path.normcase(os.path.normpath(source_path))
+        except Exception:
+            key = source_path.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(source_path)
+
+    return sources
+
 
 def _mac_app_support_dir() -> str:
     return os.path.join(

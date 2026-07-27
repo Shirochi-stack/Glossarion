@@ -1520,6 +1520,286 @@ def test_progress_manager_collapses_extracted_zip_members_to_one_bundle(
     ]
 
 
+@pytest.mark.parametrize(
+    "extension",
+    [".txt", ".pdf", ".srt", ".ass", ".lrc"],
+)
+def test_glossary_editor_uses_supported_direct_file_as_source(
+    tmp_path,
+    extension,
+):
+    from glossary_paths import resolve_glossary_input_sources
+
+    subtitle = tmp_path / f"episode{extension}"
+    subtitle.write_text("subtitle", encoding="utf-8")
+
+    assert resolve_glossary_input_sources([str(subtitle)]) == [
+        os.path.abspath(subtitle)
+    ]
+
+
+def test_glossary_editor_collapses_zip_members_and_tracks_archive_switch(
+    tmp_path,
+):
+    from glossary_paths import resolve_glossary_input_sources
+
+    first_archive = tmp_path / "season_one.zip"
+    second_archive = tmp_path / "season_two.zip"
+    first_archive.write_bytes(b"zip")
+    second_archive.write_bytes(b"zip")
+    first_member = tmp_path / "extract_one" / "episode.srt"
+    second_member = tmp_path / "extract_two" / "episode.ass"
+    first_member.parent.mkdir()
+    second_member.parent.mkdir()
+    first_member.write_text("one", encoding="utf-8")
+    second_member.write_text("two", encoding="utf-8")
+
+    mappings = {
+        os.path.normcase(os.path.abspath(first_member)): {
+            "archive_path": str(first_archive),
+        },
+        os.path.normcase(os.path.abspath(second_member)): {
+            "archive_path": str(second_archive),
+        },
+    }
+    resolver = lambda path: mappings.get(
+        os.path.normcase(os.path.abspath(path))
+    )
+
+    assert resolve_glossary_input_sources([str(first_archive)]) == [
+        os.path.abspath(first_archive)
+    ]
+    assert resolve_glossary_input_sources([str(second_archive)]) == [
+        os.path.abspath(second_archive)
+    ]
+
+    assert resolve_glossary_input_sources(
+        [str(first_member), str(first_member)],
+        subtitle_info_resolver=resolver,
+    ) == [
+        os.path.abspath(first_archive)
+    ]
+
+    assert resolve_glossary_input_sources(
+        [str(second_member)],
+        subtitle_info_resolver=resolver,
+    ) == [
+        os.path.abspath(second_archive)
+    ]
+
+
+def test_subtitle_glossary_refresh_paths_are_wired_without_qt_imports():
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    gui_source = (source_root / "translator_gui.py").read_text(encoding="utf-8")
+    manager_source = (source_root / "GlossaryManager_GUI.py").read_text(
+        encoding="utf-8"
+    )
+
+    apply_start = gui_source.index(
+        "def _apply_selected_files_to_input_field"
+    )
+    apply_end = gui_source.index(
+        "def _trigger_qa_scan_on_main_thread",
+        apply_start,
+    )
+    autofill_start = gui_source.index(
+        "def _autofill_glossary_for_current_selection"
+    )
+    autofill_end = gui_source.index(
+        "def _glossary_dir_signature",
+        autofill_start,
+    )
+
+    assert "_refresh_glossary_editor" in gui_source[apply_start:apply_end]
+    assert "_glossary_editor_input_sources()" in gui_source[
+        autofill_start:autofill_end
+    ]
+    assert "resolve_glossary_input_sources" in manager_source
+
+
+def _direct_text_dialog_class():
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from translator_gui import _InputOutputDialog
+
+    return _InputOutputDialog
+
+
+def test_direct_text_card_limit_is_clamped():
+    dialog_class = _direct_text_dialog_class()
+
+    assert dialog_class._normalize_rendered_card_limit(None) == 20
+    assert dialog_class._normalize_rendered_card_limit(1) == 4
+    assert dialog_class._normalize_rendered_card_limit(50) == 50
+    assert dialog_class._normalize_rendered_card_limit(999) == 200
+
+
+def test_direct_text_history_window_tracks_focus_and_tail():
+    dialog_class = _direct_text_dialog_class()
+    bounds = dialog_class._history_window_bounds
+
+    assert bounds(100, 20) == (80, 100)
+    assert bounds(100, 20, 3) == (0, 20)
+    assert bounds(100, 20, 50) == (40, 60)
+    assert bounds(100, 20, 99) == (80, 100)
+    assert bounds(8, 20, 4) == (0, 8)
+
+
+def test_direct_text_history_window_shifts_with_overlap():
+    dialog_class = _direct_text_dialog_class()
+
+    class FakeDialog:
+        _DEFAULT_RENDERED_CARD_LIMIT = 20
+        _history_card_limit = 20
+        _history_visible_start = 80
+        _history_visible_end = 100
+        _chat_messages = [("user", str(index)) for index in range(100)]
+
+        @staticmethod
+        def _normalize_rendered_card_limit(value):
+            return dialog_class._normalize_rendered_card_limit(value)
+
+    dialog = FakeDialog()
+
+    assert dialog_class._shift_history_window(dialog, -1) is True
+    assert (dialog._history_visible_start, dialog._history_visible_end) == (
+        74,
+        94,
+    )
+
+    assert dialog_class._shift_history_window(dialog, 1) is True
+    assert (dialog._history_visible_start, dialog._history_visible_end) == (
+        80,
+        100,
+    )
+    assert dialog_class._shift_history_window(dialog, 1) is False
+
+
+def test_direct_text_append_preserves_an_older_scroll_window():
+    dialog_class = _direct_text_dialog_class()
+
+    class FakeDialog:
+        _history_visible_start = 74
+        _history_visible_end = 94
+        _chat_messages = [("user", str(index)) for index in range(101)]
+
+        def _reset_history_window(self):
+            raise AssertionError("an older viewport must not be reset to tail")
+
+    dialog = FakeDialog()
+
+    followed_tail = dialog_class._update_history_window_after_append(
+        dialog,
+        100,
+    )
+
+    assert followed_tail is False
+    assert (dialog._history_visible_start, dialog._history_visible_end) == (
+        74,
+        94,
+    )
+
+
+def test_direct_text_scroll_boundary_moves_render_window():
+    dialog_class = _direct_text_dialog_class()
+
+    class Scrollbar:
+        def value(self):
+            return 0
+
+        def minimum(self):
+            return 0
+
+        def maximum(self):
+            return 1000
+
+        def pageStep(self):
+            return 200
+
+    class OutputBox:
+        def verticalScrollBar(self):
+            return Scrollbar()
+
+    class FakeDialog:
+        _DEFAULT_RENDERED_CARD_LIMIT = 20
+        _history_card_limit = 20
+        _history_page_size = 6
+        _history_visible_start = 80
+        _history_visible_end = 100
+        _history_scroll_intent = -1
+        _history_window_shift_active = False
+        _output_scrollbar_drag_active = False
+        _message_bookmark_navigation_index = None
+        _inline_response_editor_frame = None
+        _chat_messages = [("user", str(index)) for index in range(100)]
+        output_box = OutputBox()
+        rendered = []
+
+        @staticmethod
+        def _normalize_rendered_card_limit(value):
+            return dialog_class._normalize_rendered_card_limit(value)
+
+        def _shift_history_window(self, direction):
+            return dialog_class._shift_history_window(self, direction)
+
+        def _render_output(self, **kwargs):
+            self.rendered.append(kwargs)
+
+    dialog = FakeDialog()
+    dialog_class._update_history_window_for_scroll(dialog)
+
+    assert (dialog._history_visible_start, dialog._history_visible_end) == (
+        74,
+        94,
+    )
+    assert dialog.rendered == [{"preserve_viewport": True}]
+
+
+def test_direct_text_settings_tab_uses_vertical_scroll_area():
+    gui_source = (
+        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
+    ).read_text(encoding="utf-8")
+    settings_start = gui_source.index("self.settings_tab = QWidget()")
+    settings_end = gui_source.index(
+        'self.tabs.addTab(self.settings_tab, "Settings")',
+        settings_start,
+    )
+    settings_block = gui_source[settings_start:settings_end]
+
+    assert "self.settings_scroll_area = QScrollArea()" in settings_block
+    assert "self.settings_scroll_area.setWidgetResizable(True)" in settings_block
+    assert "Qt.ScrollBarAlwaysOff" in settings_block
+    assert "Qt.ScrollBarAsNeeded" in settings_block
+    assert "self.settings_scroll_area.setWidget(settings_content)" in settings_block
+    assert "QSizePolicy.Minimum" in settings_block
+    assert (
+        "self.rendered_card_limit_spinbox.wheelEvent"
+        in gui_source
+    )
+
+
+def test_direct_text_bookmark_popup_sizes_to_visible_rows_before_scrolling():
+    gui_source = (
+        Path(__file__).resolve().parents[1] / "src" / "translator_gui.py"
+    ).read_text(encoding="utf-8")
+    preview_start = gui_source.index(
+        "def _show_message_bookmark_preview"
+    )
+    preview_end = gui_source.index(
+        "def _schedule_input_bookmark_preview_hide",
+        preview_start,
+    )
+    preview_block = gui_source[preview_start:preview_end]
+
+    fixed_height = preview_block.index("input_list.setFixedHeight")
+    popup_resize = preview_block.index("popup.resize")
+    popup_show = preview_block.index("popup.show()")
+    scroll_to_item = preview_block.index("input_list.scrollToItem")
+
+    assert fixed_height < popup_resize < popup_show < scroll_to_item
+    assert "popup_height = popup.sizeHint().height()" in preview_block
+
+
 def test_progress_manager_does_not_collapse_partial_subtitle_bundle(tmp_path):
     from Retranslation_GUI import RetranslationMixin
 

@@ -1449,6 +1449,35 @@ class _InputOutputDialog(QDialog):
     # message on the GUI thread.
     _ACTIVE_STREAM_START_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_START_7F31"
     _ACTIVE_STREAM_END_MARKER = "DIRECT_TEXT_ACTIVE_STREAM_END_7F31"
+    _DEFAULT_RENDERED_CARD_LIMIT = 20
+    _MIN_RENDERED_CARD_LIMIT = 4
+    _MAX_RENDERED_CARD_LIMIT = 200
+
+    @classmethod
+    def _normalize_rendered_card_limit(cls, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = cls._DEFAULT_RENDERED_CARD_LIMIT
+        return max(
+            cls._MIN_RENDERED_CARD_LIMIT,
+            min(cls._MAX_RENDERED_CARD_LIMIT, value),
+        )
+
+    @staticmethod
+    def _history_window_bounds(total, limit, focus_index=None):
+        """Return a bounded saved-message window containing ``focus_index``."""
+        total = max(0, int(total or 0))
+        limit = max(1, int(limit or 1))
+        if total <= limit:
+            return (0, total)
+        if focus_index is None:
+            return (total - limit, total)
+        focus_index = max(0, min(int(focus_index), total - 1))
+        start = max(0, focus_index - (limit // 2))
+        end = min(total, start + limit)
+        start = max(0, end - limit)
+        return (start, end)
 
     @staticmethod
     def _recommended_window_metrics():
@@ -1605,9 +1634,25 @@ class _InputOutputDialog(QDialog):
         self._rendered_message_cache = {}
         self._message_text_cache = {}
         self._drop_hover_active = False
+        self._history_card_limit = self._normalize_rendered_card_limit(
+            translator.config.get(
+                'direct_text_rendered_card_limit',
+                self._DEFAULT_RENDERED_CARD_LIMIT,
+            )
+        )
         self._history_visible_start = 0
-        self._history_page_size = 10
+        self._history_visible_end = 0
+        self._history_page_size = max(2, self._history_card_limit // 3)
         self._history_character_budget = 120000
+        self._history_scroll_intent = 0
+        self._history_scrollbar_press_value = None
+        self._history_window_shift_active = False
+        self._history_window_scroll_timer = QTimer(self)
+        self._history_window_scroll_timer.setSingleShot(True)
+        self._history_window_scroll_timer.setInterval(55)
+        self._history_window_scroll_timer.timeout.connect(
+            self._update_history_window_for_scroll
+        )
         # Follow newly streamed text by default. Users can opt into a fixed
         # viewport from Settings or the transcript context menu.
         self._output_auto_scroll_disabled = bool(
@@ -2452,6 +2497,27 @@ class _InputOutputDialog(QDialog):
                 self.attachment_prompt_role_combo.currentData() or 'user',
             )
         )
+        self.rendered_card_limit_spinbox = QSpinBox()
+        self.rendered_card_limit_spinbox.setRange(
+            self._MIN_RENDERED_CARD_LIMIT,
+            self._MAX_RENDERED_CARD_LIMIT,
+        )
+        self.rendered_card_limit_spinbox.setSingleStep(2)
+        self.rendered_card_limit_spinbox.setSuffix(" cards")
+        self.rendered_card_limit_spinbox.setKeyboardTracking(False)
+        # Let the surrounding Settings scroll area handle wheel gestures
+        # without accidentally changing this value under the pointer.
+        self.rendered_card_limit_spinbox.wheelEvent = (
+            lambda event: event.ignore()
+        )
+        self.rendered_card_limit_spinbox.setValue(self._history_card_limit)
+        self.rendered_card_limit_spinbox.setToolTip(
+            "Maximum saved input/output cards kept in the live conversation "
+            "document. Scrolling automatically moves this render window."
+        )
+        self.rendered_card_limit_spinbox.valueChanged.connect(
+            self._set_rendered_card_limit
+        )
         # _create_styled_checkbox supplies the parent's indicator styling but
         # QCheckBox otherwise picks up QWidget's opaque background.  The cards
         # are deliberately transparent, so keep the checkbox label area
@@ -2469,7 +2535,26 @@ class _InputOutputDialog(QDialog):
         # Keep overrides out of the conversation itself, with enough room to
         # explain what each persistent Direct Text-only option changes.
         self.settings_tab = QWidget()
-        settings_layout = QVBoxLayout(self.settings_tab)
+        settings_tab_layout = QVBoxLayout(self.settings_tab)
+        settings_tab_layout.setContentsMargins(0, 0, 0, 0)
+        settings_tab_layout.setSpacing(0)
+
+        self.settings_scroll_area = QScrollArea()
+        self.settings_scroll_area.setWidgetResizable(True)
+        self.settings_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.settings_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff
+        )
+        self.settings_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
+        )
+        self.settings_scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        settings_content = QWidget()
+        settings_content.setObjectName("directSettingsContent")
+        settings_layout = QVBoxLayout(settings_content)
         settings_layout.setContentsMargins(28, 24, 28, 24)
         settings_layout.setSpacing(12)
         settings_title = QLabel("Direct Text settings")
@@ -2484,6 +2569,10 @@ class _InputOutputDialog(QDialog):
 
         prompt_role_card = QFrame()
         prompt_role_card.setObjectName("directSettingsCard")
+        prompt_role_card.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Minimum,
+        )
         prompt_role_layout = QVBoxLayout(prompt_role_card)
         prompt_role_layout.setContentsMargins(16, 13, 16, 13)
         prompt_role_layout.setSpacing(7)
@@ -2501,6 +2590,31 @@ class _InputOutputDialog(QDialog):
         prompt_role_detail.setWordWrap(True)
         prompt_role_layout.addWidget(prompt_role_detail)
         settings_layout.addWidget(prompt_role_card)
+
+        rendered_cards_card = QFrame()
+        rendered_cards_card.setObjectName("directSettingsCard")
+        rendered_cards_card.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Minimum,
+        )
+        rendered_cards_layout = QVBoxLayout(rendered_cards_card)
+        rendered_cards_layout.setContentsMargins(16, 13, 16, 13)
+        rendered_cards_layout.setSpacing(7)
+        rendered_cards_header = QHBoxLayout()
+        rendered_cards_label = QLabel("Rendered conversation cards")
+        rendered_cards_header.addWidget(rendered_cards_label)
+        rendered_cards_header.addStretch(1)
+        rendered_cards_header.addWidget(self.rendered_card_limit_spinbox)
+        rendered_cards_layout.addLayout(rendered_cards_header)
+        rendered_cards_detail = QLabel(
+            "Limit the saved input/output cards mounted in the transcript. "
+            "The rendered window follows your scroll position automatically; "
+            "currently streaming request cards remain visible until they finish."
+        )
+        rendered_cards_detail.setObjectName("settingDescription")
+        rendered_cards_detail.setWordWrap(True)
+        rendered_cards_layout.addWidget(rendered_cards_detail)
+        settings_layout.addWidget(rendered_cards_card)
 
         setting_rows = (
             (
@@ -2543,6 +2657,10 @@ class _InputOutputDialog(QDialog):
         for checkbox, description in setting_rows:
             card = QFrame()
             card.setObjectName("directSettingsCard")
+            card.setSizePolicy(
+                QSizePolicy.Expanding,
+                QSizePolicy.Minimum,
+            )
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(16, 13, 16, 13)
             card_layout.setSpacing(5)
@@ -2553,6 +2671,8 @@ class _InputOutputDialog(QDialog):
             card_layout.addWidget(detail)
             settings_layout.addWidget(card)
         settings_layout.addStretch(1)
+        self.settings_scroll_area.setWidget(settings_content)
+        settings_tab_layout.addWidget(self.settings_scroll_area, 1)
         self.tabs.addTab(self.settings_tab, "Settings")
 
         # Thinking and pipeline details are rendered inside each assistant
@@ -3282,6 +3402,34 @@ class _InputOutputDialog(QDialog):
             self.translator.save_config(show_message=False)
         except Exception:
             pass
+
+    def _set_rendered_card_limit(self, value):
+        """Persist and immediately apply the transcript render-window limit."""
+        limit = self._normalize_rendered_card_limit(value)
+        spinbox = getattr(self, 'rendered_card_limit_spinbox', None)
+        if spinbox is not None and spinbox.value() != limit:
+            spinbox.blockSignals(True)
+            spinbox.setValue(limit)
+            spinbox.blockSignals(False)
+        if limit == getattr(self, '_history_card_limit', None):
+            return
+
+        focus_index = None
+        if hasattr(self, 'output_box'):
+            positions = self._visible_message_bookmark_positions()
+            focus_index = self._message_bookmark_index_from_view(positions)
+        self._history_card_limit = limit
+        self._history_page_size = max(2, limit // 3)
+        self._persist_dialog_value(
+            'direct_text_rendered_card_limit',
+            limit,
+        )
+
+        if focus_index is None:
+            focus_index = max(0, len(self._chat_messages) - 1)
+        self._set_history_window_around(focus_index)
+        if hasattr(self, 'output_box'):
+            self._render_output(preserve_viewport=True)
 
     def _on_glossary_override_toggled(self, mode, checked):
         """Persist one exclusive Direct Text glossary override mode."""
@@ -4197,6 +4345,9 @@ class _InputOutputDialog(QDialog):
                     self._adjust_chat_zoom(1 if wheel_delta > 0 else -1)
                 elif output_box is not None:
                     self._clear_message_bookmark_navigation()
+                    self._note_history_scroll_intent(
+                        -1 if wheel_delta > 0 else 1
+                    )
                     # The inline editor is fitted to its document height, so it
                     # has no useful independent scrolling. Route an ordinary
                     # wheel gesture to the conversation viewport instead.
@@ -4231,6 +4382,13 @@ class _InputOutputDialog(QDialog):
                     return True
             elif watched in (output_box, output_viewport):
                 self._clear_message_bookmark_navigation()
+                wheel_delta = event.angleDelta().y()
+                if not wheel_delta:
+                    wheel_delta = event.pixelDelta().y()
+                if wheel_delta:
+                    self._note_history_scroll_intent(
+                        -1 if wheel_delta > 0 else 1
+                    )
                 # Let QTextBrowser perform the wheel movement first, then make
                 # that user-selected position the new persistent stream lock.
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
@@ -4239,11 +4397,29 @@ class _InputOutputDialog(QDialog):
                 self._clear_message_bookmark_navigation()
                 self._output_scrollbar_drag_active = True
                 self._output_viewport_lock_anchor = None
+                self._history_scrollbar_press_value = int(
+                    output_scrollbar.value()
+                )
             elif event.type() == QEvent.MouseButtonRelease:
                 self._output_scrollbar_drag_active = False
+                press_value = self._history_scrollbar_press_value
+                self._history_scrollbar_press_value = None
+                if press_value is not None:
+                    current_value = int(output_scrollbar.value())
+                    if current_value != int(press_value):
+                        self._note_history_scroll_intent(
+                            -1 if current_value < int(press_value) else 1
+                        )
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
             elif event.type() == QEvent.Wheel:
                 self._clear_message_bookmark_navigation()
+                wheel_delta = event.angleDelta().y()
+                if not wheel_delta:
+                    wheel_delta = event.pixelDelta().y()
+                if wheel_delta:
+                    self._note_history_scroll_intent(
+                        -1 if wheel_delta > 0 else 1
+                    )
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_box and event.type() == QEvent.KeyRelease:
             if event.key() in (
@@ -4251,6 +4427,15 @@ class _InputOutputDialog(QDialog):
                 Qt.Key_Home, Qt.Key_End, Qt.Key_Space,
             ):
                 self._clear_message_bookmark_navigation()
+                earlier = event.key() in (
+                    Qt.Key_Up,
+                    Qt.Key_PageUp,
+                    Qt.Key_Home,
+                ) or (
+                    event.key() == Qt.Key_Space
+                    and bool(event.modifiers() & Qt.ShiftModifier)
+                )
+                self._note_history_scroll_intent(-1 if earlier else 1)
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_viewport and event.type() == QEvent.Resize:
             QTimer.singleShot(0, self._position_inline_response_editor)
@@ -4387,6 +4572,13 @@ class _InputOutputDialog(QDialog):
         start = len(messages)
         visible_count = 0
         visible_characters = 0
+        card_limit = self._normalize_rendered_card_limit(
+            getattr(
+                self,
+                '_history_card_limit',
+                self._DEFAULT_RENDERED_CARD_LIMIT,
+            )
+        )
         while start > 0:
             message = messages[start - 1]
             if message and message[0] == "assistant":
@@ -4404,7 +4596,7 @@ class _InputOutputDialog(QDialog):
                     message_size += len(
                         str(message[2] if len(message) > 2 else "")
                     )
-            if visible_count >= self._history_page_size:
+            if visible_count >= card_limit:
                 break
             if (
                 visible_count >= 3
@@ -4416,6 +4608,163 @@ class _InputOutputDialog(QDialog):
             visible_count += 1
             visible_characters += message_size
         self._history_visible_start = start
+        self._history_visible_end = len(messages)
+
+    def _set_history_window_around(self, message_index):
+        """Move the bounded saved-card window around one logical message."""
+        total = len(self._chat_messages)
+        limit = self._normalize_rendered_card_limit(
+            getattr(
+                self,
+                '_history_card_limit',
+                self._DEFAULT_RENDERED_CARD_LIMIT,
+            )
+        )
+        if total <= 0:
+            bounds = (0, 0)
+        elif int(message_index) >= total:
+            bounds = self._history_window_bounds(total, limit)
+        else:
+            bounds = self._history_window_bounds(
+                total,
+                limit,
+                message_index,
+            )
+        changed = bounds != (
+            int(getattr(self, '_history_visible_start', 0) or 0),
+            int(getattr(self, '_history_visible_end', total) or 0),
+        )
+        self._history_visible_start, self._history_visible_end = bounds
+        return changed
+
+    def _update_history_window_after_append(self, previous_count):
+        """Follow appended cards only when the rendered window was at the tail."""
+        previous_count = max(0, int(previous_count or 0))
+        visible_end = int(
+            getattr(self, '_history_visible_end', previous_count)
+            or 0
+        )
+        if visible_end >= previous_count:
+            self._reset_history_window()
+            return True
+
+        total = len(self._chat_messages)
+        self._history_visible_start = max(
+            0,
+            min(
+                int(getattr(self, '_history_visible_start', 0) or 0),
+                total,
+            ),
+        )
+        self._history_visible_end = max(
+            self._history_visible_start,
+            min(visible_end, total),
+        )
+        return False
+
+    def _shift_history_window(self, direction):
+        """Shift the saved-card render window while retaining an overlap."""
+        total = len(self._chat_messages)
+        if total <= 0:
+            self._history_visible_start = 0
+            self._history_visible_end = 0
+            return False
+        limit = self._normalize_rendered_card_limit(
+            getattr(
+                self,
+                '_history_card_limit',
+                self._DEFAULT_RENDERED_CARD_LIMIT,
+            )
+        )
+        start = max(
+            0,
+            min(
+                int(getattr(self, '_history_visible_start', 0) or 0),
+                total,
+            ),
+        )
+        end = max(
+            start,
+            min(
+                int(getattr(self, '_history_visible_end', total) or total),
+                total,
+            ),
+        )
+        step = max(
+            1,
+            min(
+                limit - 1,
+                int(
+                    getattr(
+                        self,
+                        '_history_page_size',
+                        max(2, limit // 3),
+                    )
+                    or 1
+                ),
+            ),
+        )
+        if int(direction) < 0:
+            if start <= 0:
+                return False
+            new_start = max(0, start - step)
+            new_end = min(total, new_start + limit)
+        else:
+            if end >= total:
+                return False
+            new_end = min(total, end + step)
+            new_start = max(0, new_end - limit)
+        if (new_start, new_end) == (start, end):
+            return False
+        self._history_visible_start = new_start
+        self._history_visible_end = new_end
+        return True
+
+    def _note_history_scroll_intent(self, direction):
+        """Debounce one user request to move the virtual card window."""
+        direction = -1 if int(direction) < 0 else 1
+        self._history_scroll_intent = direction
+        timer = getattr(self, '_history_window_scroll_timer', None)
+        if timer is not None:
+            timer.start()
+
+    def _update_history_window_for_scroll(self):
+        """Slide the rendered-card window at the scrolled viewport boundary."""
+        direction = int(getattr(self, '_history_scroll_intent', 0) or 0)
+        self._history_scroll_intent = 0
+        if not direction or getattr(self, '_history_window_shift_active', False):
+            return
+        if getattr(self, '_output_scrollbar_drag_active', False):
+            self._history_scroll_intent = direction
+            self._history_window_scroll_timer.start()
+            return
+        if getattr(self, '_message_bookmark_navigation_index', None) is not None:
+            return
+        if getattr(self, '_inline_response_editor_frame', None) is not None:
+            return
+
+        scrollbar = self.output_box.verticalScrollBar()
+        value = int(scrollbar.value())
+        minimum = int(scrollbar.minimum())
+        maximum = int(scrollbar.maximum())
+        threshold = max(
+            24,
+            min(160, int(max(1, scrollbar.pageStep()) * 0.16)),
+        )
+        if direction < 0:
+            at_boundary = value <= minimum + threshold
+        else:
+            at_boundary = value >= maximum - threshold
+        if not at_boundary:
+            return
+        if not self._shift_history_window(direction):
+            return
+
+        self._history_window_shift_active = True
+        try:
+            self._render_output(preserve_viewport=True)
+        finally:
+            self._history_window_shift_active = False
 
     def _active_message_bookmark_count(self):
         """Return the number of live response cards currently in the timeline."""
@@ -4643,14 +4992,15 @@ class _InputOutputDialog(QDialog):
                 selected_row = row
             else:
                 break
-        if input_list.count():
-            input_list.setCurrentRow(selected_row)
-            input_list.scrollToItem(input_list.item(selected_row))
-
         popup_width = max(320, min(460, int(self.width() * 0.34)))
         visible_rows = min(8, len(bookmarks))
         row_height = max(36, input_list.sizeHintForRow(0))
-        popup_height = 47 + (visible_rows * row_height)
+        # Size the interactive list viewport to its actual rows. The previous
+        # hard-coded popup height could leave a large empty hoverable region,
+        # especially when a conversation only had one or two inputs.
+        input_list.setFixedHeight((visible_rows * row_height) + 4)
+        popup.layout().activate()
+        popup_height = popup.sizeHint().height()
         popup.resize(popup_width, popup_height)
 
         anchor_bottom = anchor.mapToGlobal(anchor.rect().bottomRight())
@@ -4673,6 +5023,12 @@ class _InputOutputDialog(QDialog):
         self._input_bookmark_hide_timer.stop()
         popup.show()
         popup.raise_()
+        if input_list.count():
+            input_list.setCurrentRow(selected_row)
+            # Do this after sizing/showing the popup. Otherwise QListWidget can
+            # retain the scroll range from its small construction-time size,
+            # hiding earlier rows and displaying empty space below the last.
+            input_list.scrollToItem(input_list.item(selected_row))
 
     def _schedule_input_bookmark_preview_hide(self):
         """Give the pointer time to move from the controls into the popup."""
@@ -5016,20 +5372,13 @@ class _InputOutputDialog(QDialog):
             self._refresh_output_viewport_lock_anchor()
             self._update_message_bookmark_controls()
 
-        history_expanded = message_index < int(self._history_visible_start)
-        if history_expanded:
-            self._history_visible_start = max(
-                0,
-                min(
-                    message_index,
-                    int(self._history_visible_start)
-                    - int(self._history_page_size),
-                ),
-            )
+        history_window_changed = self._set_history_window_around(
+            message_index
+        )
         if (
             previous_navigation_index is None
             or previous_tail_enabled != target_tail_enabled
-            or history_expanded
+            or history_window_changed
         ):
             self._render_output(preserve_viewport=True)
         # QTextDocument resolves anchor geometry after the current event turn.
@@ -7061,18 +7410,13 @@ class _InputOutputDialog(QDialog):
             target = str(url or "")
         history_prefix = "direct-history:"
         if target.startswith(history_prefix):
-            old_start = max(0, int(self._history_visible_start))
-            self._history_visible_start = max(
-                0, old_start - int(self._history_page_size)
-            )
-            self._render_output()
-            if old_start < len(self._chat_messages):
-                QTimer.singleShot(
-                    0,
-                    lambda index=old_start: self.output_box.scrollToAnchor(
-                        f"direct-message-{index}"
-                    ),
-                )
+            if self._shift_history_window(-1):
+                self._render_output(preserve_viewport=True)
+            return
+        later_history_prefix = "direct-history-later:"
+        if target.startswith(later_history_prefix):
+            if self._shift_history_window(1):
+                self._render_output(preserve_viewport=True)
             return
         copy_prefix = "direct-copy:"
         if target.startswith(copy_prefix):
@@ -9051,7 +9395,7 @@ class _InputOutputDialog(QDialog):
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return False
 
-    def _schedule_output_viewport_anchor_restore(self, anchor):
+    def _schedule_output_viewport_anchor_restore(self, anchor, *, force=False):
         """Reapply an anchor after QTextDocument's deferred layout settles."""
         if not isinstance(anchor, dict):
             return
@@ -9061,13 +9405,17 @@ class _InputOutputDialog(QDialog):
             expected_revision = int(document.revision())
 
             def restore_after_layout():
-                if not self._output_auto_scroll_disabled:
+                if not force and not self._output_auto_scroll_disabled:
                     return
                 if self.output_box.document() is not expected_document:
                     return
                 if int(expected_document.revision()) != expected_revision:
                     return
-                active_anchor = self._output_viewport_lock_anchor
+                active_anchor = (
+                    self._output_viewport_lock_anchor
+                    if self._output_auto_scroll_disabled
+                    else None
+                )
                 if not isinstance(active_anchor, dict):
                     active_anchor = anchor
                 self._restore_output_viewport_anchor(active_anchor)
@@ -9171,6 +9519,32 @@ class _InputOutputDialog(QDialog):
             0,
             min(int(self._history_visible_start), len(self._chat_messages)),
         )
+        history_end = max(
+            history_start,
+            min(
+                int(
+                    getattr(
+                        self,
+                        '_history_visible_end',
+                        len(self._chat_messages),
+                    )
+                    or 0
+                ),
+                len(self._chat_messages),
+            ),
+        )
+        history_limit = self._normalize_rendered_card_limit(
+            getattr(
+                self,
+                '_history_card_limit',
+                self._DEFAULT_RENDERED_CARD_LIMIT,
+            )
+        )
+        if history_end - history_start > history_limit:
+            history_start = max(0, history_end - history_limit)
+            self._history_visible_start = history_start
+        self._history_visible_end = history_end
+        history_at_tail = history_end >= len(self._chat_messages)
         glossary_approval_pending = isinstance(
             self._pending_glossary_approval, dict
         )
@@ -9200,14 +9574,17 @@ class _InputOutputDialog(QDialog):
                     )
                 )
         if active_only:
-            if not self._assistant_message_active:
+            if not self._assistant_message_active or not history_at_tail:
+                if not history_at_tail:
+                    return
                 active_only = False
             else:
                 messages = active_messages
                 first_message_index = len(self._chat_messages)
         if not active_only:
-            messages = list(self._chat_messages[history_start:])
-            messages.extend(active_messages)
+            messages = list(self._chat_messages[history_start:history_end])
+            if history_at_tail:
+                messages.extend(active_messages)
             first_message_index = history_start
 
         saved_request_ordinals = {}
@@ -9251,7 +9628,7 @@ class _InputOutputDialog(QDialog):
                 message_html.append(
                     "<div class='history-loader'>"
                     f"<a href='direct-history:{history_start}'>"
-                    f"↑ Show earlier messages ({hidden_count:,} hidden)</a>"
+                    f"↑ Scroll for earlier messages ({hidden_count:,} hidden)</a>"
                     "</div>"
                 )
             active_marker_added = False
@@ -9604,7 +9981,11 @@ class _InputOutputDialog(QDialog):
                     + "<div class='message-gap'>&nbsp;</div>"
                 )
 
-            if not active_only and self._assistant_message_active:
+            if (
+                not active_only
+                and history_at_tail
+                and self._assistant_message_active
+            ):
                 if not active_marker_added:
                     message_html.append(
                         self._active_stream_marker_html(
@@ -9616,7 +9997,21 @@ class _InputOutputDialog(QDialog):
                 # fragment prevents the next streaming repaint from inserting
                 # a second copy beside the full-document copy.
 
-        pending_glossary = self._pending_glossary_approval
+        if (
+            not active_only
+            and history_end < len(self._chat_messages)
+        ):
+            newer_count = len(self._chat_messages) - history_end
+            message_html.append(
+                "<div class='history-loader'>"
+                f"<a href='direct-history-later:{history_end}'>"
+                f"Scroll for newer messages ({newer_count:,} hidden) ↓</a>"
+                "</div>"
+            )
+
+        pending_glossary = (
+            self._pending_glossary_approval if history_at_tail else None
+        )
         if isinstance(pending_glossary, dict):
             glossary_path = str(pending_glossary.get('path', '') or '')
             glossary_available = bool(
@@ -9671,7 +10066,11 @@ class _InputOutputDialog(QDialog):
                 "<div class='message-gap'>&nbsp;</div>"
             )
 
-        if not active_only and self._assistant_message_active:
+        if (
+            not active_only
+            and history_at_tail
+            and self._assistant_message_active
+        ):
             message_html.append(
                 self._active_stream_marker_html(
                     self._ACTIVE_STREAM_END_MARKER
@@ -9692,11 +10091,12 @@ class _InputOutputDialog(QDialog):
 
         scrollbar = self.output_box.verticalScrollBar()
         previous_scroll = scrollbar.value()
-        viewport_anchor = (
-            self._output_viewport_anchor_for_render()
-            if self._output_auto_scroll_disabled
-            else None
-        )
+        if self._output_auto_scroll_disabled:
+            viewport_anchor = self._output_viewport_anchor_for_render()
+        elif preserve_viewport:
+            viewport_anchor = self._capture_output_viewport_anchor()
+        else:
+            viewport_anchor = None
         previous_bottom_gap = max(
             0, scrollbar.maximum() - previous_scroll
         )
@@ -9873,7 +10273,7 @@ class _InputOutputDialog(QDialog):
             # default stylesheet when localized streaming updates are inserted.
             self.output_box.document().setDefaultStyleSheet(style_sheet)
             self.output_box.setHtml(document)
-            if self._output_auto_scroll_disabled:
+            if viewport_anchor is not None:
                 self._settle_output_document_layout()
             if self._inline_response_editor_frame is not None:
                 self._set_inline_response_placeholder_height(
@@ -9881,7 +10281,7 @@ class _InputOutputDialog(QDialog):
                 )
             if keep_viewport:
                 if (
-                    self._output_auto_scroll_disabled
+                    viewport_anchor is not None
                     and self._restore_output_viewport_anchor(viewport_anchor)
                 ):
                     pass
@@ -9905,14 +10305,21 @@ class _InputOutputDialog(QDialog):
             if freeze_viewport:
                 self.output_box.setUpdatesEnabled(True)
                 self.output_box.viewport().update()
-        if self._output_auto_scroll_disabled:
-            self._schedule_output_viewport_anchor_restore(viewport_anchor)
+        if viewport_anchor is not None:
+            self._schedule_output_viewport_anchor_restore(
+                viewport_anchor,
+                force=bool(
+                    preserve_viewport
+                    and not self._output_auto_scroll_disabled
+                ),
+            )
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
         self._schedule_message_bookmark_controls_update()
 
     def _commit_active_request_phase(self):
         """Persist real request cards without ending the ongoing Direct Text run."""
+        previous_message_count = len(self._chat_messages)
         segments_to_commit = [
             segment
             for segment in self._active_request_segments
@@ -9942,15 +10349,21 @@ class _InputOutputDialog(QDialog):
         self._generation_token_count = 0
         self._processing_token_count = 0
         self._processing_text = ""
-        self._reset_history_window()
+        followed_history_tail = self._update_history_window_after_append(
+            previous_message_count
+        )
         if segments_to_commit:
             self._save_chat_history()
-        self._schedule_stream_render(immediate=True)
+        if followed_history_tail:
+            self._schedule_stream_render(immediate=True)
+        else:
+            self._render_output(preserve_viewport=True)
 
     def _commit_assistant_message(self, completion_message=None):
         """Freeze the active streamed response into the visible chat history."""
         if not self._assistant_message_active:
             return
+        previous_message_count = len(self._chat_messages)
         if (
             isinstance(completion_message, list)
             and (
@@ -10006,9 +10419,14 @@ class _InputOutputDialog(QDialog):
             self._stream_phase_by_thread = {}
             self._listener_stream_phase_by_thread = {}
             self._listener_glossary_threads = set()
-            self._reset_history_window()
+            followed_history_tail = self._update_history_window_after_append(
+                previous_message_count
+            )
             self._save_chat_history()
-            self._schedule_stream_render(immediate=True)
+            if followed_history_tail:
+                self._schedule_stream_render(immediate=True)
+            else:
+                self._render_output(preserve_viewport=True)
             return
         content = str(self._streamed_content or "").strip()
         if not content:
@@ -10037,9 +10455,11 @@ class _InputOutputDialog(QDialog):
         )
         self._chat_messages.extend(completion_messages)
         self._assistant_message_active = False
-        self._reset_history_window()
+        followed_history_tail = self._update_history_window_after_append(
+            previous_message_count
+        )
         self._save_chat_history()
-        self._render_output()
+        self._render_output(preserve_viewport=not followed_history_tail)
 
     def _append_thinking(self, text, *, streamed_thinking=False):
         value = str(text)
@@ -32548,6 +32968,12 @@ Important rules:
                self.entry_epub.setText(f"{len(files)} files selected ({summary})")
 
            self._update_entry_epub_tooltip()
+           try:
+               refresh = getattr(self, '_refresh_glossary_editor', None)
+               if callable(refresh):
+                   refresh()
+           except Exception:
+               pass
        except Exception:
            pass
     
@@ -37613,8 +38039,8 @@ Important rules:
         """Periodically re-check auto-mapping so new glossary files are picked up.
 
         Called by a 2-second QTimer. Only does work when auto-mapping is
-        enabled, an EPUB is selected, no process is running, and the user
-        hasn't manually loaded a glossary.
+        enabled, a supported source is selected, no process is running, and
+        the user hasn't manually loaded a glossary.
         """
         try:
             # Guard: auto-mapping must be enabled
@@ -37640,10 +38066,9 @@ Important rules:
             if getattr(self, 'manual_glossary_manually_loaded', False):
                 return
 
-            # Guard: need at least one selected EPUB
-            files = list(getattr(self, 'selected_files', []) or [])
-            epubs = [p for p in files if str(p).lower().endswith('.epub')]
-            if not epubs:
+            # Guard: need at least one EPUB/TXT/PDF/subtitle/archive source.
+            sources = self._glossary_editor_input_sources()
+            if not sources:
                 return
 
             # Remember current glossary before re-mapping
@@ -37657,10 +38082,12 @@ Important rules:
             new_glossary = getattr(self, 'manual_glossary_path', None)
             if new_glossary and new_glossary != prev_glossary:
                 try:
-                    # Always sync editor path, not just when tab is visible
-                    if hasattr(self, 'editor_file_entry'):
-                        if os.path.exists(new_glossary):
-                            self.editor_file_entry.setText(new_glossary)
+                    # Rebuild both the displayed path and the inline tree.
+                    refresh = getattr(self, '_refresh_glossary_editor', None)
+                    if callable(refresh):
+                        refresh()
+                    elif hasattr(self, 'editor_file_entry') and os.path.exists(new_glossary):
+                        self.editor_file_entry.setText(new_glossary)
                 except Exception:
                     pass
         except Exception:
@@ -37694,22 +38121,21 @@ Important rules:
     def _autofill_glossary_for_current_selection(self) -> int:
         """Auto-fill glossary selection/mapping for the currently selected input files.
 
-        - For a single EPUB selection, sets self.manual_glossary_path if empty.
-        - For multiple EPUBs, fills self.manual_glossary_map (per-EPUB) and clears manual_glossary_path.
+        Subtitle ZIP members are collapsed to their archive identity.
+        A single source sets ``manual_glossary_path``; multiple sources use
+        ``manual_glossary_map``.
 
-        Returns the number of EPUBs that received a glossary assignment.
+        Returns the number of input sources that received an assignment.
         """
         try:
-            files = list(getattr(self, 'selected_files', []) or [])
+            sources = self._glossary_editor_input_sources()
         except Exception:
-            files = []
-
-        epubs = [p for p in files if str(p).lower().endswith('.epub')]
-        if not epubs:
+            sources = []
+        if not sources:
             return 0
 
-        # Single EPUB: set a single glossary path (only if user hasn't chosen one).
-        if len(epubs) == 1:
+        # Single source: set one glossary path.
+        if len(sources) == 1:
             try:
                 if getattr(self, 'manual_glossary_path', None):
                     # If user manually loaded this glossary, don't override it
@@ -37719,7 +38145,7 @@ Important rules:
                     # Only clear+re-map if there's a DIFFERENT glossary to replace with.
                     # If guess is None (no candidate) or same file, leave the current glossary alone.
                     try:
-                        _peek = self._guess_glossary_for_input_file(epubs[0])
+                        _peek = self._guess_glossary_for_input_file(sources[0])
                     except Exception:
                         _peek = None
                     if not _peek:
@@ -37736,7 +38162,7 @@ Important rules:
 
             gp = None
             try:
-                gp = self._guess_glossary_for_input_file(epubs[0])
+                gp = self._guess_glossary_for_input_file(sources[0])
             except Exception:
                 gp = None
 
@@ -37778,7 +38204,7 @@ Important rules:
 
             return 0
 
-        # Multiple EPUBs: build per-EPUB mapping.
+        # Multiple inputs: build a per-source mapping.
         try:
             existing = getattr(self, 'manual_glossary_map', {}) or {}
             if not isinstance(existing, dict):
@@ -37790,12 +38216,12 @@ Important rules:
         assigned = 0
         log_pairs = []
 
-        for epub_path in epubs:
-            key = os.path.normpath(os.path.abspath(epub_path))
+        for source_path in sources:
+            key = os.path.normpath(os.path.abspath(source_path))
 
             # Keep existing if valid
             try:
-                prev = existing.get(epub_path) or existing.get(key) or existing.get(os.path.normpath(epub_path))
+                prev = existing.get(source_path) or existing.get(key) or existing.get(os.path.normpath(source_path))
             except Exception:
                 prev = None
 
@@ -37804,14 +38230,14 @@ Important rules:
                 mapping[key] = prev_n
                 assigned += 1
                 try:
-                    log_pairs.append((os.path.basename(epub_path), os.path.basename(prev_n)))
+                    log_pairs.append((os.path.basename(source_path), os.path.basename(prev_n)))
                 except Exception:
                     pass
                 continue
 
             gp = None
             try:
-                gp = self._guess_glossary_for_input_file(epub_path)
+                gp = self._guess_glossary_for_input_file(source_path)
             except Exception:
                 gp = None
 
@@ -37820,7 +38246,7 @@ Important rules:
                 mapping[key] = gp_n
                 assigned += 1
                 try:
-                    log_pairs.append((os.path.basename(epub_path), os.path.basename(gp_n)))
+                    log_pairs.append((os.path.basename(source_path), os.path.basename(gp_n)))
                 except Exception:
                     pass
 
@@ -37842,7 +38268,10 @@ Important rules:
                     if getattr(self, '_last_automap_multilog_key', None) != _map_key:
                         self._last_automap_multilog_key = _map_key
                         self._last_automap_no_match_logged = False  # Reset so future "no matches" can log once
-                        self.append_log(f"📑 Auto-mapped glossaries for {assigned}/{len(epubs)} EPUB(s)")
+                        self.append_log(
+                            f"📑 Auto-mapped glossaries for "
+                            f"{assigned}/{len(sources)} input source(s)"
+                        )
                         # Show a short preview of mappings
                         try:
                             preview = log_pairs[:5]
