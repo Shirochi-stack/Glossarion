@@ -18311,6 +18311,11 @@ _THINKING_ENV_KEYS = (
     'ENABLE_DEEPSEEK_THINKING',
     'ENABLE_ANTHROPIC_THINKING',
 )
+_THINKING_ENV_OVERRIDE_LOCK = threading.RLock()
+_THINKING_ENV_OVERRIDE_STATE = {
+    "active": 0,
+    "saved": {},
+}
 
 # Mappings for the "Think a little" slider (1-5)
 _GEMINI_LEVEL_MAP = {1: 'minimal', 2: 'low', 3: 'medium', 4: 'high', 5: 'high'}
@@ -18334,7 +18339,7 @@ def _get_thinking_skip_values():
     }
 
 @contextmanager
-def _skip_thinking_env(context_key):
+def _skip_thinking_env(context_key, *, quiet=False):
     """Temporarily override thinking env vars for lightweight tasks.
     
     context_key: one of 'BOOK_TITLE', 'METADATA', 'TOC'
@@ -18354,21 +18359,35 @@ def _skip_thinking_env(context_key):
     # Save originals and override
     _label = context_key.replace('_', ' ').title()
     level = int(os.environ.get('LIGHTWEIGHT_THINKING_LEVEL', '1'))
-    print(f"   ⏭️ Reduced thinking for {_label} (level {level}: Gemini={skip_values['GEMINI_THINKING_LEVEL']}, GPT={skip_values['GPT_EFFORT']})")
-    saved = {}
-    for key in _THINKING_ENV_KEYS:
-        saved[key] = os.environ.get(key)
-        os.environ[key] = skip_values[key]
+    if not quiet:
+        print(f"   ⏭️ Reduced thinking for {_label} (level {level}: Gemini={skip_values['GEMINI_THINKING_LEVEL']}, GPT={skip_values['GPT_EFFORT']})")
+    # These overrides are process-wide, but metadata-only batch work runs in
+    # threads. Keep them installed until the final overlapping lightweight
+    # request exits so one thread cannot restore them underneath another.
+    with _THINKING_ENV_OVERRIDE_LOCK:
+        if _THINKING_ENV_OVERRIDE_STATE["active"] == 0:
+            _THINKING_ENV_OVERRIDE_STATE["saved"] = {
+                key: os.environ.get(key) for key in _THINKING_ENV_KEYS
+            }
+            for key in _THINKING_ENV_KEYS:
+                os.environ[key] = skip_values[key]
+        _THINKING_ENV_OVERRIDE_STATE["active"] += 1
     
     try:
         yield
     finally:
-        # Restore originals
-        for key in _THINKING_ENV_KEYS:
-            if saved[key] is not None:
-                os.environ[key] = saved[key]
-            elif key in os.environ:
-                del os.environ[key]
+        with _THINKING_ENV_OVERRIDE_LOCK:
+            _THINKING_ENV_OVERRIDE_STATE["active"] = max(
+                0, _THINKING_ENV_OVERRIDE_STATE["active"] - 1
+            )
+            if _THINKING_ENV_OVERRIDE_STATE["active"] == 0:
+                saved = _THINKING_ENV_OVERRIDE_STATE["saved"]
+                for key in _THINKING_ENV_KEYS:
+                    if saved.get(key) is not None:
+                        os.environ[key] = saved[key]
+                    else:
+                        os.environ.pop(key, None)
+                _THINKING_ENV_OVERRIDE_STATE["saved"] = {}
 
 # =====================================================
 # API AND TRANSLATION UTILITIES

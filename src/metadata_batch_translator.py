@@ -2976,8 +2976,15 @@ class MetadataTranslator:
         self.client = client
         self.config = config or {}
         self.progress_callback = progress_callback
-        self.system_prompt = os.getenv('METADATA_SYSTEM_PROMPT',
-            "You are a translator. Respond with only the translated text, nothing else.")
+        self._prefer_explicit_config = bool(
+            self.config.get('_prefer_explicit_config', False)
+        )
+        self._quiet = bool(self.config.get('quiet', False))
+        self.system_prompt = self._setting(
+            'METADATA_SYSTEM_PROMPT',
+            'metadata_system_prompt',
+            "You are a translator. Respond with only the translated text, nothing else.",
+        )
         # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
         if stop_check_fn is not None:
             self.stop_check_fn = stop_check_fn
@@ -2988,13 +2995,34 @@ class MetadataTranslator:
             except ImportError:
                 self.stop_check_fn = lambda: False
 
+    def _setting(self, env_name: str, config_name: str, default=None):
+        """Read an option without requiring per-thread environment mutation."""
+        if self._prefer_explicit_config and config_name in self.config:
+            return self.config.get(config_name, default)
+        return os.getenv(env_name, self.config.get(config_name, default))
+
+    def _source_language(self) -> str:
+        if self._prefer_explicit_config and 'source_language' in self.config:
+            return str(self.config.get('source_language') or '')
+        return _get_source_language()
+
+    def _print(self, *args, **kwargs) -> None:
+        if not self._quiet:
+            print(*args, **kwargs)
+
+    def _print_exception(self) -> None:
+        if not self._quiet:
+            import traceback
+
+            traceback.print_exc()
+
     def _notify_field_progress(self, field_name, status, error=None):
         if not callable(self.progress_callback):
             return
         try:
             self.progress_callback(field_name, status, error)
         except Exception as callback_error:
-            print(f"⚠️ Metadata progress callback failed: {callback_error}")
+            self._print(f"⚠️ Metadata progress callback failed: {callback_error}")
 
     def _stop_check_active(self) -> bool:
         try:
@@ -3062,7 +3090,7 @@ class MetadataTranslator:
         self._raise_if_stop_requested()
         try:
             from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
-            with _skip_thinking_env('METADATA'):
+            with _skip_thinking_env('METADATA', quiet=self._quiet):
                 response = send_with_interrupt(
                     messages=messages,
                     client=self.client,
@@ -3073,7 +3101,7 @@ class MetadataTranslator:
                 )
         except ImportError:
             # Fallback to direct send if send_with_interrupt is not available
-            print("⚠️ send_with_interrupt not available, using direct client.send()")
+            self._print("⚠️ send_with_interrupt not available, using direct client.send()")
             try:
                 response = self.client.send(
                     messages=messages,
@@ -3188,7 +3216,7 @@ class MetadataTranslator:
         
         # Handle language behavior
         lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
-        source_lang = _get_source_language()
+        source_lang = self._source_language()
         
         if lang_behavior == 'never':
             lang_str = ""
@@ -3198,8 +3226,10 @@ class MetadataTranslator:
             lang_str = source_lang if source_lang else ""
         
         # Handle output language - check env first (set by GUI), then config
-        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
-        print(f"[DEBUG] MetadataTranslator output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
+        output_lang = self._setting(
+            'OUTPUT_LANGUAGE', 'output_language', 'English'
+        )
+        self._print(f"[DEBUG] MetadataTranslator output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
         
         # Replace variables
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
@@ -3213,7 +3243,7 @@ class MetadataTranslator:
         try:
             if is_translation_service:
                 # For translation services, send only the field values without AI prompts
-                print(f"🌐 Using translation service ({client_type}) - sending fields directly")
+                self._print(f"🌐 Using translation service ({client_type}) - sending fields directly")
                 # Convert fields to a simple text format
                 field_text = "\n".join([f"{field}: {value}" for field, value in fields_to_send.items()])
                 messages = [
@@ -3227,8 +3257,12 @@ class MetadataTranslator:
                 ]
             
             # Get temperature and max_tokens from environment or config
-            temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
-            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
+            temperature = float(self._setting(
+                'TRANSLATION_TEMPERATURE', 'temperature', 0.3
+            ))
+            max_tokens = int(self._setting(
+                'MAX_OUTPUT_TOKENS', 'max_tokens', 4096
+            ))
             
             response_content = self._send_with_retry(
                 messages=messages,
@@ -3242,19 +3276,19 @@ class MetadataTranslator:
                 
                 for field, value in translated.items():
                     if field in metadata:
-                        print(f"✔ Translated {field}: {metadata[field]}\n  ↓\n{value}")
+                        self._print(f"✔ Translated {field}: {metadata[field]}\n  ↓\n{value}")
                         
                 return translated
             else:
-                print("⚠️ Empty response from API")
+                self._print("⚠️ Empty response from API")
                 return {}
             
         except Exception as e:
             if self._is_cancelled_error(e):
-                print(f"⏭️ Metadata translation cancelled by user")
+                self._print(f"⏭️ Metadata translation cancelled by user")
                 raise
-            print(f"❌ Error translating metadata: {repr(e)}")
-            import traceback; traceback.print_exc()
+            self._print(f"❌ Error translating metadata: {repr(e)}")
+            self._print_exception()
             return {}
     
     def _translate_fields_parallel(self,
@@ -3314,7 +3348,7 @@ class MetadataTranslator:
                         if result:
                             translated[field] = result
                             self._notify_field_progress(field, "completed")
-                            print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
+                            self._print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
                         else:
                             self._notify_field_progress(
                                 field, "failed", "Metadata field returned no translation"
@@ -3327,9 +3361,9 @@ class MetadataTranslator:
                             for pending_future in futures:
                                 pending_future.cancel()
                             raise
-                        print(f"❌ Error translating {field}: {repr(e)}")
+                        self._print(f"❌ Error translating {field}: {repr(e)}")
                         self._notify_field_progress(field, "failed", e)
-                        import traceback; traceback.print_exc()
+                        self._print_exception()
 
                 submit_available_work()
 
@@ -3360,7 +3394,7 @@ class MetadataTranslator:
         
         # Handle language behavior
         lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
-        source_lang = _get_source_language()
+        source_lang = self._source_language()
         
         if lang_behavior == 'never':
             lang_str = ""
@@ -3370,8 +3404,10 @@ class MetadataTranslator:
             lang_str = source_lang if source_lang else ""
         
         # Handle output language - check env first (set by GUI), then config
-        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
-        print(f"[DEBUG] MetadataTranslator._translate_single_field({field_name}) output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
+        output_lang = self._setting(
+            'OUTPUT_LANGUAGE', 'output_language', 'English'
+        )
+        self._print(f"[DEBUG] MetadataTranslator._translate_single_field({field_name}) output_lang='{output_lang}' (env={os.getenv('OUTPUT_LANGUAGE')}, config={self.config.get('output_language')})")
         
         # Replace variables
         prompt = prompt_template.replace('{target_lang}', output_lang)
@@ -3382,8 +3418,8 @@ class MetadataTranslator:
                 "the same number of items in the same order, translating each "
                 "item separately."
             )
-        print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
-        print(f"[DEBUG] prompt AFTER replace: '{prompt[:200]}'")
+        self._print(f"[DEBUG] prompt_template BEFORE replace: '{prompt_template}'")
+        self._print(f"[DEBUG] prompt AFTER replace: '{prompt[:200]}'")
         
         # Clean up double spaces
         prompt = ' '.join(prompt.split())
@@ -3405,15 +3441,19 @@ class MetadataTranslator:
                     system_prompt = prompt
                 else:
                     system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
-                print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
+                self._print(f"[DEBUG] FINAL system_prompt sent to API: '{system_prompt[:200]}'")
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": field_value_text}
                 ]
             
             # Get temperature and max_tokens from environment or config
-            temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
-            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
+            temperature = float(self._setting(
+                'TRANSLATION_TEMPERATURE', 'temperature', 0.3
+            ))
+            max_tokens = int(self._setting(
+                'MAX_OUTPUT_TOKENS', 'max_tokens', 4096
+            ))
             
             response_content = self._send_with_retry(
                 messages=messages,
@@ -3429,16 +3469,16 @@ class MetadataTranslator:
                     )
                 return response_content.strip()
             else:
-                print(f"⚠️ Empty response when translating {field_name}")
+                self._print(f"⚠️ Empty response when translating {field_name}")
                 return None
             
         except Exception as e:
             # Gracefully handle user-initiated cancellation without traceback
             if self._is_cancelled_error(e):
-                print(f"⏭️ Metadata translation of '{field_name}' cancelled by user")
+                self._print(f"⏭️ Metadata translation of '{field_name}' cancelled by user")
                 raise
-            print(f"❌ Error translating {field_name}: {repr(e)}")
-            import traceback; traceback.print_exc()
+            self._print(f"❌ Error translating {field_name}: {repr(e)}")
+            self._print_exception()
             return None
     
     @staticmethod
@@ -3461,11 +3501,11 @@ class MetadataTranslator:
         try:
             parsed = json.loads(self._strip_json_code_fence(response))
         except (TypeError, ValueError, json.JSONDecodeError) as e:
-            print(f"Error parsing metadata array response: {e}")
+            self._print(f"Error parsing metadata array response: {e}")
             return None
 
         if not isinstance(parsed, list) or len(parsed) != len(original_values):
-            print(
+            self._print(
                 "Error parsing metadata array response: expected "
                 f"{len(original_values)} items, received "
                 f"{len(parsed) if isinstance(parsed, list) else 'a non-array value'}"
@@ -3486,7 +3526,7 @@ class MetadataTranslator:
                     original_value = original_fields[field]
                     if isinstance(original_value, list):
                         if not isinstance(value, list) or len(value) != len(original_value):
-                            print(
+                            self._print(
                                 f"Ignoring translated {field}: expected an array "
                                 f"with {len(original_value)} items"
                             )
@@ -3500,7 +3540,7 @@ class MetadataTranslator:
             return result
             
         except Exception as e:
-            print(f"Error parsing response: {e}")
+            self._print(f"Error parsing response: {e}")
             return {}
 
 

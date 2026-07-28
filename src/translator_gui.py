@@ -28984,6 +28984,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if base_env is not None
             else self._get_environment_variables(file_path, api_key)
         )
+        if base_env is not None:
+            # The expensive GUI settings snapshot is shared by the batch, but
+            # retain the correct source identity in every individual job.
+            env_vars['EPUB_PATH'] = file_path
+            env_vars['GLOSSARY_SOURCE_PATH'] = file_path
         try:
             metadata_fields = json.loads(
                 env_vars.get('TRANSLATE_METADATA_FIELDS', '{}')
@@ -29026,9 +29031,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         return env_vars
 
     def _run_parallel_metadata_files(self, files: list[str]) -> bool:
-        """Translate multiple EPUB metadata sets in isolated child workers."""
-        import queue
-        import subprocess
+        """Translate multiple EPUB metadata sets in an in-process thread pool."""
+        from metadata_translation_worker import run_metadata_translation_job
 
         files = [
             os.path.abspath(path) for path in files
@@ -29065,11 +29069,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log("❌ Error: Please enter your API key.")
             return False
 
+        shared_env = self._get_environment_variables(files[0], api_key)
         prepared_jobs: list[tuple[str, dict]] = []
         for file_path in files:
             env_vars = self._metadata_only_environment_for_file(
                 file_path,
                 api_key,
+                base_env=shared_env,
             )
             prepared_jobs.append((file_path, env_vars))
 
@@ -29080,26 +29086,54 @@ If you see multiple p-b cookies, use the one with the longest value."""
         worker_count = min(batch_size, len(prepared_jobs))
         self.append_log(
             f"⚡ Metadata batch mode: translating {len(prepared_jobs)} EPUBs "
-            f"with {worker_count} parallel worker"
+            f"with {worker_count} thread"
             f"{'s' if worker_count != 1 else ''}"
         )
 
-        process_lock = threading.Lock()
-        self._metadata_worker_processes = set()
+        # Provider/model settings are identical for every selected EPUB. Apply
+        # them once before starting the pool. Book-specific paths and metadata
+        # selections stay in each job dict and are never written to os.environ
+        # by worker threads.
+        per_book_env_keys = {
+            'EPUB_PATH',
+            'GLOSSARY_SOURCE_PATH',
+            'MANUAL_GLOSSARY',
+            'OUTPUT_DIRECTORY',
+            'OUTPUT_DIR',
+            'EPUB_OUTPUT_DIR',
+            'TRANSLATE_METADATA_FIELDS',
+            'SUBTITLE_OUTPUT_GROUP_DIR',
+            'SUBTITLE_OUTPUT_FILE',
+            'SUBTITLE_WORK_DIR',
+            'SUBTITLE_BUNDLE_FILES_JSON',
+            'SUBTITLE_BUNDLE_OUTPUTS_JSON',
+            'SUBTITLE_BUNDLE_WORK_DIR',
+        }
+        first_env = prepared_jobs[0][1]
+        common_env = {
+            key: value
+            for key, value in first_env.items()
+            if (
+                key not in per_book_env_keys
+                and all(job_env.get(key) == value for _, job_env in prepared_jobs)
+            )
+        }
+        try:
+            import large_env
 
-        def _worker_command(job_path: str) -> list[str]:
-            if getattr(sys, 'frozen', False):
-                return [
-                    sys.executable,
-                    '--run-metadata-translation-worker',
-                    job_path,
-                ]
-            return [
-                sys.executable,
-                os.path.abspath(__file__),
-                '--run-metadata-translation-worker',
-                job_path,
-            ]
+            large_env.update_env(common_env)
+        except Exception:
+            for key, value in common_env.items():
+                try:
+                    os.environ[str(key)] = (
+                        '' if value is None else str(value)
+                    )
+                except (OSError, ValueError):
+                    pass
+        os.environ.pop('TRANSLATION_CANCELLED', None)
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        self._metadata_worker_processes = set()
 
         total_jobs = len(prepared_jobs)
 
@@ -29120,86 +29154,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 f"{display_name}"
             )
 
-            job_fd, job_path = tempfile.mkstemp(
-                prefix='glossarion_metadata_',
-                suffix='.json',
-            )
-            os.close(job_fd)
-            proc = None
             try:
-                with open(job_path, 'w', encoding='utf-8') as job_file:
-                    json.dump(
-                        {
-                            'source_path': file_path,
-                            'env': env_vars,
-                        },
-                        job_file,
-                        ensure_ascii=False,
-                    )
-
-                child_env = dict(os.environ)
-                child_env['PYTHONIOENCODING'] = 'utf-8'
-                child_env.pop('TRANSLATION_CANCELLED', None)
-                child_env['GRACEFUL_STOP'] = '0'
-                child_env['GRACEFUL_STOP_COMPLETED'] = '0'
-                proc = subprocess.Popen(
-                    _worker_command(job_path),
-                    cwd=os.getcwd(),
-                    env=child_env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    bufsize=1,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                succeeded = run_metadata_translation_job(
+                    file_path,
+                    env_vars,
+                    log_callback=lambda message: self.append_log(
+                        f"[{worker_tag}] {message}"
+                    ),
+                    stop_check_fn=lambda: bool(self.stop_requested),
                 )
-                with process_lock:
-                    self._metadata_worker_processes.add(proc)
-
-                output_queue: queue.Queue[str] = queue.Queue()
-                reader_done = threading.Event()
-
-                def _read_output():
-                    try:
-                        if proc.stdout is not None:
-                            for line in proc.stdout:
-                                output_queue.put(line.rstrip())
-                    finally:
-                        reader_done.set()
-
-                threading.Thread(
-                    target=_read_output,
-                    name=f"MetadataLog-{proc.pid}",
-                    daemon=True,
-                ).start()
-
-                while proc.poll() is None or not reader_done.is_set():
-                    while True:
-                        try:
-                            line = output_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        if line:
-                            self.append_log(f"[{worker_tag}] {line}")
-
-                    if self.stop_requested and proc.poll() is None:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        break
-                    time.sleep(0.05)
-
-                while True:
-                    try:
-                        line = output_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    if line:
-                        self.append_log(f"[{worker_tag}] {line}")
-                succeeded = proc.wait() == 0
                 self.append_log(
                     f"{'✅' if succeeded else '❌'} "
                     f"[{worker_tag}] Metadata "
@@ -29212,14 +29175,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     f"{os.path.basename(file_path)}: {exc}"
                 )
                 return file_path, False
-            finally:
-                if proc is not None:
-                    with process_lock:
-                        self._metadata_worker_processes.discard(proc)
-                try:
-                    os.remove(job_path)
-                except OSError:
-                    pass
 
         successful = 0
         failed = 0
@@ -29238,7 +29193,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 in enumerate(prepared_jobs, start=1)
             ]
             for future in concurrent.futures.as_completed(futures):
-                _file_path, succeeded = future.result()
+                try:
+                    _file_path, succeeded = future.result()
+                except Exception as exc:
+                    self.append_log(
+                        f"❌ Metadata thread failed unexpectedly: {exc}"
+                    )
+                    succeeded = False
                 if succeeded:
                     successful += 1
                 else:
@@ -36630,7 +36591,7 @@ Important rules:
                 )
             else:
                 run_mode = (
-                    "parallel batch"
+                    "thread-pool batch"
                     if bool(getattr(
                         self,
                         'batch_translation_var',
