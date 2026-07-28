@@ -9634,6 +9634,50 @@ Do not stop after the glossary."""
         browse_btn.setStyleSheet("background-color: #495057; color: white; padding: 8px; font-weight: bold;")
         file_layout.addWidget(browse_btn)
 
+        def force_refresh_glossary_editor():
+            """Reload the selected glossary from disk without relying on mtime."""
+            path = self.editor_file_entry.text()
+            if path and os.path.exists(path):
+                try:
+                    self._editor_last_mtime = os.path.getmtime(path)
+                except OSError:
+                    self._editor_last_mtime = 0.0
+                try:
+                    self._reload_icon.spin(600)
+                except (AttributeError, RuntimeError):
+                    pass
+                self.append_log(
+                    f"Force refreshing glossary editor: {os.path.basename(path)}"
+                )
+                load_glossary_for_editing()
+                return
+
+            # If the editor has no valid current path, force the association
+            # scan too so a newly generated glossary can be discovered.
+            auto_select_current_glossary()
+            refreshed_path = self.editor_file_entry.text()
+            if not refreshed_path or not os.path.exists(refreshed_path):
+                QMessageBox.warning(
+                    parent,
+                    "No Glossary Found",
+                    "No glossary file is available to refresh.",
+                )
+
+        self.force_refresh_glossary_btn = QPushButton("Force Refresh")
+        self.force_refresh_glossary_btn.setFixedWidth(110)
+        self.force_refresh_glossary_btn.setToolTip(
+            "Reload the glossary directly from disk, even when automatic change detection misses it."
+        )
+        self.force_refresh_glossary_btn.clicked.connect(
+            force_refresh_glossary_editor
+        )
+        self.force_refresh_glossary_btn.setStyleSheet(
+            "QPushButton { background-color: #0891b2; color: white; padding: 8px; "
+            "font-weight: bold; } "
+            "QPushButton:hover { background-color: #0e7490; }"
+        )
+        file_layout.addWidget(self.force_refresh_glossary_btn)
+
         # Load-Glossary shortcut: mirrors the main toolbar's "Load Glossary"
         # button but uses the currently browsed file instead of prompting for
         # one. When Auto Glossary mode is "Manual Glossary Only", it also

@@ -15323,6 +15323,61 @@ Recent translations to summarize:
             mode = 'quick-scan'
         return mode
 
+    def _set_scan_phase_enabled(self, enabled):
+        """Update post-translation QA state and keep its duplicate toggles synced."""
+        enabled = bool(enabled)
+        self.scan_phase_enabled_var = enabled
+        self.config['scan_phase_enabled'] = enabled
+        os.environ['SCAN_PHASE_ENABLED'] = '1' if enabled else '0'
+
+        for attr_name in (
+            'scan_phase_shortcut_checkbox',
+            'scan_phase_settings_checkbox',
+        ):
+            checkbox = getattr(self, attr_name, None)
+            if checkbox is None:
+                continue
+            try:
+                if checkbox.isChecked() != enabled:
+                    checkbox.blockSignals(True)
+                    try:
+                        checkbox.setChecked(enabled)
+                    finally:
+                        checkbox.blockSignals(False)
+                update_checkmark = getattr(checkbox, '_update_checkmark', None)
+                if callable(update_checkmark):
+                    update_checkmark()
+                checkbox.update()
+            except (AttributeError, RuntimeError):
+                pass
+
+    def _open_qa_scanner_settings_dialog(self):
+        """Open QA Scanner Settings directly from a shortcut button."""
+        try:
+            from qa_scan_runtime import normalize_qa_scan_settings
+            target_language = (
+                self.config.get('output_language')
+                or getattr(self, 'target_lang_var', '')
+                or os.getenv('OUTPUT_LANGUAGE', '')
+            )
+            qa_settings = normalize_qa_scan_settings(
+                self.config.get('qa_scanner_settings', {}),
+                target_language=target_language,
+            )
+        except Exception:
+            qa_settings = dict(self.config.get('qa_scanner_settings', {}) or {})
+
+        try:
+            return self.show_qa_scanner_settings(self, qa_settings)
+        except Exception as exc:
+            self.append_log(f"❌ Failed to open QA Scanner Settings: {exc}")
+            QMessageBox.critical(
+                self,
+                "QA Scanner Settings",
+                f"Failed to open QA Scanner Settings:\n{exc}",
+            )
+            return None
+
     def _get_qa_scanner_settings_json(self):
         """Serialize QA scanner settings so worker-side scans match GUI scans."""
         settings = self.config.get('qa_scanner_settings', {})
@@ -20938,6 +20993,40 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         auto_glossary_control_layout.addWidget(self.auto_glossary_shortcut_combo)
         auto_glossary_row_layout.addWidget(auto_glossary_control)
+
+        # Main-window shortcuts for the post-translation QA controls. The
+        # checkbox is synchronized with its duplicate in Other Settings.
+        self.scan_phase_shortcut_checkbox = self._create_styled_checkbox("Post QA Scan")
+        self.scan_phase_shortcut_checkbox.setChecked(
+            bool(getattr(self, 'scan_phase_enabled_var', self.config.get('scan_phase_enabled', True)))
+        )
+        self.scan_phase_shortcut_checkbox.setToolTip(
+            "Automatically run the QA Scanner after translation completes."
+        )
+        self.scan_phase_shortcut_checkbox.toggled.connect(
+            self._set_scan_phase_enabled
+        )
+        auto_glossary_row_layout.addWidget(self.scan_phase_shortcut_checkbox)
+
+        self.scan_phase_settings_btn = QPushButton("⚙️ Scanner Settings")
+        self.scan_phase_settings_btn.setMinimumWidth(130)
+        self.scan_phase_settings_btn.setToolTip("Open QA Scanner Settings")
+        self.scan_phase_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0d6efd;
+                color: white;
+                border: 1px solid #0d6efd;
+                padding: 6px 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0b5ed7;
+            }
+        """)
+        self.scan_phase_settings_btn.clicked.connect(
+            self._open_qa_scanner_settings_dialog
+        )
+        auto_glossary_row_layout.addWidget(self.scan_phase_settings_btn)
 
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
@@ -37660,8 +37749,7 @@ Important rules:
                     self.config['enable_image_compression'] = tb_imgcomp
                     self.enable_image_compression_var = tb_imgcomp
                     tb_scan = toggle_states.get('scan_phase_enabled', False)
-                    self.config['scan_phase_enabled'] = tb_scan
-                    self.scan_phase_enabled_var = tb_scan
+                    self._set_scan_phase_enabled(tb_scan)
                     tb_retry = toggle_states.get('retry_timeout', True)
                     self.config['retry_timeout'] = tb_retry
                     self.retry_timeout_var = tb_retry

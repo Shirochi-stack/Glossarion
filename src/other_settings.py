@@ -10569,13 +10569,17 @@ def _create_processing_options_section(self, parent):
     scan_h.setContentsMargins(0, 10, 0, 0)
     
     scan_cb = self._create_styled_checkbox("Enable post-translation Scanning phase")
+    self.scan_phase_settings_checkbox = scan_cb
     try:
         scan_cb.setChecked(bool(self.scan_phase_enabled_var))
     except Exception:
         pass
     def _on_scan_toggle(checked):
         try:
-            self.scan_phase_enabled_var = bool(checked)
+            if hasattr(self, '_set_scan_phase_enabled'):
+                self._set_scan_phase_enabled(checked)
+            else:
+                self.scan_phase_enabled_var = bool(checked)
         except Exception:
             pass
     scan_cb.toggled.connect(_on_scan_toggle)
