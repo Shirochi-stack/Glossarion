@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QWidget, QLineEdit, QFrame, QSplitter, QTextBrowser,
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget, QStyledItemDelegate,
-    QStyle, QStyleOptionViewItem, QLayout
+    QStyle, QStyleOptionViewItem, QLayout, QFormLayout, QDialogButtonBox,
+    QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
@@ -13852,6 +13853,218 @@ class _ChapterVirtualList(QWidget):
 # Book Details Dialog
 # ---------------------------------------------------------------------------
 
+_EDITABLE_BOOK_METADATA_FIELDS = (
+    "title",
+    "creator",
+    "publisher",
+    "language",
+    "date",
+    "description",
+    "subject",
+)
+
+
+def _metadata_subject_values(value) -> list[str]:
+    """Normalize a metadata subject value into ordered, unique tags."""
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(item) -> None:
+        if isinstance(item, (list, tuple, set, frozenset)):
+            for child in item:
+                add(child)
+            return
+        text = str(item or "").strip()
+        if not text:
+            return
+        if "#" in text:
+            parts = [
+                match.group(1).strip().strip(",;")
+                for match in re.finditer(r"#([^#]+)", text)
+            ]
+        else:
+            parts = [
+                part.strip()
+                for part in re.split(r"[,;\n]+", text)
+            ]
+        for part in parts:
+            if not part:
+                continue
+            key = part.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(part)
+
+    add(value)
+    return values
+
+
+def _merge_manual_metadata_edits(
+    existing: dict,
+    edits: dict,
+    source_values: dict | None = None,
+) -> tuple[dict, set[str]]:
+    """Merge user-edited display values without discarding metadata fields."""
+    merged = dict(existing or {})
+    source_values = source_values or {}
+    changed: set[str] = set()
+
+    def normalized(field: str, value):
+        if field == "subject":
+            return _metadata_subject_values(value)
+        return str(value or "").strip()
+
+    def stored_value(field: str, value):
+        if field != "subject":
+            return normalized(field, value)
+        subjects = normalized(field, value)
+        if len(subjects) == 1:
+            return subjects[0]
+        return subjects
+
+    for field in _EDITABLE_BOOK_METADATA_FIELDS:
+        if field not in edits:
+            continue
+        new_value = stored_value(field, edits[field])
+        if normalized(field, merged.get(field)) == normalized(field, new_value):
+            continue
+
+        original_key = (
+            "original_title" if field == "title" else f"original_{field}"
+        )
+        original_value = source_values.get(field)
+        if not normalized(field, original_value):
+            original_value = merged.get(field)
+        if (
+            original_key not in merged
+            and normalized(field, original_value)
+            and normalized(field, original_value) != normalized(field, new_value)
+        ):
+            merged[original_key] = stored_value(field, original_value)
+
+        merged[field] = new_value
+        translated_key = (
+            "title_translated"
+            if field == "title"
+            else f"{field}_translated"
+        )
+        # A manual value is authoritative output metadata. Marking it complete
+        # prevents a later chapter compile from silently translating over it.
+        merged[translated_key] = True
+        changed.add(field)
+
+    return merged, changed
+
+
+class _BookMetadataEditDialog(QDialog):
+    """Compact editor for the output workspace's metadata.json."""
+
+    def __init__(self, values: dict, parent=None):
+        super().__init__(parent)
+        self._initial_values = dict(values or {})
+        self.setWindowTitle("Edit EPUB Metadata")
+        self.setModal(True)
+        self.setMinimumWidth(620)
+        self.setStyleSheet("""
+            QDialog { background: #161622; color: #e0e0e0; }
+            QLabel { color: #aeb3c7; font-size: 9pt; }
+            QLineEdit, QPlainTextEdit {
+                background: #202033; color: #f0f0f5;
+                border: 1px solid #3a3a5e; border-radius: 5px;
+                padding: 6px 8px; font-size: 9.5pt;
+            }
+            QLineEdit:focus, QPlainTextEdit:focus {
+                border-color: #6c63ff;
+            }
+            QPushButton {
+                background: #2a2a3e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 5px;
+                padding: 6px 16px; font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #3a3a5e; border-color: #6c63ff;
+            }
+        """)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 18)
+        outer.setSpacing(14)
+
+        note = QLabel(
+            "Changes are saved to the output workspace's metadata.json. "
+            "The original EPUB is not modified."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+
+        self._title_edit = QLineEdit(str(values.get("title") or ""))
+        self._creator_edit = QLineEdit(str(values.get("creator") or ""))
+        self._publisher_edit = QLineEdit(str(values.get("publisher") or ""))
+        self._language_edit = QLineEdit(str(values.get("language") or ""))
+        self._date_edit = QLineEdit(str(values.get("date") or ""))
+        self._subject_edit = QPlainTextEdit(
+            str(values.get("subject") or "")
+        )
+        self._subject_edit.setPlaceholderText(
+            "Separate tags with commas or new lines"
+        )
+        self._subject_edit.setFixedHeight(72)
+        self._description_edit = QPlainTextEdit(
+            str(values.get("description") or "")
+        )
+        self._description_edit.setFixedHeight(150)
+
+        form.addRow("Title", self._title_edit)
+        form.addRow("Author", self._creator_edit)
+        form.addRow("Publisher", self._publisher_edit)
+        form.addRow("Language", self._language_edit)
+        form.addRow("Date", self._date_edit)
+        form.addRow("Tags", self._subject_edit)
+        form.addRow("Synopsis", self._description_edit)
+        outer.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    def values(self) -> dict:
+        return {
+            "title": self._title_edit.text(),
+            "creator": self._creator_edit.text(),
+            "publisher": self._publisher_edit.text(),
+            "language": self._language_edit.text(),
+            "date": self._date_edit.text(),
+            "subject": self._subject_edit.toPlainText(),
+            "description": self._description_edit.toPlainText(),
+        }
+
+    def changed_values(self) -> dict:
+        current = self.values()
+        changed = {}
+        for field, value in current.items():
+            if field == "subject":
+                old_value = _metadata_subject_values(
+                    self._initial_values.get(field)
+                )
+                new_value = _metadata_subject_values(value)
+            else:
+                old_value = str(
+                    self._initial_values.get(field) or ""
+                ).strip()
+                new_value = str(value or "").strip()
+            if old_value != new_value:
+                changed[field] = value
+        return changed
+
+
 class BookDetailsDialog(QDialog):
     """Web-like book page: cover, metadata, synopsis, and collapsible TOC.
 
@@ -14210,9 +14423,36 @@ class BookDetailsDialog(QDialog):
         # Metadata column
         meta_col = QVBoxLayout()
         meta_col.setSpacing(14)
+        meta_header = QHBoxLayout()
+        meta_header.setSpacing(8)
         meta_heading = QLabel("METADATA")
         meta_heading.setObjectName("section")
-        meta_col.addWidget(meta_heading)
+        meta_header.addWidget(meta_heading)
+        meta_header.addStretch()
+        self._edit_metadata_btn = QPushButton("\u270f\ufe0f  Edit")
+        self._edit_metadata_btn.setCursor(Qt.PointingHandCursor)
+        self._edit_metadata_btn.setToolTip(
+            "Edit the output workspace's metadata.json"
+        )
+        self._edit_metadata_btn.setStyleSheet("""
+            QPushButton {
+                background: #242438; color: #c8cbe0;
+                border: 1px solid #3a3a5e; border-radius: 5px;
+                padding: 3px 8px; font-size: 8pt; font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #343454; border-color: #6c63ff;
+            }
+            QPushButton:disabled {
+                background: #181824; color: #555a70;
+                border-color: #28283d;
+            }
+        """)
+        self._edit_metadata_btn.clicked.connect(
+            self._on_edit_metadata_clicked
+        )
+        meta_header.addWidget(self._edit_metadata_btn)
+        meta_col.addLayout(meta_header)
         self._meta_grid = QGridLayout()
         self._meta_grid.setContentsMargins(0, 0, 0, 0)
         self._meta_grid.setHorizontalSpacing(14)
@@ -14645,9 +14885,8 @@ class BookDetailsDialog(QDialog):
         title = (self._metadata_json.get("title") or self._details.get("title")
                  or self._book.get("name", ""))
         self._title_lbl.setText(title or self._book.get("name", ""))
-        authors = list(self._metadata_json.get("authors") or self._details.get("authors") or [])
-        if isinstance(authors, str):
-            authors = [authors]
+        self.setWindowTitle(title or self._book.get("name", ""))
+        authors = self._metadata_author_values()
         self._author_lbl.setText(", ".join(authors) if authors else "")
 
         synopsis = (self._metadata_json.get("description")
@@ -14747,6 +14986,15 @@ class BookDetailsDialog(QDialog):
         # already enables / disables the actions correctly.)
         resolved_out = self._resolve_output_folder_target()
         folder_ok = bool(resolved_out) and os.path.isdir(resolved_out)
+        self._edit_metadata_btn.setEnabled(folder_ok)
+        self._edit_metadata_btn.setCursor(
+            Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor
+        )
+        self._edit_metadata_btn.setToolTip(
+            "Edit the output workspace's metadata.json"
+            if folder_ok
+            else "An output workspace is required to edit metadata"
+        )
         self._folder_btn.setEnabled(folder_ok)
         self._folder_btn.setCursor(Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor)
         self._folder_btn_opacity.setOpacity(1.0 if folder_ok else 0.35)
@@ -14988,16 +15236,29 @@ class BookDetailsDialog(QDialog):
 
         return tags
 
+    def _metadata_author_values(self) -> list[str]:
+        """Return output-metadata creators, then source EPUB authors."""
+        authors = self._metadata_json.get("creator")
+        if not authors:
+            authors = self._metadata_json.get("authors")
+        if not authors:
+            authors = self._details.get("authors") or []
+        if isinstance(authors, str):
+            authors = [authors]
+        try:
+            values = list(authors or [])
+        except TypeError:
+            values = [authors]
+        return [str(author).strip() for author in values if str(author).strip()]
+
     def _display_tag_values(self) -> list[str]:
         """Return translated output tags, falling back to source EPUB tags."""
-        translated_tags = self._collect_tag_values(
-            self._metadata_json.get("subject") or [],
-            self._metadata_json.get("subjects") or [],
-            self._metadata_json.get("genres") or [],
-            self._metadata_json.get("tags") or [],
-        )
-        if translated_tags:
-            return translated_tags
+        metadata_tag_keys = ("subject", "subjects", "genres", "tags")
+        if any(key in self._metadata_json for key in metadata_tag_keys):
+            return self._collect_tag_values(
+                *(self._metadata_json.get(key) or []
+                  for key in metadata_tag_keys)
+            )
         return self._collect_tag_values(self._details.get("subjects") or [])
 
     def _style_chapter_page_size_combo(self) -> None:
@@ -15478,6 +15739,146 @@ class BookDetailsDialog(QDialog):
                 parent_lib._watch_compile_for_folder(out_folder, gui)
             except Exception:
                 pass
+
+    def _metadata_editor_values(self) -> dict:
+        """Return the effective values currently shown on the details page."""
+        title = (
+            self._metadata_json.get("title")
+            or self._details.get("title")
+            or self._book.get("name", "")
+        )
+        publisher = (
+            self._metadata_json.get("publisher")
+            or self._details.get("publisher")
+            or ""
+        )
+        language = (
+            self._metadata_json.get("language")
+            or self._details.get("language")
+            or ""
+        )
+        date = (
+            self._metadata_json.get("date")
+            or self._details.get("date")
+            or ""
+        )
+        description = (
+            self._metadata_json.get("description")
+            or self._details.get("description")
+            or ""
+        )
+        return {
+            "title": str(title or ""),
+            "creator": ", ".join(self._metadata_author_values()),
+            "publisher": str(publisher or ""),
+            "language": str(language or ""),
+            "date": str(date or ""),
+            "subject": ", ".join(self._display_tag_values()),
+            "description": str(description or ""),
+        }
+
+    def _source_metadata_values(self) -> dict:
+        """Return source-EPUB values used to preserve original_* fields."""
+        raw_authors = self._details.get("authors") or []
+        if isinstance(raw_authors, str):
+            raw_authors = [raw_authors]
+        return {
+            "title": self._details.get("title") or "",
+            "creator": ", ".join(
+                str(author).strip()
+                for author in raw_authors
+                if str(author).strip()
+            ),
+            "publisher": self._details.get("publisher") or "",
+            "language": self._details.get("language") or "",
+            "date": self._details.get("date") or "",
+            "description": self._details.get("description") or "",
+            "subject": self._details.get("subjects") or [],
+        }
+
+    def _on_edit_metadata_clicked(self):
+        """Edit and atomically save this workspace's metadata.json."""
+        output_folder = self._resolve_output_folder_target()
+        if not output_folder or not os.path.isdir(output_folder):
+            QMessageBox.warning(
+                self,
+                "Edit Metadata",
+                "Could not resolve this book's output workspace.",
+            )
+            return
+
+        dialog = _BookMetadataEditDialog(
+            self._metadata_editor_values(),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        edits = dialog.changed_values()
+        if not edits:
+            return
+
+        metadata_path = os.path.join(output_folder, "metadata.json")
+        current_metadata = dict(self._metadata_json or {})
+        if os.path.isfile(metadata_path):
+            try:
+                import json as _json
+                with open(metadata_path, "r", encoding="utf-8") as stream:
+                    loaded = _json.load(stream)
+                if isinstance(loaded, dict):
+                    current_metadata = loaded
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Edit Metadata",
+                    f"Could not read metadata.json:\n{exc}",
+                )
+                return
+
+        updated, changed_fields = _merge_manual_metadata_edits(
+            current_metadata,
+            edits,
+            self._source_metadata_values(),
+        )
+        if not changed_fields:
+            return
+
+        temp_path = ""
+        try:
+            import json as _json
+            file_descriptor, temp_path = tempfile.mkstemp(
+                prefix=".metadata-",
+                suffix=".json.tmp",
+                dir=output_folder,
+            )
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+                _json.dump(updated, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+            os.replace(temp_path, metadata_path)
+            temp_path = ""
+        except Exception as exc:
+            if temp_path and os.path.isfile(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+            QMessageBox.warning(
+                self,
+                "Edit Metadata",
+                f"Could not save metadata.json:\n{exc}",
+            )
+            return
+
+        self._metadata_json = updated
+        self._book["metadata_json"] = dict(updated)
+        self._apply_hero_payload({
+            "details": self._details,
+            "metadata_json": updated,
+            "cover": self._current_cover_path,
+        })
+
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_auto_refresh"):
+            QTimer.singleShot(0, parent._auto_refresh)
 
     def _on_translate_metadata_clicked(self):
         """Run this book's metadata phase through the parent Library."""

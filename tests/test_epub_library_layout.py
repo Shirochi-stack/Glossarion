@@ -15,6 +15,7 @@ from epub_library import (
     EpubLibraryDialog,
     SIZE_NORMAL,
     _FlowLayout,
+    _merge_manual_metadata_edits,
 )
 
 
@@ -214,3 +215,53 @@ def test_details_tags_fall_back_to_source_epub_subjects():
         "판타지",
         "빙의",
     ]
+
+
+def test_details_tags_allow_manually_cleared_metadata_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {"subject": []}
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == []
+
+
+def test_details_author_prefers_metadata_creator():
+    class DetailsStub:
+        _details = {"authors": ["원작자"]}
+        _metadata_json = {"creator": "Edited Author"}
+
+    assert BookDetailsDialog._metadata_author_values(DetailsStub()) == [
+        "Edited Author",
+    ]
+
+
+def test_manual_metadata_edits_preserve_originals_and_unknown_fields():
+    existing = {
+        "title": "Translated Title",
+        "original_title": "원제",
+        "identifier": "book-123",
+        "subject": ["Fantasy", "Possession"],
+    }
+    updated, changed = _merge_manual_metadata_edits(
+        existing,
+        {
+            "title": "My Preferred Title",
+            "subject": "Fantasy\nDrama; Fantasy",
+        },
+        {
+            "title": "원제",
+            "subject": ["판타지", "빙의"],
+        },
+    )
+
+    assert changed == {"title", "subject"}
+    assert updated["title"] == "My Preferred Title"
+    assert updated["original_title"] == "원제"
+    assert updated["title_translated"] is True
+    assert updated["subject"] == ["Fantasy", "Drama"]
+    assert updated["original_subject"] == ["판타지", "빙의"]
+    assert updated["subject_translated"] is True
+    assert updated["identifier"] == "book-123"

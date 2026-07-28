@@ -29101,9 +29101,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 job_path,
             ]
 
-        def _run_one(file_path: str, env_vars: dict) -> tuple[str, bool]:
+        total_jobs = len(prepared_jobs)
+
+        def _run_one(
+            file_path: str,
+            env_vars: dict,
+            job_index: int,
+        ) -> tuple[str, bool]:
             if self.stop_requested:
                 return file_path, False
+
+            worker_tag = f"M{job_index}"
+            display_name = os.path.splitext(
+                os.path.basename(file_path)
+            )[0]
+            self.append_log(
+                f"▶ [{worker_tag}] Metadata {job_index}/{total_jobs}: "
+                f"{display_name}"
+            )
 
             job_fd, job_path = tempfile.mkstemp(
                 prefix='glossarion_metadata_',
@@ -29159,7 +29174,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     daemon=True,
                 ).start()
 
-                label = os.path.basename(file_path)
                 while proc.poll() is None or not reader_done.is_set():
                     while True:
                         try:
@@ -29167,7 +29181,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         except queue.Empty:
                             break
                         if line:
-                            self.append_log(f"[{label}] {line}")
+                            self.append_log(f"[{worker_tag}] {line}")
 
                     if self.stop_requested and proc.poll() is None:
                         proc.terminate()
@@ -29184,8 +29198,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except queue.Empty:
                         break
                     if line:
-                        self.append_log(f"[{label}] {line}")
-                return file_path, proc.wait() == 0
+                        self.append_log(f"[{worker_tag}] {line}")
+                succeeded = proc.wait() == 0
+                self.append_log(
+                    f"{'✅' if succeeded else '❌'} "
+                    f"[{worker_tag}] Metadata "
+                    f"{'complete' if succeeded else 'failed'}"
+                )
+                return file_path, succeeded
             except Exception as exc:
                 self.append_log(
                     f"❌ Metadata worker failed for "
@@ -29208,8 +29228,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             thread_name_prefix='MetadataBook',
         ) as executor:
             futures = [
-                executor.submit(_run_one, file_path, env_vars)
-                for file_path, env_vars in prepared_jobs
+                executor.submit(
+                    _run_one,
+                    file_path,
+                    env_vars,
+                    job_index,
+                )
+                for job_index, (file_path, env_vars)
+                in enumerate(prepared_jobs, start=1)
             ]
             for future in concurrent.futures.as_completed(futures):
                 _file_path, succeeded = future.result()

@@ -70,6 +70,7 @@ except:
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
+    ('metadata_translation_worker.py', '.'),
     ('language_options.py', '.'),
     ('metadata_progress.py', '.'),
     ('splash_utils.py', '.'),
@@ -218,6 +219,7 @@ datas.append(('enable_debug_mode.py', '.'))
 # Application modules
 app_modules = [
     'TransateKRtoEN',
+    'metadata_translation_worker',
     'subtitle_processor',
     'language_options',
     'metadata_progress',
