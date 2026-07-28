@@ -20598,12 +20598,19 @@ def main(log_callback=None, stop_callback=None):
         out = os.path.join(os.path.dirname(os.path.abspath(input_path)), out)
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
-    
+
+    metadata_only = os.getenv("METADATA_ONLY", "0") == "1"
     preserve_pdf_ocr_images = (
         is_pdf_file
         and config.OUTPUT_MODE == "vision"
     )
-    cleanup_previous_extraction(out, preserve_images=preserve_pdf_ocr_images)
+    if metadata_only:
+        print("⚡ Metadata-only fast path: preserving existing chapter resources")
+    else:
+        cleanup_previous_extraction(
+            out,
+            preserve_images=preserve_pdf_ocr_images,
+        )
 
     os.environ["EPUB_OUTPUT_DIR"] = out
     glossary_root_override = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
@@ -20615,7 +20622,7 @@ def main(log_callback=None, stop_callback=None):
 
     # Manage translation history persistence based on contextual + rolling settings
     history_file = os.path.join(payloads_dir, "translation_history.json")
-    if os.path.exists(history_file):
+    if not metadata_only and os.path.exists(history_file):
         if config.CONTEXTUAL and config.TRANSLATION_HISTORY_ROLLING:
             # Preserve existing history across runs when using rolling window
             print(f"[DEBUG] Preserving translation history (rolling window enabled) → {history_file}")
@@ -20642,6 +20649,12 @@ def main(log_callback=None, stop_callback=None):
     metadata_reset_all, metadata_reset_fields = (
         progress_manager.metadata_regeneration_request()
     )
+    if metadata_only:
+        # The Library's explicit action is a regeneration request. Reuse the
+        # standard metadata phase below, including its original-value restore,
+        # instead of maintaining a second translation implementation.
+        metadata_reset_all = True
+        metadata_reset_fields = set()
     if not os.path.isfile(_metadata_path_before_extraction):
         metadata_reset_all = True
     metadata_regeneration_requested = metadata_progress_enabled and (
@@ -20707,6 +20720,7 @@ def main(log_callback=None, stop_callback=None):
         return
 
     # Check if model needs API key (delegates to UnifiedClient's authoritative list)
+    metadata_translation_failed = False
     try:
         from unified_api_client import UnifiedClient as _UC
         model_needs_api_key = _UC._model_needs_api_key(config.MODEL)
@@ -20772,7 +20786,44 @@ def main(log_callback=None, stop_callback=None):
             return
         print("📄 Continuing normal PDF extraction/translation after OCR source generation")
         
-    if is_pdf_file:
+    metadata_only_existing = {}
+    if metadata_only:
+        if not input_path.lower().endswith(".epub"):
+            print("❌ Metadata-only translation requires an EPUB source")
+            return False
+        print("\n" + "="*50)
+        print("⚡ SOURCE EPUB METADATA FAST PATH")
+        print("="*50)
+        try:
+            if os.path.isfile(_metadata_path_before_extraction):
+                try:
+                    with open(
+                        _metadata_path_before_extraction,
+                        "r",
+                        encoding="utf-8",
+                    ) as existing_metadata_file:
+                        metadata_only_existing = json.load(
+                            existing_metadata_file
+                        )
+                    if not isinstance(metadata_only_existing, dict):
+                        metadata_only_existing = {}
+                except Exception:
+                    metadata_only_existing = {}
+            with zipfile.ZipFile(input_path, "r") as zf:
+                metadata = Chapter_Extractor._extract_epub_metadata(zf)
+            chapters = []
+            print(
+                f"✅ Read {len(metadata)} metadata field(s) directly from "
+                "the source EPUB"
+            )
+            print("⏭️ Skipped chapter and resource extraction")
+        except Exception as metadata_extract_error:
+            print(
+                "❌ Could not read metadata from the source EPUB: "
+                f"{metadata_extract_error}"
+            )
+            return False
+    elif is_pdf_file:
         print("📄 Processing PDF file...")
         try:
             # Determine whether to use ProcessPoolExecutor based on PDF size.
@@ -21351,25 +21402,34 @@ def main(log_callback=None, stop_callback=None):
         validate_epub_structure(out)
         print("="*50 + "\n")
     
-    progress_manager.migrate_to_content_hash(chapters)
-    progress_manager.save()
+    if not metadata_only:
+        progress_manager.migrate_to_content_hash(chapters)
+        progress_manager.save()
 
     # Retroactively update image references in translated EPUB files.
     # Image output mode copies raw EPUB HTML and generates replacement images,
     # so this repair pass must not rewrite those refs back to original names.
-    if not is_text_file and not is_pdf_file and config.OUTPUT_MODE != "image":
+    if (
+        not metadata_only
+        and not is_text_file
+        and not is_pdf_file
+        and config.OUTPUT_MODE != "image"
+    ):
         retroactive_update_image_references(out)
 
     if check_stop():
         return
 
     metadata_path = os.path.join(out, "metadata.json")
-    if os.path.exists(metadata_path):
+    if not metadata_only and os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as mf:
             metadata = json.load(mf)
 
-    metadata["chapter_count"] = len(chapters)
-    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
+    if not metadata_only:
+        metadata["chapter_count"] = len(chapters)
+        metadata["chapter_titles"] = {
+            str(c["num"]): c["title"] for c in chapters
+        }
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
     client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
@@ -21426,6 +21486,31 @@ def main(log_callback=None, stop_callback=None):
     translate_metadata_fields = resolve_metadata_field_settings(
         translate_metadata_fields, input_path
     )
+    if metadata_only and metadata_only_existing:
+        # Selected fields always start from the current source EPUB values.
+        # Preserve only unselected translated fields and structural chapter
+        # information from the existing output metadata.
+        for field_name, should_translate in translate_metadata_fields.items():
+            if should_translate or field_name == "_per_epub":
+                continue
+            for existing_key in (
+                field_name,
+                (
+                    "original_title"
+                    if field_name == "title"
+                    else f"original_{field_name}"
+                ),
+                (
+                    "title_translated"
+                    if field_name == "title"
+                    else f"{field_name}_translated"
+                ),
+            ):
+                if existing_key in metadata_only_existing:
+                    metadata[existing_key] = metadata_only_existing[existing_key]
+        for structural_key in ("chapter_count", "chapter_titles"):
+            if structural_key in metadata_only_existing:
+                metadata[structural_key] = metadata_only_existing[structural_key]
 
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
     if metadata_translation_mode not in ('together', 'parallel', 'metadata_separate'):
@@ -21557,6 +21642,7 @@ def main(log_callback=None, stop_callback=None):
                 _set_metadata_field_progress(
                     "title", "failed", error="Title translation request failed"
                 )
+                metadata_translation_failed = True
                 print("⚠️ Title request failed or was interrupted — will retry on next run")
         elif title_selected and not title_translation_allowed:
             print(f"📚 Skipping title translation for {os.path.splitext(input_path)[1]} file")
@@ -21669,6 +21755,7 @@ def main(log_callback=None, stop_callback=None):
 
                 unresolved_fields = sorted(set(fields_to_translate) - completed_fields)
                 if unresolved_fields:
+                    metadata_translation_failed = True
                     if metadata_translation_mode == 'parallel':
                         for field_name in unresolved_fields:
                             _set_metadata_field_progress(
@@ -21695,6 +21782,7 @@ def main(log_callback=None, stop_callback=None):
                 print("📋 No additional metadata fields to translate")
 
     except Exception as e:
+        metadata_translation_failed = True
         if metadata_progress_enabled:
             for phase_key, phase_entry in progress_manager.metadata_entries():
                 if str(phase_entry.get("status", "")).lower() == "in_progress":
@@ -21718,6 +21806,14 @@ def main(log_callback=None, stop_callback=None):
         except Exception as metadata_save_error:
             _set_metadata_progress("failed", error=metadata_save_error)
             raise
+
+    if metadata_only:
+        if metadata_translation_failed:
+            print("❌ Metadata-only translation did not complete successfully")
+            return False
+        print("✅ Metadata-only translation completed")
+        print("TRANSLATION_COMPLETE_SIGNAL")
+        return True
 
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")

@@ -184,3 +184,33 @@ def test_details_tags_keep_full_text_and_wrap_to_multiple_rows(qapp):
     assert len({chip.y() for chip in chips}) > 1
     assert height > max(chip.height() for chip in chips)
     assert all(chip.width() >= chip.sizeHint().width() for chip in chips)
+
+
+def test_details_tags_prefer_translated_metadata_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {
+            "subject": ["Fantasy", "Possession"],
+        }
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == [
+        "Fantasy",
+        "Possession",
+    ]
+
+
+def test_details_tags_fall_back_to_source_epub_subjects():
+    class DetailsStub:
+        _details = {"subjects": ["판타지", "빙의"]}
+        _metadata_json = {}
+
+        def _collect_tag_values(self, *sources):
+            return BookDetailsDialog._collect_tag_values(self, *sources)
+
+    assert BookDetailsDialog._display_tag_values(DetailsStub()) == [
+        "판타지",
+        "빙의",
+    ]

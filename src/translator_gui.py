@@ -13,6 +13,26 @@ if __name__ == '__main__':
         # to talk to, so exit silently instead of showing an error dialog.
         _early_sys.exit(0)
 
+    # PyInstaller-safe metadata translation worker. Keep this before the GUI
+    # imports so a batch of EPUB metadata jobs does not initialize Qt in every
+    # child process.
+    if "--run-metadata-translation-worker" in _early_sys.argv:
+        _idx = _early_sys.argv.index("--run-metadata-translation-worker")
+        _job_path = (
+            _early_sys.argv[_idx + 1]
+            if len(_early_sys.argv) > _idx + 1 else ""
+        )
+        try:
+            from metadata_translation_worker import main as _metadata_worker_main
+            raise SystemExit(_metadata_worker_main(_job_path))
+        except Exception as _metadata_worker_exc:
+            print(
+                f"[ERROR] Metadata translation worker failed: "
+                f"{_metadata_worker_exc}",
+                flush=True,
+            )
+            raise SystemExit(1)
+
     # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
     # run itself via ``sys.executable script.py`` once bundled because
     # sys.executable is the Glossarion app exe.  Handle this tiny helper command
@@ -26311,7 +26331,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         self._clear_translation_run_overrides()
         try:
-            multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
+            if getattr(self, '_metadata_only_run', False):
+                multipass_enabled = False
+                multipass_refinement_mode = 'failed'
+                os.environ['MULTIPASS_MODE'] = '0'
+            else:
+                multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
             multipass_refinement_mode_label = (
                 'Full + raw'
                 if multipass_refinement_mode == 'full_with_raw'
@@ -26409,6 +26434,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
             mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
             self.append_log(f"🚀 Initializing {mode_label} multipass refinement...")
+        elif getattr(self, '_metadata_only_run', False):
+            self.append_log("🌐 Initializing metadata translation...")
         else:
             self.append_log("🚀 Initializing translation process...")
         
@@ -26449,7 +26476,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         return
                 
                 # Check for large EPUBs and set optimization parameters
-                epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                epub_files = (
+                    []
+                    if getattr(self, '_metadata_only_run', False)
+                    else [
+                        f for f in self.selected_files
+                        if f.lower().endswith('.epub')
+                    ]
+                )
                 
                 for epub_path in epub_files:
                     try:
@@ -26525,7 +26559,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self._current_auto_glossary_mode()
 
-                if getattr(self, '_single_chapter_filter', None) and auto_glossary_mode in ('balanced', 'full'):
+                if getattr(self, '_metadata_only_run', False) and auto_glossary_mode in ('balanced', 'full'):
+                    self.append_log("🌐 Metadata-only mode: skipping auto glossary extraction")
+                    auto_glossary_mode = 'off'
+                elif getattr(self, '_single_chapter_filter', None) and auto_glossary_mode in ('balanced', 'full'):
                     self.append_log("🎯 Single-chapter mode: skipping auto glossary extraction (jumping straight to translation)")
                     auto_glossary_mode = 'off'
 
@@ -26654,6 +26691,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                     mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
                     self.append_log(f"🚀 Starting {mode_label} multipass refinement...")
+                elif getattr(self, '_metadata_only_run', False):
+                    self.append_log("🌐 Starting metadata translation...")
                 else:
                     self.append_log("🚀 Starting translation...")
                 translation_completed = self.run_translation_direct()
@@ -26698,7 +26737,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     if subtitle_files:
                         self.append_log("Subtitles: skipping post-translation scanner")
                     current_run_output_mode = self._active_translation_output_mode()
-                    if csv_json_files or image_files or sdlxliff_files or subtitle_files:
+                    if getattr(self, '_metadata_only_run', False):
+                        self.append_log("🌐 Metadata-only mode: skipping post-translation QA scan")
+                    elif csv_json_files or image_files or sdlxliff_files or subtitle_files:
                         pass
                     elif current_run_output_mode == 'refinement':
                         self.append_log("✨ Skipping post-translation scanning for refinement mode")
@@ -26738,6 +26779,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self._single_chapter_filter = None
                 self._force_stream_all = False
                 os.environ.pop('SINGLE_CHAPTER_FILTER', None)
+                self._metadata_only_run = False
+                self._metadata_output_roots = {}
+                self._metadata_worker_processes = set()
+                os.environ.pop('METADATA_ONLY', None)
 
                 self._clear_translation_run_overrides()
                 # Reset stop flags ONCE, at the true end of the (possibly
@@ -27047,8 +27092,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Sort files based on OPF order if available
             original_file_count = len(self.selected_files)
-            self.selected_files = self._get_opf_file_order(self.selected_files)
-            self.append_log(f"📚 Processing {original_file_count} files in reading order")
+            if getattr(self, '_metadata_only_run', False):
+                self.append_log(
+                    f"🌐 Processing {original_file_count} EPUB metadata "
+                    "source(s) in selection order"
+                )
+            else:
+                self.selected_files = self._get_opf_file_order(
+                    self.selected_files
+                )
+                self.append_log(
+                    f"📚 Processing {original_file_count} files in reading order"
+                )
             # ====================================================
 
             # ── Generative-only mode (no input file) ───────────────────────
@@ -27084,6 +27139,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📁 Using output override: {os.environ['OUTPUT_DIRECTORY']}")
             except Exception as e:
                 self.append_log(f"⚠️ Could not apply OUTPUT_DIRECTORY override: {e}")
+
+            if (
+                getattr(self, '_metadata_only_run', False)
+                and total_files > 1
+                and bool(getattr(
+                    self,
+                    'batch_translation_var',
+                    self.config.get('batch_translation', True),
+                ))
+            ):
+                return self._run_parallel_metadata_files(self.selected_files)
             
             # Check if we're processing multiple images - if so, create a combined output folder
             image_extensions = set(_InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS)
@@ -28906,6 +28972,262 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
             return False
 
+    def _metadata_only_environment_for_file(
+        self,
+        file_path: str,
+        api_key: str,
+        base_env: dict | None = None,
+    ) -> dict:
+        """Build one isolated metadata-only backend environment."""
+        env_vars = dict(
+            base_env
+            if base_env is not None
+            else self._get_environment_variables(file_path, api_key)
+        )
+        try:
+            metadata_fields = json.loads(
+                env_vars.get('TRANSLATE_METADATA_FIELDS', '{}')
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata_fields = {}
+        if not isinstance(metadata_fields, dict):
+            metadata_fields = {}
+        if not any(
+            bool(enabled)
+            for field, enabled in metadata_fields.items()
+            if field != '_per_epub'
+        ):
+            metadata_fields['title'] = True
+
+        env_vars.update({
+            'METADATA_ONLY': '1',
+            'TRANSLATE_BOOK_TITLE': '1',
+            'TRANSLATE_METADATA_FIELDS': json.dumps(
+                metadata_fields, ensure_ascii=False
+            ),
+            'OUTPUT_MODE': 'text',
+            'VISION_OCR_FIRST': '0',
+            'ENABLE_IMAGE_TRANSLATION': '0',
+            'ENABLE_IMAGE_OUTPUT_MODE': '0',
+            'ENABLE_VIDEO_OUTPUT_MODE': '0',
+            'ENABLE_AUDIO_OUTPUT_MODE': '0',
+            'ENABLE_REFINEMENT_OUTPUT_MODE': '0',
+            'MULTIPASS_MODE': '0',
+            'USE_ASYNC_CHAPTER_EXTRACTION': '0',
+        })
+
+        output_roots = getattr(self, '_metadata_output_roots', {}) or {}
+        source_key = os.path.normcase(os.path.abspath(file_path))
+        output_root = output_roots.get(source_key)
+        if output_root:
+            output_root = os.path.abspath(output_root)
+            env_vars['OUTPUT_DIRECTORY'] = output_root
+            env_vars['OUTPUT_DIR'] = output_root
+        return env_vars
+
+    def _run_parallel_metadata_files(self, files: list[str]) -> bool:
+        """Translate multiple EPUB metadata sets in isolated child workers."""
+        import queue
+        import subprocess
+
+        files = [
+            os.path.abspath(path) for path in files
+            if path and path.lower().endswith('.epub') and os.path.isfile(path)
+        ]
+        if not files:
+            self.append_log("❌ No valid EPUBs were available for metadata translation")
+            return False
+
+        api_key = self.api_key_entry.text()
+        model = self.model_var
+        try:
+            from unified_api_client import UnifiedClient as _UC
+            model_needs_api_key = _UC._model_needs_api_key(model)
+        except Exception:
+            model_needs_api_key = bool(model)
+
+        if '@' in model or model.startswith('vertex/'):
+            google_creds = self.config.get('google_cloud_credentials')
+            if not google_creds or not os.path.exists(google_creds):
+                self.append_log(
+                    "❌ Error: Google Cloud credentials required for Vertex AI models."
+                )
+                return False
+            if not api_key:
+                try:
+                    with open(google_creds, 'r', encoding='utf-8') as creds_file:
+                        api_key = json.load(creds_file).get(
+                            'project_id', 'vertex-ai-project'
+                        )
+                except Exception:
+                    api_key = 'vertex-ai-project'
+        elif model_needs_api_key and not api_key:
+            self.append_log("❌ Error: Please enter your API key.")
+            return False
+
+        prepared_jobs: list[tuple[str, dict]] = []
+        for file_path in files:
+            env_vars = self._metadata_only_environment_for_file(
+                file_path,
+                api_key,
+            )
+            prepared_jobs.append((file_path, env_vars))
+
+        try:
+            batch_size = max(1, int(getattr(self, 'batch_size_var', 5)))
+        except (TypeError, ValueError):
+            batch_size = 5
+        worker_count = min(batch_size, len(prepared_jobs))
+        self.append_log(
+            f"⚡ Metadata batch mode: translating {len(prepared_jobs)} EPUBs "
+            f"with {worker_count} parallel worker"
+            f"{'s' if worker_count != 1 else ''}"
+        )
+
+        process_lock = threading.Lock()
+        self._metadata_worker_processes = set()
+
+        def _worker_command(job_path: str) -> list[str]:
+            if getattr(sys, 'frozen', False):
+                return [
+                    sys.executable,
+                    '--run-metadata-translation-worker',
+                    job_path,
+                ]
+            return [
+                sys.executable,
+                os.path.abspath(__file__),
+                '--run-metadata-translation-worker',
+                job_path,
+            ]
+
+        def _run_one(file_path: str, env_vars: dict) -> tuple[str, bool]:
+            if self.stop_requested:
+                return file_path, False
+
+            job_fd, job_path = tempfile.mkstemp(
+                prefix='glossarion_metadata_',
+                suffix='.json',
+            )
+            os.close(job_fd)
+            proc = None
+            try:
+                with open(job_path, 'w', encoding='utf-8') as job_file:
+                    json.dump(
+                        {
+                            'source_path': file_path,
+                            'env': env_vars,
+                        },
+                        job_file,
+                        ensure_ascii=False,
+                    )
+
+                child_env = dict(os.environ)
+                child_env['PYTHONIOENCODING'] = 'utf-8'
+                child_env.pop('TRANSLATION_CANCELLED', None)
+                child_env['GRACEFUL_STOP'] = '0'
+                child_env['GRACEFUL_STOP_COMPLETED'] = '0'
+                proc = subprocess.Popen(
+                    _worker_command(job_path),
+                    cwd=os.getcwd(),
+                    env=child_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    bufsize=1,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                )
+                with process_lock:
+                    self._metadata_worker_processes.add(proc)
+
+                output_queue: queue.Queue[str] = queue.Queue()
+                reader_done = threading.Event()
+
+                def _read_output():
+                    try:
+                        if proc.stdout is not None:
+                            for line in proc.stdout:
+                                output_queue.put(line.rstrip())
+                    finally:
+                        reader_done.set()
+
+                threading.Thread(
+                    target=_read_output,
+                    name=f"MetadataLog-{proc.pid}",
+                    daemon=True,
+                ).start()
+
+                label = os.path.basename(file_path)
+                while proc.poll() is None or not reader_done.is_set():
+                    while True:
+                        try:
+                            line = output_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if line:
+                            self.append_log(f"[{label}] {line}")
+
+                    if self.stop_requested and proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        break
+                    time.sleep(0.05)
+
+                while True:
+                    try:
+                        line = output_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if line:
+                        self.append_log(f"[{label}] {line}")
+                return file_path, proc.wait() == 0
+            except Exception as exc:
+                self.append_log(
+                    f"❌ Metadata worker failed for "
+                    f"{os.path.basename(file_path)}: {exc}"
+                )
+                return file_path, False
+            finally:
+                if proc is not None:
+                    with process_lock:
+                        self._metadata_worker_processes.discard(proc)
+                try:
+                    os.remove(job_path)
+                except OSError:
+                    pass
+
+        successful = 0
+        failed = 0
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix='MetadataBook',
+        ) as executor:
+            futures = [
+                executor.submit(_run_one, file_path, env_vars)
+                for file_path, env_vars in prepared_jobs
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                _file_path, succeeded = future.result()
+                if succeeded:
+                    successful += 1
+                else:
+                    failed += 1
+
+        self._metadata_worker_processes = set()
+        self.append_log("\n" + "=" * 60)
+        self.append_log("🌐 Metadata Translation Summary:")
+        self.append_log(f"   ✅ Successful: {successful} EPUBs")
+        if failed:
+            self.append_log(f"   ❌ Failed: {failed} EPUBs")
+        self.append_log(f"   📁 Total: {len(prepared_jobs)} EPUBs")
+        self.append_log("=" * 60)
+        return successful > 0 and not self.stop_requested
+
     def _process_text_file(self, file_path):
         """Process EPUB, text-like, PDF, or SDLXLIFF files."""
         try:
@@ -28950,7 +29272,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 
                 # Check for output directory override
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                metadata_roots = (
+                    getattr(self, '_metadata_output_roots', {}) or {}
+                    if getattr(self, '_metadata_only_run', False)
+                    else {}
+                )
+                metadata_root = metadata_roots.get(
+                    os.path.normcase(os.path.abspath(file_path))
+                )
+                override_dir = (
+                    metadata_root
+                    or os.environ.get('OUTPUT_DIRECTORY')
+                    or self.config.get('output_directory')
+                )
                 if override_dir:
                     # If absolute, use as is. If relative, join with CWD (or file dir?)
                     # TransateKRtoEN treats it as root, so we should too.
@@ -29034,9 +29368,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 env_vars = self._get_environment_variables(file_path, api_key)
                 env_vars['MULTIPASS_MODE'] = '1' if multipass_enabled else '0'
                 env_vars['MULTIPASS_REFINEMENT_MODE'] = multipass_refinement_mode
+
+                if getattr(self, '_metadata_only_run', False):
+                    env_vars = self._metadata_only_environment_for_file(
+                        file_path,
+                        api_key,
+                        base_env=env_vars,
+                    )
                 
+                # Metadata-only runs read the OPF metadata directly and never
+                # start chapter extraction.
+                if getattr(self, '_metadata_only_run', False):
+                    env_vars['USE_ASYNC_CHAPTER_EXTRACTION'] = '0'
+                    self.append_log(
+                        "⚡ Reading metadata directly from the source EPUB "
+                        "(chapter extraction bypassed)"
+                    )
                 # Enable async chapter extraction for EPUBs, PDFs, and SDLXLIFF to prevent GUI freezing
-                if file_path.lower().endswith(('.epub', '.pdf', '.sdlxliff')):
+                elif file_path.lower().endswith(('.epub', '.pdf', '.sdlxliff')):
                     env_vars['USE_ASYNC_CHAPTER_EXTRACTION'] = '1'
                     self.append_log("🚀 Using async chapter extraction (subprocess mode)")
                 
@@ -29102,7 +29451,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # the run jumps straight to the translation phase. The filter
                 # is consumed by Chapter_Extractor._extract_chapters_universal.
                 _sc_filter = getattr(self, '_single_chapter_filter', None)
-                if _sc_filter:
+                if getattr(self, '_metadata_only_run', False):
+                    os.environ['METADATA_ONLY'] = '1'
+                    os.environ.pop('SINGLE_CHAPTER_FILTER', None)
+                    os.environ.pop('CHAPTER_RANGE', None)
+                    self.append_log(
+                        "🌐 Metadata-only mode: running the normal metadata "
+                        "phase and skipping chapter translation"
+                    )
+                elif _sc_filter:
                     os.environ['SINGLE_CHAPTER_FILTER'] = str(_sc_filter)
                     # Targeted extraction is tiny — run it in-process.
                     os.environ['USE_ASYNC_CHAPTER_EXTRACTION'] = '0'
@@ -29125,6 +29482,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                     mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
                     self.append_log(f"🚀 Starting {mode_label} multipass refinement...")
+                elif getattr(self, '_metadata_only_run', False):
+                    self.append_log("🌐 Starting metadata translation phase...")
                 else:
                     self.append_log("🚀 Starting translation...")
                 
@@ -29148,6 +29507,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                         mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'Multipass').title()
                         self.append_log(f"✅ {mode_label} multipass refinement completed successfully!")
+                    elif getattr(self, '_metadata_only_run', False):
+                        self.append_log("✅ Metadata translation completed successfully!")
                     else:
                         self.append_log("✅ Translation completed successfully!")
                     return True
@@ -36170,6 +36531,106 @@ Important rules:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Library Error", f"Could not open Library:\n{e}")
             return None
+
+    def start_metadata_translation(
+        self,
+        epub_paths,
+        output_roots: dict[str, str] | None = None,
+    ) -> bool:
+        """Run the regular metadata phase for one or more EPUBs."""
+        try:
+            if isinstance(epub_paths, (str, os.PathLike)):
+                epub_paths = [str(epub_paths)]
+            valid_paths = []
+            seen = set()
+            for path in epub_paths or []:
+                if (
+                    not path
+                    or not os.path.isfile(path)
+                    or not str(path).lower().endswith('.epub')
+                ):
+                    continue
+                absolute_path = os.path.abspath(path)
+                path_key = os.path.normcase(absolute_path)
+                if path_key in seen:
+                    continue
+                seen.add(path_key)
+                valid_paths.append(absolute_path)
+            if not valid_paths:
+                self.append_log(
+                    "❌ Metadata translation: no valid EPUB sources were found"
+                )
+                return False
+            if (
+                (self.translation_thread and self.translation_thread.is_alive())
+                or (
+                    hasattr(self, 'glossary_thread')
+                    and self.glossary_thread
+                    and self.glossary_thread.is_alive()
+                )
+            ):
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self,
+                    "Process Running",
+                    "A translation or glossary process is already running.\n"
+                    "Please wait for it to finish (or stop it) first.",
+                )
+                return False
+
+            normalized_roots = {}
+            for path, root in (output_roots or {}).items():
+                if not path or not root:
+                    continue
+                normalized_roots[
+                    os.path.normcase(os.path.abspath(path))
+                ] = os.path.abspath(root)
+            self._metadata_output_roots = normalized_roots
+
+            try:
+                self._apply_selected_files_to_input_field(valid_paths)
+            except Exception:
+                pass
+            self.selected_files = valid_paths
+            self.current_file_index = 0
+            self._metadata_only_run = True
+            self._single_chapter_filter = None
+            self._force_stream_all = False
+
+            if len(valid_paths) == 1:
+                self.append_log(
+                    f"🌐 Queued metadata translation: "
+                    f"{os.path.basename(valid_paths[0])}"
+                )
+            else:
+                run_mode = (
+                    "parallel batch"
+                    if bool(getattr(
+                        self,
+                        'batch_translation_var',
+                        self.config.get('batch_translation', True),
+                    ))
+                    else "sequential"
+                )
+                self.append_log(
+                    f"🌐 Queued metadata translation for "
+                    f"{len(valid_paths)} EPUBs ({run_mode})"
+                )
+            self.run_translation_thread()
+            started = bool(
+                self.translation_thread and self.translation_thread.is_alive()
+            )
+            if not started:
+                self._metadata_only_run = False
+                self._metadata_output_roots = {}
+                os.environ.pop('METADATA_ONLY', None)
+            return started
+        except Exception as exc:
+            self.append_log(f"❌ Failed to start metadata translation: {exc}")
+            self._metadata_only_run = False
+            self._metadata_output_roots = {}
+            os.environ.pop('METADATA_ONLY', None)
+            return False
 
     def start_single_chapter_translation(self, epub_path: str, chapter_filename: str,
                                          force_stream_all: bool = False) -> bool:

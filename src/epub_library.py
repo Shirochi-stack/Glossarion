@@ -2574,6 +2574,26 @@ def _resolve_book_source_file(book: dict) -> str:
     return ""
 
 
+def _resolve_book_metadata_source(book: dict) -> str:
+    """Return the original EPUB that can feed metadata translation."""
+    source = _resolve_book_source_file(book)
+    if (
+        not source
+        and isinstance(book, dict)
+        and book.get("type") == "epub"
+        and not book.get("in_library")
+        and os.path.isfile(book.get("path", ""))
+    ):
+        source = book["path"]
+    if (
+        source
+        and source.lower().endswith(".epub")
+        and os.path.isfile(source)
+    ):
+        return source
+    return ""
+
+
 def _resolve_book_translated_file(book: dict) -> str:
     """Return the compiled / translated EPUB path to reveal, or ``""``.
 
@@ -9137,6 +9157,125 @@ class EpubLibraryDialog(QDialog):
         self._set_cards_compiling(folder, True)
         self._watch_compile_for_folder(folder, gui)
 
+    def _translate_metadata_for_books(self, books: list[dict]) -> bool:
+        """Run the normal metadata phase for every resolvable selected EPUB."""
+        entries: list[tuple[dict, str, str]] = []
+        seen_sources: set[str] = set()
+        for book in books or []:
+            source_path = _resolve_book_metadata_source(book)
+            if not source_path:
+                continue
+            source_key = os.path.normcase(os.path.abspath(source_path))
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+
+            if book.get("type") == "in_progress":
+                output_folder = (
+                    book.get("output_folder") or book.get("path", "")
+                )
+                if not os.path.isdir(output_folder):
+                    output_folder = ""
+            else:
+                output_folder = _resolve_book_output_folder(book)
+            entries.append((book, source_path, output_folder))
+
+        if not entries:
+            QMessageBox.warning(
+                self,
+                "Translate Metadata",
+                "Could not resolve an original EPUB source for the selection.",
+            )
+            return False
+
+        # A single output root can be synchronized with the main override in
+        # the usual way. Selections spanning multiple roots are routed per
+        # book below, so changing the global override would be misleading.
+        alignment_books: list[dict] = []
+        alignment_roots: set[str] = set()
+        for book, _source_path, output_folder in entries:
+            alignment_book = book
+            if output_folder and not book.get("output_folder"):
+                alignment_book = dict(book)
+                alignment_book["output_folder"] = output_folder
+            alignment_books.append(alignment_book)
+            if output_folder:
+                alignment_roots.add(os.path.normcase(os.path.abspath(
+                    os.path.dirname(output_folder)
+                )))
+        if len(alignment_roots) <= 1:
+            if not self._ensure_output_override_matches(alignment_books):
+                return False
+
+        existing_metadata: list[str] = []
+        output_roots: dict[str, str] = {}
+        for _book, source_path, output_folder in entries:
+            if not output_folder:
+                continue
+            output_roots[os.path.abspath(source_path)] = os.path.dirname(
+                os.path.abspath(output_folder)
+            )
+            metadata_path = os.path.join(output_folder, "metadata.json")
+            if os.path.isfile(metadata_path):
+                existing_metadata.append(metadata_path)
+
+        if existing_metadata:
+            count = len(existing_metadata)
+            total = len(entries)
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Metadata Already Exists")
+            if total == 1:
+                warning_text = (
+                    "metadata.json already exists for this EPUB.\n\n"
+                    "Continuing will regenerate the selected translated "
+                    "metadata fields and replace their current translated "
+                    "values."
+                )
+            else:
+                warning_text = (
+                    f"metadata.json already exists for {count} of the {total} "
+                    "selected EPUBs.\n\n"
+                    "Continuing will regenerate the selected translated "
+                    "metadata fields and replace their current translated "
+                    "values."
+                )
+            msg.setText(warning_text)
+            preview = existing_metadata[:8]
+            detail = "\n".join(preview)
+            if count > len(preview):
+                detail += f"\n… and {count - len(preview)} more"
+            msg.setInformativeText(detail)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+            msg.setDefaultButton(QMessageBox.Cancel)
+            if msg.exec() != QMessageBox.Yes:
+                return False
+
+        gui = _find_translator_gui(self)
+        if gui is None or not hasattr(gui, "start_metadata_translation"):
+            QMessageBox.warning(
+                self,
+                "Translate Metadata",
+                "The main translator window is not available.",
+            )
+            return False
+        try:
+            return bool(gui.start_metadata_translation(
+                [source_path for _book, source_path, _folder in entries],
+                output_roots=output_roots,
+            ))
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Translate Metadata",
+                f"Could not start metadata translation:\n{exc}",
+            )
+            return False
+
+    def _translate_metadata_for_book(self, book: dict) -> bool:
+        """Book Details compatibility wrapper for a single EPUB."""
+        return self._translate_metadata_for_books([book])
+
     def _cards_for_output_folder(self, folder: str) -> list:
         """Return every flash card whose workspace is *folder*."""
         if not folder:
@@ -11086,6 +11225,31 @@ class EpubLibraryDialog(QDialog):
             output_folder = (_resolve_book_output_folder(book)
                              or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
+        # Run the normal title/metadata phase for every selected EPUB. The
+        # translator processes them in order, or concurrently when its Batch
+        # Translation toggle is enabled.
+        metadata_books = [
+            selected_book for selected_book in selected_books
+            if _resolve_book_metadata_source(selected_book)
+        ]
+        if metadata_books:
+            if len(metadata_books) > 1:
+                metadata_label = (
+                    f"\U0001f310  Translate Metadata for "
+                    f"{len(metadata_books)} EPUBs"
+                )
+            else:
+                metadata_label = "\U0001f310  Translate Metadata"
+            metadata_action = menu.addAction(metadata_label)
+            metadata_action.setToolTip(
+                "Translate the configured metadata fields for the selected "
+                "EPUBs only."
+            )
+            metadata_books_snapshot = list(metadata_books)
+            metadata_action.triggered.connect(
+                lambda *_a, books=metadata_books_snapshot:
+                    self._translate_metadata_for_books(books)
+            )
         # "Compile EPUB" — explicitly runs the EPUB converter phase on the
         # card's output workspace (same action as the Book Details button;
         # single-chapter Translate runs never compile on their own). Only
@@ -14000,6 +14164,34 @@ class BookDetailsDialog(QDialog):
             self._translated_btn_opacity)
         actions.addWidget(self._translated_btn)
 
+        self._translate_metadata_btn = QPushButton(
+            "\U0001f310  Translate Metadata"
+        )
+        self._translate_metadata_btn.setCursor(Qt.PointingHandCursor)
+        self._translate_metadata_btn.setMaximumWidth(145)
+        self._translate_metadata_btn.setSizePolicy(
+            QSizePolicy.Fixed,
+            QSizePolicy.Fixed,
+        )
+        self._translate_metadata_btn.setToolTip(
+            "Run this EPUB's configured title/metadata translation phase only."
+        )
+        self._translate_metadata_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 5px;
+                padding: 4px 8px; font-size: 8.25pt; font-weight: bold; }
+            QPushButton:hover { background: #3a3a5e; border-color: #6c63ff; }
+        """)
+        self._translate_metadata_btn.clicked.connect(
+            self._on_translate_metadata_clicked
+        )
+        try:
+            _metadata_source = _resolve_book_metadata_source(self._book)
+            self._translate_metadata_btn.setVisible(bool(_metadata_source))
+        except Exception:
+            self._translate_metadata_btn.setVisible(False)
+        actions.addWidget(self._translate_metadata_btn)
+
         actions.addStretch()
         center.addLayout(actions)
 
@@ -14542,11 +14734,7 @@ class BookDetailsDialog(QDialog):
             self._meta_grid.addWidget(k_lbl, i, 0, Qt.AlignTop | Qt.AlignLeft)
             self._meta_grid.addWidget(v_lbl, i, 1, Qt.AlignTop | Qt.AlignLeft)
 
-        tags = self._collect_tag_values(
-            self._details.get("subjects") or [],
-            self._metadata_json.get("genres") or [],
-            self._metadata_json.get("tags") or [],
-        )
+        tags = self._display_tag_values()
         self._genres_heading.hide()
         self._genres_row.hide()
         self._tags_heading.setVisible(bool(tags))
@@ -14601,6 +14789,8 @@ class BookDetailsDialog(QDialog):
     def _on_details_ready(self, payload: dict):
         new_chapters_info = payload.get("chapters_info", []) or []
         auto = bool(getattr(self, "_is_auto_refreshing", False))
+        new_metadata_json = payload.get("metadata_json", {}) or {}
+        metadata_changed = new_metadata_json != self._metadata_json
         # On an auto-refresh, skip the expensive TOC rebuild when every
         # per-chapter signal is unchanged — otherwise we'd pointlessly
         # tear down + re-add hundreds of rows every 2 seconds.
@@ -14621,7 +14811,7 @@ class BookDetailsDialog(QDialog):
         # Re-apply the hero with the richer details returned by Phase 2
         # (OPF now includes real chapter titles, metadata_json may have
         # been re-loaded). Hero widgets are idempotent so this is safe.
-        if not auto:
+        if not auto or metadata_changed:
             self._apply_hero_payload(payload)
 
         # In-progress strip + reader-entry-point relabeling
@@ -14797,6 +14987,18 @@ class BookDetailsDialog(QDialog):
                     add(part)
 
         return tags
+
+    def _display_tag_values(self) -> list[str]:
+        """Return translated output tags, falling back to source EPUB tags."""
+        translated_tags = self._collect_tag_values(
+            self._metadata_json.get("subject") or [],
+            self._metadata_json.get("subjects") or [],
+            self._metadata_json.get("genres") or [],
+            self._metadata_json.get("tags") or [],
+        )
+        if translated_tags:
+            return translated_tags
+        return self._collect_tag_values(self._details.get("subjects") or [])
 
     def _style_chapter_page_size_combo(self) -> None:
         icon_path = _find_halgakos_icon()
@@ -15276,6 +15478,23 @@ class BookDetailsDialog(QDialog):
                 parent_lib._watch_compile_for_folder(out_folder, gui)
             except Exception:
                 pass
+
+    def _on_translate_metadata_clicked(self):
+        """Run this book's metadata phase through the parent Library."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_translate_metadata_for_book"):
+                parent._translate_metadata_for_book(self._book)
+                return
+            try:
+                parent = parent.parent()
+            except Exception:
+                parent = None
+        QMessageBox.warning(
+            self,
+            "Translate Metadata",
+            "The EPUB Library window is not available.",
+        )
 
     def _compile_epub_running(self) -> bool:
         """True while the main GUI's EPUB converter worker is active."""
