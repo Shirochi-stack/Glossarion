@@ -1257,13 +1257,11 @@ try:
     from authnd_auth import send_chat_completion as _authnd_send
     from authnd_auth import cancel_stream as _authnd_cancel_stream
     from authnd_auth import reset_cancel as _authnd_reset_cancel
-    from authnd_auth import AuthNDUpstreamMetadataError as _AuthNDUpstreamMetadataError
     AUTHND_AVAILABLE = True
 except ImportError:
     _authnd_send = None
     _authnd_cancel_stream = None
     _authnd_reset_cancel = None
-    _AuthNDUpstreamMetadataError = None
     AUTHND_AVAILABLE = False
 
 # Search/Gemini Free - Google Search browser-backed route (optional, no API key)
@@ -9978,9 +9976,6 @@ class UnifiedClient:
                 if self._should_abort_retry():
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-
-                if e.error_type in {"config_error", "upstream_metadata"}:
-                    raise
 
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
                     self._enable_image_request_quality_retry()
@@ -26092,16 +26087,6 @@ class UnifiedClient:
             except RuntimeError as exc:
                 error_str = str(exc)
                 error_l = error_str.lower()
-                if (
-                    _AuthNDUpstreamMetadataError is not None
-                    and isinstance(exc, _AuthNDUpstreamMetadataError)
-                ):
-                    raise UnifiedClientError(
-                        f"AuthND request reached NVIDIA Build, but NVIDIA returned invalid "
-                        f"function metadata for '{actual_model}': {error_str}",
-                        error_type="upstream_metadata",
-                        http_status=500,
-                    ) from None
                 if "stream cancelled" in error_str.lower():
                     self._log_once("AuthND: Stream cancelled by user")
                     raise UnifiedClientError(
