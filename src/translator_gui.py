@@ -29519,10 +29519,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 # Prefer structured cancellation detection when available.
                 is_cancelled = False
+                error_type = None
                 try:
                     from unified_api_client import UnifiedClientError
-                    if isinstance(e, UnifiedClientError) and getattr(e, 'error_type', None) == 'cancelled':
-                        is_cancelled = True
+                    if isinstance(e, UnifiedClientError):
+                        error_type = getattr(e, 'error_type', None)
+                        if error_type == 'cancelled':
+                            is_cancelled = True
                 except Exception:
                     pass
 
@@ -29540,6 +29543,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("⏹️ Graceful stop: not starting new API call")
                     else:
                         self.append_log("❌ Translation stopped by user")
+                elif error_type == 'upstream_metadata':
+                    # This is a complete provider response, not a local crash.
+                    # Preserve the actionable message without dumping internal
+                    # call stacks into the translation log.
+                    self.append_log(f"❌ Translation error: {e}")
+                    if hasattr(self, 'append_log_with_api_error_detection'):
+                        self.append_log_with_api_error_detection(str(e))
                 else:
                     # For other exceptions, show full details
                     self.append_log(f"❌ Translation error: {e}")

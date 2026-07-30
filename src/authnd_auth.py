@@ -43,9 +43,13 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
+
+class AuthNDUpstreamMetadataError(RuntimeError):
+    """NVIDIA Build accepted the request but could not resolve model metadata."""
+
 _cancel_event = threading.Event()
 _thread_local = threading.local()
-_metadata_cache: Dict[str, Dict[str, str]] = {}
+_metadata_cache: Dict[str, Dict[str, Any]] = {}
 _metadata_lock = threading.Lock()
 _chat_template_unsupported_models: set = set()
 _chat_template_unsupported_lock = threading.Lock()
@@ -331,14 +335,29 @@ def _captcha_token_failure_hint(error: Any) -> str:
 
 
 def _build_page_model_slug(model_id: str) -> str:
-    """Return the NVIDIA Build page slug for a model id.
+    """Return the preferred NVIDIA Build page slug for a model id.
 
-    Build pages use underscore separators for numeric version components
-    in several public model slugs (for example llama-3_1-70b-instruct),
-    while the chat payload still expects the dotted model name.
+    Most current Build pages preserve the payload model id exactly. Some older
+    pages use underscores for numeric version separators; those are handled by
+    ``_model_page_urls`` as a fallback after trying the exact model id.
     """
-    model_id = str(model_id or "").strip("/")
+    return str(model_id or "").strip("/")
+
+
+def _build_legacy_page_model_slug(model_id: str) -> str:
+    model_id = _build_page_model_slug(model_id)
     return re.sub(r"(?<=\d)\.(?=\d)", "_", model_id)
+
+
+def _model_page_urls(publisher: str, model_id: str) -> List[str]:
+    publisher = str(publisher or "").strip("/")
+    exact_slug = _build_page_model_slug(model_id)
+    legacy_slug = _build_legacy_page_model_slug(model_id)
+    urls = [f"{BUILD_BASE_URL}/{publisher}/{exact_slug}"]
+    legacy_url = f"{BUILD_BASE_URL}/{publisher}/{legacy_slug}"
+    if legacy_url not in urls:
+        urls.append(legacy_url)
+    return urls
 
 
 def _normalize_model(model: str) -> Tuple[str, str, str]:
@@ -360,7 +379,7 @@ def _normalize_model(model: str) -> Tuple[str, str, str]:
         publisher = os.getenv("AUTHND_DEFAULT_PUBLISHER", DEFAULT_PUBLISHER).strip("/") or DEFAULT_PUBLISHER
         model_id = raw
 
-    page_url = f"{BUILD_BASE_URL}/{publisher}/{_build_page_model_slug(model_id)}"
+    page_url = _model_page_urls(publisher, model_id)[0]
     return publisher, model_id, page_url
 
 
@@ -402,7 +421,25 @@ def _select_payload_model(metadata_payload_model: str, model_path: str, log_fn: 
     return scraped_payload_model
 
 
-def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
+_NULL_METADATA_VALUES = frozenset(("", "none", "null", "undefined", "$undefined"))
+
+
+def _clean_metadata_value(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    if cleaned.casefold() in _NULL_METADATA_VALUES:
+        return ""
+    return cleaned
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value or "").strip())
+        return True
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _resolve_model_metadata(page_url: str) -> Dict[str, Any]:
     with _metadata_lock:
         cached = _metadata_cache.get(page_url)
         if cached:
@@ -423,34 +460,76 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
                 return match.group(1)
         return ""
 
-    function_id = os.getenv("AUTHND_NVCF_FUNCTION_ID", "").strip() or _match((
-        r'\\"nvcfFunctionId\\":\\"([^"\\]+)\\"',
-        r'"nvcfFunctionId"\s*:\s*"([^"]+)"',
-    ))
-    artifact_name = _match((
+    artifact_name = _clean_metadata_value(_match((
         r'\\"artifactName\\":\\"([^"\\]+)\\"',
         r'"artifactName"\s*:\s*"([^"]+)"',
-    ))
-    payload_model = _match((
+    )))
+    payload_model = _clean_metadata_value(_match((
         r'\\"model\\"\s*:\s*\\"([^"\\]+)\\"',
         r'"model"\s*:\s*"([^"]+)"',
+    )))
+
+    configured_function_id = _clean_metadata_value(os.getenv("AUTHND_NVCF_FUNCTION_ID", ""))
+    raw_scraped_function_id = _match((
+        r'\\"nvcfFunctionId\\":\\"([^"\\]+)\\"',
+        r'"nvcfFunctionId"\s*:\s*"([^"]+)"',
+        r'\\"nvcfFunctionId\\"\s*:\s*(null|None|undefined)',
+        r'"nvcfFunctionId"\s*:\s*(null|None|undefined)',
     ))
-    namespace = os.getenv("AUTHND_NGC_ORG", "").strip("/") or _match((
+    scraped_function_id = _clean_metadata_value(raw_scraped_function_id)
+    function_id_unavailable = bool(raw_scraped_function_id) and not _is_uuid(scraped_function_id)
+
+    function_id = ""
+    function_id_source = ""
+    if _is_uuid(configured_function_id):
+        function_id = configured_function_id
+        function_id_source = "configured"
+    elif _is_uuid(scraped_function_id):
+        function_id = scraped_function_id
+        function_id_source = "page"
+
+    namespace = _clean_metadata_value(os.getenv("AUTHND_NGC_ORG", "").strip("/")) or _clean_metadata_value(_match((
         r'\\"namespace\\":\\"([^"\\]+)\\"',
         r'"namespace"\s*:\s*"([^"]+)"',
-    )) or DEFAULT_ORG_ID
+    ))) or DEFAULT_ORG_ID
 
-    endpoint_id = os.getenv("AUTHND_PREDICT_ID", "").strip() or artifact_name or function_id
+    configured_endpoint_id = _clean_metadata_value(os.getenv("AUTHND_PREDICT_ID", ""))
+    endpoint_id = configured_endpoint_id or artifact_name or function_id
     metadata = {
         "endpoint_id": endpoint_id,
         "function_id": function_id,
+        "function_id_unavailable": function_id_unavailable and not configured_endpoint_id,
+        "function_id_source": function_id_source,
         "artifact_name": artifact_name,
         "namespace": namespace,
         "payload_model": payload_model,
+        "page_url": page_url,
     }
     with _metadata_lock:
         _metadata_cache[page_url] = dict(metadata)
     return metadata
+
+
+def _resolve_model_page_metadata(publisher: str, model_id: str) -> Tuple[str, Dict[str, Any]]:
+    """Resolve exact and legacy NVIDIA Build slugs to a real model page."""
+    first_page_url = ""
+    first_metadata: Dict[str, Any] = {}
+    first_error: Optional[requests.RequestException] = None
+    for page_url in _model_page_urls(publisher, model_id):
+        try:
+            metadata = _resolve_model_metadata(page_url)
+        except requests.RequestException as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        if not first_page_url:
+            first_page_url = page_url
+            first_metadata = metadata
+        if metadata.get("artifact_name") or metadata.get("function_id"):
+            return page_url, metadata
+    if not first_page_url and first_error is not None:
+        raise first_error
+    return first_page_url, first_metadata
 
 
 def _content_to_text(content: Any) -> str:
@@ -1575,14 +1654,28 @@ def _log_non_stream_summary(
 def _raise_for_status(response: requests.Response) -> None:
     if response.status_code < 400:
         return
-    raise RuntimeError(
-        _authnd_http_error_message(
-            response.status_code,
-            response.headers,
-            response.text or "",
-            response.reason,
-        )
+    message = _authnd_http_error_message(
+        response.status_code,
+        response.headers,
+        response.text or "",
+        response.reason,
     )
+    raise _authnd_runtime_error(message)
+
+
+def _authnd_runtime_error(message: str) -> RuntimeError:
+    normalized = str(message or "").casefold()
+    if (
+        "function_id" in normalized
+        and "uuid parsing failed" in normalized
+        and (
+            "value `none`" in normalized
+            or "value 'none'" in normalized
+            or 'value "none"' in normalized
+        )
+    ):
+        return AuthNDUpstreamMetadataError(message)
+    return RuntimeError(message)
 
 
 def _httpx_status_error(resp: Any) -> RuntimeError:
@@ -1592,7 +1685,9 @@ def _httpx_status_error(resp: Any) -> RuntimeError:
         body = resp.read().decode("utf-8", errors="replace").strip()
     except Exception:
         body = ""
-    return RuntimeError(_authnd_http_error_message(resp.status_code, headers, body, reason))
+    return _authnd_runtime_error(
+        _authnd_http_error_message(resp.status_code, headers, body, reason)
+    )
 
 
 def _post_prediction(
@@ -1650,6 +1745,7 @@ def _post_prediction(
                     "namespace": org_id,
                     "endpoint_id": endpoint_id,
                     "function_id": metadata.get("function_id") or "",
+                    "function_id_source": metadata.get("function_id_source") or "",
                     "artifact_name": metadata.get("artifact_name") or "",
                     "payload_model": payload_model,
                 },
@@ -1674,7 +1770,7 @@ def _post_prediction(
     }
     if os.getenv("AUTHND_LEGACY_EXTRA_HEADERS", "0").lower() in ("1", "true", "yes"):
         headers.update({
-            "nv-function-id": endpoint_id,
+            "nv-function-id": metadata.get("function_id") or endpoint_id,
             "nv-model-name": model_path,
             "nv-session-id": str(uuid.uuid4()),
             "nvcf-request-id": request_id,
@@ -1822,8 +1918,9 @@ def send_chat_completion(
     if _is_cancelled():
         raise RuntimeError("stream cancelled")
 
-    publisher, model_id, page_url = _normalize_model(model)
+    publisher, model_id, _ = _normalize_model(model)
     model_path = f"{publisher}/{model_id}"
+    page_url, _metadata = _resolve_model_page_metadata(publisher, model_id)
     suppress_chat_template_kwargs = _model_requires_no_chat_template_kwargs(model_path)
     timeout_value = int(timeout or _env_int("AUTHND_TIMEOUT", DEFAULT_TIMEOUT))
     token_timeout = _env_int("AUTHND_TOKEN_TIMEOUT", min(max(timeout_value, 60), 180))

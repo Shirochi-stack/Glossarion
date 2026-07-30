@@ -9,7 +9,7 @@ const metadataCache = new Map();
 export async function sendAuthndChatCompletion({ messages, settings }) {
   const modelInfo = normalizeAuthndModel(settings.model);
   const normalizedMessages = normalizeMessages(messages);
-  const metadata = await resolveModelMetadata(modelInfo.pageUrl);
+  const { pageUrl, metadata } = await resolveModelPageMetadata(modelInfo);
 
   const endpointId = metadata.endpointId || modelInfo.modelId;
   const namespace = metadata.namespace || DEFAULT_ORG_ID;
@@ -26,7 +26,7 @@ export async function sendAuthndChatCompletion({ messages, settings }) {
   applyReasoningPayload(payload, modelInfo.modelPath, settings);
 
   const response = await postPredictionFromBuildPage({
-    pageUrl: modelInfo.pageUrl,
+    pageUrl,
     predictUrl: url,
     payload
   });
@@ -70,17 +70,28 @@ export function normalizeAuthndModel(model) {
     modelId = raw;
   }
 
-  const pageSlug = buildPageModelSlug(modelId);
+  const pageUrls = modelPageUrls(publisher, modelId);
   return {
     publisher,
     modelId,
     modelPath: `${publisher}/${modelId}`,
-    pageUrl: `${BUILD_BASE_URL}/${publisher}/${pageSlug}`
+    pageUrl: pageUrls[0],
+    pageUrls
   };
 }
 
 function buildPageModelSlug(modelId) {
-  return String(modelId || "").replace(/(?<=\d)\.(?=\d)/g, "_").replace(/^\/+|\/+$/g, "");
+  return String(modelId || "").replace(/^\/+|\/+$/g, "");
+}
+
+function buildLegacyPageModelSlug(modelId) {
+  return buildPageModelSlug(modelId).replace(/(?<=\d)\.(?=\d)/g, "_");
+}
+
+function modelPageUrls(publisher, modelId) {
+  const exactUrl = `${BUILD_BASE_URL}/${publisher}/${buildPageModelSlug(modelId)}`;
+  const legacyUrl = `${BUILD_BASE_URL}/${publisher}/${buildLegacyPageModelSlug(modelId)}`;
+  return exactUrl === legacyUrl ? [exactUrl] : [exactUrl, legacyUrl];
 }
 
 function payloadModelName(modelPath) {
@@ -103,32 +114,73 @@ async function resolveModelMetadata(pageUrl) {
   }
 
   const html = await response.text();
+  const payloadModel = cleanMetadataValue(matchFirst(html, [
+    /\\"model\\"\s*:\s*\\"([^"\\]+)\\"/,
+    /"model"\s*:\s*"([^"]+)"/
+  ]));
+  const rawFunctionId = matchFirst(html, [
+    /\\"nvcfFunctionId\\":\\"([^"\\]+)\\"/,
+    /"nvcfFunctionId"\s*:\s*"([^"]+)"/,
+    /\\"nvcfFunctionId\\"\s*:\s*(null|None|undefined)/,
+    /"nvcfFunctionId"\s*:\s*(null|None|undefined)/
+  ]);
+  const pageFunctionId = cleanMetadataValue(rawFunctionId);
+  const functionIdUnavailable = Boolean(rawFunctionId) && !isUuid(pageFunctionId);
+  const functionId = isUuid(pageFunctionId) ? pageFunctionId : "";
+  const artifactName = cleanMetadataValue(matchFirst(html, [
+    /\\"artifactName\\":\\"([^"\\]+)\\"/,
+    /"artifactName"\s*:\s*"([^"]+)"/
+  ]));
   const metadata = {
-    endpointId: matchFirst(html, [
-      /\\"artifactName\\":\\"([^"\\]+)\\"/,
-      /"artifactName"\s*:\s*"([^"]+)"/,
-      /\\"nvcfFunctionId\\":\\"([^"\\]+)\\"/,
-      /"nvcfFunctionId"\s*:\s*"([^"]+)"/
-    ]),
-    functionId: matchFirst(html, [
-      /\\"nvcfFunctionId\\":\\"([^"\\]+)\\"/,
-      /"nvcfFunctionId"\s*:\s*"([^"]+)"/
-    ]),
-    artifactName: matchFirst(html, [
-      /\\"artifactName\\":\\"([^"\\]+)\\"/,
-      /"artifactName"\s*:\s*"([^"]+)"/
-    ]),
-    namespace: matchFirst(html, [
+    endpointId: artifactName || functionId,
+    functionId,
+    functionIdUnavailable,
+    functionIdSource: isUuid(pageFunctionId) ? "page" : "",
+    artifactName,
+    namespace: cleanMetadataValue(matchFirst(html, [
       /\\"namespace\\":\\"([^"\\]+)\\"/,
       /"namespace"\s*:\s*"([^"]+)"/
-    ]) || DEFAULT_ORG_ID,
-    payloadModel: matchFirst(html, [
-      /\\"model\\"\s*:\s*\\"([^"\\]+)\\"/,
-      /"model"\s*:\s*"([^"]+)"/
-    ])
+    ])) || DEFAULT_ORG_ID,
+    payloadModel,
+    pageUrl
   };
   metadataCache.set(pageUrl, metadata);
   return metadata;
+}
+
+async function resolveModelPageMetadata(modelInfo) {
+  let firstResult = null;
+  let firstError = null;
+  for (const pageUrl of modelInfo.pageUrls || [modelInfo.pageUrl]) {
+    let metadata;
+    try {
+      metadata = await resolveModelMetadata(pageUrl);
+    } catch (error) {
+      firstError ||= error;
+      continue;
+    }
+    firstResult ||= { pageUrl, metadata };
+    if (metadata.artifactName || metadata.functionId) {
+      return { pageUrl, metadata };
+    }
+  }
+  if (firstResult) {
+    return firstResult;
+  }
+  throw firstError;
+}
+
+function cleanMetadataValue(value) {
+  const cleaned = String(value || "").trim();
+  return ["", "none", "null", "undefined", "$undefined"].includes(cleaned.toLowerCase())
+    ? ""
+    : cleaned;
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+    String(value || "").trim()
+  );
 }
 
 async function postPredictionFromBuildPage({ pageUrl, predictUrl, payload }) {
