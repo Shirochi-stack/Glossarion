@@ -7,7 +7,11 @@ from PySide6.QtCore import QEvent, QMimeData, QUrl
 
 import ImageRenderer
 import manga_integration
-from manga_integration import MangaTranslationTab, _translation_run_token_matches
+from manga_integration import (
+    MangaTranslationTab,
+    _manga_filename_without_skip_prefix,
+    _translation_run_token_matches,
+)
 import manga_ocr_io
 
 
@@ -47,6 +51,12 @@ class _DropHarness:
 
     def _log(self, message, level):
         self.logs.append((message, level))
+
+
+def test_skip_display_prefix_uses_emoji_and_accepts_legacy_marker():
+    assert _manga_filename_without_skip_prefix('⏭️ page.png') == 'page.png'
+    assert _manga_filename_without_skip_prefix('[SKIP] page.png') == 'page.png'
+    assert _manga_filename_without_skip_prefix('page.png') == 'page.png'
 
 
 def test_drop_payload_keeps_supported_local_paths_only(tmp_path):

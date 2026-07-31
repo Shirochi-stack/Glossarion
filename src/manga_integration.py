@@ -91,6 +91,18 @@ def _natural_sort_key(text):
         return int(part) if part.isdigit() else part.lower()
     return [convert(c) for c in re.split('([0-9]+)', text)]
 
+
+_MANGA_SKIP_PREFIX = "⏭️ "
+
+
+def _manga_filename_without_skip_prefix(text: str) -> str:
+    """Remove current or legacy skip markers from a displayed filename."""
+    value = str(text or '')
+    for prefix in (_MANGA_SKIP_PREFIX, "[SKIP] "):
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return value
+
 # Windows thread priority constants
 if _IS_WINDOWS:
     _THREAD_PRIORITY_IDLE = -15
@@ -9501,12 +9513,14 @@ class MangaTranslationTab(QObject):
             if not filepath and row < len(self.selected_files):
                 filepath = self.selected_files[row]
                 item.setData(Qt.UserRole, filepath)
-            basename = os.path.basename(filepath or item.text().replace("[SKIP] ", "", 1))
+            basename = os.path.basename(
+                filepath or _manga_filename_without_skip_prefix(item.text())
+            )
             key = self._skip_key_for_path(filepath or basename)
             skipped_by_range = active_filter and (row + 1) not in indices
             skipped_manually = key in manual_skipped
             skipped = skipped_by_range or skipped_manually
-            item.setText(f"[SKIP] {basename}" if skipped else basename)
+            item.setText(f"{_MANGA_SKIP_PREFIX}{basename}" if skipped else basename)
             item.setForeground(skipped_brush if skipped else active_brush)
             item.setBackground(skipped_background if skipped else active_background)
             if skipped_manually:
@@ -13309,7 +13323,7 @@ class MangaTranslationTab(QObject):
                 item = self.file_listbox.item(i)
                 filepath = item.data(Qt.UserRole) if item else None
                 if not filepath:
-                    filename = item.text().replace("[SKIP] ", "", 1) if item else ""
+                    filename = _manga_filename_without_skip_prefix(item.text()) if item else ""
                     # Fallback for older rows that do not have full-path data yet.
                     for candidate in old_order:
                         if candidate in seen_paths:
