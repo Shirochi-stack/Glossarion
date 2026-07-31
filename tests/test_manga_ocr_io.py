@@ -1,6 +1,10 @@
 from dataclasses import dataclass
 
 import manga_ocr_io
+from manga_translator import (
+    _prepare_precomputed_regions,
+    _regions_requiring_translation,
+)
 
 
 @dataclass
@@ -12,6 +16,36 @@ class FakeTextRegion:
     region_type: str
     translated_text: str | None = None
     bubble_bounds: tuple | None = None
+
+
+def test_imported_pipeline_regions_keep_and_reuse_translations():
+    translated = FakeTextRegion(
+        text='source',
+        vertices=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        bounding_box=(0, 0, 10, 10),
+        confidence=1.0,
+        region_type='text_block',
+        translated_text='translated',
+    )
+    missing = FakeTextRegion(
+        text='missing',
+        vertices=[(20, 0), (30, 0), (30, 10), (20, 10)],
+        bounding_box=(20, 0, 10, 10),
+        confidence=1.0,
+        region_type='text_block',
+    )
+
+    prepared = _prepare_precomputed_regions(
+        [translated, missing],
+        preserve_translations=True,
+    )
+    pending = _regions_requiring_translation(
+        prepared,
+        reuse_existing=True,
+    )
+
+    assert prepared[0].translated_text == 'translated'
+    assert pending == [missing]
 
 
 def test_document_round_trip_preserves_unicode_and_detector_metadata(tmp_path):

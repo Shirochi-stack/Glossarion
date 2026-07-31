@@ -1,9 +1,11 @@
 import os
+import threading
 from types import SimpleNamespace
 
-from PySide6.QtCore import QMimeData, QUrl
+from PySide6.QtCore import QEvent, QMimeData, QUrl
 
 import ImageRenderer
+import manga_integration
 from manga_integration import MangaTranslationTab, _translation_run_token_matches
 import manga_ocr_io
 
@@ -65,6 +67,149 @@ def test_drop_payload_keeps_supported_local_paths_only(tmp_path):
 
     paths = MangaTranslationTab._manga_drop_local_paths(object(), mime)
     assert paths == [os.path.abspath(image), os.path.abspath(folder)]
+
+
+def test_ocr_drop_payload_keeps_unique_local_json_files_only(tmp_path):
+    session = tmp_path / 'chapter_ocr_20260731_193045.json'
+    session.write_text('{}', encoding='utf-8')
+    ignored = tmp_path / 'notes.txt'
+    ignored.write_text('notes', encoding='utf-8')
+    mime = QMimeData()
+    mime.setUrls([
+        QUrl.fromLocalFile(str(session)),
+        QUrl.fromLocalFile(str(session)),
+        QUrl.fromLocalFile(str(ignored)),
+        QUrl('https://example.com/session.json'),
+    ])
+
+    paths = MangaTranslationTab._ocr_drop_local_json_paths(object(), mime)
+
+    assert paths == [os.path.abspath(session)]
+
+
+def test_ocr_json_drop_routes_into_batch_import(tmp_path):
+    session = os.path.abspath(tmp_path / 'chapter_ocr.json')
+
+    class _Target:
+        def isEnabled(self):
+            return True
+
+    class _DropEvent:
+        def __init__(self):
+            self.accepted = False
+
+        def type(self):
+            return QEvent.Drop
+
+        def mimeData(self):
+            return object()
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+    target = _Target()
+    dropped = []
+    highlights = []
+    manga_tab = SimpleNamespace(
+        _ocr_import_drop_targets={target},
+        _ocr_drop_local_json_paths=lambda _mime: [session],
+        _set_ocr_import_drop_highlight=lambda active: highlights.append(active),
+        _import_batch_ocr_path=lambda path: dropped.append(path),
+    )
+    event = _DropEvent()
+
+    handled = MangaTranslationTab.eventFilter(manga_tab, target, event)
+
+    assert handled is True
+    assert event.accepted is True
+    assert highlights == [False]
+    assert dropped == [session]
+
+
+def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monkeypatch):
+    image = os.path.abspath(tmp_path / 'page.png')
+    with open(image, 'wb') as handle:
+        handle.write(b'image')
+    page = manga_ocr_io.make_page(
+        image,
+        [{
+            'text': 'source',
+            'translated_text': 'translated',
+            'bounding_box': [1, 2, 30, 40],
+        }],
+    )
+    document = manga_ocr_io.create_document([page], workflow='automatic')
+
+    class _StateManager:
+        def __init__(self):
+            self.states = {}
+            self.flushed = False
+
+        def get_state(self, path):
+            return self.states.get(path, {})
+
+        def set_state(self, path, state, save=True):
+            self.states[path] = state
+
+        def flush(self):
+            self.flushed = True
+
+    class _Button:
+        def setText(self, text):
+            self.text = text
+
+        def setToolTip(self, text):
+            self.tooltip = text
+
+    state_manager = _StateManager()
+    refreshed = []
+    manga_tab = SimpleNamespace(
+        _imported_ocr_document=None,
+        _refresh_imported_ocr_page_map=lambda _files: {image: page},
+        image_state_manager=state_manager,
+        image_preview_widget=SimpleNamespace(current_image_path=image),
+        batch_ocr_import_btn=_Button(),
+        _refresh_imported_manual_preview=lambda path: refreshed.append(path),
+        _log=lambda *_args: None,
+        dialog=object(),
+    )
+    monkeypatch.setattr(ImageRenderer, '_clear_cross_image_state', lambda *_args: None)
+    monkeypatch.setattr(ImageRenderer, '_rehydrate_text_state_from_persisted', lambda *_args: None)
+    monkeypatch.setattr(ImageRenderer, '_restore_image_state_overlays_only', lambda *_args: None)
+    monkeypatch.setattr(manga_integration.QMessageBox, 'information', lambda *_args: None)
+
+    imported = MangaTranslationTab._apply_imported_batch_ocr_document(
+        manga_tab,
+        str(tmp_path / 'session.json'),
+        document,
+        [image],
+    )
+
+    assert imported is True
+    assert state_manager.flushed is True
+    assert state_manager.states[image]['translated_texts'][0]['translation'] == 'translated'
+    assert refreshed == [image]
+
+
+def test_imported_regions_keep_session_provenance_for_glossary_handoff(tmp_path):
+    image = os.path.abspath(tmp_path / 'page.png')
+    page = {
+        'regions': [{
+            'text': 'source',
+            'translated_text': 'translated',
+            'bounding_box': [1, 2, 30, 40],
+        }],
+    }
+    normalized = os.path.normcase(os.path.abspath(image))
+    manga_tab = SimpleNamespace(
+        _imported_ocr_document={'pages': [page]},
+        _imported_ocr_page_map={normalized: page},
+    )
+
+    regions = MangaTranslationTab._resolve_imported_ocr_regions(manga_tab, image)
+
+    assert regions[0].translated_text == 'translated'
+    assert regions[0]._imported_ocr_session is True
 
 
 def test_folder_drop_recurses_and_skips_generated_output_folders(tmp_path):
@@ -223,6 +368,108 @@ def test_manga_ocr_export_filename_includes_timestamp():
     )
 
     assert filename == 'chapter_ocr_20260731_193045.json'
+
+
+def test_auto_ocr_folder_uses_the_epub_default_output_root(tmp_path, monkeypatch):
+    app_output_root = tmp_path / 'app-output'
+    monkeypatch.delenv('OUTPUT_DIRECTORY', raising=False)
+    monkeypatch.setattr(
+        manga_integration,
+        '_get_app_dir',
+        lambda: str(app_output_root),
+    )
+    manga_tab = SimpleNamespace(main_gui=SimpleNamespace(config={}))
+
+    output_dir = MangaTranslationTab._manga_ocr_output_dir(manga_tab)
+
+    assert output_dir == os.path.join(str(app_output_root), 'OCR Text')
+
+
+def test_auto_ocr_folder_respects_output_directory_override(tmp_path, monkeypatch):
+    override_root = tmp_path / 'custom-output'
+    monkeypatch.delenv('OUTPUT_DIRECTORY', raising=False)
+    manga_tab = SimpleNamespace(
+        main_gui=SimpleNamespace(config={'output_directory': str(override_root)})
+    )
+
+    output_dir = MangaTranslationTab._manga_ocr_output_dir(manga_tab)
+
+    assert output_dir == os.path.join(str(override_root), 'OCR Text')
+
+
+def test_ocr_import_dialog_defaults_to_auto_saved_ocr_folder(tmp_path, monkeypatch):
+    ocr_folder = tmp_path / 'custom-output' / 'OCR Text'
+    session = tmp_path / 'session.json'
+    manga_ocr_io.write_document(
+        str(session),
+        manga_ocr_io.create_document([], workflow='automatic'),
+    )
+    captured = {}
+
+    def _choose_file(_parent, _title, initial_dir, _filters):
+        captured['initial_dir'] = initial_dir
+        return str(session), ''
+
+    monkeypatch.setattr(manga_integration.QFileDialog, 'getOpenFileName', _choose_file)
+    manga_tab = SimpleNamespace(
+        dialog=object(),
+        _manga_ocr_output_dir=lambda: str(ocr_folder),
+    )
+
+    path, document = MangaTranslationTab._load_ocr_document_from_dialog(
+        manga_tab,
+        'Import Manga OCR Text',
+    )
+
+    assert captured['initial_dir'] == str(ocr_folder)
+    assert ocr_folder.is_dir()
+    assert path == str(session)
+    assert document['workflow'] == 'automatic'
+
+
+def test_automatic_ocr_session_never_drops_saved_translation(tmp_path):
+    image = tmp_path / 'page.png'
+    image.write_bytes(b'image')
+    output = tmp_path / 'chapter_ocr_20260731_193045.json'
+    document = manga_ocr_io.create_document(
+        [],
+        workflow='automatic',
+        source_root=str(tmp_path),
+    )
+    manga_tab = SimpleNamespace(
+        _automatic_ocr_document=document,
+        _automatic_ocr_export_path=str(output),
+        _ocr_io_lock=threading.Lock(),
+        selected_files=[str(image)],
+        _current_manga_processing_files=lambda: [str(image)],
+        _log=lambda *_args: None,
+    )
+    translated_region = {
+        'rect_index': 0,
+        'text': 'source',
+        'translated_text': 'translated',
+        'bounding_box': [1, 2, 30, 40],
+    }
+    ocr_only_region = {
+        'rect_index': 0,
+        'text': 'source',
+        'translated_text': None,
+        'bounding_box': [1, 2, 30, 40],
+    }
+
+    MangaTranslationTab._record_automatic_ocr_page(
+        manga_tab,
+        str(image),
+        [translated_region],
+    )
+    MangaTranslationTab._record_automatic_ocr_page(
+        manga_tab,
+        str(image),
+        [ocr_only_region],
+    )
+
+    saved = manga_ocr_io.load_document(str(output))
+    assert saved['pages'][0]['regions'][0]['translated_text'] == 'translated'
 
 
 def test_imported_translation_rerenders_and_reloads_preview(tmp_path, monkeypatch):

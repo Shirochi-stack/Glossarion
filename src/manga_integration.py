@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
                                QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton,
                                QAbstractItemView)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread, QUrl
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush, QDesktopServices
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
 import logging
@@ -6682,14 +6682,19 @@ class MangaTranslationTab(QObject):
         ocr_io_layout.setSpacing(8)
         self.batch_ocr_import_btn = QPushButton("📥 Import OCR")
         self.batch_ocr_import_btn.setToolTip(
-            "Import OCR text saved by an earlier manga run. Matching pages will skip OCR."
+            "Click to select, or drag and drop, a saved OCR JSON session. "
+            "Matching pages will skip OCR."
         )
+        self.batch_ocr_import_btn.setAcceptDrops(True)
+        self.batch_ocr_import_btn.setProperty("ocrDropActive", False)
+        self.batch_ocr_import_btn.installEventFilter(self)
+        self._ocr_import_drop_targets = {self.batch_ocr_import_btn}
         self.batch_ocr_import_btn.clicked.connect(self._import_batch_ocr_text)
-        self.batch_ocr_export_btn = QPushButton("📤 Export OCR")
-        self.batch_ocr_export_btn.setToolTip(
-            "Save a copy of the OCR file automatically created by the latest translation run."
+        self.batch_ocr_open_btn = QPushButton("📂 Open Auto-Saved OCR Files")
+        self.batch_ocr_open_btn.setToolTip(
+            "Open the dedicated folder containing timestamped OCR and translation session files."
         )
-        self.batch_ocr_export_btn.clicked.connect(self._export_automatic_ocr_text)
+        self.batch_ocr_open_btn.clicked.connect(self._open_automatic_ocr_folder)
         def style_ocr_io_button(button, background, border, hover, pressed):
             button.setMinimumHeight(36)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -6710,6 +6715,11 @@ class MangaTranslationTab(QObject):
                 QPushButton:pressed {{
                     background-color: {pressed};
                 }}
+                QPushButton[ocrDropActive="true"] {{
+                    background-color: #7a5a18;
+                    border: 2px dashed #ffd166;
+                    color: white;
+                }}
                 QPushButton:disabled {{
                     background-color: #252525;
                     color: #6f6f6f;
@@ -6725,14 +6735,14 @@ class MangaTranslationTab(QObject):
             pressed="#19475d",
         )
         style_ocr_io_button(
-            self.batch_ocr_export_btn,
+            self.batch_ocr_open_btn,
             background="#28734c",
             border="#3b9b69",
             hover="#338b5d",
             pressed="#1d5739",
         )
         ocr_io_layout.addWidget(self.batch_ocr_import_btn, stretch=1)
-        ocr_io_layout.addWidget(self.batch_ocr_export_btn, stretch=1)
+        ocr_io_layout.addWidget(self.batch_ocr_open_btn, stretch=1)
         control_layout.addWidget(ocr_io_row)
 
         # Add tooltip to show why button is disabled
@@ -13905,6 +13915,25 @@ class MangaTranslationTab(QObject):
 
     def eventFilter(self, obj, event):
         try:
+            ocr_drop_targets = getattr(self, '_ocr_import_drop_targets', set())
+            if obj in ocr_drop_targets:
+                event_type = event.type()
+                if event_type in (QEvent.DragEnter, QEvent.DragMove):
+                    paths = self._ocr_drop_local_json_paths(event.mimeData())
+                    if len(paths) == 1 and obj.isEnabled():
+                        event.acceptProposedAction()
+                        self._set_ocr_import_drop_highlight(True)
+                        return True
+                elif event_type == QEvent.DragLeave:
+                    self._set_ocr_import_drop_highlight(False)
+                elif event_type == QEvent.Drop:
+                    paths = self._ocr_drop_local_json_paths(event.mimeData())
+                    self._set_ocr_import_drop_highlight(False)
+                    if len(paths) == 1 and obj.isEnabled():
+                        event.acceptProposedAction()
+                        self._import_batch_ocr_path(paths[0])
+                        return True
+
             drop_targets = getattr(self, '_manga_drop_targets', set())
             if obj in drop_targets:
                 event_type = event.type()
@@ -16536,16 +16565,15 @@ class MangaTranslationTab(QObject):
         return os.path.join(output_dir, filename)
 
     def _manga_ocr_output_dir(self) -> str:
-        """Return the dedicated folder used for automatically saved manga OCR."""
+        """Return the manga OCR folder under the application's active output root."""
         override_dir = (
             os.environ.get('OUTPUT_DIRECTORY')
             or getattr(self.main_gui, 'config', {}).get('output_directory')
         )
-        source_dir = self._current_manga_source_dir()
-        if not source_dir:
-            files = self._current_manga_processing_files() or list(self.selected_files or [])
-            source_dir = os.path.dirname(files[0]) if files else os.getcwd()
-        return os.path.join(os.path.abspath(override_dir or source_dir), "OCR Text")
+        # Mirror the EPUB default output root: the executable/app source
+        # directory on Windows and the working directory elsewhere.
+        output_root = override_dir or _get_app_dir()
+        return os.path.join(os.path.abspath(output_root), "OCR Text")
 
     def _manga_ocr_default_filename(self) -> str:
         return f"{self._manga_glossary_source_name()}_ocr.json"
@@ -16571,7 +16599,10 @@ class MangaTranslationTab(QObject):
                 source_root = os.path.dirname(files[0])
         output_dir = self._manga_ocr_output_dir()
         os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, self._manga_ocr_default_filename())
+        output_path = os.path.join(
+            output_dir,
+            self._manga_ocr_timestamped_export_filename(),
+        )
         document = manga_ocr_io.create_document(
             [], workflow="automatic", source_root=source_root
         )
@@ -16613,13 +16644,18 @@ class MangaTranslationTab(QObject):
         if page is None:
             return None
         from manga_translator import TextRegion
-        return [
+        regions = [
             manga_ocr_io.region_record_to_text_region(record, TextRegion)
             for record in page.get('regions', [])
         ]
+        # Preserve provenance through the glossary workflow's OCR-only pass,
+        # which forwards these same objects as explicit precomputed regions.
+        for region in regions:
+            region._imported_ocr_session = True
+        return regions
 
     def _record_automatic_ocr_page(self, image_path: str, regions) -> None:
-        """Incrementally persist one page's OCR from a worker thread."""
+        """Incrementally persist OCR and translations without losing newer text."""
         document = getattr(self, '_automatic_ocr_document', None)
         output_path = getattr(self, '_automatic_ocr_export_path', None)
         if not document or not output_path:
@@ -16644,6 +16680,27 @@ class MangaTranslationTab(QObject):
             for index, existing in enumerate(current_pages):
                 existing_path = existing.get('source_path')
                 if existing_path and os.path.normcase(os.path.abspath(existing_path)) == normalized:
+                    # A page is saved once immediately after OCR and again after
+                    # translation. Never let a late OCR-only callback erase text
+                    # already written by the translated callback.
+                    existing_regions = list(existing.get('regions') or [])
+                    existing_by_rect_index = {
+                        region.get('rect_index'): region
+                        for region in existing_regions
+                        if isinstance(region, dict) and region.get('rect_index') is not None
+                    }
+                    for region_index, incoming_region in enumerate(page.get('regions') or []):
+                        if not isinstance(incoming_region, dict):
+                            continue
+                        previous_region = existing_by_rect_index.get(incoming_region.get('rect_index'))
+                        if previous_region is None and region_index < len(existing_regions):
+                            previous_region = existing_regions[region_index]
+                        if (
+                            isinstance(previous_region, dict)
+                            and not str(incoming_region.get('translated_text') or '').strip()
+                            and str(previous_region.get('translated_text') or '').strip()
+                        ):
+                            incoming_region['translated_text'] = previous_region['translated_text']
                     current_pages[index] = page
                     replaced = True
                     break
@@ -16652,16 +16709,29 @@ class MangaTranslationTab(QObject):
             current_pages.sort(key=lambda item: int(item.get('index', 0) or 0))
             document['pages'] = current_pages
             manga_ocr_io.write_document(output_path, document)
+        translated_count = sum(
+            1
+            for region in page.get('regions') or []
+            if isinstance(region, dict) and str(region.get('translated_text') or '').strip()
+        )
         self._log(
-            f"Saved OCR text: {os.path.basename(image_path)} ({len(page.get('regions') or [])} regions)",
+            f"Saved OCR session: {os.path.basename(image_path)} "
+            f"({len(page.get('regions') or [])} regions, {translated_count} translated)",
             "debug",
         )
 
     def _load_ocr_document_from_dialog(self, title: str):
+        initial_dir = self._manga_ocr_output_dir()
+        try:
+            os.makedirs(initial_dir, exist_ok=True)
+        except OSError:
+            # QFileDialog can still fall back to its normal location if the
+            # configured output directory is temporarily unavailable.
+            initial_dir = ""
         path, _ = QFileDialog.getOpenFileName(
             self.dialog,
             title,
-            "",
+            initial_dir,
             "Glossarion Manga OCR (*.json);;JSON Files (*.json);;All Files (*)",
         )
         if not path:
@@ -16672,6 +16742,47 @@ class MangaTranslationTab(QObject):
             QMessageBox.warning(self.dialog, "Invalid OCR File", str(error))
             return None, None
 
+    def _ocr_drop_local_json_paths(self, mime_data) -> List[str]:
+        """Return unique local JSON files from an OCR import drop payload."""
+        if mime_data is None or not mime_data.hasUrls():
+            return []
+        paths: List[str] = []
+        seen = set()
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = os.path.abspath(url.toLocalFile())
+            key = os.path.normcase(os.path.normpath(path))
+            if key in seen or not os.path.isfile(path):
+                continue
+            if os.path.splitext(path)[1].casefold() != '.json':
+                continue
+            seen.add(key)
+            paths.append(path)
+        return paths
+
+    def _set_ocr_import_drop_highlight(self, active: bool) -> None:
+        button = getattr(self, 'batch_ocr_import_btn', None)
+        if button is None:
+            return
+        button.setProperty("ocrDropActive", bool(active))
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+
+    def _import_batch_ocr_path(self, path: str) -> bool:
+        """Import a dropped OCR session using the normal batch import workflow."""
+        files = list(self._current_manga_processing_files() or self.selected_files or [])
+        if not files:
+            QMessageBox.warning(self.dialog, "No Files", "Load the manga images before importing OCR text.")
+            return False
+        try:
+            document = manga_ocr_io.load_document(path)
+        except manga_ocr_io.MangaOcrFormatError as error:
+            QMessageBox.warning(self.dialog, "Invalid OCR File", str(error))
+            return False
+        return self._apply_imported_batch_ocr_document(path, document, files)
+
     def _import_batch_ocr_text(self) -> None:
         """Load OCR that the next Start Translation run should reuse."""
         files = list(self._current_manga_processing_files() or self.selected_files or [])
@@ -16681,6 +16792,15 @@ class MangaTranslationTab(QObject):
         path, document = self._load_ocr_document_from_dialog("Import Manga OCR Text")
         if not document:
             return
+        self._apply_imported_batch_ocr_document(path, document, files)
+
+    def _apply_imported_batch_ocr_document(
+        self,
+        path: str,
+        document: Dict[str, Any],
+        files: List[str],
+    ) -> bool:
+        """Apply and report an OCR document loaded by either click or drop."""
         self._imported_ocr_document = document
         matches = self._refresh_imported_ocr_page_map(files)
         if not matches:
@@ -16690,17 +16810,76 @@ class MangaTranslationTab(QObject):
                 "No Matching Pages",
                 "The OCR file does not match any currently loaded manga images.",
             )
-            return
+            return False
+
+        translated_region_count = sum(
+            1
+            for page in matches.values()
+            for region in (page.get('regions') or [])
+            if isinstance(region, dict)
+            and str(region.get('translated_text') or '').strip()
+        )
+
+        # Batch import is also a session restore. Populate the manual editor's
+        # state from canonical regions so imported translations appear now,
+        # rather than only becoming visible after another translation run.
+        try:
+            state_manager = getattr(self, 'image_state_manager', None)
+            preview = getattr(self, 'image_preview_widget', None)
+            if state_manager is not None:
+                for image_path, page in matches.items():
+                    imported_state = manga_ocr_io.editor_state_from_page(page)
+                    existing_state = state_manager.get_state(image_path) or {}
+                    existing_state.update(imported_state)
+                    state_manager.set_state(image_path, existing_state, save=True)
+                if hasattr(state_manager, 'flush'):
+                    state_manager.flush()
+
+                current = getattr(preview, 'current_image_path', None) if preview else None
+                current_source = None
+                if current:
+                    current_key = os.path.normcase(os.path.abspath(current))
+                    current_source = next(
+                        (
+                            image_path for image_path in matches
+                            if os.path.normcase(os.path.abspath(image_path)) == current_key
+                        ),
+                        None,
+                    )
+                if current_source:
+                    ImageRenderer._clear_cross_image_state(self)
+                    ImageRenderer._rehydrate_text_state_from_persisted(self, current_source)
+                    ImageRenderer._restore_image_state_overlays_only(self, current_source)
+                    self._refresh_imported_manual_preview(current_source)
+        except Exception as restore_error:
+            self._log(f"Could not refresh imported OCR session preview: {restore_error}", "warning")
+
         if hasattr(self, 'batch_ocr_import_btn'):
             self.batch_ocr_import_btn.setText(f"📥 Imported OCR ({len(matches)})")
             self.batch_ocr_import_btn.setToolTip(path)
-        self._log(f"Imported OCR for {len(matches)}/{len(files)} loaded pages", "success")
-        QMessageBox.information(
-            self.dialog,
-            "OCR Imported",
-            f"Matched {len(matches)} of {len(files)} loaded pages.\n\n"
-            "Matching pages will skip OCR when you start translation.",
+        self._log(
+            f"Imported OCR for {len(matches)}/{len(files)} loaded pages "
+            f"with {translated_region_count} translated regions",
+            "success",
         )
+        if translated_region_count:
+            QMessageBox.information(
+                self.dialog,
+                "OCR Session Imported",
+                f"Matched {len(matches)} of {len(files)} loaded pages and restored "
+                f"{translated_region_count} translated regions.\n\n"
+                "Start Translation will reuse both OCR and existing translations.",
+            )
+        else:
+            self._log("The imported session contains OCR only and no translated text", "warning")
+            QMessageBox.warning(
+                self.dialog,
+                "OCR-Only Session Imported",
+                f"Matched {len(matches)} of {len(files)} loaded pages, but this JSON "
+                "contains no translated text.\n\nOCR will be reused, but translations "
+                "cannot be restored from this file.",
+            )
+        return True
 
     def _latest_automatic_ocr_path(self) -> Optional[str]:
         current = getattr(self, '_automatic_ocr_export_path', None)
@@ -16717,6 +16896,28 @@ class MangaTranslationTab(QObject):
         except OSError:
             return None
 
+    def _open_automatic_ocr_folder(self) -> None:
+        """Open the dedicated auto-saved manga OCR folder."""
+        output_dir = self._manga_ocr_output_dir()
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as error:
+            QMessageBox.warning(
+                self.dialog,
+                "Could Not Open OCR Folder",
+                f"Glossarion could not create the OCR folder:\n{output_dir}\n\n{error}",
+            )
+            return
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(output_dir)):
+            QMessageBox.warning(
+                self.dialog,
+                "Could Not Open OCR Folder",
+                f"Glossarion could not open:\n{output_dir}",
+            )
+            return
+        self._log(f"Opened auto-saved OCR folder: {output_dir}", "info")
+
     def _export_automatic_ocr_text(self) -> None:
         """Copy the automatically generated OCR manifest to a user-selected path."""
         source_path = self._latest_automatic_ocr_path()
@@ -16730,7 +16931,7 @@ class MangaTranslationTab(QObject):
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manga OCR Text",
-            self._manga_ocr_timestamped_export_filename(source_path),
+            os.path.basename(source_path),
             "Glossarion Manga OCR (*.json);;JSON Files (*.json)",
         )
         if not destination:

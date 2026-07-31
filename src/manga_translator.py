@@ -207,6 +207,38 @@ class TextRegion:
                 data[key] = value
         return data
 
+
+def _prepare_precomputed_regions(
+    regions: List[TextRegion],
+    *,
+    preserve_translations: bool = False,
+) -> List[TextRegion]:
+    """Copy precomputed regions and optionally retain imported translations."""
+    prepared = list(regions or [])
+    if not preserve_translations:
+        for region in prepared:
+            try:
+                region.translated_text = None
+            except Exception:
+                pass
+    return prepared
+
+
+def _regions_requiring_translation(
+    regions: List[TextRegion],
+    *,
+    reuse_existing: bool = False,
+) -> List[TextRegion]:
+    """Return only untranslated regions when restoring an imported session."""
+    prepared = list(regions or [])
+    if not reuse_existing:
+        return prepared
+    return [
+        region
+        for region in prepared
+        if not str(getattr(region, 'translated_text', None) or '').strip()
+    ]
+
 def does_rectangle_fit(bigger_rect: Tuple, smaller_rect: Tuple) -> bool:
     """
     Check if smaller_rect fits entirely inside bigger_rect.
@@ -15081,6 +15113,13 @@ class MangaTranslator:
             # owns its full translate/render path, so skip that shortcut for
             # OCR-only and precomputed-region glossary passes.
             used_precomputed_regions = precomputed_regions is not None
+            used_imported_regions = bool(
+                used_precomputed_regions
+                and any(
+                    getattr(region, '_imported_ocr_session', False)
+                    for region in (precomputed_regions or [])
+                )
+            )
             if not used_precomputed_regions:
                 resolver = getattr(self, 'ocr_import_resolver', None)
                 if callable(resolver):
@@ -15092,6 +15131,7 @@ class MangaTranslator:
                     if imported_regions is not None:
                         precomputed_regions = imported_regions
                         used_precomputed_regions = True
+                        used_imported_regions = True
             if self.manga_settings.get('advanced', {}).get('format_detection', False):
                 self._log("🔍 Analyzing image format...")
                 img = Image.open(image_path)
@@ -15142,12 +15182,10 @@ class MangaTranslator:
             # pass, or resolve regions from a user-imported OCR document.
             if used_precomputed_regions:
                 self._log(f"📍 [STEP 1] Reusing precomputed OCR regions")
-                regions = list(precomputed_regions or [])
-                for region in regions:
-                    try:
-                        region.translated_text = None
-                    except Exception:
-                        pass
+                regions = _prepare_precomputed_regions(
+                    precomputed_regions or [],
+                    preserve_translations=used_imported_regions,
+                )
             else:
                 self._log(f"📍 [STEP 1] Text Detection Phase")
                 regions = self.detect_text_regions(image_path)
@@ -15238,16 +15276,30 @@ class MangaTranslator:
             # Helper tasks
             def _task_translate():
                 try:
+                    regions_to_translate = _regions_requiring_translation(
+                        regions,
+                        reuse_existing=used_imported_regions,
+                    )
+                    reused_count = len(regions) - len(regions_to_translate)
+                    if reused_count:
+                        self._log(
+                            f"📥 Reusing {reused_count}/{len(regions)} translated regions from imported OCR session",
+                            "info",
+                        )
+                    if not regions_to_translate:
+                        self._log("✅ Imported page already contains all translations; skipping translation API", "success")
+                        return True
+
                     if self.full_page_context_enabled:
                         # Full page context translation mode
                         self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
                         self._log("   This mode sends all text together for more consistent translations", "info")
                         if self._check_stop():
                             return False
-                        translations = self.translate_full_page_context(regions, image_path)
+                        translations = self.translate_full_page_context(regions_to_translate, image_path)
                         if translations:
-                            translated_count = sum(1 for r in regions if getattr(r, 'translated_text', None) and r.translated_text and r.translated_text != r.text)
-                            self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
+                            translated_count = sum(1 for r in regions_to_translate if getattr(r, 'translated_text', None) and r.translated_text and r.translated_text != r.text)
+                            self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions_to_translate)} pending regions translated")
                             return True
                         else:
                             self._log("❌ Full page context translation failed", "error")
@@ -15258,9 +15310,9 @@ class MangaTranslator:
                         self._log(f"\n📝 Using INDIVIDUAL translation mode")
                         if self.manga_settings.get('advanced', {}).get('parallel_processing', False):
                             self._log("⚡ Parallel processing ENABLED")
-                            _ = self._translate_regions_parallel(regions, image_path)
+                            _ = self._translate_regions_parallel(regions_to_translate, image_path)
                         else:
-                            _ = self.translate_regions(regions, image_path)
+                            _ = self.translate_regions(regions_to_translate, image_path)
                         return True
                 except Exception as te:
                     error_msg = f"Translation task error: {type(te).__name__}: {str(te)}"
@@ -15670,6 +15722,15 @@ class MangaTranslator:
             
             # Update result
             result['regions'] = [r.to_dict() for r in regions]
+            # Persist once more from the finalized result representation. This
+            # guarantees the automatic session JSON contains translated_text
+            # even if renderer work or an earlier worker callback raced with the
+            # post-translation save above.
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, result['regions'])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not finalize translated OCR session: {export_error}", "warning")
             if not result.get('interrupted', False):
                 result['success'] = True
                 self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")

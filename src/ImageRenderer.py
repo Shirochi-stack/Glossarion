@@ -11459,7 +11459,7 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
         # Also disable start_button in manga_integration if it exists
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
-        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_export_btn'):
+        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_open_btn'):
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setEnabled(False)
         
@@ -11500,7 +11500,7 @@ def _enable_workflow_buttons(self):
         # Also re-enable start_button in manga_integration if it exists
         if hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(True)
-        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_export_btn'):
+        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_open_btn'):
             if hasattr(self, btn_name):
                 getattr(self, btn_name).setEnabled(True)
         
