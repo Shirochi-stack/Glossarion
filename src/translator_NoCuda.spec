@@ -135,6 +135,7 @@ datas.append(('Halgakos_NoChibi.png', '.'))
 datas.append(('WhereIsMyOutput.png', '.'))
 
 app_files = [
+    ('manga_ocr_io.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('metadata_translation_worker.py', '.'),
@@ -427,6 +428,7 @@ if platform.system() == 'Windows':
 
 # Application modules
 app_modules = [
+    'manga_ocr_io',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',

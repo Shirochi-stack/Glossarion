@@ -64,6 +64,31 @@ configure_utf8_output()
 _global_log_callback = None
 _stop_flag = False
 
+# Historical refinement data is never a valid EPUB source.  Keep this rule at
+# the converter boundary as well as in the translation pipeline so a recursive
+# fallback cannot accidentally discover a chapter under the backup directory.
+_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup"})
+
+
+def _is_forbidden_epub_source_path(path: str, output_dir: str) -> bool:
+    """Return True when *path* is outside the workspace or inside a backup."""
+    try:
+        root = os.path.realpath(os.path.abspath(output_dir))
+        candidate = os.path.realpath(os.path.abspath(path))
+        root_key = os.path.normcase(root)
+        candidate_key = os.path.normcase(candidate)
+        if os.path.commonpath((root_key, candidate_key)) != root_key:
+            return True
+        relative = os.path.relpath(candidate, root)
+    except (OSError, ValueError, TypeError):
+        return True
+
+    return any(
+        part.casefold() in _EPUB_FORBIDDEN_SOURCE_DIRS
+        for part in relative.replace("\\", "/").split("/")
+        if part not in ("", ".")
+    )
+
 
 def _norm_abs_path(path: str) -> str:
     """Return a normalized absolute path key for loose path comparisons."""
@@ -2128,6 +2153,9 @@ class EPUBCompiler:
                 if hasattr(self, '_extract_source_headers_and_current_titles'):
                     # Use the new extraction method
                     source_headers, current_titles = self._extract_source_headers_and_current_titles()
+                    for _header_num, _source_title in source_headers.items():
+                        if _header_num in current_titles:
+                            current_titles[_header_num]['source_title'] = _source_title
                     self.log(f"[DEBUG] Extraction complete: {len(source_headers)} source, {len(current_titles)} current")
                 else:
                     self.log("⚠️ Missing _extract_source_headers_and_current_titles method!")
@@ -2269,6 +2297,22 @@ class EPUBCompiler:
                             
                             # Apply translations to HTML files using the same method
                             if hasattr(self, 'update_html_headers') and self.update_html_headers:
+                                for _num, _new_title in list(translated_headers.items()):
+                                    _current_info = current_titles.get(_num) or {}
+                                    _current_title = str(_current_info.get('title') or '').strip()
+                                    _source_title = str(_current_info.get('source_title') or '').strip()
+                                    if (
+                                        _current_title
+                                        and _source_title
+                                        and _current_title != _source_title
+                                        and _current_title != str(_new_title or '').strip()
+                                    ):
+                                        translated_headers[_num] = _current_title
+                                        self.log(
+                                            f"⏭️ Preserving manually edited header in "
+                                            f"{_current_info.get('filename', f'chapter {_num}')}: "
+                                            f"'{_current_title}'"
+                                        )
                                 self.header_translator._update_html_headers_exact(
                                     self.html_dir, 
                                     translated_headers, 
@@ -2339,7 +2383,21 @@ class EPUBCompiler:
                                 reused_headers=_reused_from_toc,
                                 source_headers_full=source_headers
                             )
-                            
+
+                            # Manual working headings are authoritative even
+                            # when a fresh/cache-mixed header batch was run.
+                            for _num, _new_title in list((translated_headers or {}).items()):
+                                _current_info = current_titles.get(_num) or {}
+                                _current_title = str(_current_info.get('title') or '').strip()
+                                _source_title = str(_current_info.get('source_title') or '').strip()
+                                if (
+                                    _current_title
+                                    and _source_title
+                                    and _current_title != _source_title
+                                    and _current_title != str(_new_title or '').strip()
+                                ):
+                                    translated_headers[_num] = _current_title
+
                             # Update chapter_titles_info with translations
                             if translated_headers:
                                 self.log("\n📝 Updating chapter titles in EPUB structure...")
@@ -3180,29 +3238,10 @@ class EPUBCompiler:
                     if xhtml_content:
                         self.log(f"[DEBUG] XHTML first 300 chars: {xhtml_content[:300]}")
                 
-                # Process images
+                # Process images in memory only.  EPUB compilation must never
+                # rewrite translated/manual source HTML.  Missing image tags
+                # are removed from the packaged XHTML, not from the workspace.
                 xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
-                # Write back: remove broken img tags from source HTML file
-                if _missing_imgs and os.path.exists(path):
-                    try:
-                        _missing_set = set(_missing_imgs)
-                        from bs4 import BeautifulSoup as _BS_wb
-                        _soup_wb = _BS_wb(raw_content, 'html.parser')
-                        _wb_changed = False
-                        for _wb_img in list(_soup_wb.find_all('img')):
-                            _wb_src = _wb_img.get('src', '')
-                            _wb_base = os.path.basename(_wb_src.split('?')[0])
-                            if _wb_base in _missing_set:
-                                _wb_parent = _wb_img.parent
-                                _wb_img.decompose()
-                                _wb_changed = True
-                                if _wb_parent and _wb_parent.name == 'p' and not _wb_parent.get_text(strip=True) and not _wb_parent.find_all(True):
-                                    _wb_parent.decompose()
-                        if _wb_changed:
-                            with open(path, 'w', encoding='utf-8') as _wf:
-                                _wf.write(str(_soup_wb))
-                    except Exception:
-                        pass
                 
                 # Validate
                 if is_problem_chapter:
@@ -3587,6 +3626,10 @@ class EPUBCompiler:
     def _find_html_files(self) -> List[str]:
         """Find HTML files using OPF-based ordering when available"""
         self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+
+        backup_dir = os.path.join(self.output_dir, "unrefined_backup")
+        if os.path.isdir(backup_dir):
+            self.log("[INFO] Ignoring unrefined_backup/ (historical data is never an EPUB source)")
         
         # Get all HTML files in directory
         all_files = os.listdir(self.output_dir)
@@ -3920,28 +3963,9 @@ class EPUBCompiler:
             if is_problem_chapter:
                 self.log(f"[DEBUG] Processing chapter images...")
             
+            # Keep source HTML immutable during packaging.  The returned XHTML
+            # is the only copy from which missing image tags are removed.
             xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
-            # Write back: remove broken img tags from source HTML file
-            if _missing_imgs and os.path.exists(path):
-                try:
-                    _missing_set = set(_missing_imgs)
-                    from bs4 import BeautifulSoup as _BS_wb
-                    _soup_wb = _BS_wb(raw_content, 'html.parser')
-                    _wb_changed = False
-                    for _wb_img in list(_soup_wb.find_all('img')):
-                        _wb_src = _wb_img.get('src', '')
-                        _wb_base = os.path.basename(_wb_src.split('?')[0])
-                        if _wb_base in _missing_set:
-                            _wb_parent = _wb_img.parent
-                            _wb_img.decompose()
-                            _wb_changed = True
-                            if _wb_parent and _wb_parent.name == 'p' and not _wb_parent.get_text(strip=True) and not _wb_parent.find_all(True):
-                                _wb_parent.decompose()
-                    if _wb_changed:
-                        with open(path, 'w', encoding='utf-8') as _wf:
-                            _wf.write(str(_soup_wb))
-                except Exception:
-                    pass
             
             # Validate final content
             if is_problem_chapter:
@@ -6605,12 +6629,21 @@ img {
                 # Direct path check
                 for cand in expanded:
                     direct = os.path.normpath(os.path.join(self.output_dir, cand))
-                    if os.path.exists(direct):
+                    if (
+                        not _is_forbidden_epub_source_path(direct, self.output_dir)
+                        and os.path.exists(direct)
+                    ):
                         return True
                 # Dynamically discover likely roots by locating any HTML/XHTML files
                 roots = set()
                 try:
-                    for root_dir, _, files in os.walk(self.output_dir):
+                    for root_dir, dirnames, files in os.walk(self.output_dir):
+                        dirnames[:] = [
+                            dirname for dirname in dirnames
+                            if dirname.casefold() not in _EPUB_FORBIDDEN_SOURCE_DIRS
+                        ]
+                        if _is_forbidden_epub_source_path(root_dir, self.output_dir):
+                            continue
                         if any(f.lower().endswith(('.html', '.htm', '.xhtml')) for f in files):
                             roots.add(root_dir)
                     # Prefer shorter paths first
@@ -6620,7 +6653,10 @@ img {
                 for root_dir in candidate_roots:
                     for cand in expanded:
                         candidate = os.path.normpath(os.path.join(root_dir, cand))
-                        if os.path.exists(candidate):
+                        if (
+                            not _is_forbidden_epub_source_path(candidate, self.output_dir)
+                            and os.path.exists(candidate)
+                        ):
                             return True
 
                 # Final fallback: scan output dir for any HTML file matching core name

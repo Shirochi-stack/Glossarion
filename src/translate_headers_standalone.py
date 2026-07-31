@@ -623,7 +623,8 @@ def apply_existing_translations(
     for idx, (output_file, (source_title, current_title, _)) in enumerate(matches.items(), 1):
         current_titles_map[idx] = {
             'title': current_title,
-            'filename': output_file
+            'filename': output_file,
+            'source_title': source_title,
         }
         chapter_to_output[idx] = output_file
     
@@ -632,6 +633,28 @@ def apply_existing_translations(
     
     if update_html:
         log("\n📝 Updating HTML files and toc.ncx with existing translations...")
+
+        # Treat a working heading that differs from both the source EPUB and
+        # the cached translation as a deliberate manual edit.  Carry that
+        # heading through to HTML, NCX, and the compiler result instead of
+        # silently replacing it with stale cached text.
+        effective_headers = dict(translated_headers)
+        for chapter_num, new_title in translated_headers.items():
+            info = current_titles_map.get(chapter_num) or {}
+            current_title = str(info.get('title') or '').strip()
+            source_title = str(info.get('source_title') or '').strip()
+            if (
+                current_title
+                and source_title
+                and current_title != source_title
+                and current_title != str(new_title or '').strip()
+            ):
+                effective_headers[chapter_num] = current_title
+                log(
+                    f"⏭️ Preserving manually edited header in "
+                    f"{info.get('filename', f'chapter {chapter_num}')}: "
+                    f"'{current_title}'"
+                )
         
         # Import BatchHeaderTranslator for its update methods
         from metadata_batch_translator import BatchHeaderTranslator
@@ -644,16 +667,16 @@ def apply_existing_translations(
         translator = BatchHeaderTranslator(DummyClient(), {})
         
         # Use the exact replacement method to update HTML files
-        translator._update_html_headers_exact(output_dir, translated_headers, current_titles_map)
+        translator._update_html_headers_exact(output_dir, effective_headers, current_titles_map)
         
         # Update toc.ncx if it exists
         toc_path = os.path.join(output_dir, 'toc.ncx')
         if os.path.exists(toc_path):
             log("📖 Updating toc.ncx...")
-            update_toc_ncx(toc_path, translated_headers, current_titles_map, log_callback)
+            update_toc_ncx(toc_path, effective_headers, current_titles_map, log_callback)
         
         # Build result mapping
-        for idx, translated_title in translated_headers.items():
+        for idx, translated_title in effective_headers.items():
             if idx in chapter_to_output:
                 result[chapter_to_output[idx]] = translated_title
     
@@ -893,7 +916,8 @@ def translate_headers_standalone(
         headers_to_translate[idx] = source_title
         current_titles_map[idx] = {
             'title': current_title,
-            'filename': output_file
+            'filename': output_file,
+            'source_title': source_title,
         }
     
     log(f"Prepared {len(headers_to_translate)} headers for translation")
@@ -976,6 +1000,21 @@ def translate_headers_standalone(
             return {}
         raise
     
+    # Manual headings remain authoritative in the returned mapping as well as
+    # on disk, so the compiler does not reintroduce a cached/generated title in
+    # its TOC after correctly preserving the HTML file.
+    for idx, translated_title in list(translated_headers.items()):
+        info = current_titles_map.get(idx) or {}
+        current_title = str(info.get('title') or '').strip()
+        source_title = str(info.get('source_title') or '').strip()
+        if (
+            current_title
+            and source_title
+            and current_title != source_title
+            and current_title != str(translated_title or '').strip()
+        ):
+            translated_headers[idx] = current_title
+
     # Step 5: Map back to output filenames
     log("\nStep 5: Mapping translations to output files...")
     result = {}

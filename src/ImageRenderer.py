@@ -1318,13 +1318,9 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
 def _validate_and_clean_stale_state(self, image_path: str):
     """Validate state and clear references to non-existent output files.
     
-    If cleaned_image_path or rendered_image_path don't exist anymore,
-    clear them from state along with ALL dependent data:
-    - translated_texts
-    - recognized_texts (OCR data)
-    - detection_regions (detection boxes)
-    - viewer_rectangles (manually adjusted boxes)
-    - overlay_rects
+    OCR, translated text, and editor mappings are portable source data. They
+    remain valid even when cleaned/rendered image files were not exported or
+    have moved, so only stale file-path fields may be removed here.
     """
     print = _manga_debug_print
     try:
@@ -1336,15 +1332,11 @@ def _validate_and_clean_stale_state(self, image_path: str):
             return
         
         state_changed = False
-        cleaned_exists = False
-        rendered_exists = False
-        
         # Check cleaned_image_path
         cleaned_path = state.get('cleaned_image_path')
         if cleaned_path:
             if os.path.exists(cleaned_path):
                 print(f"[STATE_CLEAN] Cleaned image exists: {os.path.basename(cleaned_path)}")
-                cleaned_exists = True
             else:
                 print(f"[STATE_CLEAN] Cleaned image no longer exists: {os.path.basename(cleaned_path)}")
                 state.pop('cleaned_image_path', None)
@@ -1355,36 +1347,14 @@ def _validate_and_clean_stale_state(self, image_path: str):
         if rendered_path:
             if os.path.exists(rendered_path):
                 print(f"[STATE_CLEAN] Rendered/translated image exists: {os.path.basename(rendered_path)}")
-                rendered_exists = True
             else:
                 print(f"[STATE_CLEAN] Rendered/translated image no longer exists: {os.path.basename(rendered_path)}")
                 state.pop('rendered_image_path', None)
                 state_changed = True
         
-        # If NEITHER cleaned nor rendered output exists, clear only TRANSLATION output state.
-        # Detection regions, viewer rectangles, and recognized texts are NOT orphaned —
-        # they are created by Detect/Recognize steps BEFORE any output files exist.
-        if not cleaned_exists and not rendered_exists:
-            orphaned_keys = []
-            
-            # Only clear translated_texts — these genuinely require a rendered output
-            if state.get('translated_texts'):
-                orphaned_keys.append('translated_texts')
-                state.pop('translated_texts', None)
-            
-            # Keep recognized_texts, detection_regions, viewer_rectangles, overlay_rects
-            # — they are valid intermediate state from Detect/Recognize steps
-            
-            if orphaned_keys:
-                print(f"[STATE_CLEAN] No output files exist - clearing orphaned translation state: {', '.join(orphaned_keys)}")
-                state_changed = True
-        
-        # If only translated output is missing but cleaned exists, just clear translation data
-        elif cleaned_exists and not rendered_exists:
-            if state.get('translated_texts'):
-                print(f"[STATE_CLEAN] Translated output missing but cleaned exists - clearing translated_texts only")
-                state.pop('translated_texts', None)
-                state_changed = True
+        # translated_texts intentionally survives missing output files. A
+        # portable editor import may not include rendered images, and the text
+        # is required if the user chooses to render the page again.
         
         # Save cleaned state if changed
         if state_changed:
@@ -5130,6 +5100,16 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
         print(f"[FULL_PIPELINE] Error traceback: {traceback.format_exc()}")
         self.update_queue.put(('translate_button_restore', None))
 
+def _manual_translate_full_page_context_enabled(self) -> bool:
+    """Read the live manual-editor setting without reusing batch snapshots."""
+    if hasattr(self, 'full_page_context_value'):
+        return bool(self.full_page_context_value)
+    try:
+        return bool(self.main_gui.config.get('manga_full_page_context', False))
+    except Exception:
+        return False
+
+
 def _run_translate_background(self, recognized_texts: list, image_path: str):
     """Run translation in background thread with concurrent inpainting and translation"""
     # ===== RESET FLAGS: Clear any stale cancellation from previous ops =====
@@ -5209,14 +5189,10 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
             return
         
         # STEP 1: Translation (runs immediately without waiting for inpainting)
-        full_page_context_enabled = False
-        if hasattr(self, '_batch_full_page_context_enabled'):
-            full_page_context_enabled = bool(self._batch_full_page_context_enabled)
-        else:
-            try:
-                full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
-            except Exception:
-                full_page_context_enabled = False
+        # This function is the single-page workflow. Never read the Translate
+        # All snapshot here: it can outlive a previous batch and override the
+        # checkbox currently shown in the manual editor.
+        full_page_context_enabled = _manual_translate_full_page_context_enabled(self)
 
 
         if full_page_context_enabled:
@@ -11461,8 +11437,8 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
             ('clean_btn', 'Clean'),
             ('recognize_btn', 'Recognize Text'),
             ('translate_btn', 'Translate'),
-            ('import_ocr_btn', 'Import'),
-            ('export_ocr_btn', 'Export'),
+            ('import_ocr_btn', '📥 Import'),
+            ('export_ocr_btn', '📤 Export'),
             ('translate_all_btn', 'Translate All'),
         ]
         
@@ -11510,8 +11486,8 @@ def _enable_workflow_buttons(self):
             ('clean_btn', 'Clean'),
             ('recognize_btn', 'Recognize Text'),
             ('translate_btn', 'Translate'),
-            ('import_ocr_btn', 'Import'),
-            ('export_ocr_btn', 'Export'),
+            ('import_ocr_btn', '📥 Import'),
+            ('export_ocr_btn', '📤 Export'),
             ('translate_all_btn', 'Translate All'),
         ]
         

@@ -76,6 +76,11 @@ def _manga_cmd_debug_print(*args, **kwargs):
         pass
     print(*args, **kwargs)
 
+
+def _translation_run_token_matches(current_token, event_token) -> bool:
+    """Return whether a lifecycle event belongs to the active manga run."""
+    return event_token is None or event_token == current_token
+
 # Natural/numerical sort helper function
 def _natural_sort_key(text):
     """Generate a key for natural/numerical sorting.
@@ -14266,7 +14271,16 @@ class MangaTranslationTab(QObject):
                         self.current_file_label.setStyleSheet("color: lightgray;")
                 
                 elif update[0] == 'ui_state':
-                    _, state = update
+                    state = update[1]
+                    state_token = update[2] if len(update) > 2 else None
+                    if not _translation_run_token_matches(
+                        getattr(self, '_translation_start_token', None),
+                        state_token,
+                    ):
+                        # A stopped/completed worker can finish after the user
+                        # has already started another run.  Its UI event belongs
+                        # to the old run and must not reset the new one.
+                        continue
                     if state == 'translation_started':
                         try:
                             # Keep the file list enabled so its scrollbar remains usable during long runs.
@@ -14277,7 +14291,7 @@ class MangaTranslationTab(QObject):
                     elif state == 'translation_complete':
                         try:
                             # Reset UI to ready state when translation completes
-                            self._reset_ui_state()
+                            self._reset_ui_state(state_token)
                             # REMOVED: Don't auto-switch tabs - let user manually switch
                             # try:
                             #     if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer_tabs'):
@@ -15255,7 +15269,7 @@ class MangaTranslationTab(QObject):
             if self._is_translation_start_cancelled(start_token):
                 self._log("Translation startup canceled before worker launch", "warning")
                 self._translation_startup_pending = False
-                self.update_queue.put(('ui_state', 'translation_complete'))
+                self.update_queue.put(('ui_state', 'translation_complete', start_token))
                 return
 
             # Reset graceful stop mode from any previous translation only after
@@ -15276,7 +15290,7 @@ class MangaTranslationTab(QObject):
             if self._is_translation_start_cancelled(start_token):
                 self._log("Translation startup canceled before configuration", "warning")
                 self._translation_startup_pending = False
-                self.update_queue.put(('ui_state', 'translation_complete'))
+                self.update_queue.put(('ui_state', 'translation_complete', start_token))
                 return
             # Set thread limits based on parallel processing settings
             try:
@@ -15397,7 +15411,7 @@ class MangaTranslationTab(QObject):
                 if not google_creds or not os.path.exists(google_creds):
                     self._log("❌ Google Cloud Vision credentials not found. Please set up credentials in the main settings.", "error")
                     self._stop_startup_heartbeat()
-                    self._reset_ui_state()
+                    self._reset_ui_state(start_token)
                     return
                 ocr_config['google_credentials_path'] = google_creds
                 
@@ -15419,7 +15433,7 @@ class MangaTranslationTab(QObject):
                 if not azure_key or not azure_endpoint:
                     self._log("❌ Azure credentials not configured.", "error")
                     self._stop_startup_heartbeat()
-                    self._reset_ui_state()
+                    self._reset_ui_state(start_token)
                     return
                 
                 # Save Azure settings
@@ -15449,7 +15463,7 @@ class MangaTranslationTab(QObject):
                 if not azure_key or not azure_endpoint:
                     self._log("❌ Azure credentials not configured.", "error")
                     self._stop_startup_heartbeat()
-                    self._reset_ui_state()
+                    self._reset_ui_state(start_token)
                     return
                 
                 # Save Azure settings
@@ -15511,7 +15525,7 @@ class MangaTranslationTab(QObject):
             if not api_key:
                 self._log("❌ API key not found. Please configure your API key in the main settings.", "error")
                 self._stop_startup_heartbeat()
-                self._reset_ui_state()
+                self._reset_ui_state(start_token)
                 return
             
             # Check if we need to create or update the client
@@ -15545,7 +15559,7 @@ class MangaTranslationTab(QObject):
                             self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
                             self._log("   Please check your multi-key configuration in Settings.", "error")
                             self._stop_startup_heartbeat()
-                            self._reset_ui_state()
+                            self._reset_ui_state(start_token)
                             return
                         
                         os.environ['USE_MULTI_API_KEYS'] = '1'
@@ -15614,7 +15628,7 @@ class MangaTranslationTab(QObject):
                     import traceback
                     self._log(traceback.format_exc(), "debug")
                     self._stop_startup_heartbeat()
-                    self._reset_ui_state()
+                    self._reset_ui_state(start_token)
                     return
             
             # Vision keys are used by custom-api manga OCR (context=manga_ocr).
@@ -15753,7 +15767,7 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             self._stop_startup_heartbeat()
-            self._reset_ui_state()
+            self._reset_ui_state(start_token)
             return
         
         # Initialize translator if needed (or if it was reset or client was cleared during shutdown)
@@ -15920,7 +15934,7 @@ class MangaTranslationTab(QObject):
                 import traceback
                 self._log(traceback.format_exc(), "error")
                 self._stop_startup_heartbeat()
-                self._reset_ui_state()
+                self._reset_ui_state(start_token)
                 return
         else:
             # Update batch settings for existing translator
@@ -16069,7 +16083,7 @@ class MangaTranslationTab(QObject):
         processing_files, range_error = self._manga_range_filtered_files()
         if range_error or not processing_files:
             self._log(f"Invalid image range: {range_error or 'range matched no files'}", "error")
-            self.update_queue.put(('ui_state', 'translation_complete'))
+            self.update_queue.put(('ui_state', 'translation_complete', start_token))
             return
         self._manga_processing_files = processing_files
         range_text = str(getattr(self, 'manga_image_range_value', '') or '').strip()
@@ -16090,10 +16104,10 @@ class MangaTranslationTab(QObject):
         if self._is_translation_start_cancelled(start_token):
             self._log("Translation startup canceled before file processing", "warning")
             self._translation_startup_pending = False
-            self.update_queue.put(('ui_state', 'translation_complete'))
+            self.update_queue.put(('ui_state', 'translation_complete', start_token))
             return
         # Queue UI updates to be processed by main thread (just for file list disable)
-        self.update_queue.put(('ui_state', 'translation_started'))
+        self.update_queue.put(('ui_state', 'translation_started', start_token))
         
         # Log start message
         self._log(f"Starting translation of {self.total_files} files...", "info")
@@ -16144,7 +16158,7 @@ class MangaTranslationTab(QObject):
         if self._is_translation_start_cancelled(start_token):
             self._log("Translation startup canceled before worker launch", "warning")
             self._translation_startup_pending = False
-            self.update_queue.put(('ui_state', 'translation_complete'))
+            self.update_queue.put(('ui_state', 'translation_complete', start_token))
             return
         self._translation_startup_pending = False
 
@@ -16166,11 +16180,12 @@ class MangaTranslationTab(QObject):
                 pass
             
             if self.executor:
-                self.translation_future = self.executor.submit(self._translation_worker)
+                self.translation_future = self.executor.submit(self._translation_worker, start_token)
             else:
                 # Fallback to dedicated thread
                 self.translation_thread = threading.Thread(
                     target=self._translation_worker,
+                    args=(start_token,),
                     daemon=True
                 )
                 self.translation_thread.start()
@@ -16178,6 +16193,7 @@ class MangaTranslationTab(QObject):
             # Last resort fallback to thread
             self.translation_thread = threading.Thread(
                 target=self._translation_worker,
+                args=(start_token,),
                 daemon=True
             )
             self.translation_thread.start()
@@ -16500,6 +16516,17 @@ class MangaTranslationTab(QObject):
     def _manga_ocr_default_filename(self) -> str:
         return f"{self._manga_glossary_source_name()}_ocr.json"
 
+    def _manga_ocr_timestamped_export_filename(
+        self,
+        filename: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> str:
+        """Return an export filename such as manga_ocr_20260731_193045.json."""
+        base_name = os.path.basename(filename or self._manga_ocr_default_filename())
+        stem, extension = os.path.splitext(base_name)
+        export_timestamp = timestamp or time.strftime('%Y%m%d_%H%M%S')
+        return f"{stem}_{export_timestamp}{extension or '.json'}"
+
     def _prepare_automatic_ocr_export(self, files: List[str]) -> None:
         """Create the per-run OCR manifest before translation starts."""
         source_root = self._current_manga_source_dir()
@@ -16669,7 +16696,7 @@ class MangaTranslationTab(QObject):
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manga OCR Text",
-            os.path.basename(source_path),
+            self._manga_ocr_timestamped_export_filename(source_path),
             "Glossarion Manga OCR (*.json);;JSON Files (*.json)",
         )
         if not destination:
@@ -16692,6 +16719,89 @@ class MangaTranslationTab(QObject):
             files.append(current)
         return files
 
+    def _manual_editor_state_for_export(self, image_path: str) -> Dict[str, Any]:
+        """Return persisted state plus the current editor's unsaved text maps."""
+        state = dict(self.image_state_manager.get_state(image_path) or {})
+        current = getattr(self.image_preview_widget, 'current_image_path', None)
+        try:
+            is_current = (
+                current
+                and os.path.normcase(os.path.abspath(current))
+                == os.path.normcase(os.path.abspath(image_path))
+            )
+        except Exception:
+            is_current = current == image_path
+        if not is_current:
+            return state
+
+        recognized_owner = getattr(self, '_recognized_texts_image_path', None)
+        if not recognized_owner or os.path.normcase(os.path.abspath(recognized_owner)) == os.path.normcase(os.path.abspath(image_path)):
+            live_recognized = list(getattr(self, '_recognized_texts', []) or [])
+            if live_recognized:
+                state['recognized_texts'] = live_recognized
+
+        translation_owner = (
+            getattr(self, '_translation_data_image_path', None)
+            or getattr(self, '_translating_image_path', None)
+        )
+        if translation_owner:
+            try:
+                owns_translation = (
+                    os.path.normcase(os.path.abspath(translation_owner))
+                    == os.path.normcase(os.path.abspath(image_path))
+                )
+            except Exception:
+                owns_translation = translation_owner == image_path
+        else:
+            owns_translation = True
+
+        if not owns_translation:
+            return state
+
+        # The queued state update normally contains this list, but Export can
+        # be clicked while the current editor still has the newest copy only
+        # in memory.
+        live_translated = list(getattr(self, '_translated_texts', []) or [])
+        if live_translated:
+            state['translated_texts'] = live_translated
+
+        translation_data = getattr(self, '_translation_data', None)
+        if not isinstance(translation_data, dict) or not translation_data:
+            return state
+
+        translated = list(state.get('translated_texts') or [])
+        recognized_by_index = {}
+        for fallback_index, record in enumerate(state.get('recognized_texts') or []):
+            if not isinstance(record, dict):
+                continue
+            try:
+                record_index = int(record.get('region_index', fallback_index))
+            except (TypeError, ValueError):
+                continue
+            recognized_by_index[record_index] = record
+
+        for raw_index, data in translation_data.items():
+            if not isinstance(data, dict):
+                continue
+            try:
+                region_index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            while len(translated) <= region_index:
+                translated.append({})
+            prior = translated[region_index] if isinstance(translated[region_index], dict) else {}
+            recognized = recognized_by_index.get(region_index, {})
+            translated[region_index] = {
+                'original': {
+                    'region_index': region_index,
+                    'text': data.get('original', recognized.get('text', '')),
+                },
+                'translation': data.get('translation', prior.get('translation', '')),
+                'bbox': prior.get('bbox') or recognized.get('bbox') or [0, 0, 1, 1],
+            }
+        state['translated_texts'] = translated
+        return state
+
     def _export_manual_ocr_text(self) -> None:
         """Export editor OCR, translations, and rectangle mappings."""
         current = getattr(self.image_preview_widget, 'current_image_path', None)
@@ -16700,11 +16810,16 @@ class MangaTranslationTab(QObject):
         files = self._manual_ocr_files()
         source_root = self._current_manga_source_dir()
         pages = []
+        translated_region_count = 0
         for index, image_path in enumerate(files, start=1):
-            state = self.image_state_manager.get_state(image_path) or {}
+            state = self._manual_editor_state_for_export(image_path)
             regions = manga_ocr_io.canonical_regions_from_editor_state(state)
             if not regions and not state.get('recognized_texts'):
                 continue
+            translated_region_count += sum(
+                1 for region in regions
+                if str(region.get('translated_text') or '').strip()
+            )
             pages.append(manga_ocr_io.make_page(
                 image_path,
                 regions,
@@ -16725,7 +16840,7 @@ class MangaTranslationTab(QObject):
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manual Manga OCR",
-            self._manga_ocr_default_filename(),
+            self._manga_ocr_timestamped_export_filename(),
             "Glossarion Manga OCR (*.json);;JSON Files (*.json)",
         )
         if not destination:
@@ -16738,7 +16853,8 @@ class MangaTranslationTab(QObject):
             QMessageBox.information(
                 self.dialog,
                 "Session Exported",
-                f"Exported OCR text, translated text, and mappings for {len(pages)} pages.",
+                f"Exported OCR text, {translated_region_count} translated regions, "
+                f"and mappings for {len(pages)} pages.",
             )
         except Exception as error:
             QMessageBox.warning(self.dialog, "Export Failed", str(error))
@@ -16775,7 +16891,9 @@ class MangaTranslationTab(QObject):
             current = getattr(self.image_preview_widget, 'current_image_path', None)
             if current in matches:
                 ImageRenderer._clear_cross_image_state(self)
+                ImageRenderer._rehydrate_text_state_from_persisted(self, current)
                 ImageRenderer._restore_image_state_overlays_only(self, current)
+                self._refresh_imported_manual_preview(current)
         except Exception as error:
             QMessageBox.warning(self.dialog, "Import Failed", str(error))
             return
@@ -16785,6 +16903,68 @@ class MangaTranslationTab(QObject):
             "Session Imported",
             f"Restored OCR text, translated text, and mappings for {len(matches)} pages.",
         )
+
+    def _refresh_imported_manual_preview(self, image_path: str) -> bool:
+        """Render imported translations and reload both preview surfaces."""
+        state = self.image_state_manager.get_state(image_path) or {}
+        translated_texts = [
+            entry for entry in (state.get('translated_texts') or [])
+            if isinstance(entry, dict)
+            and not entry.get('deleted')
+            and str(entry.get('translation') or '').strip()
+        ]
+        if not translated_texts:
+            return False
+
+        preview = self.image_preview_widget
+        preview.source_display_mode = 'translated'
+        preview.cleaned_images_enabled = True
+        self._log(
+            f"Rendering {len(translated_texts)} imported translations for preview...",
+            "info",
+        )
+
+        # This uses the restored rectangles and imported text map, then writes
+        # the normal isolated translated image for the current page.
+        ImageRenderer.save_positions_and_rerender(self)
+
+        refreshed_state = self.image_state_manager.get_state(image_path) or {}
+        rendered_path = refreshed_state.get('rendered_image_path')
+        if not rendered_path or not os.path.isfile(rendered_path):
+            filename = os.path.basename(image_path)
+            base_name = os.path.splitext(filename)[0]
+            output_root = (
+                getattr(self.main_gui, 'config', {}).get('output_directory')
+                or os.environ.get('OUTPUT_DIRECTORY')
+                or os.path.dirname(image_path)
+            )
+            candidate = os.path.join(output_root, f"{base_name}_translated", filename)
+            rendered_path = candidate if os.path.isfile(candidate) else None
+
+        if rendered_path:
+            preview.current_translated_path = rendered_path
+            if not hasattr(self, '_rendered_images_map'):
+                self._rendered_images_map = {}
+            self._rendered_images_map[image_path] = rendered_path
+            if getattr(preview, 'output_viewer', None):
+                preview.output_viewer.load_image(rendered_path)
+
+        # load_image resolves translated mode to the newly rendered output and
+        # preserve flags keep imported rectangles/context menus attached.
+        preview.load_image(
+            image_path,
+            preserve_rectangles=True,
+            preserve_text_overlays=True,
+        )
+        if rendered_path:
+            self._log("Imported translation preview refreshed", "success")
+            return True
+
+        self._log(
+            "Imported text was restored, but the translated preview could not be rendered",
+            "warning",
+        )
+        return False
 
     def _build_manga_glossary_input(self, ocr_pages: List[Dict[str, Any]]) -> str:
         """Build the single glossary-generation request body from all OCR pages."""
@@ -17864,7 +18044,7 @@ class MangaTranslationTab(QObject):
                 self._log(f"❌ Translation error for {filename}: {e}", "error")
                 self._log(traceback.format_exc(), "debug")
     
-    def _translation_worker(self):
+    def _translation_worker(self, start_token=None):
         """Worker thread for translation"""
         # Defensive imports at function start to prevent UnboundLocalError
         import os
@@ -18830,7 +19010,7 @@ class MangaTranslationTab(QObject):
             try:
                 # Use the existing update_queue to schedule UI reset on main thread
                 # This queue is processed by the main thread's timer
-                self.update_queue.put(('ui_state', 'translation_complete'))
+                self.update_queue.put(('ui_state', 'translation_complete', start_token))
             except Exception as e:
                 self._log(f"Error resetting UI: {e}", "warning")
     
@@ -19121,15 +19301,27 @@ class MangaTranslationTab(QObject):
                 try:
                     from PySide6.QtCore import QTimer
                     # Wait 2 seconds for cleanup to allow "Stopping..." to be visible
-                    QTimer.singleShot(2000, self._reset_ui_state)
+                    stopped_token = getattr(self, '_translation_start_token', None)
+                    QTimer.singleShot(
+                        2000,
+                        lambda token=stopped_token: self._reset_ui_state(token),
+                    )
                 except Exception:
                     pass
     
-    def _reset_ui_state(self):
+    def _reset_ui_state(self, expected_start_token=None):
         """Reset UI to ready state - with widget existence checks (PySide6)"""
+        if not _translation_run_token_matches(
+            getattr(self, '_translation_start_token', None),
+            expected_start_token,
+        ):
+            # Delayed stop timers and old worker completion events are allowed
+            # to arrive, but they cannot reset a newer translation run.
+            return False
+
         # Check if the dialog still exists first (PySide6)
         if not hasattr(self, 'dialog') or not self.dialog:
-            return
+            return False
         
         # Restore stdio redirection if active
         self._redirect_stderr(False)
@@ -19213,3 +19405,6 @@ class MangaTranslationTab(QObject):
             # Log the error but don't crash
             if hasattr(self, '_log'):
                 self._log(f"Error resetting UI state: {str(e)}", "warning")
+            return False
+
+        return True

@@ -2704,6 +2704,22 @@ class BatchHeaderTranslator:
             html_file = current_info['filename']
             html_path = os.path.join(html_dir, html_file)
 
+            # A cached translation may update an untouched source heading, but
+            # it must not clobber a heading the user edited after translation.
+            # Callers that know the source title include it for this three-way
+            # comparison; older callers remain backward compatible.
+            source_title = current_info.get('source_title')
+            if (
+                source_title is not None
+                and current_title.strip() != source_title.strip()
+                and current_title.strip() != new_title.strip()
+            ):
+                print(
+                    f"⏭️ Preserving manually edited header in {html_file}: "
+                    f"'{current_title}'"
+                )
+                continue
+
             # Skip if the translated name is identical to what's already in the file
             if new_title.strip() == current_title.strip():
                 skipped_files.append(html_file)

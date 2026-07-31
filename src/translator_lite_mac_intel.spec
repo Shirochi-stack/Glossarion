@@ -68,6 +68,7 @@ except:
 
 # Main application files
 app_files = [
+    ('manga_ocr_io.py', '.'),
     # Core GUI
     ('translator_gui.py', '.'),
     ('metadata_translation_worker.py', '.'),
@@ -207,6 +208,7 @@ datas.append(('enable_debug_mode.py', '.'))
 
 # Application modules
 app_modules = [
+    'manga_ocr_io',
     'TransateKRtoEN',
     'metadata_translation_worker',
     'subtitle_processor',

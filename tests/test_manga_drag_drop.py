@@ -1,8 +1,11 @@
 import os
+from types import SimpleNamespace
 
 from PySide6.QtCore import QMimeData, QUrl
 
-from manga_integration import MangaTranslationTab
+import ImageRenderer
+from manga_integration import MangaTranslationTab, _translation_run_token_matches
+import manga_ocr_io
 
 
 class _FakeListWidget:
@@ -91,3 +94,198 @@ def test_folder_drop_recurses_and_skips_generated_output_folders(tmp_path):
     assert harness.list_items == harness.selected_files
     assert harness.file_listbox.current_row == 0
     assert harness.manga_selected_folder_roots == [os.path.abspath(chapter)]
+
+
+def test_translation_lifecycle_events_only_match_their_run():
+    assert _translation_run_token_matches(current_token=2, event_token=2) is True
+    assert _translation_run_token_matches(current_token=2, event_token=1) is False
+
+
+def test_stale_completion_cannot_reset_a_new_translation_run():
+    manga_tab = SimpleNamespace(
+        _translation_start_token=2,
+        is_running=True,
+        _translation_startup_pending=True,
+        _translation_start_cancel_requested=False,
+    )
+
+    reset = MangaTranslationTab._reset_ui_state(
+        manga_tab,
+        expected_start_token=1,
+    )
+
+    assert reset is False
+    assert manga_tab.is_running is True
+    assert manga_tab._translation_startup_pending is True
+
+
+def test_manual_translate_uses_live_full_page_setting_not_stale_batch_snapshot():
+    manga_tab = SimpleNamespace(
+        full_page_context_value=True,
+        _batch_full_page_context_enabled=False,
+        main_gui=SimpleNamespace(config={'manga_full_page_context': False}),
+    )
+
+    assert ImageRenderer._manual_translate_full_page_context_enabled(manga_tab) is True
+
+
+def test_missing_rendered_image_does_not_delete_imported_translation(tmp_path):
+    image = tmp_path / 'page.png'
+    image.write_bytes(b'image')
+
+    class _StateManager:
+        def __init__(self):
+            self.state = {
+                'rendered_image_path': str(tmp_path / 'missing-render.png'),
+                'translated_texts': [
+                    {
+                        'original': {'region_index': 0, 'text': 'source'},
+                        'translation': 'translated',
+                        'bbox': [1, 2, 3, 4],
+                    }
+                ],
+            }
+
+        def get_state(self, _image_path):
+            return self.state
+
+        def set_state(self, _image_path, state, save=True):
+            self.state = state
+
+    manager = _StateManager()
+    manga_tab = SimpleNamespace(image_state_manager=manager)
+
+    ImageRenderer._validate_and_clean_stale_state(manga_tab, str(image))
+
+    assert 'rendered_image_path' not in manager.state
+    assert manager.state['translated_texts'][0]['translation'] == 'translated'
+
+
+def test_manual_export_merges_live_translation_map(tmp_path):
+    image = tmp_path / 'page.png'
+    image.write_bytes(b'image')
+    state = {
+        'recognized_texts': [
+            {'region_index': 0, 'text': 'source', 'bbox': [1, 2, 30, 40]}
+        ],
+        'viewer_rectangles': [
+            {'x': 1, 'y': 2, 'width': 30, 'height': 40, 'shape': 'rect'}
+        ],
+    }
+
+    class _StateManager:
+        def get_state(self, _image_path):
+            return state
+
+    manga_tab = SimpleNamespace(
+        image_state_manager=_StateManager(),
+        image_preview_widget=SimpleNamespace(current_image_path=str(image)),
+        _recognized_texts=state['recognized_texts'],
+        _recognized_texts_image_path=str(image),
+        _translation_data={
+            0: {'original': 'source', 'translation': 'translated'}
+        },
+        _translation_data_image_path=str(image),
+    )
+
+    export_state = MangaTranslationTab._manual_editor_state_for_export(
+        manga_tab,
+        str(image),
+    )
+    regions = manga_ocr_io.canonical_regions_from_editor_state(export_state)
+
+    assert regions[0]['text'] == 'source'
+    assert regions[0]['translated_text'] == 'translated'
+
+    page = manga_ocr_io.make_page(
+        str(image),
+        regions,
+        editor_state=export_state,
+    )
+    document = manga_ocr_io.create_document([page], workflow='manual-editor')
+    output = tmp_path / 'manual-session.json'
+    manga_ocr_io.write_document(str(output), document)
+
+    imported = manga_ocr_io.load_document(str(output))
+    imported_state = manga_ocr_io.editor_state_from_page(imported['pages'][0])
+    assert imported_state['recognized_texts'][0]['text'] == 'source'
+    assert imported_state['translated_texts'][0]['translation'] == 'translated'
+
+
+def test_manga_ocr_export_filename_includes_timestamp():
+    manga_tab = SimpleNamespace(
+        _manga_ocr_default_filename=lambda: 'chapter_ocr.json'
+    )
+
+    filename = MangaTranslationTab._manga_ocr_timestamped_export_filename(
+        manga_tab,
+        timestamp='20260731_193045',
+    )
+
+    assert filename == 'chapter_ocr_20260731_193045.json'
+
+
+def test_imported_translation_rerenders_and_reloads_preview(tmp_path, monkeypatch):
+    image = tmp_path / 'page.png'
+    image.write_bytes(b'image')
+    rendered = tmp_path / 'page_translated' / 'page.png'
+    state = {
+        'translated_texts': [
+            {
+                'original': {'region_index': 0, 'text': 'source'},
+                'translation': 'translated',
+                'bbox': [1, 2, 30, 40],
+            }
+        ],
+    }
+
+    class _StateManager:
+        def get_state(self, _image_path):
+            return state
+
+    class _Viewer:
+        def __init__(self):
+            self.loaded = []
+
+        def load_image(self, path):
+            self.loaded.append(path)
+
+    output_viewer = _Viewer()
+    preview_loads = []
+    preview = SimpleNamespace(
+        source_display_mode='original',
+        cleaned_images_enabled=False,
+        current_translated_path=None,
+        output_viewer=output_viewer,
+        load_image=lambda path, **kwargs: preview_loads.append((path, kwargs)),
+    )
+    logs = []
+    manga_tab = SimpleNamespace(
+        image_state_manager=_StateManager(),
+        image_preview_widget=preview,
+        main_gui=SimpleNamespace(config={}),
+        _log=lambda message, level: logs.append((message, level)),
+    )
+
+    def _render_imported(_tab):
+        rendered.parent.mkdir()
+        rendered.write_bytes(b'rendered')
+        state['rendered_image_path'] = str(rendered)
+
+    monkeypatch.setattr(ImageRenderer, 'save_positions_and_rerender', _render_imported)
+
+    refreshed = MangaTranslationTab._refresh_imported_manual_preview(
+        manga_tab,
+        str(image),
+    )
+
+    assert refreshed is True
+    assert preview.source_display_mode == 'translated'
+    assert preview.current_translated_path == str(rendered)
+    assert output_viewer.loaded == [str(rendered)]
+    assert preview_loads == [
+        (
+            str(image),
+            {'preserve_rectangles': True, 'preserve_text_overlays': True},
+        )
+    ]

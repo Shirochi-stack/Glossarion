@@ -11,6 +11,7 @@ from QA_Scanner_GUI import _normalize_qa_dialog_path
 from enhanced_text_extractor import EnhancedTextExtractor
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
 from html_tag_entities import unescape_valid_html_tag_entities
+from metadata_batch_translator import BatchHeaderTranslator
 from qa_scan_runtime import (
     active_qa_output_folder_for_source,
     automatic_qa_output_candidates,
@@ -824,6 +825,119 @@ def test_epub_image_repair_preserves_and_resolves_real_image_path(tmp_path):
     assert missing == []
     assert 'src="images/chapter0007_img_1.webp"' in validated
     assert '..=""' not in validated
+
+
+def test_epub_html_discovery_never_uses_unrefined_backup(tmp_path):
+    working_name = "response_chapter_notice0002.html"
+    working_html = "<html><body><p>MANUAL REFINED COPY</p></body></html>"
+    backup_html = "<html><body><p>STALE UNREFINED BACKUP</p></body></html>"
+    (tmp_path / working_name).write_text(working_html, encoding="utf-8")
+    backup_dir = tmp_path / "unrefined_backup"
+    backup_dir.mkdir()
+    backup_path = backup_dir / working_name
+    backup_path.write_text(backup_html, encoding="utf-8")
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+
+    assert compiler._find_html_files() == [working_name]
+    assert epub_converter._is_forbidden_epub_source_path(
+        str(backup_path), str(tmp_path)
+    )
+    assert not epub_converter._is_forbidden_epub_source_path(
+        str(tmp_path / working_name), str(tmp_path)
+    )
+
+
+def test_epub_chapter_processing_does_not_rewrite_manual_source_html(tmp_path):
+    filename = "response_chapter_notice0002.html"
+    source_path = tmp_path / filename
+    original = (
+        "<!DOCTYPE html><html><head><title>Manual notice</title></head>"
+        "<body><h1>Manual notice</h1><p>MANUAL REFINED COPY</p>"
+        '<p><img src="images/does-not-exist.webp"/></p></body></html>'
+    )
+    source_path.write_text(original, encoding="utf-8")
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _msg: None)
+    compiler.max_workers = 1
+    book = epub_converter.epub.EpubBook()
+    spine = []
+    toc = []
+
+    added = compiler._process_chapters(
+        book,
+        [filename],
+        {0: ("Manual notice", 1.0, "manual")},
+        [],
+        {},
+        spine,
+        toc,
+        {"language": "en"},
+    )
+
+    assert added == 1
+    assert source_path.read_text(encoding="utf-8") == original
+    packaged = "\n".join(
+        item.get_content().decode("utf-8", errors="replace")
+        for item in book.get_items_of_type(epub_converter.ITEM_DOCUMENT)
+    )
+    assert "MANUAL REFINED COPY" in packaged
+    assert "does-not-exist.webp" not in packaged
+
+
+def test_cached_header_translation_preserves_manual_heading(tmp_path, monkeypatch):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    filename = "response_chapter_notice0002.html"
+    html_path = tmp_path / filename
+    manual_html = (
+        "<html><head><title>My manual notice</title></head>"
+        "<body><h1>My manual notice</h1><p>MANUAL BODY EDIT</p></body></html>"
+    )
+    html_path.write_text(manual_html, encoding="utf-8")
+    translator = BatchHeaderTranslator(None, {})
+
+    translator._update_html_headers_exact(
+        str(tmp_path),
+        {3: "Cached translated notice"},
+        {
+            3: {
+                "title": "My manual notice",
+                "source_title": "Original source notice",
+                "filename": filename,
+            }
+        },
+    )
+
+    assert html_path.read_text(encoding="utf-8") == manual_html
+
+
+def test_cached_header_translation_can_update_untouched_source_heading(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    filename = "response_chapter_notice0002.html"
+    html_path = tmp_path / filename
+    html_path.write_text(
+        "<html><body><h1>Original source notice</h1><p>BODY</p></body></html>",
+        encoding="utf-8",
+    )
+    translator = BatchHeaderTranslator(None, {})
+
+    translator._update_html_headers_exact(
+        str(tmp_path),
+        {3: "Cached translated notice"},
+        {
+            3: {
+                "title": "Original source notice",
+                "source_title": "Original source notice",
+                "filename": filename,
+            }
+        },
+    )
+
+    updated = html_path.read_text(encoding="utf-8")
+    assert "<h1>Cached translated notice</h1>" in updated
+    assert "<p>BODY</p>" in updated
 
 
 def test_xml_validator_valid_codepoints():

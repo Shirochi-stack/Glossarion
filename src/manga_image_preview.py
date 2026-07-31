@@ -1849,18 +1849,30 @@ class MangaImagePreviewWidget(QWidget):
         # Center session Import/Export in the otherwise unused toolbar gap.
         tools_layout.addStretch()
 
-        self.import_ocr_btn = self._create_compact_button("Import")
+        self.import_ocr_btn = self._create_session_io_button(
+            "📥 Import",
+            background="#245f7a",
+            border="#3287aa",
+            hover="#2d7696",
+            pressed="#19475d",
+        )
         self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.import_ocr_btn.setFixedWidth(82)
-        self.import_ocr_btn.setMinimumHeight(32)
-        self.import_ocr_btn.setToolTip("Import OCR text, translated text, and region mappings")
+        self.import_ocr_btn.setFixedWidth(104)
+        self.import_ocr_btn.setMinimumHeight(34)
+        self.import_ocr_btn.setToolTip("Import an OCR and translated-text editing session")
         self.import_ocr_btn.clicked.connect(self.import_ocr_clicked.emit)
         tools_layout.addWidget(self.import_ocr_btn)
 
-        self.export_ocr_btn = self._create_compact_button("Export")
+        self.export_ocr_btn = self._create_session_io_button(
+            "📤 Export",
+            background="#28734c",
+            border="#3b9b69",
+            hover="#338b5d",
+            pressed="#1d5739",
+        )
         self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.export_ocr_btn.setFixedWidth(82)
-        self.export_ocr_btn.setMinimumHeight(32)
+        self.export_ocr_btn.setFixedWidth(104)
+        self.export_ocr_btn.setMinimumHeight(34)
         self.export_ocr_btn.setToolTip("Export OCR text, translated text, and region mappings")
         self.export_ocr_btn.clicked.connect(self.export_ocr_clicked.emit)
         tools_layout.addWidget(self.export_ocr_btn)
@@ -2213,6 +2225,44 @@ class MangaImagePreviewWidget(QWidget):
         # Ensure tooltips always work by setting mouse tracking
         btn.setMouseTracking(True)
         
+        return btn
+
+    def _create_session_io_button(
+        self,
+        text: str,
+        *,
+        background: str,
+        border: str,
+        hover: str,
+        pressed: str,
+    ) -> QPushButton:
+        """Create a visually distinct manual-session Import/Export button."""
+        btn = self._create_compact_button(text)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {background};
+                color: white;
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 9pt;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+                border-color: white;
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed};
+                padding-top: 6px;
+                padding-bottom: 4px;
+            }}
+            QPushButton:disabled {{
+                background-color: #232323;
+                color: #686868;
+                border-color: #343434;
+            }}
+        """)
         return btn
     
     def _create_tool_frame(self, title: str) -> QFrame:
