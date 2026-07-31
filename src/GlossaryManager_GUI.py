@@ -6455,6 +6455,18 @@ Do not stop after the glossary."""
                     value_list.blockSignals(False)
                 _sync_select_all_state()
 
+            def _toggle_all_visible_values(_checked=False):
+                visible_checkboxes = [
+                    _value_checkbox(index)
+                    for index in range(value_list.count())
+                    if not value_list.item(index).isHidden()
+                ]
+                visible_checkboxes = [
+                    checkbox for checkbox in visible_checkboxes if checkbox is not None
+                ]
+                should_check = any(not checkbox.isChecked() for checkbox in visible_checkboxes)
+                _set_visible_check_state(Qt.Checked if should_check else Qt.Unchecked)
+
             def _apply_selected_values():
                 selected = {
                     value_list.item(index).data(Qt.UserRole)
@@ -6481,7 +6493,9 @@ Do not stop after the glossary."""
                 popup.accept()
 
             search_entry.textChanged.connect(_filter_value_list)
-            select_all.stateChanged.connect(_set_visible_check_state)
+            # Keep the partial state as status only. Using stateChanged here makes
+            # a tri-state checkbox require two clicks (unchecked -> partial -> checked).
+            select_all.clicked.connect(_toggle_all_visible_values)
             for index in range(value_list.count()):
                 checkbox = _value_checkbox(index)
                 if checkbox is not None:
