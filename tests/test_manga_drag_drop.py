@@ -70,6 +70,39 @@ def test_drop_payload_keeps_supported_local_paths_only(tmp_path):
     assert paths == [os.path.abspath(image), os.path.abspath(folder)]
 
 
+def test_file_context_reorder_actions_move_the_clicked_entry(tmp_path):
+    files = [
+        os.path.abspath(tmp_path / 'one.png'),
+        os.path.abspath(tmp_path / 'two.png'),
+        os.path.abspath(tmp_path / 'three.png'),
+        os.path.abspath(tmp_path / 'four.png'),
+    ]
+    rebuilds = []
+    preview_updates = []
+    persists = []
+    manga_tab = SimpleNamespace(
+        selected_files=list(files),
+        image_preview_widget=object(),
+        _skip_key_for_path=lambda path: os.path.normcase(os.path.abspath(path)),
+        _rebuild_manga_file_listbox=lambda current_path=None: rebuilds.append(current_path),
+        _update_manga_preview_image_list_for_range=lambda: preview_updates.append(True),
+        _persist_selected_files=lambda: persists.append(True),
+        _log=lambda *_args: None,
+    )
+
+    assert MangaTranslationTab._move_manga_file_entry(manga_tab, files[1], 'up')
+    assert manga_tab.selected_files == [files[1], files[0], files[2], files[3]]
+    assert MangaTranslationTab._move_manga_file_entry(manga_tab, files[1], 'bottom')
+    assert manga_tab.selected_files == [files[0], files[2], files[3], files[1]]
+    assert MangaTranslationTab._move_manga_file_entry(manga_tab, files[3], 'top')
+    assert manga_tab.selected_files == [files[3], files[0], files[2], files[1]]
+    assert MangaTranslationTab._move_manga_file_entry(manga_tab, files[3], 'down')
+    assert manga_tab.selected_files == [files[0], files[3], files[2], files[1]]
+    assert rebuilds == [files[1], files[1], files[3], files[3]]
+    assert len(preview_updates) == 4
+    assert len(persists) == 4
+
+
 def test_ocr_drop_payload_keeps_unique_local_json_files_only(tmp_path):
     session = tmp_path / 'chapter_ocr_20260731_193045.json'
     session.write_text('{}', encoding='utf-8')

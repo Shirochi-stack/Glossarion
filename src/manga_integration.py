@@ -9392,6 +9392,30 @@ class MangaTranslationTab(QObject):
             is_skipped = self._is_manually_skipped_processing_file(filepath)
             action = menu.addAction("▶️ Process This Image" if is_skipped else "⏭️ Skip Processing")
             action.triggered.connect(lambda checked=False, path=filepath: self._toggle_skip_processing_for_path(path))
+
+            menu.addSeparator()
+            can_reorder = bool(getattr(self, '_file_selection_editing_enabled', True))
+            last_row = max(0, len(self.selected_files) - 1)
+            move_up_action = menu.addAction("↑ Move Up One")
+            move_up_action.setEnabled(can_reorder and row > 0)
+            move_up_action.triggered.connect(
+                lambda checked=False, path=filepath: self._move_manga_file_entry(path, 'up')
+            )
+            move_down_action = menu.addAction("↓ Move Down One")
+            move_down_action.setEnabled(can_reorder and row < last_row)
+            move_down_action.triggered.connect(
+                lambda checked=False, path=filepath: self._move_manga_file_entry(path, 'down')
+            )
+            move_top_action = menu.addAction("⇈ Move to Top")
+            move_top_action.setEnabled(can_reorder and row > 0)
+            move_top_action.triggered.connect(
+                lambda checked=False, path=filepath: self._move_manga_file_entry(path, 'top')
+            )
+            move_bottom_action = menu.addAction("⇊ Move to Bottom")
+            move_bottom_action.setEnabled(can_reorder and row < last_row)
+            move_bottom_action.triggered.connect(
+                lambda checked=False, path=filepath: self._move_manga_file_entry(path, 'bottom')
+            )
             menu.exec(self.file_listbox.mapToGlobal(position))
         except Exception as e:
             print(f"[FILE_SKIP] Failed to show file context menu: {e}")
@@ -9413,6 +9437,47 @@ class MangaTranslationTab(QObject):
             self._log(f"{os.path.basename(path)}: {label}", "info")
         except Exception as e:
             print(f"[FILE_SKIP] Failed to toggle skip state: {e}")
+
+    def _move_manga_file_entry(self, path: str, direction: str) -> bool:
+        """Move one file in the visible processing order."""
+        files = list(getattr(self, 'selected_files', []) or [])
+        path_key = self._skip_key_for_path(path)
+        source_row = next(
+            (
+                index for index, candidate in enumerate(files)
+                if self._skip_key_for_path(candidate) == path_key
+            ),
+            -1,
+        )
+        if source_row < 0 or len(files) < 2:
+            return False
+
+        if direction == 'up':
+            destination_row = max(0, source_row - 1)
+        elif direction == 'down':
+            destination_row = min(len(files) - 1, source_row + 1)
+        elif direction == 'top':
+            destination_row = 0
+        elif direction == 'bottom':
+            destination_row = len(files) - 1
+        else:
+            return False
+        if destination_row == source_row:
+            return False
+
+        moved_path = files.pop(source_row)
+        files.insert(destination_row, moved_path)
+        self.selected_files = files
+        self._rebuild_manga_file_listbox(current_path=moved_path)
+        if hasattr(self, 'image_preview_widget'):
+            self._update_manga_preview_image_list_for_range()
+        self._persist_selected_files()
+        self._log(
+            f"Moved {os.path.basename(moved_path)} from row {source_row + 1} "
+            f"to row {destination_row + 1}",
+            "info",
+        )
+        return True
 
     def _update_manga_image_range_display(self) -> None:
         """Grey out rows skipped by the current visible-order image range."""
