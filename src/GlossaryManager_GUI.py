@@ -10062,9 +10062,6 @@ Do not stop after the glossary."""
         self._force_refresh_animation_timer = QTimer(self.force_refresh_glossary_btn)
         self._force_refresh_animation_timer.setInterval(160)
         self._force_refresh_animation_frame = 0
-        self._force_refresh_animation_started_at = 0.0
-        self._force_refresh_animation_generation = 0
-        self._force_refresh_animation_stop_pending = False
         refresh_animation_frames = (
             ("🔄 Refreshing", "#0891b2"),
             ("🔄 Refreshing.", "#0ea5c6"),
@@ -10085,46 +10082,18 @@ Do not stop after the glossary."""
         def _start_force_refresh_animation():
             if self._force_refresh_animation_timer.isActive():
                 return
-            self._force_refresh_animation_generation += 1
-            self._force_refresh_animation_stop_pending = False
-            self._force_refresh_animation_started_at = time.monotonic()
             self._force_refresh_animation_frame = 0
             self.force_refresh_glossary_btn.setEnabled(False)
             _advance_force_refresh_animation()
             self._force_refresh_animation_timer.start()
 
-        def _finish_force_refresh_animation(generation):
-            if generation != self._force_refresh_animation_generation:
-                return
+        def _stop_force_refresh_animation(force=False):
             try:
                 self._force_refresh_animation_timer.stop()
                 self._force_refresh_animation_frame = 0
-                self._force_refresh_animation_started_at = 0.0
-                self._force_refresh_animation_stop_pending = False
                 self.force_refresh_glossary_btn.setText("🔄 Force Refresh")
                 self.force_refresh_glossary_btn.setEnabled(True)
                 _set_force_refresh_button_style("#0891b2")
-            except (AttributeError, RuntimeError):
-                pass
-
-        def _stop_force_refresh_animation(force=False):
-            try:
-                if not self._force_refresh_animation_timer.isActive():
-                    return
-                generation = self._force_refresh_animation_generation
-                elapsed = time.monotonic() - self._force_refresh_animation_started_at
-                remaining_ms = max(0, int((0.9 - elapsed) * 1000))
-                if not force and remaining_ms > 0:
-                    if not self._force_refresh_animation_stop_pending:
-                        self._force_refresh_animation_stop_pending = True
-                        QTimer.singleShot(
-                            remaining_ms,
-                            lambda current_generation=generation: _finish_force_refresh_animation(
-                                current_generation
-                            ),
-                        )
-                    return
-                _finish_force_refresh_animation(generation)
             except (AttributeError, RuntimeError):
                 pass
 
