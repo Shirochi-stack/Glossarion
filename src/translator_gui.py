@@ -18103,24 +18103,15 @@ Recent translations to summarize:
         """Setup bindings for manual model input in combobox with autocomplete"""
         self._install_model_completer(self._model_all_values)
 
-    def _schedule_provider_model_catalog_refresh(self, delay_ms=650):
-        """Retry a requested catalog refresh after the active worker finishes."""
-        try:
-            timer = getattr(self, '_provider_model_catalog_refresh_timer', None)
-            if timer is None:
-                timer = QTimer(self)
-                timer.setSingleShot(True)
-                timer.timeout.connect(self._start_provider_model_catalog_refresh)
-                self._provider_model_catalog_refresh_timer = timer
-            timer.start(max(0, int(delay_ms)))
-        except (RuntimeError, TypeError, ValueError):
-            pass
-
-    def _start_provider_model_catalog_refresh(self):
+    def _start_provider_model_catalog_refresh(self, show_feedback=False):
         """Refresh eligible online model catalogs without blocking Qt."""
+        if show_feedback:
+            # If startup polling is already active, its result will satisfy
+            # this explicit request without launching a duplicate request.
+            self._model_catalog_feedback_requested = True
+
         existing = getattr(self, '_provider_model_catalog_thread', None)
         if existing is not None and existing.is_alive():
-            self._schedule_provider_model_catalog_refresh(250)
             return False
 
         try:
@@ -18156,6 +18147,45 @@ Recent translations to summarize:
         )
         return True
 
+    @staticmethod
+    def _apply_polled_model_icons(manager, polled_model_keys):
+        """Mark models confirmed by the latest online provider poll."""
+        list_widget = getattr(manager, '_model_list_widget', None)
+        if list_widget is None:
+            return
+
+        checked_icon = getattr(manager, '_polled_model_icon', QIcon())
+        empty_icon = QIcon()
+        polled_model_keys = {
+            str(model).casefold() for model in (polled_model_keys or set())
+        }
+        for index in range(list_widget.count()):
+            item = list_widget.item(index)
+            is_polled = item.text().casefold() in polled_model_keys
+            item.setIcon(checked_icon if is_polled else empty_icon)
+            item.setToolTip(
+                "✓ Confirmed by the latest successful online provider poll"
+                if is_polled else ""
+            )
+
+    @staticmethod
+    def _create_polled_model_icon():
+        """Create a compact check icon without altering the stored model ID."""
+        pixmap = QPixmap(14, 14)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QColor("#69cf91"))
+            font = QFont()
+            font.setPixelSize(11)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, "✓")
+        finally:
+            painter.end()
+        return QIcon(pixmap)
+
     def _apply_provider_model_catalog_refresh(self, result):
         """Apply a completed catalog refresh on Qt's GUI thread."""
         online_models = list(getattr(result, 'models', []) or [])
@@ -18186,6 +18216,25 @@ Recent translations to summarize:
 
         statuses = dict(getattr(result, 'statuses', {}) or {})
         online = [name for name, status in statuses.items() if str(status).startswith('online')]
+        provider_models = dict(getattr(result, 'provider_models', {}) or {})
+        online_model_count = sum(
+            len(provider_models.get(name, []) or []) for name in online
+        )
+        polled_model_keys = {
+            str(model).casefold()
+            for name in online
+            for model in (provider_models.get(name, []) or [])
+        }
+        self._polled_online_model_ids = polled_model_keys
+        credential_skip_count = sum(
+            1 for status in statuses.values()
+            if 'no provider credential' in str(status)
+        )
+        unavailable_count = sum(
+            1 for status in statuses.values()
+            if str(status).startswith('static fallback')
+            and 'no provider credential' not in str(status)
+        )
 
         # If the user explicitly polled from Manage Models, refresh that
         # dialog too. Automatic background refreshes must not disturb unsaved
@@ -18233,17 +18282,93 @@ Recent translations to summarize:
             if poll_status is not None:
                 if online:
                     poll_status.setText(
-                        f"✓ {len(online_models)} models · {', '.join(sorted(online))}"
+                        f"✓ {online_model_count} online · {', '.join(sorted(online))}\n"
+                        f"{len(online_models)} total incl. fallbacks\n"
+                        f"{credential_skip_count} need credentials · {unavailable_count} unavailable"
                     )
                     poll_status.setStyleSheet("color: #78d69a; font-size: 8pt;")
                 else:
                     poll_status.setText("No online catalog responded; using static fallbacks.")
                     poll_status.setStyleSheet("color: #e3b65b; font-size: 8pt;")
 
-        if online:
-            self.append_log(
-                f"🌐 Updated online model catalog: {', '.join(sorted(online))}"
+        # Icons are safe to update after both automatic and explicit polls:
+        # unlike replacing the list, this does not disturb unsaved ordering or
+        # custom entries in an already-open manager.
+        if manager is not None:
+            self._apply_polled_model_icons(manager, polled_model_keys)
+
+        # Startup and API-key-triggered refreshes are intentionally silent.
+        # An explicit request writes one detailed, consolidated log entry even
+        # if it reused an in-flight startup request.
+        if getattr(self, '_model_catalog_feedback_requested', False):
+            self._model_catalog_feedback_requested = False
+            self._log_provider_model_catalog_feedback(
+                result,
+                total_model_count=len(online_models),
+                online_model_count=online_model_count,
             )
+
+    def _log_provider_model_catalog_feedback(
+        self,
+        result,
+        *,
+        total_model_count,
+        online_model_count,
+    ):
+        """Write detailed feedback for an explicit catalog poll to the log."""
+        statuses = dict(getattr(result, 'statuses', {}) or {})
+
+        def display_name(name):
+            aliases = {
+                'openrouter': 'OpenRouter',
+                'openai': 'OpenAI',
+                'anthropic': 'Anthropic',
+                'authgem_key': 'AuthGem Key',
+                'gemini': 'Gemini',
+                'xai': 'xAI',
+                'zai': 'Z.ai',
+                'zhipu': 'Zhipu',
+            }
+            return aliases.get(str(name), str(name).replace('_', ' ').title())
+
+        online = [
+            (name, status) for name, status in statuses.items()
+            if str(status).startswith('online')
+        ]
+        missing_credentials = [
+            name for name, status in statuses.items()
+            if 'no provider credential' in str(status)
+        ]
+        failed = [
+            (name, status) for name, status in statuses.items()
+            if str(status).startswith('static fallback')
+            and 'no provider credential' not in str(status)
+        ]
+
+        online_summary = ', '.join(
+            f"{display_name(name)} ({len((getattr(result, 'provider_models', {}) or {}).get(name, []) or [])})"
+            for name, _status in online
+        ) or 'None'
+        lines = [
+            "🌐 Provider model poll complete",
+            f"   ✅ Online catalogs: {online_summary}",
+            f"   📚 Online models: {online_model_count}",
+            f"   📋 Total dropdown entries: {total_model_count}",
+        ]
+        if missing_credentials:
+            lines.extend((
+                f"   🔐 Static fallback (no credential): {len(missing_credentials)} providers",
+                "      " + ', '.join(display_name(name) for name in missing_credentials),
+            ))
+        if failed:
+            lines.extend((
+                "   ⚠️ Catalog unavailable; static fallback used:",
+                '\n'.join(
+                    f"      • {display_name(name)} — {status}"
+                    for name, status in failed
+                ),
+            ))
+        self.append_log('\n'.join(lines))
 
     def _install_model_completer(self, model_list):
         """Create and install a prefix-priority completer on the model combobox.
@@ -19360,7 +19485,7 @@ Recent translations to summarize:
         action = menu.exec(self.model_combo.mapToGlobal(position))
 
         if action == refresh_action:
-            self._start_provider_model_catalog_refresh()
+            self._start_provider_model_catalog_refresh(show_feedback=True)
         elif action == manage_action:
             self._open_model_manager()
         elif action == cut_action and line_edit is not None:
@@ -19536,6 +19661,9 @@ Recent translations to summarize:
                     return
             list_widget.insertItem(0, text)
             list_widget.setCurrentRow(0)
+            self._apply_polled_model_icons(
+                dialog, getattr(self, '_polled_online_model_ids', set())
+            )
             add_entry.clear()
             save_state()
 
@@ -19551,6 +19679,7 @@ Recent translations to summarize:
         list_widget = QListWidget()
         list_widget.setDragDropMode(QListWidget.InternalMove)
         list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        list_widget.setIconSize(QSize(14, 14))
 
         # Populate from current combo
         current_models = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
@@ -19593,6 +19722,9 @@ Recent translations to summarize:
             if history_index[0] > 0:
                 history_index[0] -= 1
                 self._restore_list_order(list_widget, history_stack[history_index[0]])
+                self._apply_polled_model_icons(
+                    dialog, getattr(self, '_polled_online_model_ids', set())
+                )
                 update_undo_redo_buttons()
         undo_btn.clicked.connect(do_undo)
         button_column.addWidget(undo_btn)
@@ -19605,6 +19737,9 @@ Recent translations to summarize:
             if history_index[0] < len(history_stack) - 1:
                 history_index[0] += 1
                 self._restore_list_order(list_widget, history_stack[history_index[0]])
+                self._apply_polled_model_icons(
+                    dialog, getattr(self, '_polled_online_model_ids', set())
+                )
                 update_undo_redo_buttons()
         redo_btn.clicked.connect(do_redo)
         button_column.addWidget(redo_btn)
@@ -19684,6 +19819,9 @@ Recent translations to summarize:
             if reply == QMessageBox.Yes:
                 list_widget.clear()
                 list_widget.addItems(get_model_options())
+                self._apply_polled_model_icons(
+                    dialog, getattr(self, '_polled_online_model_ids', set())
+                )
                 save_state()
         reset_btn.clicked.connect(reset_defaults)
         button_column.addWidget(reset_btn)
@@ -19704,7 +19842,7 @@ Recent translations to summarize:
         )
         button_column.addWidget(poll_btn)
 
-        poll_status = QLabel("Ready to poll online catalogs")
+        poll_status = QLabel("Ready to poll online catalogs\n✓ marks models confirmed online")
         poll_status.setWordWrap(True)
         poll_status.setStyleSheet("color: #8fa8bd; font-size: 8pt;")
         button_column.addWidget(poll_status)
@@ -19715,10 +19853,14 @@ Recent translations to summarize:
             str(model).casefold() for model in get_model_options()
         }
         dialog._model_list_widget = list_widget
+        dialog._polled_model_icon = self._create_polled_model_icon()
         dialog._model_poll_button = poll_btn
         dialog._model_poll_status = poll_status
         dialog._save_model_list_state = save_state
         dialog._catalog_poll_pending = False
+        self._apply_polled_model_icons(
+            dialog, getattr(self, '_polled_online_model_ids', set())
+        )
 
         def poll_provider_catalogs():
             dialog._catalog_poll_pending = True
