@@ -1163,7 +1163,7 @@ class GlossaryManagerMixin:
     
     def _create_styled_checkbox(self, text):
         """Create a checkbox with the same overlay checkmark used by the main GUI."""
-        from PySide6.QtWidgets import QCheckBox, QLabel, QStyle, QStyleOptionButton
+        from PySide6.QtWidgets import QCheckBox, QLabel
         from PySide6.QtCore import Qt, QTimer
 
         checkbox = QCheckBox(text)
@@ -1182,14 +1182,7 @@ class GlossaryManagerMixin:
 
         def position_checkmark():
             try:
-                option = QStyleOptionButton()
-                checkbox.initStyleOption(option)
-                indicator_rect = checkbox.style().subElementRect(
-                    QStyle.SE_CheckBoxIndicator,
-                    option,
-                    checkbox,
-                )
-                checkmark.setGeometry(indicator_rect)
+                checkmark.setGeometry(2, 1, 14, 14)
             except RuntimeError:
                 pass
 
@@ -1214,13 +1207,6 @@ class GlossaryManagerMixin:
             pass
 
         checkbox.stateChanged.connect(update_checkmark)
-        original_resize_event = checkbox.resizeEvent
-
-        def _styled_checkbox_resize_event(event):
-            original_resize_event(event)
-            position_checkmark()
-
-        checkbox.resizeEvent = _styled_checkbox_resize_event
         QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
         return checkbox
 
@@ -6389,15 +6375,26 @@ Do not stop after the glossary."""
                 list_item.setData(Qt.UserRole, raw_value)
                 list_item.setData(Qt.UserRole + 1, display_value)
                 list_item.setFlags(Qt.ItemIsEnabled)
+
+                row_widget = QWidget()
+                row_widget.setAttribute(Qt.WA_TranslucentBackground)
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(0)
                 value_checkbox = self._create_styled_checkbox(display_value)
+                value_checkbox.setFixedHeight(select_all.sizeHint().height())
+                value_checkbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 value_checkbox.setChecked(currently_allowed is None or raw_value in currently_allowed)
-                list_item.setSizeHint(value_checkbox.sizeHint())
+                row_layout.addWidget(value_checkbox, 0, Qt.AlignVCenter)
+                row_widget._filter_checkbox = value_checkbox
+                list_item.setSizeHint(QSize(value_checkbox.sizeHint().width(), value_checkbox.height() + 8))
                 value_list.addItem(list_item)
-                value_list.setItemWidget(list_item, value_checkbox)
+                value_list.setItemWidget(list_item, row_widget)
 
             def _value_checkbox(index):
                 list_item = value_list.item(index)
-                checkbox = value_list.itemWidget(list_item) if list_item is not None else None
+                row_widget = value_list.itemWidget(list_item) if list_item is not None else None
+                checkbox = getattr(row_widget, '_filter_checkbox', None)
                 return checkbox if isinstance(checkbox, QCheckBox) else None
 
             count_label = QLabel()
