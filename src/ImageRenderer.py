@@ -21,6 +21,7 @@ from queue import Queue, Empty
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
+import manga_ocr_io
 
 _REGION_METADATA_KEYS = ('bubble_type', 'region_type', 'bubble_bounds')
 
@@ -11460,6 +11461,8 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
             ('clean_btn', 'Clean'),
             ('recognize_btn', 'Recognize Text'),
             ('translate_btn', 'Translate'),
+            ('import_ocr_btn', 'Import'),
+            ('export_ocr_btn', 'Export'),
             ('translate_all_btn', 'Translate All'),
         ]
         
@@ -11480,6 +11483,9 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
         # Also disable start_button in manga_integration if it exists
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
+        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_export_btn'):
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setEnabled(False)
         
         # Show the stop button when an operation starts, but not during model loading.
         if show_stop_button and not getattr(self, '_waiting_for_model', False) and hasattr(ipw, 'stop_translation_btn'):
@@ -11504,6 +11510,8 @@ def _enable_workflow_buttons(self):
             ('clean_btn', 'Clean'),
             ('recognize_btn', 'Recognize Text'),
             ('translate_btn', 'Translate'),
+            ('import_ocr_btn', 'Import'),
+            ('export_ocr_btn', 'Export'),
             ('translate_all_btn', 'Translate All'),
         ]
         
@@ -11516,6 +11524,9 @@ def _enable_workflow_buttons(self):
         # Also re-enable start_button in manga_integration if it exists
         if hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(True)
+        for btn_name in ('batch_ocr_import_btn', 'batch_ocr_export_btn'):
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setEnabled(True)
         
         # Re-enable editing tools after processing
         editing_buttons = ['save_overlay_btn', 'delete_btn', 'clear_boxes_btn', 'box_draw_btn', 'circle_draw_btn', 'lasso_btn']
@@ -11843,23 +11854,34 @@ def _run_translate_all_background(self, image_paths: list):
                     'total': total
                 }))
                 
-                # Run the full translate pipeline for this image
-                # This includes detect -> recognize -> translate
-                regions_for_recognition = None  # Will trigger auto-detection
-                
-                # Get OCR config
-                ocr_config = _get_ocr_config(self, )
-                
-                # Step 1: Run detection
-                detection_config = _get_detection_config(self, )
-                if detection_config.get('detect_empty_bubbles', True):
-                    detection_config['detect_empty_bubbles'] = False
-                
-                regions = _run_detection_sync(self, image_path, detection_config)
-                if not regions:
-                    self._log(f"⚠️ [{idx}/{total}] No text regions detected", "warning")
-                    failed_count += 1
-                    continue
+                # Reuse imported/saved OCR when it is available. This is what
+                # makes the manual editor's Import action useful for Translate
+                # All; pages without saved OCR retain the normal detection path.
+                saved_state = self.image_state_manager.get_state(image_path) or {}
+                saved_regions = manga_ocr_io.canonical_regions_from_editor_state(saved_state)
+                saved_recognized = list(saved_state.get('recognized_texts') or [])
+                use_saved_ocr = bool(saved_regions and saved_recognized)
+
+                if use_saved_ocr:
+                    synthesized = manga_ocr_io.editor_state_from_page({'regions': saved_regions})
+                    regions = synthesized.get('detection_regions') or []
+                    recognized_texts = saved_recognized
+                    self._log(
+                        f"📥 [{idx}/{total}] Reusing imported/saved OCR "
+                        f"({len(recognized_texts)} text regions)",
+                        "info",
+                    )
+                else:
+                    # Step 1: Run detection
+                    detection_config = _get_detection_config(self, )
+                    if detection_config.get('detect_empty_bubbles', True):
+                        detection_config['detect_empty_bubbles'] = False
+
+                    regions = _run_detection_sync(self, image_path, detection_config)
+                    if not regions:
+                        self._log(f"⚠️ [{idx}/{total}] No text regions detected", "warning")
+                        failed_count += 1
+                        continue
                 
                 # ===== CANCELLATION CHECK: After detection =====
                 if _is_translation_cancelled(self):
@@ -11884,18 +11906,20 @@ def _run_translate_all_background(self, image_paths: list):
                 # Brief pause so user can see green detection boxes
                 time.sleep(0.3)
                 
-                # Step 2: Run OCR
-                # ===== CANCELLATION CHECK: Before OCR =====
-                if _is_translation_cancelled(self):
-                    self._log(f"⏹ Translation cancelled before OCR on image {idx}/{total}", "warning")
-                    print(f"[TRANSLATE_ALL] Cancelled before OCR on image {idx}")
-                    break
-                
-                recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
-                if not recognized_texts:
-                    self._log(f"⚠️ [{idx}/{total}] No text recognized", "warning")
-                    failed_count += 1
-                    continue
+                # Step 2: Run OCR only when no imported/saved OCR was found.
+                if not use_saved_ocr:
+                    # ===== CANCELLATION CHECK: Before OCR =====
+                    if _is_translation_cancelled(self):
+                        self._log(f"⏹ Translation cancelled before OCR on image {idx}/{total}", "warning")
+                        print(f"[TRANSLATE_ALL] Cancelled before OCR on image {idx}")
+                        break
+
+                    ocr_config = _get_ocr_config(self, )
+                    recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
+                    if not recognized_texts:
+                        self._log(f"⚠️ [{idx}/{total}] No text recognized", "warning")
+                        failed_count += 1
+                        continue
                 
                 # ===== CANCELLATION CHECK: After OCR =====
                 if _is_translation_cancelled(self):

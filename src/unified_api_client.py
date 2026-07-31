@@ -17058,6 +17058,18 @@ class UnifiedClient:
         except Exception:
             return False
 
+    @staticmethod
+    def _apply_openrouter_thinking_disabled(payload: dict) -> bool:
+        """Explicitly disable provider thinking when the shared GPT/OR toggle is off."""
+        if os.getenv('ENABLE_GPT_THINKING', '0') == '1':
+            return False
+
+        # Some OpenRouter models default to thinking.  Do not leave a stale
+        # normalized reasoning object alongside the explicit provider toggle.
+        payload.pop("reasoning", None)
+        payload["thinking"] = {"type": "disabled"}
+        return True
+
     def _get_authgpt_reasoning_param(self) -> dict:
         """Return the Responses API reasoning object for AuthGPT/Codex OAuth."""
         try:
@@ -21903,9 +21915,10 @@ class UnifiedClient:
                     if provider == 'openrouter':
                         try:
                             enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                            # Auto-detect :thinking suffix models (e.g. claude-3.7-sonnet:thinking, lfm-2.5-1.2b-thinking)
+                            # Thinking-model suffixes still affect the enabled payload,
+                            # but an explicit UI toggle-off must take precedence.
                             _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
-                            if enable_gpt or _is_thinking_model:
+                            if enable_gpt:
                                 # exclude=False: include reasoning content in the response stream
                                 reasoning = {"enabled": True, "exclude": False}
                                 tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
@@ -21920,17 +21933,7 @@ class UnifiedClient:
                                     reasoning.pop('max_tokens', None)
                                     reasoning["effort"] = effort
                                 extra_body["reasoning"] = reasoning
-                                if _is_thinking_model and not enable_gpt:
-                                    # Log auto-detection once
-                                    try:
-                                        tls = self._get_thread_local_client()
-                                        if not hasattr(tls, '_or_thinking_auto_logged'):
-                                            tls._or_thinking_auto_logged = set()
-                                        if effective_model not in tls._or_thinking_auto_logged:
-                                            tls._or_thinking_auto_logged.add(effective_model)
-                                            print(f"🧠 [openrouter] Auto-enabled reasoning for thinking model: {effective_model}")
-                                    except Exception:
-                                        pass
+                            self._apply_openrouter_thinking_disabled(extra_body)
                         except Exception:
                             pass
 
@@ -22322,6 +22325,8 @@ class UnifiedClient:
                                     fb_body["max_completion_tokens"] = _norm_mct
                                 elif _norm_mt is not None:
                                     fb_body["max_tokens"] = _norm_mt
+                                if provider == 'openrouter':
+                                    self._apply_openrouter_thinking_disabled(fb_body)
                                 fb_endpoint = "/chat/completions"
                                 fb_resp = self._http_request_with_retries(
                                     method="POST",
@@ -23520,6 +23525,7 @@ class UnifiedClient:
                                             effort = 'medium'
                                         reasoning["effort"] = effort
                                     body["reasoning"] = reasoning
+                                self._apply_openrouter_thinking_disabled(body)
                             except Exception:
                                 pass
                             # Add provider preference if specified (fallback path)
@@ -23876,6 +23882,7 @@ class UnifiedClient:
                                 reasoning.pop('max_tokens', None)
                                 reasoning["effort"] = effort
                             data["reasoning"] = reasoning
+                        self._apply_openrouter_thinking_disabled(data)
                     except Exception:
                         pass
                     
@@ -23975,6 +23982,7 @@ class UnifiedClient:
                             reasoning.pop('max_tokens', None)
                             reasoning["effort"] = effort
                         cfg["reasoning"] = reasoning
+                    self._apply_openrouter_thinking_disabled(cfg)
                 except Exception:
                     pass
                 # Persist provider preference

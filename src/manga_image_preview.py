@@ -1536,6 +1536,8 @@ class MangaImagePreviewWidget(QWidget):
     clean_image_clicked = Signal()
     recognize_text_clicked = Signal()
     translate_text_clicked = Signal()
+    import_ocr_clicked = Signal()
+    export_ocr_clicked = Signal()
     translate_all_clicked = Signal()
     
     # Internal signal for thumbnail loading (thread-safe)
@@ -1844,7 +1846,25 @@ class MangaImagePreviewWidget(QWidget):
         """)
         tools_layout.addWidget(self.cleaned_toggle_btn)
         
-        # Add a stretch spacer after zoom and toggle controls
+        # Center session Import/Export in the otherwise unused toolbar gap.
+        tools_layout.addStretch()
+
+        self.import_ocr_btn = self._create_compact_button("Import")
+        self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.import_ocr_btn.setFixedWidth(82)
+        self.import_ocr_btn.setMinimumHeight(32)
+        self.import_ocr_btn.setToolTip("Import OCR text, translated text, and region mappings")
+        self.import_ocr_btn.clicked.connect(self.import_ocr_clicked.emit)
+        tools_layout.addWidget(self.import_ocr_btn)
+
+        self.export_ocr_btn = self._create_compact_button("Export")
+        self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.export_ocr_btn.setFixedWidth(82)
+        self.export_ocr_btn.setMinimumHeight(32)
+        self.export_ocr_btn.setToolTip("Export OCR text, translated text, and region mappings")
+        self.export_ocr_btn.clicked.connect(self.export_ocr_clicked.emit)
+        tools_layout.addWidget(self.export_ocr_btn)
+
         tools_layout.addStretch()
         
         # MANUAL EDITING TOOLS (hidden when manual editing is off)
@@ -1974,7 +1994,7 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.setToolTip("Translate recognized text to target language")
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
-        
+
         # Translate All button - translates all images in the preview list
         self.translate_all_btn = self._create_compact_button("Translate All")
         self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
@@ -3495,6 +3515,8 @@ class MangaImagePreviewWidget(QWidget):
             self.circle_draw_btn.setVisible(enabled)
         if hasattr(self, 'lasso_btn') and self.lasso_btn is not None:
             self.lasso_btn.setVisible(enabled)
+        self.import_ocr_btn.setVisible(enabled)
+        self.export_ocr_btn.setVisible(enabled)
         self.save_overlay_btn.setVisible(enabled)
         # Experimental tools require BOTH manual editing AND experimental toggle
         if self.brush_btn is not None:

@@ -191,7 +191,7 @@ class TextRegion:
         return (x, y, x + w, y + h)
     
     def to_dict(self):
-        return {
+        data = {
             'text': self.text,
             'vertices': self.vertices,
             'bounding_box': self.bounding_box,
@@ -199,6 +199,13 @@ class TextRegion:
             'region_type': self.region_type,
             'translated_text': self.translated_text
         }
+        # Detector metadata is assigned dynamically. Preserve it so imported
+        # OCR keeps the same free-text and inpainting behavior as the first run.
+        for key in ('bubble_bounds', 'bubble_type', 'should_inpaint', 'shape', 'polygon', 'rect_index'):
+            value = getattr(self, key, None)
+            if value is not None:
+                data[key] = value
+        return data
 
 def does_rectangle_fit(bigger_rect: Tuple, smaller_rect: Tuple) -> bool:
     """
@@ -15074,6 +15081,17 @@ class MangaTranslator:
             # owns its full translate/render path, so skip that shortcut for
             # OCR-only and precomputed-region glossary passes.
             used_precomputed_regions = precomputed_regions is not None
+            if not used_precomputed_regions:
+                resolver = getattr(self, 'ocr_import_resolver', None)
+                if callable(resolver):
+                    try:
+                        imported_regions = resolver(image_path)
+                    except Exception as import_error:
+                        imported_regions = None
+                        self._log(f"WARNING: Imported OCR could not be resolved: {import_error}", "warning")
+                    if imported_regions is not None:
+                        precomputed_regions = imported_regions
+                        used_precomputed_regions = True
             if self.manga_settings.get('advanced', {}).get('format_detection', False):
                 self._log("🔍 Analyzing image format...")
                 img = Image.open(image_path)
@@ -15108,10 +15126,20 @@ class MangaTranslator:
                         format_info['is_webtoon'] and webtoon_mode != 'disabled'):
                     if webtoon_mode == 'auto' or webtoon_mode == 'force':
                         self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
-                        # Process webtoon in chunks
-                        return self._process_webtoon_chunks(image_path, output_path, result)
+                        # Process webtoon in chunks. This specialized path returns
+                        # before the normal OCR callback below, so persist its
+                        # combined region data here.
+                        webtoon_result = self._process_webtoon_chunks(image_path, output_path, result)
+                        export_callback = getattr(self, 'ocr_export_callback', None)
+                        if callable(export_callback):
+                            try:
+                                export_callback(image_path, webtoon_result.get('regions', []))
+                            except Exception as export_error:
+                                self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
+                        return webtoon_result
             
-            # Step 1: Detect text regions using OCR, or reuse a prior OCR pass.
+            # Step 1: Detect text regions using OCR, reuse an explicit prior
+            # pass, or resolve regions from a user-imported OCR document.
             if used_precomputed_regions:
                 self._log(f"📍 [STEP 1] Reusing precomputed OCR regions")
                 regions = list(precomputed_regions or [])
@@ -15123,6 +15151,15 @@ class MangaTranslator:
             else:
                 self._log(f"📍 [STEP 1] Text Detection Phase")
                 regions = self.detect_text_regions(image_path)
+
+            # Save OCR as soon as it exists, before translation/inpainting can
+            # fail. The GUI integration attaches this callback per run.
+            export_callback = getattr(self, 'ocr_export_callback', None)
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, regions or [])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not save OCR text: {export_error}", "warning")
             
             if not regions:
                 error_msg = "No text regions detected by Cloud Vision"
@@ -15535,6 +15572,15 @@ class MangaTranslator:
                 self._log("↪️ Concurrent mode disabled — running sequentially", "info")
                 translate_ok = _task_translate()
                 inpainted = _task_inpaint()
+
+            # Refresh the automatic OCR/session export after translation has
+            # populated region.translated_text. The earlier callback deliberately
+            # saves OCR immediately so it survives later pipeline failures.
+            if callable(export_callback):
+                try:
+                    export_callback(image_path, regions or [])
+                except Exception as export_error:
+                    self._log(f"WARNING: Could not save translated OCR session: {export_error}", "warning")
             
             # OPTIMIZATION: Return inpainter to pool immediately after inpainting completes
             # This frees the model for reuse by other images in batch mode
