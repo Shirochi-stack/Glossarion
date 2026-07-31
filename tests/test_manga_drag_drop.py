@@ -193,6 +193,7 @@ def test_manual_ocr_export_serialization_runs_off_the_gui_thread(tmp_path, monke
         _manual_ocr_files=lambda: [image],
         _current_manga_source_dir=lambda: str(tmp_path),
         _manga_ocr_timestamped_export_filename=lambda: 'session.json',
+        _manga_ocr_save_dialog_path=lambda filename: str(tmp_path / filename),
         _manual_editor_state_for_export=lambda _path: state,
         _set_manual_ocr_export_busy=lambda busy: busy_states.append(busy),
         _finish_manual_ocr_export=lambda *_args: None,
@@ -494,6 +495,24 @@ def test_manga_ocr_export_filename_includes_timestamp():
     )
 
     assert filename == 'chapter_ocr_20260731_193045.json'
+
+
+def test_manga_ocr_export_dialog_path_defaults_to_ocr_folder(tmp_path):
+    ocr_folder = tmp_path / 'custom-output' / 'OCR Text'
+    manga_tab = SimpleNamespace(
+        _manga_ocr_output_dir=lambda: str(ocr_folder),
+    )
+
+    initial_path = MangaTranslationTab._manga_ocr_save_dialog_path(
+        manga_tab,
+        'chapter_ocr_20260731_193045.json',
+    )
+
+    assert initial_path == os.path.join(
+        str(ocr_folder),
+        'chapter_ocr_20260731_193045.json',
+    )
+    assert ocr_folder.is_dir()
 
 
 def test_auto_ocr_folder_uses_the_epub_default_output_root(tmp_path, monkeypatch):

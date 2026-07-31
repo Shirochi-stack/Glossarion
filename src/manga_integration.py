@@ -4253,6 +4253,18 @@ class MangaTranslationTab(QObject):
         self.file_listbox = QListWidget()
         self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_listbox.setMinimumHeight(200)
+        self.file_listbox.setStyleSheet(
+            "QListWidget { background-color: #17191c; color: #d8dee7; "
+            "border: 1px solid #3a4149; border-radius: 4px; outline: none; }"
+            "QListWidget::item { background-color: #23262a; color: #d8dee7; "
+            "padding: 1px 8px; border-left: 4px solid transparent; "
+            "border-bottom: 1px solid #17191c; }"
+            "QListWidget::item:hover:!selected { background-color: #30363d; color: #ffffff; }"
+            "QListWidget::item:selected { background-color: #175f86; color: #ffffff; "
+            "border-left: 4px solid #62c8ff; font-weight: bold; }"
+            "QListWidget::item:selected:!active { background-color: #175f86; color: #ffffff; "
+            "border-left: 4px solid #62c8ff; }"
+        )
         # Enable drag and drop reordering
         self.file_listbox.setDragDropMode(QListWidget.InternalMove)
         self.file_listbox.setDefaultDropAction(Qt.MoveAction)
@@ -16643,6 +16655,17 @@ class MangaTranslationTab(QObject):
         export_timestamp = timestamp or time.strftime('%Y%m%d_%H%M%S')
         return f"{stem}_{export_timestamp}{extension or '.json'}"
 
+    def _manga_ocr_save_dialog_path(self, filename: str) -> str:
+        """Return a save-dialog path rooted in the active OCR output folder."""
+        output_dir = self._manga_ocr_output_dir()
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError:
+            # Preserve QFileDialog's normal fallback behavior when the
+            # configured output folder is temporarily unavailable.
+            return os.path.basename(filename)
+        return os.path.join(output_dir, os.path.basename(filename))
+
     def _prepare_automatic_ocr_export(self, files: List[str]) -> None:
         """Create the per-run OCR manifest before translation starts."""
         source_root = self._current_manga_source_dir()
@@ -17152,7 +17175,7 @@ class MangaTranslationTab(QObject):
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manga OCR Text",
-            os.path.basename(source_path),
+            self._manga_ocr_save_dialog_path(os.path.basename(source_path)),
             "Glossarion Manga OCR (*.json);;JSON Files (*.json)",
         )
         if not destination:
@@ -17268,7 +17291,9 @@ class MangaTranslationTab(QObject):
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manual Manga OCR",
-            self._manga_ocr_timestamped_export_filename(),
+            self._manga_ocr_save_dialog_path(
+                self._manga_ocr_timestamped_export_filename()
+            ),
             "Glossarion Manga OCR (*.json);;JSON Files (*.json)",
         )
         if not destination:
