@@ -1261,6 +1261,25 @@ def toggle_gpt_reasoning_controls(self):
     except Exception:
         pass
 
+
+def _apply_gpt_thinking_toggle(self, checked) -> bool:
+    """Apply the GPT/OpenRouter thinking toggle to UI, config, and live requests."""
+    enabled = bool(checked)
+    self.enable_gpt_thinking_var = enabled
+    try:
+        self.config['enable_gpt_thinking'] = enabled
+    except Exception:
+        pass
+    os.environ['ENABLE_GPT_THINKING'] = '1' if enabled else '0'
+    if not enabled:
+        os.environ['GPT_REASONING_TOKENS'] = ''
+    try:
+        self.toggle_gpt_reasoning_controls()
+    except Exception:
+        pass
+    return enabled
+
+
 def open_other_settings(self, *args, show=True):
     """Open the Other Settings dialog (PySide6)"""
     from PySide6.QtGui import QIcon, QKeyEvent
@@ -3156,8 +3175,7 @@ def _create_response_handling_section(self, parent):
         pass
     def _on_gpt_thinking_toggle(checked):
         try:
-            self.enable_gpt_thinking_var = bool(checked)
-            self.toggle_gpt_reasoning_controls()
+            _apply_gpt_thinking_toggle(self, checked)
         except Exception:
             pass
     gpt_enable_cb.toggled.connect(_on_gpt_thinking_toggle)

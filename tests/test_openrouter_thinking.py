@@ -1,3 +1,7 @@
+import os
+from types import SimpleNamespace
+
+from other_settings import _apply_gpt_thinking_toggle
 from unified_api_client import UnifiedClient
 
 
@@ -9,7 +13,10 @@ def test_toggle_off_explicitly_disables_openrouter_thinking(monkeypatch):
     applied = UnifiedClient._apply_openrouter_thinking_disabled(payload)
 
     assert applied is True
-    assert payload == {"thinking": {"type": "disabled"}}
+    assert payload == {
+        "reasoning": {"effort": "none"},
+        "thinking": {"type": "disabled"},
+    }
 
 
 def test_toggle_on_preserves_openrouter_reasoning_payload(monkeypatch):
@@ -21,3 +28,23 @@ def test_toggle_on_preserves_openrouter_reasoning_payload(monkeypatch):
 
     assert applied is False
     assert payload == {"reasoning": {"enabled": True, "effort": "high"}}
+
+
+def test_other_settings_toggle_off_updates_live_openrouter_state(monkeypatch):
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    monkeypatch.setenv("GPT_REASONING_TOKENS", "4096")
+    control_refreshes = []
+    gui = SimpleNamespace(
+        config={"enable_gpt_thinking": True},
+        enable_gpt_thinking_var=True,
+        toggle_gpt_reasoning_controls=lambda: control_refreshes.append(True),
+    )
+
+    enabled = _apply_gpt_thinking_toggle(gui, False)
+
+    assert enabled is False
+    assert gui.enable_gpt_thinking_var is False
+    assert gui.config["enable_gpt_thinking"] is False
+    assert os.environ["ENABLE_GPT_THINKING"] == "0"
+    assert os.environ["GPT_REASONING_TOKENS"] == ""
+    assert control_refreshes == [True]

@@ -17064,9 +17064,12 @@ class UnifiedClient:
         if os.getenv('ENABLE_GPT_THINKING', '0') == '1':
             return False
 
-        # Some OpenRouter models default to thinking.  Do not leave a stale
-        # normalized reasoning object alongside the explicit provider toggle.
-        payload.pop("reasoning", None)
+        # OpenRouter's normalized API uses reasoning.effort="none" to disable
+        # reasoning. Keep the provider-native thinking toggle too: OpenRouter
+        # can route to backends which understand that form directly. Sending
+        # only `thinking.type=disabled` is insufficient because the router may
+        # discard an unrecognized provider field and apply the model's default.
+        payload["reasoning"] = {"effort": "none"}
         payload["thinking"] = {"type": "disabled"}
         return True
 

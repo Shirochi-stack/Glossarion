@@ -232,9 +232,9 @@ def get_model_options() -> List[str]:
         "or/deepseek/deepseek-r1-distill-llama-70b:free", "or/deepseek/deepseek-v3.2", "or/deepseek/deepseek-v3.2-speciale",
         "or/deepseek/deepseek-chat-v3.1", "or/deepseek/deepseek-r1-0528", "or/deepseek/deepseek-r1", "or/deepseek/deepseek-chat",
         "or/deepseek/deepseek-r1:free","or/deepseek/deepseek-r1-0528:free", "or/deepseek/deepseek-chat-v3.1:free", "or/deepseek/deepseek-r1-0528-qwen3-8b:free",
-        "or/tngtech/deepseek-r1t2-chimera:free","or/tngtech/deepseek-r1t-chimera:free",
+        "or/tngtech/deepseek-r1t2-chimera:free","or/tngtech/deepseek-r1t-chimera:free", "or/deepseek/deepseek-v4-flash-0731",
         "or/google/gemma-3-27b-it:free", "or/google/gemma-3-27b-it",
-        "or/qwen/qwen3-235b-a22b", "or/qwen/qwen3-235b-a22b-thinking-2507",
+        "or/qwen/qwen3-235b-a22b", "or/qwen/qwen3-235b-a22b-thinking-2507", 
         
         # For ElectronHub, prefix with 'eh/'
         "eh/claude-sonnet-4-6","eh/claude-sonnet-4-6-thinking","eh/claude-opus-4-6","eh/claude-opus-4-6-thinking",
