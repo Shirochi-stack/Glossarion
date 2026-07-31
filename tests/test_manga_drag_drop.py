@@ -127,6 +127,91 @@ def test_ocr_json_drop_routes_into_batch_import(tmp_path):
     assert dropped == [session]
 
 
+def test_ocr_import_parsing_runs_off_the_gui_thread(tmp_path, monkeypatch):
+    image = os.path.abspath(tmp_path / 'page.png')
+    document = manga_ocr_io.create_document([], workflow='automatic')
+    started = threading.Event()
+    release = threading.Event()
+    busy_states = []
+
+    def _load(_path):
+        started.set()
+        release.wait(timeout=5)
+        return document
+
+    monkeypatch.setattr(manga_ocr_io, 'load_document', _load)
+    manga_tab = SimpleNamespace(
+        _ocr_import_generation=0,
+        _set_ocr_import_busy=lambda busy: busy_states.append(busy),
+        _finish_ocr_import_worker=lambda *_args: None,
+        update_queue=Queue(),
+    )
+
+    MangaTranslationTab._start_ocr_import_worker(
+        manga_tab,
+        str(tmp_path / 'session.json'),
+        [image],
+    )
+
+    assert started.wait(timeout=2)
+    assert manga_tab._ocr_import_thread.is_alive()
+    assert manga_tab.update_queue.empty()
+    release.set()
+    manga_tab._ocr_import_thread.join(timeout=5)
+    assert busy_states == [True]
+    assert manga_tab.update_queue.get_nowait()[0] == 'call_method'
+
+
+def test_manual_ocr_export_serialization_runs_off_the_gui_thread(tmp_path, monkeypatch):
+    image = os.path.abspath(tmp_path / 'page.png')
+    destination = os.path.abspath(tmp_path / 'session.json')
+    state = {
+        'viewer_rectangles': [{'x': 1, 'y': 2, 'width': 30, 'height': 40}],
+        'recognized_texts': [{'region_index': 0, 'text': 'source', 'bbox': [1, 2, 30, 40]}],
+        'translated_texts': [{
+            'original': {'region_index': 0, 'text': 'source'},
+            'translation': 'translated',
+            'bbox': [1, 2, 30, 40],
+        }],
+    }
+    started = threading.Event()
+    release = threading.Event()
+    busy_states = []
+
+    def _write(_path, _document):
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(manga_ocr_io, 'write_document', _write)
+    monkeypatch.setattr(
+        manga_integration.QFileDialog,
+        'getSaveFileName',
+        lambda *_args: (destination, ''),
+    )
+    manga_tab = SimpleNamespace(
+        image_preview_widget=SimpleNamespace(current_image_path=None),
+        _manual_ocr_files=lambda: [image],
+        _current_manga_source_dir=lambda: str(tmp_path),
+        _manga_ocr_timestamped_export_filename=lambda: 'session.json',
+        _manual_editor_state_for_export=lambda _path: state,
+        _set_manual_ocr_export_busy=lambda busy: busy_states.append(busy),
+        _finish_manual_ocr_export=lambda *_args: None,
+        _ocr_export_generation=0,
+        update_queue=Queue(),
+        dialog=object(),
+    )
+
+    MangaTranslationTab._export_manual_ocr_text(manga_tab)
+
+    assert started.wait(timeout=2)
+    assert manga_tab._ocr_export_thread.is_alive()
+    assert manga_tab.update_queue.empty()
+    release.set()
+    manga_tab._ocr_export_thread.join(timeout=5)
+    assert busy_states == [True]
+    assert manga_tab.update_queue.get_nowait()[0] == 'call_method'
+
+
 def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monkeypatch):
     image = os.path.abspath(tmp_path / 'page.png')
     with open(image, 'wb') as handle:
@@ -152,7 +237,7 @@ def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monk
         def set_state(self, path, state, save=True):
             self.states[path] = state
 
-        def flush(self):
+        def flush_async(self):
             self.flushed = True
 
     class _Button:
@@ -163,14 +248,14 @@ def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monk
             self.tooltip = text
 
     state_manager = _StateManager()
-    refreshed = []
+    scheduled = []
     manga_tab = SimpleNamespace(
         _imported_ocr_document=None,
         _refresh_imported_ocr_page_map=lambda _files: {image: page},
         image_state_manager=state_manager,
         image_preview_widget=SimpleNamespace(current_image_path=image),
         batch_ocr_import_btn=_Button(),
-        _refresh_imported_manual_preview=lambda path: refreshed.append(path),
+        _start_imported_ocr_preview_refresh=lambda matches, **kwargs: scheduled.append((matches, kwargs)),
         _log=lambda *_args: None,
         dialog=object(),
     )
@@ -189,7 +274,7 @@ def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monk
     assert imported is True
     assert state_manager.flushed is True
     assert state_manager.states[image]['translated_texts'][0]['translation'] == 'translated'
-    assert refreshed == [image]
+    assert scheduled == [({image: page}, {'priority_path': image})]
 
 
 def test_import_refresh_renders_every_nonvisible_translated_page(tmp_path, monkeypatch):
@@ -457,7 +542,7 @@ def test_ocr_import_dialog_defaults_to_auto_saved_ocr_folder(tmp_path, monkeypat
         _manga_ocr_output_dir=lambda: str(ocr_folder),
     )
 
-    path, document = MangaTranslationTab._load_ocr_document_from_dialog(
+    path = MangaTranslationTab._choose_ocr_document_path(
         manga_tab,
         'Import Manga OCR Text',
     )
@@ -465,7 +550,6 @@ def test_ocr_import_dialog_defaults_to_auto_saved_ocr_folder(tmp_path, monkeypat
     assert captured['initial_dir'] == str(ocr_folder)
     assert ocr_folder.is_dir()
     assert path == str(session)
-    assert document['workflow'] == 'automatic'
 
 
 def test_automatic_ocr_session_never_drops_saved_translation(tmp_path):

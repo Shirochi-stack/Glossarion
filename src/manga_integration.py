@@ -310,6 +310,9 @@ class ImageStateManager:
         self._dirty = False
         self._save_timer: Optional[threading.Timer] = None
         self._timer_lock = threading.Lock()
+        self._async_flush_lock = threading.Lock()
+        self._async_flush_requested = False
+        self._async_flush_thread = None
 
         # Worker process for async state operations
         self._mp_enabled = True
@@ -617,6 +620,30 @@ class ImageStateManager:
                 print(f"[STATE] Failed to flush state: {e}")
         else:
             print(f"[STATE DEBUG] flush() skipped - not dirty")
+
+    def flush_async(self):
+        """Persist the current state snapshot without blocking the GUI thread."""
+        self._dirty = True
+        with self._async_flush_lock:
+            self._async_flush_requested = True
+            if self._async_flush_thread and self._async_flush_thread.is_alive():
+                return
+
+            def _flush_worker():
+                while True:
+                    with self._async_flush_lock:
+                        self._async_flush_requested = False
+                    self.flush()
+                    with self._async_flush_lock:
+                        if not self._async_flush_requested:
+                            break
+
+            self._async_flush_thread = threading.Thread(
+                target=_flush_worker,
+                name="MangaStateFlush",
+                daemon=True,
+            )
+            self._async_flush_thread.start()
     
     def __del__(self):
         """Cleanup: flush state, stop worker, and cancel timer on deletion"""
@@ -16747,7 +16774,7 @@ class MangaTranslationTab(QObject):
             "debug",
         )
 
-    def _load_ocr_document_from_dialog(self, title: str):
+    def _choose_ocr_document_path(self, title: str) -> Optional[str]:
         initial_dir = self._manga_ocr_output_dir()
         try:
             os.makedirs(initial_dir, exist_ok=True)
@@ -16761,6 +16788,11 @@ class MangaTranslationTab(QObject):
             initial_dir,
             "Glossarion Manga OCR (*.json);;JSON Files (*.json);;All Files (*)",
         )
+        return path or None
+
+    def _load_ocr_document_from_dialog(self, title: str):
+        """Synchronous compatibility helper; production imports use a worker."""
+        path = self._choose_ocr_document_path(title)
         if not path:
             return None, None
         try:
@@ -16798,17 +16830,13 @@ class MangaTranslationTab(QObject):
         button.update()
 
     def _import_batch_ocr_path(self, path: str) -> bool:
-        """Import a dropped OCR session using the normal batch import workflow."""
+        """Start a non-blocking import for a dropped OCR session."""
         files = list(self._current_manga_processing_files() or self.selected_files or [])
         if not files:
             QMessageBox.warning(self.dialog, "No Files", "Load the manga images before importing OCR text.")
             return False
-        try:
-            document = manga_ocr_io.load_document(path)
-        except manga_ocr_io.MangaOcrFormatError as error:
-            QMessageBox.warning(self.dialog, "Invalid OCR File", str(error))
-            return False
-        return self._apply_imported_batch_ocr_document(path, document, files)
+        self._start_ocr_import_worker(path, files)
+        return True
 
     def _import_batch_ocr_text(self) -> None:
         """Load OCR that the next Start Translation run should reuse."""
@@ -16816,20 +16844,105 @@ class MangaTranslationTab(QObject):
         if not files:
             QMessageBox.warning(self.dialog, "No Files", "Load the manga images before importing OCR text.")
             return
-        path, document = self._load_ocr_document_from_dialog("Import Manga OCR Text")
-        if not document:
+        path = self._choose_ocr_document_path("Import Manga OCR Text")
+        if not path:
             return
-        self._apply_imported_batch_ocr_document(path, document, files)
+        self._start_ocr_import_worker(path, files)
+
+    def _set_ocr_import_busy(self, busy: bool) -> None:
+        batch_button = getattr(self, 'batch_ocr_import_btn', None)
+        if batch_button is not None:
+            batch_button.setEnabled(not busy)
+            if busy:
+                batch_button.setText("⏳ Importing OCR...")
+            elif not getattr(self, '_imported_ocr_document', None):
+                batch_button.setText("📥 Import OCR")
+        preview_button = getattr(getattr(self, 'image_preview_widget', None), 'import_ocr_btn', None)
+        if preview_button is not None:
+            preview_button.setEnabled(not busy)
+            preview_button.setText("⏳ Importing...") if busy else preview_button.setText("📥 Import")
+
+    def _start_ocr_import_worker(self, path: str, files: List[str]) -> None:
+        """Parse and prepare an OCR session without blocking Qt's event loop."""
+        generation = int(getattr(self, '_ocr_import_generation', 0)) + 1
+        self._ocr_import_generation = generation
+        self._set_ocr_import_busy(True)
+
+        def load_session():
+            try:
+                document = manga_ocr_io.load_document(path)
+                matches = manga_ocr_io.match_document_pages(document, files)
+                imported_states = {
+                    image_path: manga_ocr_io.editor_state_from_page(page)
+                    for image_path, page in matches.items()
+                }
+                error = None
+            except Exception as import_error:
+                document = None
+                matches = {}
+                imported_states = {}
+                error = import_error
+            self.update_queue.put(('call_method', self._finish_ocr_import_worker, (
+                generation,
+                path,
+                document,
+                list(files),
+                matches,
+                imported_states,
+                error,
+            )))
+
+        worker = threading.Thread(
+            target=load_session,
+            name=f"MangaOcrImport-{generation}",
+            daemon=True,
+        )
+        self._ocr_import_thread = worker
+        worker.start()
+
+    def _finish_ocr_import_worker(
+        self,
+        generation: int,
+        path: str,
+        document: Optional[Dict[str, Any]],
+        files: List[str],
+        matches: Dict[str, Dict[str, Any]],
+        imported_states: Dict[str, Dict[str, Any]],
+        error: Optional[Exception],
+    ) -> None:
+        if generation != getattr(self, '_ocr_import_generation', generation):
+            return
+        self._set_ocr_import_busy(False)
+        if error is not None or document is None:
+            QMessageBox.warning(self.dialog, "Invalid OCR File", str(error or "Could not load OCR session"))
+            return
+        self._apply_imported_batch_ocr_document(
+            path,
+            document,
+            files,
+            matches_override=matches,
+            imported_states=imported_states,
+        )
 
     def _apply_imported_batch_ocr_document(
         self,
         path: str,
         document: Dict[str, Any],
         files: List[str],
+        *,
+        matches_override: Optional[Dict[str, Dict[str, Any]]] = None,
+        imported_states: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Apply and report an OCR document loaded by either click or drop."""
         self._imported_ocr_document = document
-        matches = self._refresh_imported_ocr_page_map(files)
+        if matches_override is None:
+            matches = self._refresh_imported_ocr_page_map(files)
+        else:
+            matches = dict(matches_override)
+            self._imported_ocr_page_map = {
+                os.path.normcase(os.path.abspath(image_path)): page
+                for image_path, page in matches.items()
+            }
         if not matches:
             self._imported_ocr_document = None
             QMessageBox.warning(
@@ -16851,18 +16964,22 @@ class MangaTranslationTab(QObject):
         # state from canonical regions so imported translations appear now,
         # rather than only becoming visible after another translation run.
         current_source = None
-        current_refreshed = False
         try:
             state_manager = getattr(self, 'image_state_manager', None)
             preview = getattr(self, 'image_preview_widget', None)
             if state_manager is not None:
                 for image_path, page in matches.items():
-                    imported_state = manga_ocr_io.editor_state_from_page(page)
+                    imported_state = (
+                        imported_states.get(image_path)
+                        if imported_states is not None else None
+                    ) or manga_ocr_io.editor_state_from_page(page)
                     existing_state = state_manager.get_state(image_path) or {}
                     existing_state.update(imported_state)
-                    state_manager.set_state(image_path, existing_state, save=True)
-                if hasattr(state_manager, 'flush'):
-                    state_manager.flush()
+                    state_manager.set_state(image_path, existing_state, save=False)
+                if hasattr(state_manager, 'flush_async'):
+                    state_manager.flush_async()
+                elif hasattr(state_manager, 'flush'):
+                    threading.Thread(target=state_manager.flush, daemon=True).start()
 
                 current = getattr(preview, 'current_image_path', None) if preview else None
                 current_source = None
@@ -16879,16 +16996,12 @@ class MangaTranslationTab(QObject):
                     ImageRenderer._clear_cross_image_state(self)
                     ImageRenderer._rehydrate_text_state_from_persisted(self, current_source)
                     ImageRenderer._restore_image_state_overlays_only(self, current_source)
-                    current_refreshed = self._refresh_imported_manual_preview(current_source)
         except Exception as restore_error:
             self._log(f"Could not refresh imported OCR session preview: {restore_error}", "warning")
 
         background_refresh = getattr(self, '_start_imported_ocr_preview_refresh', None)
         if callable(background_refresh):
-            background_refresh(
-                matches,
-                exclude_path=current_source if current_refreshed else None,
-            )
+            background_refresh(matches, priority_path=current_source)
 
         if hasattr(self, 'batch_ocr_import_btn'):
             self.batch_ocr_import_btn.setText(f"📥 Imported OCR ({len(matches)})")
@@ -16922,6 +17035,7 @@ class MangaTranslationTab(QObject):
         matches: Dict[str, Dict[str, Any]],
         *,
         exclude_path: Optional[str] = None,
+        priority_path: Optional[str] = None,
     ) -> None:
         """Render every non-visible imported page from persisted state."""
         targets = []
@@ -16940,6 +17054,13 @@ class MangaTranslationTab(QObject):
             )
             if has_translation:
                 targets.append(image_path)
+        if priority_path:
+            priority_key = os.path.normcase(os.path.abspath(priority_path))
+            targets.sort(
+                key=lambda image_path: 0
+                if os.path.normcase(os.path.abspath(image_path)) == priority_key
+                else 1
+            )
         if not targets:
             return
 
@@ -17138,40 +17259,12 @@ class MangaTranslationTab(QObject):
         return state
 
     def _export_manual_ocr_text(self) -> None:
-        """Export editor OCR, translations, and rectangle mappings."""
+        """Export editor state without serializing it on Qt's GUI thread."""
         current = getattr(self.image_preview_widget, 'current_image_path', None)
         if current:
             ImageRenderer._persist_current_image_state(self)
         files = self._manual_ocr_files()
         source_root = self._current_manga_source_dir()
-        pages = []
-        translated_region_count = 0
-        for index, image_path in enumerate(files, start=1):
-            state = self._manual_editor_state_for_export(image_path)
-            regions = manga_ocr_io.canonical_regions_from_editor_state(state)
-            if not regions and not state.get('recognized_texts'):
-                continue
-            translated_region_count += sum(
-                1 for region in regions
-                if str(region.get('translated_text') or '').strip()
-            )
-            pages.append(manga_ocr_io.make_page(
-                image_path,
-                regions,
-                index=index,
-                source_root=source_root,
-                editor_state=state,
-            ))
-        if not pages:
-            QMessageBox.warning(
-                self.dialog,
-                "No OCR Text",
-                "Recognize text in at least one image before exporting.",
-            )
-            return
-        document = manga_ocr_io.create_document(
-            pages, workflow="manual-editor", source_root=source_root
-        )
         destination, _ = QFileDialog.getSaveFileName(
             self.dialog,
             "Export Manual Manga OCR",
@@ -17182,17 +17275,91 @@ class MangaTranslationTab(QObject):
             return
         if not os.path.splitext(destination)[1]:
             destination += '.json'
-        try:
-            manga_ocr_io.write_document(destination, document)
-            self._log(f"Exported manual OCR/translation mappings for {len(pages)} pages", "success")
-            QMessageBox.information(
-                self.dialog,
-                "Session Exported",
-                f"Exported OCR text, {translated_region_count} translated regions, "
-                f"and mappings for {len(pages)} pages.",
-            )
-        except Exception as error:
+        generation = int(getattr(self, '_ocr_export_generation', 0)) + 1
+        self._ocr_export_generation = generation
+        self._set_manual_ocr_export_busy(True)
+
+        def export_session():
+            pages = []
+            translated_region_count = 0
+            error = None
+            try:
+                for index, image_path in enumerate(files, start=1):
+                    state = self._manual_editor_state_for_export(image_path)
+                    regions = manga_ocr_io.canonical_regions_from_editor_state(state)
+                    if not regions and not state.get('recognized_texts'):
+                        continue
+                    translated_region_count += sum(
+                        1 for region in regions
+                        if str(region.get('translated_text') or '').strip()
+                    )
+                    pages.append(manga_ocr_io.make_page(
+                        image_path,
+                        regions,
+                        index=index,
+                        source_root=source_root,
+                        editor_state=state,
+                    ))
+                if pages:
+                    document = manga_ocr_io.create_document(
+                        pages,
+                        workflow="manual-editor",
+                        source_root=source_root,
+                    )
+                    manga_ocr_io.write_document(destination, document)
+            except Exception as export_error:
+                error = export_error
+            self.update_queue.put(('call_method', self._finish_manual_ocr_export, (
+                generation,
+                destination,
+                len(pages),
+                translated_region_count,
+                error,
+            )))
+
+        worker = threading.Thread(
+            target=export_session,
+            name=f"MangaOcrExport-{generation}",
+            daemon=True,
+        )
+        self._ocr_export_thread = worker
+        worker.start()
+
+    def _set_manual_ocr_export_busy(self, busy: bool) -> None:
+        button = getattr(getattr(self, 'image_preview_widget', None), 'export_ocr_btn', None)
+        if button is None:
+            return
+        button.setEnabled(not busy)
+        button.setText("⏳ Exporting...") if busy else button.setText("📤 Export")
+
+    def _finish_manual_ocr_export(
+        self,
+        generation: int,
+        destination: str,
+        page_count: int,
+        translated_region_count: int,
+        error: Optional[Exception],
+    ) -> None:
+        if generation != getattr(self, '_ocr_export_generation', generation):
+            return
+        self._set_manual_ocr_export_busy(False)
+        if error is not None:
             QMessageBox.warning(self.dialog, "Export Failed", str(error))
+            return
+        if not page_count:
+            QMessageBox.warning(
+                self.dialog,
+                "No OCR Text",
+                "Recognize text in at least one image before exporting.",
+            )
+            return
+        self._log(f"Exported manual OCR/translation mappings for {page_count} pages", "success")
+        QMessageBox.information(
+            self.dialog,
+            "Session Exported",
+            f"Exported OCR text, {translated_region_count} translated regions, "
+            f"and mappings for {page_count} pages to:\n{destination}",
+        )
 
     def _import_manual_ocr_text(self) -> None:
         """Restore OCR, translations, and editor mappings into the current manga image set."""
@@ -17200,44 +17367,10 @@ class MangaTranslationTab(QObject):
         if not files:
             QMessageBox.warning(self.dialog, "No Files", "Load the manga images before importing OCR text.")
             return
-        path, document = self._load_ocr_document_from_dialog("Import Manual Manga OCR")
-        if not document:
+        path = self._choose_ocr_document_path("Import Manual Manga OCR")
+        if not path:
             return
-        matches = manga_ocr_io.match_document_pages(document, files)
-        if not matches:
-            QMessageBox.warning(
-                self.dialog,
-                "No Matching Pages",
-                "The OCR file does not match any currently loaded manga images.",
-            )
-            return
-
-        try:
-            for image_path, page in matches.items():
-                imported_state = manga_ocr_io.editor_state_from_page(page)
-                existing_state = self.image_state_manager.get_state(image_path) or {}
-                existing_state.update(imported_state)
-                self.image_state_manager.set_state(image_path, existing_state, save=True)
-            self.image_state_manager.flush()
-
-            # Also make this import available to Start Translation from the same panel.
-            self._imported_ocr_document = document
-            self._refresh_imported_ocr_page_map(files)
-            current = getattr(self.image_preview_widget, 'current_image_path', None)
-            if current in matches:
-                ImageRenderer._clear_cross_image_state(self)
-                ImageRenderer._rehydrate_text_state_from_persisted(self, current)
-                ImageRenderer._restore_image_state_overlays_only(self, current)
-                self._refresh_imported_manual_preview(current)
-        except Exception as error:
-            QMessageBox.warning(self.dialog, "Import Failed", str(error))
-            return
-        self._log(f"Imported manual OCR/translation mappings for {len(matches)} pages", "success")
-        QMessageBox.information(
-            self.dialog,
-            "Session Imported",
-            f"Restored OCR text, translated text, and mappings for {len(matches)} pages.",
-        )
+        self._start_ocr_import_worker(path, files)
 
     def _refresh_imported_manual_preview(self, image_path: str) -> bool:
         """Render imported translations and reload both preview surfaces."""
