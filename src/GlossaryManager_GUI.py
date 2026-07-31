@@ -9,13 +9,13 @@ import json
 import threading
 import time
 from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
-                                QCheckBox, QRadioButton, QTextEdit, QListWidget,
+                                QCheckBox, QRadioButton, QTextEdit, QListWidget, QListWidgetItem,
                                 QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize, QPoint
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 from glossary_usage import (
     build_prepared_output_index,
@@ -709,6 +709,8 @@ class GlossaryManagerMixin:
             tree = getattr(self, 'glossary_tree', None)
             if tree is not None:
                 tree.clear()
+                tree.setColumnCount(1)
+                tree.setHeaderLabels(["#"])
         except Exception:
             pass
         try:
@@ -729,6 +731,8 @@ class GlossaryManagerMixin:
         self.current_glossary_data = None
         self.current_glossary_format = None
         self._glossary_editor_base_stats_text = "No glossary loaded"
+        self._glossary_editor_view_stats_text = "No glossary loaded"
+        self._glossary_column_filters = {}
         try:
             if hasattr(self, 'current_glossary_sections'):
                 self.current_glossary_sections = []
@@ -1159,7 +1163,7 @@ class GlossaryManagerMixin:
     
     def _create_styled_checkbox(self, text):
         """Create a checkbox with the same overlay checkmark used by the main GUI."""
-        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtWidgets import QCheckBox, QLabel, QStyle, QStyleOptionButton
         from PySide6.QtCore import Qt, QTimer
 
         checkbox = QCheckBox(text)
@@ -1178,13 +1182,21 @@ class GlossaryManagerMixin:
 
         def position_checkmark():
             try:
-                checkmark.setGeometry(2, 1, 14, 14)
+                option = QStyleOptionButton()
+                checkbox.initStyleOption(option)
+                indicator_rect = checkbox.style().subElementRect(
+                    QStyle.SE_CheckBoxIndicator,
+                    option,
+                    checkbox,
+                )
+                checkmark.setGeometry(indicator_rect)
             except RuntimeError:
                 pass
 
         def update_checkmark():
             try:
                 if checkbox.isChecked():
+                    checkmark.setText("−" if checkbox.checkState() == Qt.PartiallyChecked else "✓")
                     position_checkmark()
                     checkmark.show()
                     checkmark.raise_()
@@ -1202,6 +1214,13 @@ class GlossaryManagerMixin:
             pass
 
         checkbox.stateChanged.connect(update_checkmark)
+        original_resize_event = checkbox.resizeEvent
+
+        def _styled_checkbox_resize_event(event):
+            original_resize_event(event)
+            position_checkmark()
+
+        checkbox.resizeEvent = _styled_checkbox_resize_event
         QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
         return checkbox
 
@@ -6116,6 +6135,8 @@ Do not stop after the glossary."""
         self.glossary_tree.setHeaderLabels(["#"])
         self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.glossary_tree.header().setSectionsClickable(True)
+        self.glossary_tree.header().viewport().setCursor(Qt.PointingHandCursor)
         content_frame_layout.addWidget(self.glossary_tree)
 
         configured_tree_font_size = self.config.get('glossary_editor_tree_font_size', None)
@@ -6157,6 +6178,8 @@ Do not stop after the glossary."""
         self.current_glossary_data = None
         self.current_glossary_format = None
         self.glossary_column_fields = []
+        self._glossary_column_filters = {}
+        self._glossary_editor_view_stats_text = "No glossary loaded"
         self._original_translated_map = {}
         # Tracks whether the editor's current content came from an explicit
         # user Browse/Load (True) versus auto-association with an input file
@@ -6234,11 +6257,278 @@ Do not stop after the glossary."""
                         specs.append((source_idx, key, entry_dict))
             return fields, specs
 
+        def _editor_display_value(entry, field):
+            """Render a glossary value exactly as it appears in the editor tree."""
+            value = entry.get(field, '') if isinstance(entry, dict) else ''
+            if isinstance(value, list):
+                value = ', '.join(str(v) for v in value)
+            elif isinstance(value, dict):
+                value = ', '.join(f"{k}: {v}" for k, v in value.items())
+            elif value is None:
+                value = ''
+            return str(value)
+
+        def _active_glossary_column_filters():
+            filters = getattr(self, '_glossary_column_filters', {})
+            return filters if isinstance(filters, dict) else {}
+
+        def _refresh_glossary_filter_headers():
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            filters = _active_glossary_column_filters()
+            headers = ['#']
+            for field in fields:
+                label = field.replace('_', ' ').title()
+                headers.append(f"{label} {'\U0001f53d' if field in filters else '\u25be'}")
+            self.glossary_tree.setHeaderLabels(headers)
+            header_item = self.glossary_tree.headerItem()
+            if header_item is not None:
+                header_item.setToolTip(0, "Row number")
+                for column, field in enumerate(fields, start=1):
+                    state = "Filter active. " if field in filters else ""
+                    header_item.setToolTip(
+                        column,
+                        f"{state}Click to filter {field.replace('_', ' ')}.",
+                    )
+
+        def _tree_item_matches_glossary_filters(item):
+            filters = _active_glossary_column_filters()
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            field_columns = {field: index + 1 for index, field in enumerate(fields)}
+            for field, allowed_values in filters.items():
+                column = field_columns.get(field)
+                if column is None or item.text(column) not in allowed_values:
+                    return False
+            return True
+
+        def _apply_glossary_column_filters(update_stats=True):
+            filters = _active_glossary_column_filters()
+            total = self.glossary_tree.topLevelItemCount()
+            visible = 0
+            self.glossary_tree.setUpdatesEnabled(False)
+            try:
+                for row in range(total):
+                    item = self.glossary_tree.topLevelItem(row)
+                    matches = _tree_item_matches_glossary_filters(item)
+                    item.setHidden(not matches)
+                    if matches:
+                        visible += 1
+            finally:
+                self.glossary_tree.setUpdatesEnabled(True)
+
+            _refresh_glossary_filter_headers()
+            if update_stats:
+                base_stats = (
+                    getattr(self, '_glossary_editor_view_stats_text', None)
+                    or getattr(self, '_glossary_editor_base_stats_text', None)
+                    or f"Total entries: {total}"
+                )
+                if filters:
+                    self.stats_label.setText(f"{base_stats} | Column filters: {visible}/{total} shown")
+                else:
+                    self.stats_label.setText(base_stats)
+            try:
+                self.glossary_tree.viewport().update()
+            except Exception:
+                pass
+            return visible, total
+
+        self._apply_glossary_column_filters = _apply_glossary_column_filters
+
+        def _open_glossary_column_filter(column):
+            fields = list(getattr(self, 'glossary_column_fields', []) or [])
+            if column <= 0 or column > len(fields):
+                return
+            field = fields[column - 1]
+            if field == '_section' or self.glossary_tree.isColumnHidden(column):
+                return
+
+            values = sorted(
+                {
+                    self.glossary_tree.topLevelItem(row).text(column)
+                    for row in range(self.glossary_tree.topLevelItemCount())
+                },
+                key=lambda value: (value != '', value.casefold()),
+            )
+            if not values:
+                return
+
+            filters = _active_glossary_column_filters()
+            currently_allowed = filters.get(field)
+            popup = QDialog(self.dialog)
+            popup.setWindowTitle(f"Filter {field.replace('_', ' ').title()}")
+            popup.setWindowFlags(Qt.Popup)
+            popup.setMinimumWidth(360)
+            popup.setMaximumWidth(560)
+
+            popup_layout = QVBoxLayout(popup)
+            popup_layout.setContentsMargins(12, 12, 12, 12)
+            popup_layout.setSpacing(8)
+
+            title = QLabel(f"Filter {field.replace('_', ' ').title()}")
+            title.setStyleSheet("font-weight: 600;")
+            popup_layout.addWidget(title)
+
+            search_entry = QLineEdit()
+            search_entry.setPlaceholderText("Search values...")
+            search_entry.setClearButtonEnabled(True)
+            popup_layout.addWidget(search_entry)
+
+            select_all = self._create_styled_checkbox("Select all")
+            select_all.setTristate(True)
+            popup_layout.addWidget(select_all)
+
+            value_list = QListWidget()
+            value_list.setSelectionMode(QAbstractItemView.NoSelection)
+            value_list.setMinimumHeight(230)
+            value_list.setMaximumHeight(390)
+            popup_layout.addWidget(value_list, 1)
+
+            for raw_value in values:
+                display_value = raw_value if raw_value else "(Blanks)"
+                list_item = QListWidgetItem()
+                list_item.setData(Qt.UserRole, raw_value)
+                list_item.setData(Qt.UserRole + 1, display_value)
+                list_item.setFlags(Qt.ItemIsEnabled)
+                value_checkbox = self._create_styled_checkbox(display_value)
+                value_checkbox.setChecked(currently_allowed is None or raw_value in currently_allowed)
+                list_item.setSizeHint(value_checkbox.sizeHint())
+                value_list.addItem(list_item)
+                value_list.setItemWidget(list_item, value_checkbox)
+
+            def _value_checkbox(index):
+                list_item = value_list.item(index)
+                checkbox = value_list.itemWidget(list_item) if list_item is not None else None
+                return checkbox if isinstance(checkbox, QCheckBox) else None
+
+            count_label = QLabel()
+            count_label.setStyleSheet("color: #9ca3af;")
+            popup_layout.addWidget(count_label)
+
+            def _sync_select_all_state():
+                visible_items = [
+                    _value_checkbox(index)
+                    for index in range(value_list.count())
+                    if not value_list.item(index).isHidden()
+                ]
+                visible_items = [checkbox for checkbox in visible_items if checkbox is not None]
+                checked_count = sum(checkbox.isChecked() for checkbox in visible_items)
+                select_all.blockSignals(True)
+                if not visible_items or checked_count == 0:
+                    select_all.setCheckState(Qt.Unchecked)
+                elif checked_count == len(visible_items):
+                    select_all.setCheckState(Qt.Checked)
+                else:
+                    select_all.setCheckState(Qt.PartiallyChecked)
+                select_all.blockSignals(False)
+                if hasattr(select_all, '_update_checkmark'):
+                    select_all._update_checkmark()
+                count_label.setText(
+                    f"{sum(bool(_value_checkbox(i) and _value_checkbox(i).isChecked()) for i in range(value_list.count()))} "
+                    f"of {value_list.count()} values selected"
+                )
+
+            def _filter_value_list(text):
+                needle = text.strip().casefold()
+                for index in range(value_list.count()):
+                    list_item = value_list.item(index)
+                    display_value = str(list_item.data(Qt.UserRole + 1) or '')
+                    list_item.setHidden(bool(needle and needle not in display_value.casefold()))
+                _sync_select_all_state()
+
+            def _set_visible_check_state(state):
+                try:
+                    state = Qt.CheckState(state)
+                except (TypeError, ValueError):
+                    return
+                if state == Qt.PartiallyChecked:
+                    return
+                value_list.blockSignals(True)
+                try:
+                    for index in range(value_list.count()):
+                        list_item = value_list.item(index)
+                        if not list_item.isHidden():
+                            checkbox = _value_checkbox(index)
+                            if checkbox is not None:
+                                checkbox.blockSignals(True)
+                                checkbox.setChecked(state == Qt.Checked)
+                                checkbox.blockSignals(False)
+                                if hasattr(checkbox, '_update_checkmark'):
+                                    checkbox._update_checkmark()
+                finally:
+                    value_list.blockSignals(False)
+                _sync_select_all_state()
+
+            def _apply_selected_values():
+                selected = {
+                    value_list.item(index).data(Qt.UserRole)
+                    for index in range(value_list.count())
+                    if _value_checkbox(index) is not None and _value_checkbox(index).isChecked()
+                }
+                if len(selected) == len(values):
+                    filters.pop(field, None)
+                else:
+                    filters[field] = selected
+                self._glossary_column_filters = filters
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            def _clear_current_filter():
+                filters.pop(field, None)
+                self._glossary_column_filters = filters
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            def _clear_all_filters():
+                self._glossary_column_filters = {}
+                _apply_glossary_column_filters()
+                popup.accept()
+
+            search_entry.textChanged.connect(_filter_value_list)
+            select_all.stateChanged.connect(_set_visible_check_state)
+            for index in range(value_list.count()):
+                checkbox = _value_checkbox(index)
+                if checkbox is not None:
+                    checkbox.stateChanged.connect(lambda _state: _sync_select_all_state())
+            _sync_select_all_state()
+
+            button_row = QHBoxLayout()
+            clear_button = QPushButton("Clear column")
+            clear_button.setEnabled(field in filters)
+            clear_button.clicked.connect(_clear_current_filter)
+            button_row.addWidget(clear_button)
+            clear_all_button = QPushButton("Clear all")
+            clear_all_button.setEnabled(bool(filters))
+            clear_all_button.clicked.connect(_clear_all_filters)
+            button_row.addWidget(clear_all_button)
+            button_row.addStretch()
+            cancel_button = QPushButton("Cancel")
+            cancel_button.clicked.connect(popup.reject)
+            button_row.addWidget(cancel_button)
+            apply_button = QPushButton("Apply")
+            apply_button.setDefault(True)
+            apply_button.clicked.connect(_apply_selected_values)
+            button_row.addWidget(apply_button)
+            popup_layout.addLayout(button_row)
+
+            header = self.glossary_tree.header()
+            anchor = header.mapToGlobal(QPoint(header.sectionViewportPosition(column), header.height()))
+            popup.adjustSize()
+            popup.move(anchor)
+            search_entry.setFocus()
+            popup.exec()
+
+        self.glossary_tree.header().sectionClicked.connect(_open_glossary_column_filter)
+
         def _configure_editor_tree_columns(column_fields):
             self.glossary_column_fields = list(column_fields)
+            valid_fields = set(column_fields)
+            self._glossary_column_filters = {
+                field: allowed
+                for field, allowed in _active_glossary_column_filters().items()
+                if field in valid_fields
+            }
             self.glossary_tree.setColumnCount(len(column_fields) + 1)
-            headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
-            self.glossary_tree.setHeaderLabels(headers)
+            _refresh_glossary_filter_headers()
             self.glossary_tree.setColumnWidth(0, 80)
             for idx, field in enumerate(column_fields, start=1):
                 if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
@@ -6254,16 +6544,10 @@ Do not stop after the glossary."""
         def _make_editor_tree_item(display_idx, source_ref, entry, column_fields):
             values = [str(display_idx)]
             for field in column_fields:
-                value = entry.get(field, '') if isinstance(entry, dict) else ''
-                if isinstance(value, list):
-                    value = ', '.join(str(v) for v in value)
-                elif isinstance(value, dict):
-                    value = ', '.join(f"{k}: {v}" for k, v in value.items())
-                elif value is None:
-                    value = ''
-                values.append(str(value))
+                values.append(_editor_display_value(entry, field))
             item = QTreeWidgetItem(values)
             item.setData(0, Qt.UserRole, source_ref)
+            item.setHidden(not _tree_item_matches_glossary_filters(item))
             return item
 
         def _populate_editor_tree_from_data(visible_source_indices=None):
@@ -6287,6 +6571,7 @@ Do not stop after the glossary."""
                 self.glossary_tree.addTopLevelItems(items)
             finally:
                 self.glossary_tree.setUpdatesEnabled(True)
+            _apply_glossary_column_filters(update_stats=False)
             try:
                 self.glossary_tree.viewport().update()
             except Exception:
@@ -6307,7 +6592,8 @@ Do not stop after the glossary."""
             total_rows = len(rows)
             if total_rows == 0:
                 if final_stats_text:
-                    self.stats_label.setText(final_stats_text)
+                    self._glossary_editor_view_stats_text = final_stats_text
+                _apply_glossary_column_filters(update_stats=True)
                 try:
                     self.glossary_tree.viewport().update()
                 except Exception:
@@ -6333,7 +6619,8 @@ Do not stop after the glossary."""
                     QTimer.singleShot(0, lambda: add_batch(end_idx))
                     return
                 if final_stats_text:
-                    self.stats_label.setText(final_stats_text)
+                    self._glossary_editor_view_stats_text = final_stats_text
+                _apply_glossary_column_filters(update_stats=True)
                 try:
                     self.glossary_tree.viewport().update()
                 except Exception:
@@ -6358,12 +6645,14 @@ Do not stop after the glossary."""
                 return
             data = self.current_glossary_data
             if isinstance(data, list):
-                self.stats_label.setText(_loaded_glossary_stats_text(data))
+                repaired_stats = _loaded_glossary_stats_text(data)
             elif isinstance(data, dict):
                 entries = data.get('entries', {})
-                self.stats_label.setText(f"Total entries: {len(entries)}")
+                repaired_stats = f"Total entries: {len(entries)}"
             else:
-                self.stats_label.setText(f"Total entries: {self.glossary_tree.topLevelItemCount()}")
+                repaired_stats = f"Total entries: {self.glossary_tree.topLevelItemCount()}"
+            self._glossary_editor_view_stats_text = repaired_stats
+            _apply_glossary_column_filters(update_stats=True)
 
         def apply_loaded_glossary_result(payload):
             if payload.get('token') is not getattr(self, '_editor_load_token', None):
@@ -6397,8 +6686,11 @@ Do not stop after the glossary."""
                 self._original_translated_map = {}
             _populate_editor_tree_from_data()
 
-            self.stats_label.setText(payload.get('stats_text', f"Total entries: {len(entries)}"))
-            self._glossary_editor_base_stats_text = self.stats_label.text()
+            loaded_stats = payload.get('stats_text', f"Total entries: {len(entries)}")
+            self.stats_label.setText(loaded_stats)
+            self._glossary_editor_base_stats_text = loaded_stats
+            self._glossary_editor_view_stats_text = loaded_stats
+            _apply_glossary_column_filters(update_stats=True)
             log_msg = f"Loaded {len(entries)} entries from glossary"
             if getattr(self, '_last_loaded_glossary_log', '') != log_msg:
                 self.append_log(log_msg)
@@ -6878,8 +7170,11 @@ Do not stop after the glossary."""
                    stats.append(f"Characters: {chars}, Locations: {locs}")
                
                self._editor_load_token = None
-               self.stats_label.setText(" | ".join(stats))
-               self._glossary_editor_base_stats_text = self.stats_label.text()
+               loaded_stats = " | ".join(stats)
+               self.stats_label.setText(loaded_stats)
+               self._glossary_editor_base_stats_text = loaded_stats
+               self._glossary_editor_view_stats_text = loaded_stats
+               _apply_glossary_column_filters(update_stats=True)
                _log_msg = f"✅ Loaded {len(entries)} entries from glossary"
                if getattr(self, '_last_loaded_glossary_log', '') != _log_msg:
                    self.append_log(_log_msg)
@@ -9334,7 +9629,8 @@ Do not stop after the glossary."""
                 if self.glossary_tree.topLevelItemCount() != total:
                     _populate_editor_tree_from_data_batched(final_stats_text=final_stats)
                 elif final_stats:
-                    self.stats_label.setText(final_stats)
+                    self._glossary_editor_view_stats_text = final_stats
+                    _apply_glossary_column_filters(update_stats=True)
                 return
             if total <= 0:
                 return
@@ -9556,6 +9852,8 @@ Do not stop after the glossary."""
                 if will_change and hasattr(self, '_push_undo_snapshot'):
                     self._push_undo_snapshot()
                 count = replace_in_item(item)
+                if count and hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
                 status_label.setText(f"Replaced {count} occurrence(s) in current row" if count else "No matches in current row.")
 
             def replace_all():
@@ -9580,6 +9878,8 @@ Do not stop after the glossary."""
                 for idx in range(total_items):
                     item = self.glossary_tree.topLevelItem(idx)
                     total_repl += replace_in_item(item)
+                if hasattr(self, '_apply_glossary_column_filters'):
+                    self._apply_glossary_column_filters()
                 self._last_find_text = find_edit.text()
                 self._last_replace_text = replace_edit.text()
                 status_label.setText(f"Replaced {total_repl} occurrence(s) across all entries.")
@@ -10341,6 +10641,9 @@ Do not stop after the glossary."""
                                item.setData(c, Qt.BackgroundRole, None)
                except Exception:
                    pass
+
+           if hasattr(self, '_apply_glossary_column_filters'):
+               self._apply_glossary_column_filters()
 
            edit_dialog.accept()
        
