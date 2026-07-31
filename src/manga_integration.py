@@ -14244,6 +14244,75 @@ class MangaTranslationTab(QObject):
                 self.progress_label.setStyleSheet("color: white;")
         except Exception:
             pass
+
+    def _apply_completed_translation_preview(self, data) -> bool:
+        """Show a completed manga output in both preview surfaces."""
+        if isinstance(data, dict):
+            translated_path = data.get('translated_path')
+            source_path = data.get('source_path')
+            switch_to_output = bool(data.get('switch_to_output', True))
+        else:
+            translated_path = data
+            source_path = None
+            switch_to_output = True
+
+        preview = getattr(self, 'image_preview_widget', None)
+        if preview is None or not translated_path or not os.path.isfile(translated_path):
+            return False
+
+        current_path = getattr(preview, 'current_image_path', None)
+
+        def _same_path(left, right):
+            if not left or not right:
+                return False
+            try:
+                return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+            except Exception:
+                return left == right
+
+        # Only the visible source page should take over the preview. Every
+        # producer now supplies source_path, but retain compatibility with old
+        # string queue entries by treating the current page as their source.
+        if source_path and not (
+            _same_path(current_path, source_path)
+            or _same_path(current_path, translated_path)
+        ):
+            return False
+        source_path = source_path or current_path
+        if not source_path:
+            return False
+
+        preview.current_translated_path = translated_path
+        if switch_to_output:
+            preview.source_display_mode = 'translated'
+            preview.cleaned_images_enabled = True
+            toggle = getattr(preview, 'cleaned_toggle_btn', None)
+            if toggle is not None:
+                toggle.setText("✒️")
+                toggle.setToolTip("Showing translated output (click to cycle)")
+
+        if not hasattr(self, '_rendered_images_map'):
+            self._rendered_images_map = {}
+        self._rendered_images_map[source_path] = translated_path
+
+        state_manager = getattr(self, 'image_state_manager', None)
+        if state_manager is not None:
+            try:
+                state_manager.update_state(source_path, {
+                    'rendered_image_path': translated_path,
+                })
+            except Exception as state_error:
+                self._log(f"Could not persist translated preview path: {state_error}", "warning")
+
+        output_viewer = getattr(preview, 'output_viewer', None)
+        if output_viewer is not None:
+            output_viewer.load_image(translated_path)
+        preview.load_image(
+            source_path,
+            preserve_rectangles=True,
+            preserve_text_overlays=True,
+        )
+        return True
     
     def _process_updates(self):
         """Process queued GUI updates"""
@@ -14549,49 +14618,7 @@ class MangaTranslationTab(QObject):
                     # Update preview to show translated/cleaned image (thread-safe)
                     _, data = update
                     try:
-                        import os
-                        # Handle both string and dict formats
-                        if isinstance(data, dict):
-                            translated_path = data.get('translated_path')
-                            source_path = data.get('source_path')
-                            switch_to_output = bool(data.get('switch_to_output', False))
-                        else:
-                            translated_path = data
-                            source_path = None
-                            switch_to_output = False
-                        
-                        # During batch mode, only update output preview for the current image
-                        should_skip_preview = False
-                        if getattr(self, '_batch_mode_active', False):
-                            # Only update when the update is for the current image
-                            if not source_path or source_path != getattr(self.image_preview_widget, 'current_image_path', None):
-                                #print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
-                                should_skip_preview = True
-                        
-                        # Outside batch mode: if a source_path is provided, only update if it matches current image
-                        if not should_skip_preview and source_path and source_path != getattr(self.image_preview_widget, 'current_image_path', None):
-                            #print(f"[PREVIEW_UPDATE] Skipping update for non-current image outside batch mode")
-                            should_skip_preview = True
-                        
-                        if not should_skip_preview and hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
-                            #print(f"[PREVIEW_UPDATE] New translated/cleaned image available: {translated_path}")
-                            
-                            # Store the translated path for potential use
-                            if hasattr(self.image_preview_widget, 'current_translated_path'):
-                                self.image_preview_widget.current_translated_path = translated_path
-                            
-                            # Refresh the source viewer to pick up the new translated/cleaned image
-                            # based on current display mode (translated/cleaned/original)
-                            try:
-                                current_img = getattr(self.image_preview_widget, 'current_image_path', source_path)
-                                if current_img:
-                                    #print(f"[PREVIEW_UPDATE] Refreshing source viewer with current display mode")
-                                    # Preserve rectangles and overlays while refreshing
-                                    self.image_preview_widget.load_image(current_img, preserve_rectangles=True, preserve_text_overlays=True)
-                            except Exception as refresh_err:
-                                print(f"[PREVIEW_UPDATE] Failed to refresh source viewer: {refresh_err}")
-                            
-                            #print(f"[PREVIEW_UPDATE] ✅ Preview updated successfully")
+                        self._apply_completed_translation_preview(data)
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
                         import traceback
@@ -16823,6 +16850,8 @@ class MangaTranslationTab(QObject):
         # Batch import is also a session restore. Populate the manual editor's
         # state from canonical regions so imported translations appear now,
         # rather than only becoming visible after another translation run.
+        current_source = None
+        current_refreshed = False
         try:
             state_manager = getattr(self, 'image_state_manager', None)
             preview = getattr(self, 'image_preview_widget', None)
@@ -16850,9 +16879,16 @@ class MangaTranslationTab(QObject):
                     ImageRenderer._clear_cross_image_state(self)
                     ImageRenderer._rehydrate_text_state_from_persisted(self, current_source)
                     ImageRenderer._restore_image_state_overlays_only(self, current_source)
-                    self._refresh_imported_manual_preview(current_source)
+                    current_refreshed = self._refresh_imported_manual_preview(current_source)
         except Exception as restore_error:
             self._log(f"Could not refresh imported OCR session preview: {restore_error}", "warning")
+
+        background_refresh = getattr(self, '_start_imported_ocr_preview_refresh', None)
+        if callable(background_refresh):
+            background_refresh(
+                matches,
+                exclude_path=current_source if current_refreshed else None,
+            )
 
         if hasattr(self, 'batch_ocr_import_btn'):
             self.batch_ocr_import_btn.setText(f"📥 Imported OCR ({len(matches)})")
@@ -16880,6 +16916,70 @@ class MangaTranslationTab(QObject):
                 "cannot be restored from this file.",
             )
         return True
+
+    def _start_imported_ocr_preview_refresh(
+        self,
+        matches: Dict[str, Dict[str, Any]],
+        *,
+        exclude_path: Optional[str] = None,
+    ) -> None:
+        """Render every non-visible imported page from persisted state."""
+        targets = []
+        excluded_key = (
+            os.path.normcase(os.path.abspath(exclude_path))
+            if exclude_path else None
+        )
+        for image_path, page in matches.items():
+            image_key = os.path.normcase(os.path.abspath(image_path))
+            if excluded_key and image_key == excluded_key:
+                continue
+            has_translation = any(
+                isinstance(region, dict)
+                and str(region.get('translated_text') or '').strip()
+                for region in (page.get('regions') or [])
+            )
+            if has_translation:
+                targets.append(image_path)
+        if not targets:
+            return
+
+        generation = int(getattr(self, '_imported_ocr_preview_generation', 0)) + 1
+        self._imported_ocr_preview_generation = generation
+        self._log(
+            f"Rendering imported translations for {len(targets)} additional pages...",
+            "info",
+        )
+
+        def render_pages():
+            rendered_count = 0
+            for image_path in targets:
+                if generation != getattr(self, '_imported_ocr_preview_generation', generation):
+                    break
+                output_path = ImageRenderer.render_persisted_translation_state(
+                    self,
+                    image_path,
+                    refresh_preview=False,
+                )
+                if not output_path:
+                    continue
+                rendered_count += 1
+                self.update_queue.put(('preview_update', {
+                    'translated_path': output_path,
+                    'source_path': image_path,
+                    'switch_to_output': True,
+                }))
+            self._log(
+                f"Finished rendering imported translations for {rendered_count}/{len(targets)} additional pages",
+                "success" if rendered_count == len(targets) else "warning",
+            )
+
+        worker = threading.Thread(
+            target=render_pages,
+            name=f"ImportedOcrPreview-{generation}",
+            daemon=True,
+        )
+        self._imported_ocr_preview_thread = worker
+        worker.start()
 
     def _latest_automatic_ocr_path(self) -> Optional[str]:
         current = getattr(self, '_automatic_ocr_export_path', None)
@@ -17675,7 +17775,11 @@ class MangaTranslationTab(QObject):
                     (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated"))
                 )
                 if is_current:
-                    self.update_queue.put(('preview_update', result.get('output_path')))
+                    self.update_queue.put(('preview_update', {
+                        'translated_path': result.get('output_path'),
+                        'source_path': filepath,
+                        'switch_to_output': True,
+                    }))
                     self._log("🖼️ Queued preview update to show translated image", "debug")
         else:
             self.failed_files += 1
@@ -18655,7 +18759,8 @@ class MangaTranslationTab(QObject):
                                         # Use queue for thread-safe GUI update with source path for persistence
                                         self.update_queue.put(('preview_update', {
                                             'translated_path': result.get('output_path'),
-                                            'source_path': filepath
+                                            'source_path': filepath,
+                                            'switch_to_output': True,
                                         }))
                                         self._log(f"🖼️ Queued preview update to show translated image", "debug")
                             else:
@@ -18868,7 +18973,11 @@ class MangaTranslationTab(QObject):
                                     
                                     if is_current:
                                         # Use queue for thread-safe GUI update
-                                        self.update_queue.put(('preview_update', result.get('output_path')))
+                                        self.update_queue.put(('preview_update', {
+                                            'translated_path': result.get('output_path'),
+                                            'source_path': filepath,
+                                            'switch_to_output': True,
+                                        }))
                                         self._log(f"🖼️ Queued preview update to show translated image", "debug")
                                 
                                 time.sleep(0.1)  # Brief pause for stability

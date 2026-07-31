@@ -1,5 +1,6 @@
 import os
 import threading
+from queue import Queue
 from types import SimpleNamespace
 
 from PySide6.QtCore import QEvent, QMimeData, QUrl
@@ -189,6 +190,46 @@ def test_batch_ocr_import_restores_translations_into_editor_state(tmp_path, monk
     assert state_manager.flushed is True
     assert state_manager.states[image]['translated_texts'][0]['translation'] == 'translated'
     assert refreshed == [image]
+
+
+def test_import_refresh_renders_every_nonvisible_translated_page(tmp_path, monkeypatch):
+    current = os.path.abspath(tmp_path / '001.png')
+    background = os.path.abspath(tmp_path / '002.png')
+    untranslated = os.path.abspath(tmp_path / '003.png')
+    output = os.path.abspath(tmp_path / '002_translated' / '002.png')
+    translated_page = {'regions': [{'translated_text': 'translated'}]}
+    matches = {
+        current: translated_page,
+        background: translated_page,
+        untranslated: {'regions': [{'translated_text': None}]},
+    }
+    rendered = []
+
+    def _render(_tab, image_path, refresh_preview=False):
+        rendered.append((image_path, refresh_preview))
+        return output
+
+    monkeypatch.setattr(ImageRenderer, 'render_persisted_translation_state', _render)
+    manga_tab = SimpleNamespace(
+        _imported_ocr_preview_generation=0,
+        _log=lambda *_args: None,
+        update_queue=Queue(),
+    )
+
+    MangaTranslationTab._start_imported_ocr_preview_refresh(
+        manga_tab,
+        matches,
+        exclude_path=current,
+    )
+    manga_tab._imported_ocr_preview_thread.join(timeout=5)
+
+    assert rendered == [(background, False)]
+    update = manga_tab.update_queue.get_nowait()
+    assert update == ('preview_update', {
+        'translated_path': output,
+        'source_path': background,
+        'switch_to_output': True,
+    })
 
 
 def test_imported_regions_keep_session_provenance_for_glossary_handoff(tmp_path):
@@ -536,3 +577,73 @@ def test_imported_translation_rerenders_and_reloads_preview(tmp_path, monkeypatc
             {'preserve_rectangles': True, 'preserve_text_overlays': True},
         )
     ]
+
+
+def test_completed_translation_switches_and_refreshes_both_previews(tmp_path):
+    image = tmp_path / 'page.png'
+    image.write_bytes(b'image')
+    translated = tmp_path / 'page_translated' / 'page.png'
+    translated.parent.mkdir()
+    translated.write_bytes(b'translated')
+
+    class _Viewer:
+        def __init__(self):
+            self.loaded = []
+
+        def load_image(self, path):
+            self.loaded.append(path)
+
+    class _Toggle:
+        def setText(self, text):
+            self.text = text
+
+        def setToolTip(self, text):
+            self.tooltip = text
+
+    class _StateManager:
+        def __init__(self):
+            self.updated = []
+
+        def update_state(self, path, state):
+            self.updated.append((path, state))
+
+    output_viewer = _Viewer()
+    preview_loads = []
+    preview = SimpleNamespace(
+        current_image_path=str(image),
+        current_translated_path=None,
+        source_display_mode='original',
+        cleaned_images_enabled=False,
+        cleaned_toggle_btn=_Toggle(),
+        output_viewer=output_viewer,
+        load_image=lambda path, **kwargs: preview_loads.append((path, kwargs)),
+    )
+    state_manager = _StateManager()
+    manga_tab = SimpleNamespace(
+        image_preview_widget=preview,
+        image_state_manager=state_manager,
+        _log=lambda *_args: None,
+    )
+
+    refreshed = MangaTranslationTab._apply_completed_translation_preview(
+        manga_tab,
+        {
+            'translated_path': str(translated),
+            'source_path': str(image),
+            'switch_to_output': True,
+        },
+    )
+
+    assert refreshed is True
+    assert preview.source_display_mode == 'translated'
+    assert preview.cleaned_images_enabled is True
+    assert preview.current_translated_path == str(translated)
+    assert output_viewer.loaded == [str(translated)]
+    assert preview_loads == [(
+        str(image),
+        {'preserve_rectangles': True, 'preserve_text_overlays': True},
+    )]
+    assert state_manager.updated == [(
+        str(image),
+        {'rendered_image_path': str(translated)},
+    )]

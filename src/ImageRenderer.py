@@ -10340,6 +10340,108 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
         self._log(f"❌ Rendering failed: {str(e)}", "error")
         return False
 
+def render_persisted_translation_state(self, image_path: str, refresh_preview: bool = False):
+    """Render one image entirely from persisted editor state.
+
+    Unlike ``save_positions_and_rerender``, this does not read rectangles from
+    the currently visible page, so it is safe for background session imports.
+    """
+    try:
+        if not image_path or not os.path.isfile(image_path):
+            return None
+        state_manager = getattr(self, 'image_state_manager', None)
+        state = state_manager.get_state(image_path) if state_manager else {}
+        state = state or {}
+        translated_texts = state.get('translated_texts') or []
+        last_positions = state.get('last_render_positions') or {}
+        regions = []
+        from manga_translator import TextRegion
+
+        for fallback_index, result in enumerate(translated_texts):
+            if not isinstance(result, dict) or result.get('deleted'):
+                continue
+            translation = str(result.get('translation') or '').strip()
+            if not translation:
+                continue
+            original = result.get('original') or {}
+            try:
+                region_index = int(original.get('region_index', fallback_index))
+            except (TypeError, ValueError):
+                region_index = fallback_index
+            bbox = last_positions.get(str(region_index)) or result.get('bbox') or []
+            if len(bbox) < 4:
+                continue
+            x, y, width, height = [int(value) for value in bbox[:4]]
+            region = TextRegion(
+                text=str(original.get('text') or ''),
+                vertices=[
+                    (x, y),
+                    (x + width, y),
+                    (x + width, y + height),
+                    (x, y + height),
+                ],
+                bounding_box=(x, y, width, height),
+                confidence=1.0,
+                region_type='text_block',
+                translated_text=translation,
+            )
+            regions.append(region)
+
+        if not regions:
+            return None
+
+        base_image = _resolve_cleaned_image_for_render(self, image_path) or image_path
+        try:
+            from PIL import Image as _PIL
+            source_width, source_height = _PIL.open(image_path).size
+            base_width, base_height = _PIL.open(base_image).size
+            if (source_width, source_height) != (base_width, base_height):
+                scale_x = base_width / max(1, float(source_width))
+                scale_y = base_height / max(1, float(source_height))
+                for region in regions:
+                    x, y, width, height = region.bounding_box
+                    x = int(round(x * scale_x))
+                    y = int(round(y * scale_y))
+                    width = int(round(width * scale_x))
+                    height = int(round(height * scale_y))
+                    region.bounding_box = (x, y, width, height)
+                    region.vertices = [
+                        (x, y),
+                        (x + width, y),
+                        (x + width, y + height),
+                        (x, y + height),
+                    ]
+        except Exception:
+            pass
+
+        filename = os.path.basename(image_path)
+        base_name = os.path.splitext(filename)[0]
+        override_dir = ''
+        try:
+            override_dir = getattr(self.main_gui, 'config', {}).get('output_directory', '') or ''
+        except Exception:
+            pass
+        override_dir = override_dir or os.environ.get('OUTPUT_DIRECTORY', '')
+        output_root = override_dir or os.path.dirname(image_path)
+        output_dir = os.path.join(output_root, f"{base_name}_translated")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, filename)
+        return _render_with_manga_translator(
+            self,
+            base_image,
+            regions,
+            output_path=output_path,
+            original_image_path=image_path,
+            switch_tab=False,
+            refresh_preview=refresh_preview,
+            use_viewer_exclusions=False,
+            use_existing_translator=False,
+        )
+    except Exception as error:
+        self._log(f"Failed to render imported session page {os.path.basename(image_path)}: {error}", "warning")
+        return None
+
+
 def save_positions_and_rerender(self):
     """Persist current positions and re-render entire output using locked positions for stability.
     - Uses translated_texts from state if available; falls back to in-memory _translated_texts/_translation_data
@@ -10487,7 +10589,18 @@ def save_positions_and_rerender(self):
         import traceback
         print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
 
-def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
+def _render_with_manga_translator(
+    self,
+    image_path: str,
+    regions,
+    output_path: str = None,
+    image_bgr=None,
+    original_image_path: str = None,
+    switch_tab: bool = True,
+    refresh_preview: bool = True,
+    use_viewer_exclusions: bool = True,
+    use_existing_translator: bool = True,
+):
     """Render translated text using MangaTranslator's PIL pipeline.
     - image_bgr: optional OpenCV BGR image to render on (in-memory, preferred if provided)
     - output_path: where to save the rendered image (isolated per-image folder)
@@ -10516,7 +10629,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         # Decide which translator to use: prefer existing main translator for consistent settings
         translator_inst = None
         try:
-            if hasattr(self, 'translator') and self.translator:
+            if use_existing_translator and hasattr(self, 'translator') and self.translator:
                 translator_inst = self.translator
                 # Ensure latest GUI settings are applied to the main translator
                 try:
@@ -10661,7 +10774,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         # Filter out excluded regions before rendering (get from rectangle objects)
         excluded_regions = []
         try:
-            if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+            if use_viewer_exclusions and hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
                 rectangles = self.image_preview_widget.viewer.rectangles
                 for i, rect_item in enumerate(rectangles):
                     if getattr(rect_item, 'exclude_from_clean', False):
@@ -10714,7 +10827,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         
         # Trigger instant preview refresh now that file is saved
         try:
-            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'refresh_preview_signal'):
+            if refresh_preview and hasattr(self, 'main_gui') and hasattr(self.main_gui, 'refresh_preview_signal'):
                 self.main_gui.refresh_preview_signal.emit()
                 print(f"[RENDER] ✓ Triggered preview refresh signal after file save")
         except Exception as e:
@@ -10753,7 +10866,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         
         # Update last_render_positions for robust future single-region updates
         try:
-            if original_image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
+            if use_viewer_exclusions and original_image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
                 state = self.image_state_manager.get_state(original_image_path) or {}
                 last_pos = state.get('last_render_positions') or {}
                 # Map each rendered region back to a rectangle index via IoU
@@ -10795,14 +10908,16 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         # For GUI operations, we need to be on the main thread
         # The renderer itself completed, now handle the GUI update
         # Use QTimer to ensure this runs on the main thread
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab))
+        if refresh_preview:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab))
         
         print(f"[RENDER] GUI method call completed")
         
         self._log(f"✅ Rendered to: {output_filename}", "success")
         
         print(f"[RENDER] _render_with_manga_translator COMPLETED SUCCESSFULLY\n{'='*80}\n")
+        return output_path
     
     except Exception as e:
         print(f"\n{'='*80}")
@@ -10813,9 +10928,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         print(f"[RENDER] Traceback:\n{traceback_str}")
         print(f"{'='*80}\n")
         self._log(f"❌ Rendering error: {str(e)}", "error")
-        print(f"[RENDER] Traceback:\n{traceback_str}")
-        print(f"{'='*80}\n")
-        self._log(f"❌ Rendering error: {str(e)}", "error")
+        return None
 
 def _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab=True):
     """Load rendered image into the output tab - must be called on main thread"""
