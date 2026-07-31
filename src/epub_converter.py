@@ -2297,22 +2297,6 @@ class EPUBCompiler:
                             
                             # Apply translations to HTML files using the same method
                             if hasattr(self, 'update_html_headers') and self.update_html_headers:
-                                for _num, _new_title in list(translated_headers.items()):
-                                    _current_info = current_titles.get(_num) or {}
-                                    _current_title = str(_current_info.get('title') or '').strip()
-                                    _source_title = str(_current_info.get('source_title') or '').strip()
-                                    if (
-                                        _current_title
-                                        and _source_title
-                                        and _current_title != _source_title
-                                        and _current_title != str(_new_title or '').strip()
-                                    ):
-                                        translated_headers[_num] = _current_title
-                                        self.log(
-                                            f"⏭️ Preserving manually edited header in "
-                                            f"{_current_info.get('filename', f'chapter {_num}')}: "
-                                            f"'{_current_title}'"
-                                        )
                                 self.header_translator._update_html_headers_exact(
                                     self.html_dir, 
                                     translated_headers, 
@@ -2383,20 +2367,6 @@ class EPUBCompiler:
                                 reused_headers=_reused_from_toc,
                                 source_headers_full=source_headers
                             )
-
-                            # Manual working headings are authoritative even
-                            # when a fresh/cache-mixed header batch was run.
-                            for _num, _new_title in list((translated_headers or {}).items()):
-                                _current_info = current_titles.get(_num) or {}
-                                _current_title = str(_current_info.get('title') or '').strip()
-                                _source_title = str(_current_info.get('source_title') or '').strip()
-                                if (
-                                    _current_title
-                                    and _source_title
-                                    and _current_title != _source_title
-                                    and _current_title != str(_new_title or '').strip()
-                                ):
-                                    translated_headers[_num] = _current_title
 
                             # Update chapter_titles_info with translations
                             if translated_headers:

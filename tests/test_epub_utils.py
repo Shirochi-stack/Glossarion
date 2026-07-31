@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import epub_converter
+import translate_headers_standalone
 from QA_Scanner_GUI import _normalize_qa_dialog_path
 from enhanced_text_extractor import EnhancedTextExtractor
 from epub_converter import EPUBCompiler, FileUtils, HTMLEntityDecoder, XMLValidator
@@ -885,7 +886,7 @@ def test_epub_chapter_processing_does_not_rewrite_manual_source_html(tmp_path):
     assert "does-not-exist.webp" not in packaged
 
 
-def test_cached_header_translation_preserves_manual_heading(tmp_path, monkeypatch):
+def test_cached_header_translation_remains_authoritative_for_existing_heading(tmp_path, monkeypatch):
     monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
     filename = "response_chapter_notice0002.html"
     html_path = tmp_path / filename
@@ -908,7 +909,9 @@ def test_cached_header_translation_preserves_manual_heading(tmp_path, monkeypatc
         },
     )
 
-    assert html_path.read_text(encoding="utf-8") == manual_html
+    updated = html_path.read_text(encoding="utf-8")
+    assert "<h1>Cached translated notice</h1>" in updated
+    assert "<p>MANUAL BODY EDIT</p>" in updated
 
 
 def test_cached_header_translation_can_update_untouched_source_heading(
@@ -938,6 +941,49 @@ def test_cached_header_translation_can_update_untouched_source_heading(
     updated = html_path.read_text(encoding="utf-8")
     assert "<h1>Cached translated notice</h1>" in updated
     assert "<p>BODY</p>" in updated
+
+
+def test_apply_existing_translations_does_not_promote_working_html_header(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    filename = "response_chapter0500.html"
+    html_path = tmp_path / filename
+    html_path.write_text(
+        "<html><body><h1>Working HTML heading</h1><p>REFINED BODY</p></body></html>",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "load_translations_from_file",
+        lambda _path, _log=None: (
+            {1: "Original source heading"},
+            {1: "Authoritative cached heading"},
+            {1: "chapter0500"},
+        ),
+    )
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "extract_source_chapters_with_opf_mapping",
+        lambda _path, _log=None: (
+            {"chapter0500": "Original source heading"},
+            ["Text/chapter0500.xhtml"],
+        ),
+    )
+
+    result = translate_headers_standalone.apply_existing_translations(
+        "source.epub",
+        str(tmp_path),
+        str(tmp_path / "translated_headers.txt"),
+        update_html=True,
+        log_callback=lambda _message: None,
+    )
+
+    updated = html_path.read_text(encoding="utf-8")
+    assert "<h1>Authoritative cached heading</h1>" in updated
+    assert "<p>REFINED BODY</p>" in updated
+    assert result[filename] == "Authoritative cached heading"
 
 
 def test_xml_validator_valid_codepoints():
