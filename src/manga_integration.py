@@ -4209,14 +4209,6 @@ class MangaTranslationTab(QObject):
         self.manga_loaded_directory_label.setWordWrap(True)
         file_frame_layout.addWidget(self.manga_loaded_directory_label)
 
-        self.manga_drop_hint_label = QLabel("Drop manga images, CBZ files, or folders here")
-        self.manga_drop_hint_label.setAlignment(Qt.AlignCenter)
-        self.manga_drop_hint_label.setStyleSheet(
-            "QLabel { color: #8fa6bf; background-color: #252a30; "
-            "border: 1px dashed #53677c; border-radius: 4px; padding: 6px; }"
-        )
-        file_frame_layout.addWidget(self.manga_drop_hint_label)
-
         grouping_frame = QWidget()
         grouping_layout = QHBoxLayout(grouping_frame)
         grouping_layout.setContentsMargins(0, 0, 0, 0)
@@ -4252,10 +4244,12 @@ class MangaTranslationTab(QObject):
         # File listbox (QListWidget handles scrolling automatically)
         self.file_listbox = QListWidget()
         self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
-        self.file_listbox.setMinimumHeight(200)
+        self.file_listbox.setMinimumHeight(250)
         self.file_listbox.setStyleSheet(
             "QListWidget { background-color: #17191c; color: #d8dee7; "
             "border: 1px solid #3a4149; border-radius: 4px; outline: none; }"
+            "QListWidget[mangaDropActive=\"true\"] { background-color: #1b2730; "
+            "border: 2px dashed #62c8ff; }"
             "QListWidget::item { background-color: #23262a; color: #d8dee7; "
             "padding: 1px 8px; border-left: 4px solid transparent; "
             "border-bottom: 1px solid #17191c; }"
@@ -4276,10 +4270,7 @@ class MangaTranslationTab(QObject):
             file_frame,
             self.file_listbox,
             self.file_listbox.viewport(),
-            self.manga_drop_hint_label,
         }
-        self.manga_drop_hint_label.setAcceptDrops(True)
-        self.manga_drop_hint_label.installEventFilter(self)
         self._file_selection_editing_enabled = True
         # Connect model changed signal to sync selected_files list
         self.file_listbox.model().rowsMoved.connect(self._on_files_reordered)
@@ -12704,21 +12695,13 @@ class MangaTranslationTab(QObject):
 
     def _set_manga_drop_highlight(self, active: bool) -> None:
         """Show visual feedback while supported paths are dragged over the section."""
-        label = getattr(self, 'manga_drop_hint_label', None)
-        if not label:
+        file_list = getattr(self, 'file_listbox', None)
+        if not file_list:
             return
-        if active:
-            label.setText("Release to add manga files and folders")
-            label.setStyleSheet(
-                "QLabel { color: white; background-color: #245a86; "
-                "border: 2px dashed #7cc4ff; border-radius: 4px; padding: 5px; font-weight: bold; }"
-            )
-        else:
-            label.setText("Drop manga images, CBZ files, or folders here")
-            label.setStyleSheet(
-                "QLabel { color: #8fa6bf; background-color: #252a30; "
-                "border: 1px dashed #53677c; border-radius: 4px; padding: 6px; }"
-            )
+        file_list.setProperty("mangaDropActive", bool(active))
+        file_list.style().unpolish(file_list)
+        file_list.style().polish(file_list)
+        file_list.update()
 
     def _add_dropped_manga_paths(self, paths: List[str]) -> None:
         """Add dropped images, CBZ archives, and recursively scanned folders."""
@@ -13038,8 +13021,6 @@ class MangaTranslationTab(QObject):
                     QAbstractItemView.DragDropMode.InternalMove
                     if enabled else QAbstractItemView.DragDropMode.NoDragDrop
                 )
-            if hasattr(self, 'manga_drop_hint_label'):
-                self.manga_drop_hint_label.setEnabled(enabled)
         except Exception as e:
             print(f"[FILE_LIST] Failed to update editing controls: {e}")
 
