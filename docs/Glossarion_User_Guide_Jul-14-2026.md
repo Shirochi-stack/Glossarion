@@ -1,6 +1,6 @@
 # 📚 Glossarion — The Complete, Monkey-Proof User Guide
 
-**Version 9.5.3 · Updated July 14, 2026**
+**Version 9.6.9 · Updated August 1, 2026**
 
 This guide explains **every button, box, and toggle** in Glossarion in plain English. You do **not** need to know anything about coding, AI, or computers beyond clicking, typing, and dragging files. If you can use a web browser, you can use this guide.
 
@@ -124,7 +124,8 @@ The top of the window is the control strip you'll use every time.
 
 - **Input File(s):** The book(s) or folder you want to translate. Click **🔍 Browse ▼** to pick a file or a whole folder. It shows **No file selected** until you choose something.
 - **Model:** The AI brain. **The Model box is NOT a fixed dropdown — it's a free text field.** You can pick a suggestion *or just type any model name yourself*. Any model a routing prefix supports will work if you type it in (e.g. `or/deepseek/deepseek-v4-flash:free`, `nd/moonshotai/kimi-k2-thinking`, `authnd/z-ai/glm-5.1`). Next to it:
-  - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models and **custom prefixes** (see [Section 9](#9-local-ai--custom-endpoints--the-3-methods)).
+  - **Manage Models** (gear/list button) — opens the **Model Manager**, where you add your own models, rearrange the list, create **custom prefixes**, and click **🌐 Poll Providers** to fetch current provider catalogs (see [Section 5](#keeping-the-model-list-current-provider-polling) and [Section 9](#9-local-ai--custom-endpoints--the-3-methods)).
+  - **Right-click the Model box → 🌐 Refresh Online Models** — manually refresh every provider catalog Glossarion can safely access. Progress and detailed results appear in the bottom log; there is no popup.
   - **ℹ️** — "Show API provider information and shortcuts," a quick reference of which models belong to which provider.
 - **Login buttons (🔐):** If you'd rather use a subscription than an API key, you can log in with your browser:
   - **🔐 ChatGPT Login** — "Log in with your ChatGPT Plus/Pro subscription via browser. No API key needed."
@@ -179,6 +180,40 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `antigravity/...` | Local Antigravity proxy — needs a Google login plus Node/npm or Bun in compiled `.exe` builds |
 
 > Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
+
+### Keeping the model list current (provider polling)
+
+The built-in model list is a safety net, not a promise that every entry is still current. Glossarion can ask supported providers for their latest model catalog and merge the answer into the Model dropdown. This is called **provider polling**.
+
+**Automatic polling:**
+
+- After you stop typing in the **Model** or **API Key** box, Glossarion identifies the provider belonging to the selected model and polls **only that provider**.
+- Typing `grok-...` checks xAI, `gemini-...` checks native Gemini, `groq/...` checks Groq, and `or/...` checks OpenRouter. An OpenRouter-hosted Gemini such as `or/google/gemini-...` checks OpenRouter, not Google.
+- Automatic polling is limited to **one attempt per provider every 24 hours**, including failed attempts. The timer is saved across restarts, so repeatedly opening Glossarion or editing the field does not hammer the provider.
+- Startup follows the same provider-specific 24-hour rule. Polling runs in the background and does not freeze the interface.
+
+**Manual polling:**
+
+- Right-click the main **Model** box and choose **🌐 Refresh Online Models**, or open **Manage Models** and click **🌐 Poll Providers**.
+- A manual refresh bypasses the 24-hour automatic-poll limit. Use it when you know a provider just released or removed a model.
+- The bottom log immediately says polling has started, then lists which catalogs responded, which used static fallbacks, which lacked credentials, and the exact safe HTTP error returned by failed providers.
+
+**Credentials and privacy:**
+
+- Public catalogs such as OpenRouter are checked without a key.
+- For a private catalog, the key in the **API Key** box is used **only for the provider selected in the Model box**. Glossarion never tries that key against every company.
+- Example: select `grok-3-mini`, paste an xAI key, then poll to check xAI. Select an unprefixed `gemini-...` model with a Gemini key to check Google Gemini.
+- Provider-specific environment variables such as `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `GROQ_API_KEY` may also authorize their matching catalogs.
+- Subscription/OAuth and project-specific routes may stay static when their backend has no safe general catalog endpoint. AuthGrok is queried only when an `authgrok.../` model for an existing signed-in account is selected.
+
+**How to read the result:**
+
+- A subtle green **✓** in **Manage Models** means that model was confirmed by a successful online provider poll. The checkmark is visual only and is not part of the model ID. A failed later attempt does **not** erase the last successful checkmarks; that provider's markers remain until its next successful poll replaces them.
+- **Static fallback** means Glossarion kept its built-in list because the online catalog could not be queried. Translation can still work if the model ID and credentials are valid.
+- **No provider credential** means the catalog supports polling, but Glossarion had no key it could safely send to that provider. Select one of that provider's models and enter its key, then poll again.
+- **Not pollable by design** means that route has no stable, safe general model-list endpoint. Glossarion intentionally keeps its curated static entries.
+
+> **💰 Catalog polling is not an AI translation request.** It downloads model-name metadata and does not send a prompt or generate tokens. Some providers still block all authenticated API endpoints when an account has no credits. For example, xAI may return a `403` saying the team exhausted its credits or spending limit even for `GET /v1/models`; that does **not** mean Glossarion's poll ran a model or consumed translation tokens. Glossarion simply keeps the static xAI list.
 
 ### Option 2 — Log in with a subscription (no key)
 
@@ -785,6 +820,9 @@ The log will show the account actually being used, for example:
 | **"Rate limit" / error 429** | Sending requests too fast | Raise **API call delay** to `2`+ (Section 6). If you have several keys, enable **Multi-Key Mode** (Section 14). |
 | **Output is cut off mid-sentence** | Output token limit too low, or silent truncation | Raise **Output Token limit**; keep **Auto-retry Truncated Responses** on. For Gemini, try turning **Streaming OFF**. |
 | **Translation fails / "invalid model" / auth error** | Key and model are from different providers, or wrong key | Make the **Model** prefix match the **API Key**'s provider (Section 5). Re-paste the key and click **Show** to check it. |
+| **Polling says "no provider credential"** | The API-key field belongs to another selected provider, or no matching environment variable exists | Select a model owned by the provider you want to check, enter that provider's key, and poll again. Glossarion will not send one company's key to another company. |
+| **Polling uses a static fallback** | The catalog needs credentials, is offline, rejected the request, or has no pollable endpoint | Read the detailed polling lines in the bottom log. The built-in list remains available, and you can still type a valid model ID manually. |
+| **xAI polling reports exhausted credits / spending limit** | xAI blocks its authenticated metadata endpoint when the team has no spending capacity | Polling itself did not run a model or consume translation tokens. Continue with Glossarion's static xAI list, or change the xAI team's billing limit if you require its live catalog. |
 | **Names keep changing between chapters** | No glossary, or it isn't being sent | Build a glossary and turn on **Append Glossary to System Prompt** (Section 8). |
 | **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.4). |
 | **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
@@ -831,4 +869,4 @@ The log will show the account actually being used, for example:
 
 ---
 
-*Made with 🌸 for the translation community. This guide reflects Glossarion v9.5.3 as of July 14, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*
+*Made with 🌸 for the translation community. This guide reflects Glossarion v9.6.9 as of August 1, 2026 and is built directly from the in-app tooltips and the program's own code. If a button looks different from this guide, hover it — the live tooltip is always the final word.*

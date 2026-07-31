@@ -1,5 +1,7 @@
+import io
 import sys
 import types
+import urllib.error
 
 import model_options
 
@@ -51,7 +53,7 @@ def test_failed_online_catalog_uses_corrected_static_openrouter_list(tmp_path, m
 
     result = model_options.refresh_provider_model_catalogs(timeout=0.1)
 
-    assert result.statuses["openrouter"] == "static fallback (OSError)"
+    assert result.statuses["openrouter"] == "static fallback (OSError — offline)"
     assert "or/openrouter/free" in result.models
     assert "or/openai/gpt-5.4-nano" in result.models
     assert "or/google/gemini-2.5-pro" in result.models
@@ -215,4 +217,140 @@ def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch
 
     assert result.provider_models["authgem_key"] == [
         "authgem-key/gemini-current",
+    ]
+
+
+def test_http_catalog_failure_reports_status_and_safe_response_detail(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "api.x.ai" in url:
+            raise urllib.error.HTTPError(
+                url,
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(b'{"error":{"message":"Missing ListModels permission"}}'),
+            )
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret-that-must-not-appear",
+        timeout=0.1,
+    )
+
+    status = result.statuses["xai"]
+    assert status == "static fallback (HTTP 403 — Missing ListModels permission)"
+    assert "xai-secret" not in status
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret-that-must-not-appear"
+    ) is None
+
+
+def test_scoped_auto_poll_contacts_only_selected_provider_once_per_day(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append(url)
+        assert url == "https://api.x.ai/v1/models"
+        assert headers["Authorization"] == "Bearer xai-secret"
+        return {"data": [{"id": "grok-current"}]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) == "xai"
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+
+    assert calls == ["https://api.x.ai/v1/models"]
+    assert result.requested_provider == "xai"
+    assert result.provider_models["xai"] == ["grok-current"]
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) is None
+
+    monkeypatch.setattr(
+        model_options.time,
+        "time",
+        lambda: now + model_options._MODEL_CATALOG_CACHE_TTL_SECONDS + 1,
+    )
+    assert model_options.due_provider_catalog_for_model(
+        "grok-3-mini", "xai-secret"
+    ) == "xai"
+
+
+def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):
+    monkeypatch.delenv("GLOSSARION_MODEL_CATALOG_CACHE", raising=False)
+    monkeypatch.setattr(model_options.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(model_options.os.path, "expanduser", lambda _path: "/Users/tester")
+
+    assert model_options._model_catalog_cache_path().replace("\\", "/") == (
+        "/Users/tester/Library/Caches/Glossarion/model_catalog_cache.json"
+    )
+
+
+def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: {"data": [{"id": "grok-confirmed"}]},
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: (_ for _ in ()).throw(OSError("offline")),
+    )
+    failed = model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert failed.provider_models == {}
+
+    # Force a disk reload to prove the marker state survives app restarts, not
+    # merely the current process's in-memory cache.
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-confirmed"
+    ]
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda url, headers, timeout: {"data": [{"id": "grok-replacement"}]},
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="grok-3-mini",
+        active_api_key="xai-secret",
+        only_provider="xai",
+        timeout=0.1,
+    )
+    assert model_options.get_last_successful_provider_models()["xai"] == [
+        "grok-replacement"
     ]

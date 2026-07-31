@@ -538,7 +538,13 @@ def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
     except Exception:
         return icon_path.replace('\\', '/')
 
-from model_options import get_model_options, start_provider_model_catalog_refresh
+from model_options import (
+    STATIC_ONLY_PROVIDER_PREFIXES,
+    due_provider_catalog_for_model,
+    get_last_successful_provider_models,
+    get_model_options,
+    start_provider_model_catalog_refresh,
+)
 
 # Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
 # This allows spawning the same .exe with a special flag to run helper tasks.
@@ -18102,8 +18108,63 @@ Recent translations to summarize:
     def setup_model_combobox_bindings(self):
         """Setup bindings for manual model input in combobox with autocomplete"""
         self._install_model_completer(self._model_all_values)
+        line_edit = self.model_combo.lineEdit()
+        if line_edit is not None and not getattr(self, '_model_auto_poll_text_connected', False):
+            line_edit.textEdited.connect(
+                lambda _text: self._schedule_current_provider_catalog_refresh()
+            )
+            self.model_combo.activated.connect(
+                lambda *_args: self._schedule_current_provider_catalog_refresh(250)
+            )
+            self._model_auto_poll_text_connected = True
 
-    def _start_provider_model_catalog_refresh(self, show_feedback=False):
+    def _schedule_current_provider_catalog_refresh(self, delay_ms=1200):
+        """Debounce automatic polling until model/key typing has settled."""
+        timer = getattr(self, '_current_provider_catalog_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._auto_poll_current_provider_catalog)
+            self._current_provider_catalog_timer = timer
+        timer.start(max(0, int(delay_ms)))
+
+    def _auto_poll_current_provider_catalog(self):
+        """Poll only the selected provider when its persisted 24-hour TTL is due."""
+        try:
+            active_model = self.model_combo.currentText().strip()
+            active_api_key = self.api_key_entry.text().strip()
+        except (AttributeError, RuntimeError):
+            return
+        try:
+            custom_routes = self._normalize_custom_prefix_routes(
+                getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
+            )
+        except Exception:
+            custom_routes = []
+
+        provider = due_provider_catalog_for_model(
+            active_model,
+            active_api_key,
+            custom_routes,
+        )
+        if not provider:
+            return
+        started = self._start_provider_model_catalog_refresh(
+            only_provider=provider,
+            automatic=True,
+        )
+        if not started:
+            # A manual/startup request may already be finishing. Recheck its
+            # persisted attempt timestamp shortly rather than dropping this
+            # provider or launching a duplicate request.
+            self._schedule_current_provider_catalog_refresh(1500)
+
+    def _start_provider_model_catalog_refresh(
+        self,
+        show_feedback=False,
+        only_provider=None,
+        automatic=False,
+    ):
         """Refresh eligible online model catalogs without blocking Qt."""
         if show_feedback:
             # If startup polling is already active, its result will satisfy
@@ -18112,7 +18173,35 @@ Recent translations to summarize:
 
         existing = getattr(self, '_provider_model_catalog_thread', None)
         if existing is not None and existing.is_alive():
+            active_scope = getattr(self, '_provider_model_catalog_active_scope', None)
+            queue_full_refresh = (
+                not automatic and only_provider is None and bool(active_scope)
+            )
+            if queue_full_refresh:
+                # Automatic refreshes are provider-scoped, so an explicit
+                # full refresh must run immediately after one already in flight
+                # instead of treating its partial result as the requested poll.
+                self._provider_model_catalog_full_refresh_pending = True
+            if show_feedback:
+                if queue_full_refresh:
+                    self.append_log(
+                        "🌐 Provider model polling is already in progress — "
+                        "a full refresh is queued next."
+                    )
+                else:
+                    self.append_log(
+                        "🌐 Provider model polling is already in progress — "
+                        "results will be logged when it finishes."
+                    )
             return False
+
+        if show_feedback:
+            self.append_log("🌐 Polling online provider model catalogs in the background…")
+        elif automatic and only_provider:
+            self.append_log(
+                f"🌐 Auto-polling {only_provider} model catalog "
+                "(24-hour refresh)…"
+            )
 
         try:
             active_model = self.model_combo.currentText().strip()
@@ -18139,11 +18228,13 @@ Recent translations to summarize:
             except RuntimeError:
                 pass
 
+        self._provider_model_catalog_active_scope = only_provider
         self._provider_model_catalog_thread = start_provider_model_catalog_refresh(
             deliver,
             active_model=active_model,
             active_api_key=active_api_key,
             custom_routes=custom_routes,
+            only_provider=only_provider,
         )
         return True
 
@@ -18167,6 +18258,29 @@ Recent translations to summarize:
                 "✓ Confirmed by the latest successful online provider poll"
                 if is_polled else ""
             )
+
+    def _ensure_polled_model_marker_state(self):
+        """Load persistent last-successful catalogs used by Model Manager icons."""
+        existing = getattr(self, '_polled_online_models_by_provider', None)
+        if isinstance(existing, dict):
+            return existing
+        try:
+            catalogs = get_last_successful_provider_models()
+        except Exception:
+            catalogs = {}
+        by_provider = {
+            str(provider): {
+                str(model).casefold() for model in (models or [])
+            }
+            for provider, models in catalogs.items()
+        }
+        self._polled_online_models_by_provider = by_provider
+        self._polled_online_model_ids = {
+            model
+            for models in by_provider.values()
+            for model in models
+        }
+        return by_provider
 
     @staticmethod
     def _create_polled_model_icon():
@@ -18220,10 +18334,25 @@ Recent translations to summarize:
         online_model_count = sum(
             len(provider_models.get(name, []) or []) for name in online
         )
+        requested_provider = getattr(result, 'requested_provider', None)
+        polled_by_provider = dict(self._ensure_polled_model_marker_state())
+        if requested_provider:
+            if requested_provider in online:
+                polled_by_provider[requested_provider] = {
+                    str(model).casefold()
+                    for model in (provider_models.get(requested_provider, []) or [])
+                }
+        else:
+            for name in online:
+                polled_by_provider[name] = {
+                    str(model).casefold()
+                    for model in (provider_models.get(name, []) or [])
+                }
+        self._polled_online_models_by_provider = polled_by_provider
         polled_model_keys = {
-            str(model).casefold()
-            for name in online
-            for model in (provider_models.get(name, []) or [])
+            model
+            for models in polled_by_provider.values()
+            for model in models
         }
         self._polled_online_model_ids = polled_model_keys
         credential_skip_count = sum(
@@ -18240,7 +18369,11 @@ Recent translations to summarize:
         # dialog too. Automatic background refreshes must not disturb unsaved
         # edits in an open manager window.
         manager = getattr(self, '_model_manager_dialog', None)
-        if manager is not None and getattr(manager, '_catalog_poll_pending', False):
+        if (
+            manager is not None
+            and getattr(manager, '_catalog_poll_pending', False)
+            and not requested_provider
+        ):
             manager._catalog_poll_pending = False
             manager_list = getattr(manager, '_model_list_widget', None)
             poll_button = getattr(manager, '_model_poll_button', None)
@@ -18297,16 +18430,46 @@ Recent translations to summarize:
         if manager is not None:
             self._apply_polled_model_icons(manager, polled_model_keys)
 
-        # Startup and API-key-triggered refreshes are intentionally silent.
-        # An explicit request writes one detailed, consolidated log entry even
-        # if it reused an in-flight startup request.
-        if getattr(self, '_model_catalog_feedback_requested', False):
+        if requested_provider:
+            status = str(statuses.get(requested_provider, "static fallback (no result)"))
+            if status.startswith('online'):
+                self.append_log(
+                    f"✅ Auto-poll complete: {requested_provider} — "
+                    f"{len(provider_models.get(requested_provider, []) or [])} models"
+                )
+            else:
+                self.append_log(
+                    f"⚠️ Auto-poll failed: {requested_provider} — {status}"
+                )
+
+        # An explicit full refresh writes one detailed, consolidated log entry.
+        if (
+            getattr(self, '_model_catalog_feedback_requested', False)
+            and not requested_provider
+        ):
             self._model_catalog_feedback_requested = False
             self._log_provider_model_catalog_feedback(
                 result,
                 total_model_count=len(online_models),
                 online_model_count=online_model_count,
             )
+
+        if (
+            requested_provider
+            and getattr(self, '_provider_model_catalog_full_refresh_pending', False)
+        ):
+            QTimer.singleShot(100, self._launch_pending_full_provider_catalog_refresh)
+
+    def _launch_pending_full_provider_catalog_refresh(self):
+        """Run a manual full poll queued behind a provider-scoped auto poll."""
+        if not getattr(self, '_provider_model_catalog_full_refresh_pending', False):
+            return
+        existing = getattr(self, '_provider_model_catalog_thread', None)
+        if existing is not None and existing.is_alive():
+            QTimer.singleShot(250, self._launch_pending_full_provider_catalog_refresh)
+            return
+        self._provider_model_catalog_full_refresh_pending = False
+        self._start_provider_model_catalog_refresh()
 
     def _log_provider_model_catalog_feedback(
         self,
@@ -18368,6 +18531,19 @@ Recent translations to summarize:
                     for name, status in failed
                 ),
             ))
+        if STATIC_ONLY_PROVIDER_PREFIXES:
+            lines.extend((
+                f"   📌 Not pollable by design: {len(STATIC_ONLY_PROVIDER_PREFIXES)} routes",
+                '\n'.join(
+                    f"      • {prefix} — {reason}"
+                    for prefix, reason in STATIC_ONLY_PROVIDER_PREFIXES.items()
+                ),
+            ))
+        if not any(str(name).startswith('authgrok:') for name in statuses):
+            lines.append(
+                "   🔑 On-demand only: authgrok*/ — select an AuthGrok account model; "
+                "the existing signed-in session is then queried without opening a login"
+            )
         self.append_log('\n'.join(lines))
 
     def _install_model_completer(self, model_list):
@@ -18856,9 +19032,9 @@ Recent translations to summarize:
         # Initial check
         self.on_model_change()
         # UI construction is synchronous; by the time this runs, the API-key
-        # field and the rest of the window are available. Network work stays
-        # on the daemon catalog thread.
-        QTimer.singleShot(0, self._start_provider_model_catalog_refresh)
+        # field and the rest of the window are available. The same debounced,
+        # provider-scoped 24-hour policy is used at startup.
+        QTimer.singleShot(0, lambda: self._schedule_current_provider_catalog_refresh(750))
     
     def _create_profile_section(self):
         """Create profile/profile section"""
@@ -19858,6 +20034,7 @@ Recent translations to summarize:
         dialog._model_poll_status = poll_status
         dialog._save_model_list_state = save_state
         dialog._catalog_poll_pending = False
+        self._ensure_polled_model_marker_state()
         self._apply_polled_model_icons(
             dialog, getattr(self, '_polled_online_model_ids', set())
         )
@@ -22946,7 +23123,12 @@ Recent translations to summarize:
         if initial_key:
             self.api_key_entry.setText(initial_key)
         self.api_key_entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.api_key_entry.editingFinished.connect(self._start_provider_model_catalog_refresh)
+        self.api_key_entry.textEdited.connect(
+            lambda _text: self._schedule_current_provider_catalog_refresh()
+        )
+        self.api_key_entry.editingFinished.connect(
+            lambda: self._schedule_current_provider_catalog_refresh(0)
+        )
         self.frame.addWidget(self.api_key_entry, 8, 1, 1, 3)
         
         # Show/Hide API Key button (row 8)

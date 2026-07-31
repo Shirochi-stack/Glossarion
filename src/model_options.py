@@ -12,6 +12,7 @@ import re
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -480,6 +481,7 @@ class ModelCatalogRefreshResult:
     models: List[str]
     provider_models: Dict[str, List[str]]
     statuses: Dict[str, str]
+    requested_provider: Optional[str] = None
 
 
 _MODEL_CATALOG_CACHE_VERSION = 1
@@ -684,7 +686,12 @@ def _model_catalog_cache_path() -> str:
 
 
 def _empty_model_catalog_cache() -> dict:
-    return {"version": _MODEL_CATALOG_CACHE_VERSION, "providers": {}}
+    return {
+        "version": _MODEL_CATALOG_CACHE_VERSION,
+        "providers": {},
+        "last_successful": {},
+        "attempts": {},
+    }
 
 
 def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
@@ -700,6 +707,16 @@ def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
                 loaded = _empty_model_catalog_cache()
             if not isinstance(loaded.get("providers"), dict):
                 loaded["providers"] = {}
+            if not isinstance(loaded.get("last_successful"), dict):
+                loaded["last_successful"] = {}
+            # Migrate successful records written before persistent marker state
+            # was introduced. Unlike the active 24-hour cache, these records
+            # are retained across later failed refresh attempts.
+            for name, record in loaded["providers"].items():
+                if isinstance(record, dict) and isinstance(record.get("models"), list):
+                    loaded["last_successful"].setdefault(name, record)
+            if not isinstance(loaded.get("attempts"), dict):
+                loaded["attempts"] = {}
         except (OSError, ValueError, TypeError):
             loaded = _empty_model_catalog_cache()
         _MODEL_CATALOG_MEMORY_CACHE = loaded
@@ -744,6 +761,25 @@ def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) 
             cleaned = [str(model) for model in models if isinstance(model, str) and model.strip()]
             if cleaned:
                 result[str(name)] = cleaned
+    return result
+
+
+def get_last_successful_provider_models() -> Dict[str, List[str]]:
+    """Return each provider's last successful catalog, regardless of age."""
+    records = _load_model_catalog_cache().get("last_successful", {})
+    result: Dict[str, List[str]] = {}
+    for name, record in records.items():
+        if not isinstance(record, dict):
+            continue
+        models = record.get("models")
+        if not isinstance(models, list):
+            continue
+        cleaned = [
+            str(model) for model in models
+            if isinstance(model, str) and model.strip()
+        ]
+        if cleaned:
+            result[str(name)] = cleaned
     return result
 
 
@@ -829,6 +865,45 @@ def _http_get_json(url: str, headers: Mapping[str, str], timeout: float) -> obje
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = response.read()
     return json.loads(payload.decode("utf-8"))
+
+
+def _catalog_error_status(error: BaseException) -> str:
+    """Return a useful, bounded catalog error without exposing request secrets."""
+    if isinstance(error, urllib.error.HTTPError):
+        code = int(getattr(error, "code", 0) or 0)
+        reason = str(getattr(error, "reason", "") or "").strip()
+        detail = ""
+        try:
+            raw_body = error.read(4096)
+            body = raw_body.decode("utf-8", errors="replace").strip()
+            if body:
+                try:
+                    payload = json.loads(body)
+                    candidate = payload.get("error", payload) if isinstance(payload, dict) else payload
+                    if isinstance(candidate, dict):
+                        detail = str(
+                            candidate.get("message")
+                            or candidate.get("detail")
+                            or candidate.get("error")
+                            or ""
+                        ).strip()
+                    elif isinstance(candidate, str):
+                        detail = candidate.strip()
+                except (TypeError, ValueError):
+                    detail = body
+        except (OSError, ValueError):
+            pass
+
+        # Keep provider responses readable in the GUI log and avoid reflecting
+        # long HTML error pages. The URL is intentionally excluded because a
+        # Gemini catalog URL can contain its key as a query parameter.
+        reason_detail = re.sub(r"\s+", " ", detail or reason).strip()[:240]
+        suffix = f" — {reason_detail}" if reason_detail else ""
+        return f"static fallback (HTTP {code}{suffix})"
+
+    reason = re.sub(r"\s+", " ", str(error or "")).strip()[:160]
+    suffix = f" — {reason}" if reason else ""
+    return f"static fallback ({type(error).__name__}{suffix})"
 
 
 def _extract_catalog_entries(payload: object, spec: ProviderCatalogSpec) -> List[object]:
@@ -987,6 +1062,66 @@ def _custom_catalog_specs(custom_routes: object, active_model: str) -> List[Prov
     return result
 
 
+def catalog_provider_for_model(model: str, custom_routes: object = None) -> Optional[str]:
+    """Return the pollable catalog owner for a model ID, including custom routes."""
+    provider = _catalog_provider_for_model(model)
+    if provider is not None:
+        return None if provider == "static" else provider
+    custom_specs = _custom_catalog_specs(custom_routes, model)
+    return custom_specs[0].name if custom_specs else None
+
+
+def provider_model_catalog_refresh_due(
+    provider: str,
+    *,
+    max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS,
+) -> bool:
+    """Return whether an automatic provider poll is due under the persisted TTL."""
+    provider = str(provider or "").strip()
+    if not provider:
+        return False
+    cache = _load_model_catalog_cache()
+    attempts = cache.get("attempts", {})
+    providers = cache.get("providers", {})
+    timestamps: List[float] = []
+    try:
+        timestamps.append(float(attempts.get(provider, 0) or 0))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        timestamps.append(float((providers.get(provider, {}) or {}).get("fetched_at", 0) or 0))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    last_attempt = max(timestamps or [0.0])
+    return (time.time() - last_attempt) >= max(0, int(max_age))
+
+
+def due_provider_catalog_for_model(
+    active_model: str,
+    active_api_key: str = "",
+    custom_routes: object = None,
+    *,
+    max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS,
+) -> Optional[str]:
+    """Return the selected provider when it is credentialed and due for auto-polling."""
+    provider = catalog_provider_for_model(active_model, custom_routes)
+    if not provider or not provider_model_catalog_refresh_due(provider, max_age=max_age):
+        return None
+
+    # AuthGrok uses its existing account session and checks it without opening
+    # a login window. The actual session validation remains in the worker.
+    if provider == "authgrok" or provider.startswith("authgrok:"):
+        return provider
+
+    specs = list(PROVIDER_CATALOG_SPECS)
+    specs.extend(_custom_catalog_specs(custom_routes, active_model))
+    spec = next((item for item in specs if item.name == provider), None)
+    if spec is None:
+        return None
+    key = _provider_key(spec, provider, active_api_key, {})
+    return provider if spec.public or bool(key) else None
+
+
 def refresh_provider_model_catalogs(
     *,
     active_model: str = "",
@@ -995,6 +1130,7 @@ def refresh_provider_model_catalogs(
     custom_routes: object = None,
     timeout: float = 8.0,
     max_workers: int = 6,
+    only_provider: Optional[str] = None,
 ) -> ModelCatalogRefreshResult:
     """Fetch eligible provider catalogs and atomically update the local cache.
 
@@ -1002,11 +1138,14 @@ def refresh_provider_model_catalogs(
     ``active_model``. Other providers are queried only when they are public or
     have a provider-specific credential.
     """
-    active_provider = _catalog_provider_for_model(active_model)
+    active_provider = catalog_provider_for_model(active_model, custom_routes)
+    only_provider = str(only_provider or "").strip() or None
     provider_keys = dict(provider_keys or {})
     specs = list(PROVIDER_CATALOG_SPECS)
     custom_specs = _custom_catalog_specs(custom_routes, active_model)
     specs.extend(custom_specs)
+    if only_provider:
+        specs = [spec for spec in specs if spec.name == only_provider]
 
     statuses: Dict[str, str] = {}
     eligible: List[Tuple[ProviderCatalogSpec, str]] = []
@@ -1021,10 +1160,15 @@ def refresh_provider_model_catalogs(
 
     successful: Dict[str, List[str]] = {}
     failed = set()
+    attempted = {spec.name for spec, _key in eligible}
 
     authgrok_target = _authgrok_catalog_target(active_model)
-    if authgrok_target is not None:
+    if (
+        authgrok_target is not None
+        and (only_provider is None or authgrok_target[0] == only_provider)
+    ):
         authgrok_name = authgrok_target[0]
+        attempted.add(authgrok_name)
         try:
             authgrok_result = _fetch_authgrok_catalog(active_model, timeout)
             if authgrok_result is not None:
@@ -1033,7 +1177,7 @@ def refresh_provider_model_catalogs(
                 statuses[name] = f"online ({len(models)} models)"
         except Exception as error:
             failed.add(authgrok_name)
-            statuses[authgrok_name] = f"static fallback ({type(error).__name__})"
+            statuses[authgrok_name] = _catalog_error_status(error)
 
     def fetch(item: Tuple[ProviderCatalogSpec, str]):
         spec, key = item
@@ -1055,13 +1199,16 @@ def refresh_provider_model_catalogs(
                     statuses[spec.name] = f"online ({len(models)} models)"
                 except Exception as error:
                     failed.add(spec.name)
-                    statuses[spec.name] = f"static fallback ({type(error).__name__})"
+                    statuses[spec.name] = _catalog_error_status(error)
 
     try:
         cache = _load_model_catalog_cache(force_disk=True)
         providers = cache.setdefault("providers", {})
+        last_successful = cache.setdefault("last_successful", {})
+        attempts = cache.setdefault("attempts", {})
         now = time.time()
         built_in_names = {spec.name for spec in PROVIDER_CATALOG_SPECS}
+        built_in_names.update(spec.name for spec in custom_specs)
         built_in_names.update(name for name in successful if name.startswith("authgrok"))
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
         for name in failed:
@@ -1069,7 +1216,11 @@ def refresh_provider_model_catalogs(
                 providers.pop(name, None)
         for name, models in successful.items():
             if name in built_in_names:
-                providers[name] = {"fetched_at": now, "models": models}
+                record = {"fetched_at": now, "models": models}
+                providers[name] = record
+                last_successful[name] = record
+        for name in attempted:
+            attempts[name] = now
         cache["version"] = _MODEL_CATALOG_CACHE_VERSION
         cache["updated_at"] = now
         _write_model_catalog_cache(cache)
@@ -1078,12 +1229,17 @@ def refresh_provider_model_catalogs(
         # catalog that was fetched successfully for the current session.
         statuses["cache"] = f"memory only ({type(error).__name__})"
 
-    # A completed refresh uses only catalogs fetched successfully in this run.
-    # Thus a failed/unavailable provider immediately returns to its static
-    # built-in list instead of retaining stale online data.
-    runtime_models = dict(successful)
+    # A full refresh uses only catalogs fetched successfully in this run. A
+    # provider-scoped automatic refresh preserves other still-fresh cached
+    # catalogs while replacing (or clearing) the selected provider.
+    if only_provider:
+        runtime_models = _cached_provider_models()
+        runtime_models.pop(only_provider, None)
+        runtime_models.update(successful)
+    else:
+        runtime_models = dict(successful)
     options = _merge_dynamic_model_options(_get_static_model_options(), runtime_models)
-    return ModelCatalogRefreshResult(options, runtime_models, statuses)
+    return ModelCatalogRefreshResult(options, successful, statuses, only_provider)
 
 
 def start_provider_model_catalog_refresh(
