@@ -6680,25 +6680,59 @@ class MangaTranslationTab(QObject):
         ocr_io_layout = QHBoxLayout(ocr_io_row)
         ocr_io_layout.setContentsMargins(0, 0, 0, 0)
         ocr_io_layout.setSpacing(8)
-        self.batch_ocr_import_btn = QPushButton("Import OCR")
+        self.batch_ocr_import_btn = QPushButton("📥 Import OCR")
         self.batch_ocr_import_btn.setToolTip(
             "Import OCR text saved by an earlier manga run. Matching pages will skip OCR."
         )
         self.batch_ocr_import_btn.clicked.connect(self._import_batch_ocr_text)
-        self.batch_ocr_export_btn = QPushButton("Export OCR")
+        self.batch_ocr_export_btn = QPushButton("📤 Export OCR")
         self.batch_ocr_export_btn.setToolTip(
             "Save a copy of the OCR file automatically created by the latest translation run."
         )
         self.batch_ocr_export_btn.clicked.connect(self._export_automatic_ocr_text)
-        for ocr_button in (self.batch_ocr_import_btn, self.batch_ocr_export_btn):
-            ocr_button.setMinimumHeight(32)
-            ocr_button.setStyleSheet(
-                "QPushButton { background-color: #3b82f6; color: white; border: 1px solid #5795f8; "
-                "border-radius: 4px; padding: 6px 14px; font-weight: bold; } "
-                "QPushButton:hover { background-color: #4b92ff; } "
-                "QPushButton:disabled { background-color: #2d2d2d; color: #777777; border-color: #444444; }"
-            )
-            ocr_io_layout.addWidget(ocr_button, stretch=1)
+        def style_ocr_io_button(button, background, border, hover, pressed):
+            button.setMinimumHeight(36)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {background};
+                    color: white;
+                    border: 1px solid {border};
+                    border-radius: 6px;
+                    padding: 7px 16px;
+                    font-size: 9pt;
+                    font-weight: 600;
+                }}
+                QPushButton:hover {{
+                    background-color: {hover};
+                    border-color: white;
+                }}
+                QPushButton:pressed {{
+                    background-color: {pressed};
+                }}
+                QPushButton:disabled {{
+                    background-color: #252525;
+                    color: #6f6f6f;
+                    border-color: #3b3b3b;
+                }}
+            """)
+
+        style_ocr_io_button(
+            self.batch_ocr_import_btn,
+            background="#245f7a",
+            border="#3287aa",
+            hover="#2d7696",
+            pressed="#19475d",
+        )
+        style_ocr_io_button(
+            self.batch_ocr_export_btn,
+            background="#28734c",
+            border="#3b9b69",
+            hover="#338b5d",
+            pressed="#1d5739",
+        )
+        ocr_io_layout.addWidget(self.batch_ocr_import_btn, stretch=1)
+        ocr_io_layout.addWidget(self.batch_ocr_export_btn, stretch=1)
         control_layout.addWidget(ocr_io_row)
 
         # Add tooltip to show why button is disabled
@@ -16658,7 +16692,7 @@ class MangaTranslationTab(QObject):
             )
             return
         if hasattr(self, 'batch_ocr_import_btn'):
-            self.batch_ocr_import_btn.setText(f"Imported OCR ({len(matches)})")
+            self.batch_ocr_import_btn.setText(f"📥 Imported OCR ({len(matches)})")
             self.batch_ocr_import_btn.setToolTip(path)
         self._log(f"Imported OCR for {len(matches)}/{len(files)} loaded pages", "success")
         QMessageBox.information(

@@ -1857,8 +1857,8 @@ class MangaImagePreviewWidget(QWidget):
             pressed="#19475d",
         )
         self.import_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.import_ocr_btn.setFixedWidth(104)
-        self.import_ocr_btn.setMinimumHeight(34)
+        self.import_ocr_btn.setFixedWidth(86)
+        self.import_ocr_btn.setMinimumHeight(32)
         self.import_ocr_btn.setToolTip("Import an OCR and translated-text editing session")
         self.import_ocr_btn.clicked.connect(self.import_ocr_clicked.emit)
         tools_layout.addWidget(self.import_ocr_btn)
@@ -1871,8 +1871,8 @@ class MangaImagePreviewWidget(QWidget):
             pressed="#1d5739",
         )
         self.export_ocr_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.export_ocr_btn.setFixedWidth(104)
-        self.export_ocr_btn.setMinimumHeight(34)
+        self.export_ocr_btn.setFixedWidth(86)
+        self.export_ocr_btn.setMinimumHeight(32)
         self.export_ocr_btn.setToolTip("Export OCR text, translated text, and region mappings")
         self.export_ocr_btn.clicked.connect(self.export_ocr_clicked.emit)
         tools_layout.addWidget(self.export_ocr_btn)
