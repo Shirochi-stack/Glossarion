@@ -4,9 +4,20 @@ Centralized model catalog for Glossarion UIs.
 Returned list should mirror the main GUI model dropdown.
 Updated: 2026-03-10
 """
-from typing import List
+import concurrent.futures
+import json
+import os
+import platform
+import re
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-def get_model_options() -> List[str]:
+def _get_static_model_options() -> List[str]:
     return [
     
         # OpenAI Models (as of March 2026)
@@ -219,7 +230,7 @@ def get_model_options() -> List[str]:
         "or/openrouter/free",
         "or/anthropic/claude-sonnet-4.6","or/anthropic/claude-sonnet-4.5", "or/anthropic/claude-sonnet-4",
         "or/google/gemini-3.1-flash-lite-preview", "or/google/gemini-3-flash-preview", "or/google/gemini-3.1-pro-preview",
-        "or/openai/gpt-5.4","or/openai/gpt-5.4-mini", "or/openai/gpt-5.4-nano"
+        "or/openai/gpt-5.4","or/openai/gpt-5.4-mini", "or/openai/gpt-5.4-nano",
         "or/google/gemini-2.5-pro",
         "or/google/gemini-2.5-flash",
         "or/google/gemini-2.5-flash-preview-09-2025",
@@ -280,6 +291,12 @@ def get_model_options() -> List[str]:
         "authgem/gemini-2.5-pro",
         "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
         "authgem/gemini-3.1-pro-preview", "authgem/gemini-3.1-flash-lite", "authgem/gemini-3-flash-preview",
+
+        # AuthGem-Key - Gemini AI Studio using the API-key route
+        "authgem-key/gemini-2.5-flash", "authgem-key/gemini-2.5-flash-lite",
+        "authgem-key/gemini-2.5-pro", "authgem-key/gemini-2.0-flash",
+        "authgem-key/gemini-2.0-flash-lite", "authgem-key/gemini-3.1-pro-preview",
+        "authgem-key/gemini-3.1-flash-lite", "authgem-key/gemini-3-flash-preview",
 
         # nano-gpt provider models
         "nan/deepseek/deepseek-v4-flash", "nan/deepseek/deepseek-v4-flash:thinking", "nan/deepseek/deepseek-v4-pro",
@@ -437,3 +454,659 @@ def get_model_options() -> List[str]:
         "google-translate-free",  # Uses free web endpoint (no key)
         "google-translate",  # Will use Google Cloud Translate
     ]
+
+
+@dataclass(frozen=True)
+class ProviderCatalogSpec:
+    """Description of a provider's read-only model catalog endpoint."""
+
+    name: str
+    prefix: str
+    models_url: str
+    api_key_envs: Tuple[str, ...] = ()
+    public: bool = False
+    auth_style: str = "bearer"
+    base_url_env: str = ""
+    models_path: str = "/models"
+    response_keys: Tuple[str, ...] = ("data", "models")
+    id_fields: Tuple[str, ...] = ("id", "model", "name", "slug")
+    allowed_types: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ModelCatalogRefreshResult:
+    """Result returned by a provider-catalog refresh."""
+
+    models: List[str]
+    provider_models: Dict[str, List[str]]
+    statuses: Dict[str, str]
+
+
+_MODEL_CATALOG_CACHE_VERSION = 1
+_MODEL_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
+_MODEL_CATALOG_LOCK = threading.RLock()
+_MODEL_CATALOG_MEMORY_CACHE: Optional[dict] = None
+
+
+# These routes expose a model-list operation compatible with the current
+# Glossarion transport. AuthGrok is handled separately because its account
+# session uses a provider-specific catalog protocol.
+PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
+    ProviderCatalogSpec(
+        "openrouter", "or/", "https://openrouter.ai/api/v1/models?output_modalities=text",
+        ("OPENROUTER_API_KEY",), True,
+    ),
+    ProviderCatalogSpec(
+        "openai", "", "https://api.openai.com/v1/models", ("OPENAI_API_KEY",),
+        base_url_env="OPENAI_API_BASE",
+    ),
+    ProviderCatalogSpec(
+        "anthropic", "", "https://api.anthropic.com/v1/models?limit=1000", ("ANTHROPIC_API_KEY",),
+        auth_style="anthropic", base_url_env="ANTHROPIC_BASE_URL", models_path="/v1/models",
+    ),
+    ProviderCatalogSpec(
+        "gemini", "", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+        ("GEMINI_API_KEY", "GOOGLE_API_KEY"), auth_style="query",
+    ),
+    ProviderCatalogSpec(
+        "authgem_key", "authgem-key/",
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+        ("GEMINI_API_KEY", "GOOGLE_API_KEY"), auth_style="query",
+    ),
+    ProviderCatalogSpec(
+        "mistral", "", "https://api.mistral.ai/v1/models", ("MISTRAL_API_KEY",),
+    ),
+    ProviderCatalogSpec(
+        "deepseek", "", "https://api.deepseek.com/models", ("DEEPSEEK_API_KEY",),
+        base_url_env="DEEPSEEK_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "xai", "", "https://api.x.ai/v1/models", ("XAI_API_KEY",),
+        base_url_env="XAI_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "groq", "groq/", "https://api.groq.com/openai/v1/models", ("GROQ_API_KEY",),
+        base_url_env="GROQ_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "chutes", "chutes/", "https://llm.chutes.ai/v1/models", ("CHUTES_API_KEY",),
+        base_url_env="CHUTES_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "nvidia", "nd/", "https://integrate.api.nvidia.com/v1/models", ("NVIDIA_API_KEY",),
+        base_url_env="NVIDIA_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "literouter", "lr/", "https://api.literouter.com/v1/models", ("LITEROUTER_API_KEY",),
+        base_url_env="LITEROUTER_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "opencode", "oc/", "https://opencode.ai/zen/go/v1/models", ("OPENCODE_API_KEY",),
+        base_url_env="OPENCODE_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "electronhub", "eh/", "https://api.electronhub.ai/v1/models", ("ELECTRONHUB_API_KEY",),
+        base_url_env="ELECTRONHUB_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "nanogpt", "nan/", "https://nano-gpt.com/api/v1/models", ("NANOGPT_API_KEY",),
+        base_url_env="NANOGPT_API_URL", models_path="/api/v1/models",
+    ),
+    ProviderCatalogSpec(
+        "sambanova", "sam/", "https://api.sambanova.ai/v1/models", ("SAMBANOVA_API_KEY",),
+        base_url_env="SAMBANOVA_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "together", "together/", "https://api.together.xyz/v1/models", ("TOGETHER_API_KEY",),
+        base_url_env="TOGETHER_API_URL", allowed_types=("chat",),
+    ),
+    ProviderCatalogSpec(
+        "zai", "za/", "https://api.z.ai/api/paas/v4/models", ("ZAI_API_KEY", "ZA_API_KEY"),
+        base_url_env="ZA_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "zhipu", "", "https://open.bigmodel.cn/api/paas/v4/models", ("ZHIPU_API_KEY",),
+        base_url_env="ZHIPU_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "fireworks", "fireworks/", "https://api.fireworks.ai/inference/v1/models",
+        ("FIREWORKS_API_KEY",), base_url_env="FIREWORKS_API_URL",
+    ),
+    ProviderCatalogSpec(
+        "cohere", "cohere/", "https://api.cohere.com/v1/models?page_size=1000", ("COHERE_API_KEY",),
+        response_keys=("models", "data"),
+    ),
+    ProviderCatalogSpec(
+        "moonshot", "", "https://api.moonshot.cn/v1/models", ("MOONSHOT_API_KEY",),
+        base_url_env="MOONSHOT_API_URL",
+    ),
+    # The local proxy is queried only if it is already running. Catalog
+    # discovery must never start the proxy or open an OAuth browser window.
+    ProviderCatalogSpec(
+        "antigravity", "antigravity/", "http://localhost:3000/v1/models",
+        public=True, base_url_env="ANTIGRAVITY_PROXY_URL", models_path="/v1/models",
+    ),
+)
+
+
+STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
+    "authgpt/": "OAuth backend does not expose a stable general catalog endpoint",
+    "authcd/": "OAuth backend does not expose a stable general catalog endpoint",
+    "authgem/": "OAuth account and project context are required",
+    "authgem-vertex/": "Vertex catalogs are project and region specific",
+    "authnd/": "Browser-backed NVIDIA route uses the curated chat catalog",
+    "authza/": "Browser-backed model selector does not expose a stable catalog endpoint",
+    "vertex/": "Vertex catalogs are project and region specific",
+    "search/": "Search route is a fixed service rather than a model catalog",
+    "perplexity/": "The provider catalog currently lists Agent API models, not this chat route",
+}
+
+
+_PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
+    ("authgem-vertex/", "static"),
+    ("authgpt/", "static"),
+    ("authgrok/", "authgrok"),
+    ("authgem-key/", "authgem_key"),
+    ("authgem/", "static"),
+    ("authcd/", "static"),
+    ("authnd/", "static"),
+    ("authza/", "static"),
+    ("antigravity/", "antigravity"),
+    ("vertex/", "static"),
+    ("search/", "static"),
+    ("chutes/", "chutes"),
+    ("groq/", "groq"),
+    ("fireworks/", "fireworks"),
+    ("or/", "openrouter"),
+    ("openrouter/", "openrouter"),
+    ("lr/", "literouter"),
+    ("oc/", "opencode"),
+    ("opencode/", "opencode"),
+    ("opencode-go/", "opencode"),
+    ("eh/", "electronhub"),
+    ("electronhub/", "electronhub"),
+    ("electron/", "electronhub"),
+    ("nan/", "nanogpt"),
+    ("sam/", "sambanova"),
+    ("nd/", "nvidia"),
+    ("za/", "zai"),
+    ("together/", "together"),
+    ("cohere/", "cohere"),
+)
+
+
+_BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("openai", ("gpt-", "chatgpt-", "o1", "o3", "o4")),
+    ("anthropic", ("claude-",)),
+    ("gemini", ("gemini-", "gemma-")),
+    ("xai", ("grok-",)),
+    ("deepseek", ("deepseek-",)),
+    ("mistral", (
+        "mistral-", "open-mistral-", "mixtral-", "codestral-", "devstral-", "pixtral-",
+        "voxtral-", "magistral-", "ministral-", "labs-leanstral-",
+    )),
+    ("cohere", ("command", "aya-")),
+    ("moonshot", ("moonshot-", "kimi-")),
+    ("zhipu", ("glm-", "chatglm")),
+    ("together", (
+        "llama-", "llama2", "llama3", "llama4", "codellama-", "alpaca-",
+        "vicuna-", "wizardlm-",
+    )),
+)
+
+
+def _catalog_provider_for_model(model: str) -> Optional[str]:
+    """Resolve a dropdown model to the catalog that owns its namespace."""
+    value = str(model or "").strip().lower()
+    authgrok_match = re.match(r"^authgrok(\d{1,4})/", value)
+    if authgrok_match:
+        return f"authgrok:{int(authgrok_match.group(1))}"
+    for prefix, provider in _PREFIX_PROVIDER_MAP:
+        if value.startswith(prefix):
+            return provider
+    for provider, prefixes in _BARE_PROVIDER_PREFIXES:
+        if value.startswith(prefixes):
+            return provider
+    return None
+
+
+def _model_catalog_cache_path() -> str:
+    override = str(os.getenv("GLOSSARION_MODEL_CATALOG_CACHE", "") or "").strip()
+    if override:
+        return os.path.abspath(override)
+    if platform.system() == "Windows":
+        root = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or tempfile.gettempdir()
+    elif platform.system() == "Darwin":
+        root = os.path.join(os.path.expanduser("~"), "Library", "Caches")
+    else:
+        root = os.getenv("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(root, "Glossarion", "model_catalog_cache.json")
+
+
+def _empty_model_catalog_cache() -> dict:
+    return {"version": _MODEL_CATALOG_CACHE_VERSION, "providers": {}}
+
+
+def _load_model_catalog_cache(*, force_disk: bool = False) -> dict:
+    global _MODEL_CATALOG_MEMORY_CACHE
+    with _MODEL_CATALOG_LOCK:
+        if _MODEL_CATALOG_MEMORY_CACHE is not None and not force_disk:
+            return json.loads(json.dumps(_MODEL_CATALOG_MEMORY_CACHE))
+        path = _model_catalog_cache_path()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict) or loaded.get("version") != _MODEL_CATALOG_CACHE_VERSION:
+                loaded = _empty_model_catalog_cache()
+            if not isinstance(loaded.get("providers"), dict):
+                loaded["providers"] = {}
+        except (OSError, ValueError, TypeError):
+            loaded = _empty_model_catalog_cache()
+        _MODEL_CATALOG_MEMORY_CACHE = loaded
+        return json.loads(json.dumps(loaded))
+
+
+def _write_model_catalog_cache(cache: dict) -> None:
+    global _MODEL_CATALOG_MEMORY_CACHE
+    path = _model_catalog_cache_path()
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(prefix="model_catalog_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+    with _MODEL_CATALOG_LOCK:
+        _MODEL_CATALOG_MEMORY_CACHE = json.loads(json.dumps(cache))
+
+
+def _cached_provider_models(*, max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS) -> Dict[str, List[str]]:
+    now = time.time()
+    providers = _load_model_catalog_cache().get("providers", {})
+    result: Dict[str, List[str]] = {}
+    for name, record in providers.items():
+        if not isinstance(record, dict):
+            continue
+        try:
+            age = now - float(record.get("fetched_at", 0))
+        except (TypeError, ValueError):
+            continue
+        models = record.get("models")
+        if age <= max_age and isinstance(models, list):
+            cleaned = [str(model) for model in models if isinstance(model, str) and model.strip()]
+            if cleaned:
+                result[str(name)] = cleaned
+    return result
+
+
+def _deduplicate_models(models: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for model in models:
+        value = str(model or "").strip()
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _merge_dynamic_model_options(
+    static_models: Sequence[str],
+    provider_models: Mapping[str, Sequence[str]],
+) -> List[str]:
+    """Replace each successfully fetched provider section, preserving catalog order."""
+    replacements = {
+        str(provider): _deduplicate_models(models)
+        for provider, models in provider_models.items()
+        if models
+    }
+    if not replacements:
+        return _deduplicate_models(static_models)
+
+    merged: List[str] = []
+    emitted = set()
+    for model in static_models:
+        provider = _catalog_provider_for_model(model)
+        if provider in replacements:
+            if provider not in emitted:
+                merged.extend(replacements[provider])
+                emitted.add(provider)
+            continue
+        merged.append(model)
+    for provider, models in replacements.items():
+        if provider not in emitted:
+            merged.extend(models)
+    return _deduplicate_models(merged)
+
+
+def get_model_options() -> List[str]:
+    """Return cached live provider catalogs with the built-in list as fallback."""
+    static_models = _get_static_model_options()
+    dynamic = _cached_provider_models()
+    return _merge_dynamic_model_options(static_models, dynamic)
+
+
+def _provider_models_url(spec: ProviderCatalogSpec) -> str:
+    base = str(os.getenv(spec.base_url_env, "") or "").strip() if spec.base_url_env else ""
+    if not base:
+        return spec.models_url
+    base = base.rstrip("/")
+    if base.lower().endswith("/models"):
+        return base
+    if spec.name == "anthropic":
+        for suffix in ("/v1/messages", "/v1/chat/completions", "/v1", "/chat/completions"):
+            if base.lower().endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        return f"{base}/v1/models?limit=1000"
+    # NanoGPT's configured root normally omits /api/v1, while the other
+    # configured provider roots already include their API version.
+    return f"{base}{spec.models_path}"
+
+
+def _append_query_parameter(url: str, name: str, value: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    query.append((name, value))
+    return urllib.parse.urlunsplit((
+        parts.scheme, parts.netloc, parts.path,
+        urllib.parse.urlencode(query), parts.fragment,
+    ))
+
+
+def _http_get_json(url: str, headers: Mapping[str, str], timeout: float) -> object:
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read()
+    return json.loads(payload.decode("utf-8"))
+
+
+def _extract_catalog_entries(payload: object, spec: ProviderCatalogSpec) -> List[object]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in spec.response_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _normalize_catalog_model_id(spec: ProviderCatalogSpec, model_id: object) -> Optional[str]:
+    value = str(model_id or "").strip()
+    if spec.name in ("gemini", "authgem_key") and value.startswith("models/"):
+        value = value[len("models/"):]
+    if not value or len(value) > 300 or any(ch.isspace() for ch in value):
+        return None
+    if value.lower().startswith(("http://", "https://")):
+        return None
+    if spec.prefix and not value.casefold().startswith(spec.prefix.casefold()):
+        value = f"{spec.prefix}{value}"
+    return value
+
+
+def _fetch_provider_catalog(
+    spec: ProviderCatalogSpec,
+    api_key: str = "",
+    timeout: float = 8.0,
+) -> List[str]:
+    url = _provider_models_url(spec)
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Glossarion/ModelCatalog",
+    }
+    if api_key:
+        if spec.auth_style == "query":
+            url = _append_query_parameter(url, "key", api_key)
+        elif spec.auth_style == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = _http_get_json(url, headers, timeout)
+    entries = _extract_catalog_entries(payload, spec)
+    models: List[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            model_id = entry
+        elif isinstance(entry, dict):
+            if entry.get("active") is False or entry.get("archived") is True:
+                continue
+            if spec.allowed_types:
+                model_type = str(entry.get("type", "") or "").strip().casefold()
+                if model_type and model_type not in spec.allowed_types:
+                    continue
+            if spec.name in ("gemini", "authgem_key"):
+                actions = entry.get("supportedGenerationMethods", entry.get("supported_actions", []))
+                if isinstance(actions, list) and actions and "generateContent" not in actions:
+                    continue
+            if spec.name == "cohere":
+                endpoints = entry.get("endpoints", [])
+                if isinstance(endpoints, list) and endpoints and not {"chat", "generate"}.intersection(endpoints):
+                    continue
+            model_id = next((entry.get(field) for field in spec.id_fields if entry.get(field)), None)
+        else:
+            model_id = None
+        normalized = _normalize_catalog_model_id(spec, model_id)
+        if normalized:
+            models.append(normalized)
+    return _deduplicate_models(models)
+
+
+def _authgrok_catalog_target(active_model: str) -> Optional[Tuple[str, str, int]]:
+    """Return (cache name, dropdown prefix, account id) for an AuthGrok route."""
+    value = str(active_model or "").strip().lower()
+    match = re.match(r"^authgrok(\d{0,4})/", value)
+    if not match:
+        return None
+    account_id = int(match.group(1) or 0)
+    if account_id:
+        return f"authgrok:{account_id}", f"authgrok{account_id}/", account_id
+    return "authgrok", "authgrok/", 0
+
+
+def _fetch_authgrok_catalog(active_model: str, timeout: float) -> Optional[Tuple[str, List[str]]]:
+    """Use AuthGrok's existing account catalog without initiating login."""
+    target = _authgrok_catalog_target(active_model)
+    if target is None:
+        return None
+    provider_name, prefix, account_id = target
+    import authgrok_auth
+
+    store = authgrok_auth.get_store(account_id)
+    access_token = store.get_valid_access_token(auto_login=False)
+    raw_models = authgrok_auth.fetch_available_models(
+        access_token,
+        timeout=max(1, int(round(timeout))),
+    )
+    models = _deduplicate_models(
+        model if str(model).casefold().startswith(prefix.casefold()) else f"{prefix}{model}"
+        for model in raw_models
+    )
+    if not models:
+        raise ValueError("AuthGrok returned no usable model IDs")
+    return provider_name, models
+
+
+def _provider_key(
+    spec: ProviderCatalogSpec,
+    active_provider: Optional[str],
+    active_api_key: str,
+    provider_keys: Mapping[str, str],
+) -> str:
+    if spec.public:
+        return ""
+    explicit = str(provider_keys.get(spec.name, "") or "").strip()
+    if explicit:
+        return explicit
+    for env_name in spec.api_key_envs:
+        value = str(os.getenv(env_name, "") or "").strip()
+        if value:
+            return value
+    if active_provider == spec.name:
+        return str(active_api_key or "").strip()
+    return ""
+
+
+def _custom_catalog_specs(custom_routes: object, active_model: str) -> List[ProviderCatalogSpec]:
+    if not isinstance(custom_routes, list):
+        return []
+    model_value = str(active_model or "").strip().casefold()
+    result: List[ProviderCatalogSpec] = []
+    for entry in custom_routes:
+        if not isinstance(entry, dict):
+            continue
+        prefix = str(entry.get("prefix", "") or "").strip().replace("\\", "/").lstrip("/")
+        routing = str(entry.get("routing", entry.get("base_url", "")) or "").strip().rstrip("/")
+        endpoint_type = str(entry.get("endpoint_type", "/chat/completions") or "").strip()
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        if (
+            not prefix or not routing.startswith(("http://", "https://"))
+            or endpoint_type not in ("/chat/completions", "chat/completions", "openai_chat")
+            or not model_value.startswith(prefix.casefold())
+        ):
+            continue
+        result.append(ProviderCatalogSpec(
+            name=f"custom:{prefix.casefold()}",
+            prefix=prefix,
+            models_url=f"{routing}/models",
+        ))
+    return result
+
+
+def refresh_provider_model_catalogs(
+    *,
+    active_model: str = "",
+    active_api_key: str = "",
+    provider_keys: Optional[Mapping[str, str]] = None,
+    custom_routes: object = None,
+    timeout: float = 8.0,
+    max_workers: int = 6,
+) -> ModelCatalogRefreshResult:
+    """Fetch eligible provider catalogs and atomically update the local cache.
+
+    The generic active key is sent only to the provider resolved from
+    ``active_model``. Other providers are queried only when they are public or
+    have a provider-specific credential.
+    """
+    active_provider = _catalog_provider_for_model(active_model)
+    provider_keys = dict(provider_keys or {})
+    specs = list(PROVIDER_CATALOG_SPECS)
+    custom_specs = _custom_catalog_specs(custom_routes, active_model)
+    specs.extend(custom_specs)
+
+    statuses: Dict[str, str] = {}
+    eligible: List[Tuple[ProviderCatalogSpec, str]] = []
+    for spec in specs:
+        key = _provider_key(spec, active_provider, active_api_key, provider_keys)
+        if spec.name.startswith("custom:") and active_api_key:
+            key = str(active_api_key).strip()
+        if not spec.public and not key:
+            statuses[spec.name] = "static fallback (no provider credential)"
+            continue
+        eligible.append((spec, key))
+
+    successful: Dict[str, List[str]] = {}
+    failed = set()
+
+    authgrok_target = _authgrok_catalog_target(active_model)
+    if authgrok_target is not None:
+        authgrok_name = authgrok_target[0]
+        try:
+            authgrok_result = _fetch_authgrok_catalog(active_model, timeout)
+            if authgrok_result is not None:
+                name, models = authgrok_result
+                successful[name] = models
+                statuses[name] = f"online ({len(models)} models)"
+        except Exception as error:
+            failed.add(authgrok_name)
+            statuses[authgrok_name] = f"static fallback ({type(error).__name__})"
+
+    def fetch(item: Tuple[ProviderCatalogSpec, str]):
+        spec, key = item
+        return spec, _fetch_provider_catalog(spec, key, timeout)
+
+    if eligible:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(int(max_workers), len(eligible))),
+            thread_name_prefix="model-catalog",
+        ) as executor:
+            futures = {executor.submit(fetch, item): item[0] for item in eligible}
+            for future in concurrent.futures.as_completed(futures):
+                spec = futures[future]
+                try:
+                    models = future.result()[1]
+                    if not models:
+                        raise ValueError("provider returned no usable model IDs")
+                    successful[spec.name] = models
+                    statuses[spec.name] = f"online ({len(models)} models)"
+                except Exception as error:
+                    failed.add(spec.name)
+                    statuses[spec.name] = f"static fallback ({type(error).__name__})"
+
+    try:
+        cache = _load_model_catalog_cache(force_disk=True)
+        providers = cache.setdefault("providers", {})
+        now = time.time()
+        built_in_names = {spec.name for spec in PROVIDER_CATALOG_SPECS}
+        built_in_names.update(name for name in successful if name.startswith("authgrok"))
+        built_in_names.update(name for name in failed if name.startswith("authgrok"))
+        for name in failed:
+            if name in built_in_names:
+                providers.pop(name, None)
+        for name, models in successful.items():
+            if name in built_in_names:
+                providers[name] = {"fetched_at": now, "models": models}
+        cache["version"] = _MODEL_CATALOG_CACHE_VERSION
+        cache["updated_at"] = now
+        _write_model_catalog_cache(cache)
+    except OSError as error:
+        # A read-only or unavailable cache directory must not discard a
+        # catalog that was fetched successfully for the current session.
+        statuses["cache"] = f"memory only ({type(error).__name__})"
+
+    # A completed refresh uses only catalogs fetched successfully in this run.
+    # Thus a failed/unavailable provider immediately returns to its static
+    # built-in list instead of retaining stale online data.
+    runtime_models = dict(successful)
+    options = _merge_dynamic_model_options(_get_static_model_options(), runtime_models)
+    return ModelCatalogRefreshResult(options, runtime_models, statuses)
+
+
+def start_provider_model_catalog_refresh(
+    callback: Optional[Callable[[ModelCatalogRefreshResult], None]] = None,
+    **kwargs,
+) -> threading.Thread:
+    """Start a daemon refresh thread and optionally receive its result."""
+    def worker() -> None:
+        try:
+            result = refresh_provider_model_catalogs(**kwargs)
+        except Exception as error:
+            result = ModelCatalogRefreshResult(
+                get_model_options(),
+                {},
+                {"catalog": f"static fallback ({type(error).__name__})"},
+            )
+        if callback is not None:
+            try:
+                callback(result)
+            except Exception:
+                # The GUI may have closed while this daemon worker was active.
+                pass
+
+    thread = threading.Thread(target=worker, name="provider-model-catalog", daemon=True)
+    thread.start()
+    return thread

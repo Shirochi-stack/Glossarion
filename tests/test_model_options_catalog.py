@@ -1,0 +1,218 @@
+import sys
+import types
+
+import model_options
+
+
+def _isolated_cache(tmp_path, monkeypatch):
+    cache_path = tmp_path / "model_catalog_cache.json"
+    monkeypatch.setenv("GLOSSARION_MODEL_CATALOG_CACHE", str(cache_path))
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    for spec in model_options.PROVIDER_CATALOG_SPECS:
+        for env_name in spec.api_key_envs:
+            monkeypatch.delenv(env_name, raising=False)
+        if spec.base_url_env:
+            monkeypatch.delenv(spec.base_url_env, raising=False)
+    return cache_path
+
+
+def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
+    cache_path = _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        assert "openrouter.ai/api/v1/models" in url
+        assert "Authorization" not in headers
+        return {"data": [{"id": "vendor/new-model"}, {"id": "openrouter/free"}]}
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.provider_models["openrouter"] == [
+        "or/vendor/new-model",
+        "or/openrouter/free",
+    ]
+    assert "or/vendor/new-model" in result.models
+    assert "or/openai/gpt-5" not in result.models
+    assert result.statuses["openrouter"] == "online (2 models)"
+    assert cache_path.is_file()
+
+    monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    assert "or/vendor/new-model" in model_options.get_model_options()
+
+
+def test_failed_online_catalog_uses_corrected_static_openrouter_list(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fail_get(_url, _headers, _timeout):
+        raise OSError("offline")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fail_get)
+
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.statuses["openrouter"] == "static fallback (OSError)"
+    assert "or/openrouter/free" in result.models
+    assert "or/openai/gpt-5.4-nano" in result.models
+    assert "or/google/gemini-2.5-pro" in result.models
+    assert "or/openai/gpt-5.4-nanoor/google/gemini-2.5-pro" not in result.models
+
+
+def test_generic_key_is_sent_only_to_the_selected_provider(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "groq.com" in url:
+            return {"data": [{"id": "llama-new"}]}
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "router/new"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="groq/llama-old",
+        active_api_key="groq-secret",
+        timeout=0.1,
+    )
+
+    groq_call = next(call for call in calls if "groq.com" in call[0])
+    router_call = next(call for call in calls if "openrouter.ai" in call[0])
+    assert groq_call[1]["Authorization"] == "Bearer groq-secret"
+    assert "Authorization" not in router_call[1]
+    assert result.provider_models["groq"] == ["groq/llama-new"]
+    assert result.provider_models["openrouter"] == ["or/router/new"]
+
+
+def test_public_openrouter_catalog_does_not_send_api_key(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "router/new"}]}
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    model_options.refresh_provider_model_catalogs(
+        active_model="or/router/old",
+        active_api_key="openrouter-secret",
+        timeout=0.1,
+    )
+
+    router_call = next(call for call in calls if "openrouter.ai" in call[0])
+    assert "Authorization" not in router_call[1]
+
+
+def test_selected_custom_openai_route_can_poll_its_models(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, dict(headers)))
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "localhost:9999" in url:
+            return {"data": [{"id": "local-current"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="lab/local-current",
+        active_api_key="local-key",
+        custom_routes=[{
+            "prefix": "lab/",
+            "routing": "http://localhost:9999/v1",
+            "endpoint_type": "/chat/completions",
+        }],
+        timeout=0.1,
+    )
+
+    assert "lab/local-current" in result.models
+    local_call = next(call for call in calls if "localhost:9999" in call[0])
+    assert local_call[0] == "http://localhost:9999/v1/models"
+    assert local_call[1]["Authorization"] == "Bearer local-key"
+
+
+def test_running_antigravity_proxy_replaces_its_static_catalog(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "localhost:3000/v1/models" in url:
+            return {"data": [{"id": "gemini-live"}, {"id": "claude-live"}]}
+        raise AssertionError(f"unexpected provider request: {url}")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(timeout=0.1)
+
+    assert result.provider_models["antigravity"] == [
+        "antigravity/gemini-live",
+        "antigravity/claude-live",
+    ]
+    assert "antigravity/gemini-3-flash" not in result.models
+
+
+def test_selected_authgrok_uses_existing_session_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+
+    class FakeStore:
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "oauth-token"
+
+    fake_authgrok = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout: ["grok-live", "grok-build"],
+    )
+    monkeypatch.setitem(sys.modules, "authgrok_auth", fake_authgrok)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgrok2/grok-old",
+        timeout=0.1,
+    )
+
+    assert token_calls == [False]
+    assert result.provider_models["authgrok:2"] == [
+        "authgrok2/grok-live",
+        "authgrok2/grok-build",
+    ]
+
+
+def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        if "openrouter.ai" in url:
+            return {"data": [{"id": "openrouter/free"}]}
+        if "generativelanguage.googleapis.com" in url:
+            assert "key=gemini-secret" in url
+            return {
+                "models": [{
+                    "name": "models/gemini-current",
+                    "supportedGenerationMethods": ["generateContent"],
+                }]
+            }
+        raise OSError("local proxy is not running")
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgem-key/gemini-current",
+        active_api_key="gemini-secret",
+        timeout=0.1,
+    )
+
+    assert result.provider_models["authgem_key"] == [
+        "authgem-key/gemini-current",
+    ]

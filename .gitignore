@@ -107,6 +107,7 @@ tests/**
 !tests/test_manga_ocr_io.py
 !tests/test_manga_drag_drop.py
 !tests/test_openrouter_thinking.py
+!tests/test_model_options_catalog.py
 !tests/test_shutdown_utils_cleanup.py
 !tests/test_authgrok_auth.py
 !tests/test_antigravity_proxy.py

@@ -538,7 +538,7 @@ def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
     except Exception:
         return icon_path.replace('\\', '/')
 
-from model_options import get_model_options
+from model_options import get_model_options, start_provider_model_catalog_refresh
 
 # Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
 # This allows spawning the same .exe with a special flag to run helper tasks.
@@ -11480,6 +11480,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     open_progress_manager_signal = Signal()
     # Qt Signal for refreshing the visible input path after worker-side file resolution
     input_files_updated_signal = Signal(list)
+    # Worker-to-GUI bridge for online provider model catalogs.
+    model_catalog_updated_signal = Signal(object)
     # Worker-to-GUI bridge used to pause a Direct Text run after automatic
     # glossary generation without opening Qt dialogs from the worker thread.
     direct_text_glossary_approval_signal = Signal(str, object)
@@ -18094,11 +18096,154 @@ Recent translations to summarize:
         # Enforce image output dependency when model changes
         if hasattr(self, '_enforce_image_output_dependency'):
             self._enforce_image_output_dependency()
-    
+
+
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
         """Setup bindings for manual model input in combobox with autocomplete"""
         self._install_model_completer(self._model_all_values)
+
+    def _schedule_provider_model_catalog_refresh(self, delay_ms=650):
+        """Retry a requested catalog refresh after the active worker finishes."""
+        try:
+            timer = getattr(self, '_provider_model_catalog_refresh_timer', None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._start_provider_model_catalog_refresh)
+                self._provider_model_catalog_refresh_timer = timer
+            timer.start(max(0, int(delay_ms)))
+        except (RuntimeError, TypeError, ValueError):
+            pass
+
+    def _start_provider_model_catalog_refresh(self):
+        """Refresh eligible online model catalogs without blocking Qt."""
+        existing = getattr(self, '_provider_model_catalog_thread', None)
+        if existing is not None and existing.is_alive():
+            self._schedule_provider_model_catalog_refresh(250)
+            return False
+
+        try:
+            active_model = self.model_combo.currentText().strip()
+        except Exception:
+            active_model = str(getattr(self, 'model_var', self.config.get('model', '')) or '').strip()
+        try:
+            active_api_key = self.api_key_entry.text().strip()
+        except Exception:
+            active_api_key = str(self.config.get('api_key', '') or '').strip()
+        try:
+            custom_routes = self._normalize_custom_prefix_routes(
+                getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
+            )
+        except Exception:
+            custom_routes = []
+
+        if not getattr(self, '_provider_model_catalog_signal_connected', False):
+            self.model_catalog_updated_signal.connect(self._apply_provider_model_catalog_refresh)
+            self._provider_model_catalog_signal_connected = True
+
+        def deliver(result):
+            try:
+                self.model_catalog_updated_signal.emit(result)
+            except RuntimeError:
+                pass
+
+        self._provider_model_catalog_thread = start_provider_model_catalog_refresh(
+            deliver,
+            active_model=active_model,
+            active_api_key=active_api_key,
+            custom_routes=custom_routes,
+        )
+        return True
+
+    def _apply_provider_model_catalog_refresh(self, result):
+        """Apply a completed catalog refresh on Qt's GUI thread."""
+        online_models = list(getattr(result, 'models', []) or [])
+        if not online_models or not hasattr(self, 'model_combo'):
+            return
+
+        custom_models = self.config.get('custom_model_list')
+        if isinstance(custom_models, list):
+            display_models = list(custom_models)
+            existing = {str(model).casefold() for model in display_models}
+            display_models.extend(
+                model for model in online_models
+                if str(model).casefold() not in existing
+            )
+        else:
+            display_models = online_models
+
+        current_text = self.model_combo.currentText()
+        blocked = self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            self.model_combo.addItems(display_models)
+            self.model_combo.setCurrentText(current_text)
+        finally:
+            self.model_combo.blockSignals(blocked)
+        self._model_all_values = list(display_models)
+        self._install_model_completer(self._model_all_values)
+
+        statuses = dict(getattr(result, 'statuses', {}) or {})
+        online = [name for name, status in statuses.items() if str(status).startswith('online')]
+
+        # If the user explicitly polled from Manage Models, refresh that
+        # dialog too. Automatic background refreshes must not disturb unsaved
+        # edits in an open manager window.
+        manager = getattr(self, '_model_manager_dialog', None)
+        if manager is not None and getattr(manager, '_catalog_poll_pending', False):
+            manager._catalog_poll_pending = False
+            manager_list = getattr(manager, '_model_list_widget', None)
+            poll_button = getattr(manager, '_model_poll_button', None)
+            poll_status = getattr(manager, '_model_poll_status', None)
+            if manager_list is not None:
+                previous_models = [
+                    manager_list.item(index).text()
+                    for index in range(manager_list.count())
+                ]
+                known_models = set(getattr(manager, '_known_catalog_models', set()) or set())
+                custom_models = [
+                    model for model in previous_models
+                    if str(model).casefold() not in known_models
+                ]
+                refreshed_models = list(online_models)
+                refreshed_keys = {str(model).casefold() for model in refreshed_models}
+                refreshed_models.extend(
+                    model for model in custom_models
+                    if str(model).casefold() not in refreshed_keys
+                )
+
+                selected_model = manager_list.currentItem().text() if manager_list.currentItem() else ''
+                manager_list.clear()
+                manager_list.addItems(refreshed_models)
+                for index in range(manager_list.count()):
+                    if manager_list.item(index).text() == selected_model:
+                        manager_list.setCurrentRow(index)
+                        break
+                manager._known_catalog_models = {
+                    str(model).casefold() for model in online_models
+                }
+                save_manager_state = getattr(manager, '_save_model_list_state', None)
+                if callable(save_manager_state):
+                    save_manager_state()
+
+            if poll_button is not None:
+                poll_button.setEnabled(True)
+                poll_button.setText("🌐 Poll Providers")
+            if poll_status is not None:
+                if online:
+                    poll_status.setText(
+                        f"✓ {len(online_models)} models · {', '.join(sorted(online))}"
+                    )
+                    poll_status.setStyleSheet("color: #78d69a; font-size: 8pt;")
+                else:
+                    poll_status.setText("No online catalog responded; using static fallbacks.")
+                    poll_status.setStyleSheet("color: #e3b65b; font-size: 8pt;")
+
+        if online:
+            self.append_log(
+                f"🌐 Updated online model catalog: {', '.join(sorted(online))}"
+            )
 
     def _install_model_completer(self, model_list):
         """Create and install a prefix-priority completer on the model combobox.
@@ -18150,6 +18295,13 @@ Recent translations to summarize:
                         return 2      # segment-start
                     pos = slash + 1
                 return 3              # plain substring
+
+        old_proxy = getattr(self, '_model_completer_proxy', None)
+        if old_proxy is not None:
+            try:
+                self.model_combo.lineEdit().textEdited.disconnect(old_proxy.set_search_text)
+            except (RuntimeError, TypeError):
+                pass
 
         source = QStringListModel(model_list)
         proxy = _PrefixPriorityProxy()
@@ -18578,6 +18730,10 @@ Recent translations to summarize:
         
         # Initial check
         self.on_model_change()
+        # UI construction is synchronous; by the time this runs, the API-key
+        # field and the rest of the window are available. Network work stays
+        # on the daemon catalog thread.
+        QTimer.singleShot(0, self._start_provider_model_catalog_refresh)
     
     def _create_profile_section(self):
         """Create profile/profile section"""
@@ -19198,11 +19354,14 @@ Recent translations to summarize:
             paste_action.setEnabled(False)
 
         menu.addSeparator()
+        refresh_action = menu.addAction("🌐 Refresh Online Models")
         manage_action = menu.addAction("⚙️ Manage Models...")
 
         action = menu.exec(self.model_combo.mapToGlobal(position))
 
-        if action == manage_action:
+        if action == refresh_action:
+            self._start_provider_model_catalog_refresh()
+        elif action == manage_action:
             self._open_model_manager()
         elif action == cut_action and line_edit is not None:
             line_edit.cut()
@@ -19528,6 +19687,50 @@ Recent translations to summarize:
                 save_state()
         reset_btn.clicked.connect(reset_defaults)
         button_column.addWidget(reset_btn)
+
+        button_column.addSpacing(10)
+
+        # Visible provider-catalog polling. This uses the same asynchronous
+        # refresh as startup, so the manager and the rest of Qt stay responsive.
+        poll_btn = QPushButton("🌐 Poll Providers")
+        poll_btn.setToolTip(
+            "Fetch current model catalogs for providers that are public or have credentials; "
+            "use built-in lists when a provider cannot be reached."
+        )
+        poll_btn.setStyleSheet(
+            "QPushButton { background-color: #236f91; color: white; font-weight: bold; }"
+            "QPushButton:hover { background-color: #2d86ad; }"
+            "QPushButton:disabled { background-color: #3f4b53; color: #aeb8bf; }"
+        )
+        button_column.addWidget(poll_btn)
+
+        poll_status = QLabel("Ready to poll online catalogs")
+        poll_status.setWordWrap(True)
+        poll_status.setStyleSheet("color: #8fa8bd; font-size: 8pt;")
+        button_column.addWidget(poll_status)
+
+        # Keep only genuinely custom entries when replacing an online/static
+        # provider catalog after the user presses Poll Providers.
+        dialog._known_catalog_models = {
+            str(model).casefold() for model in get_model_options()
+        }
+        dialog._model_list_widget = list_widget
+        dialog._model_poll_button = poll_btn
+        dialog._model_poll_status = poll_status
+        dialog._save_model_list_state = save_state
+        dialog._catalog_poll_pending = False
+
+        def poll_provider_catalogs():
+            dialog._catalog_poll_pending = True
+            poll_btn.setEnabled(False)
+            poll_btn.setText("⏳ Polling…")
+            poll_status.setText("Contacting provider catalogs in the background…")
+            poll_status.setStyleSheet("color: #73b9e6; font-size: 8pt;")
+            started = self._start_provider_model_catalog_refresh()
+            if not started:
+                poll_status.setText("Waiting for the current catalog refresh to finish…")
+
+        poll_btn.clicked.connect(poll_provider_catalogs)
 
         button_column.addStretch()
 
@@ -22601,6 +22804,7 @@ Recent translations to summarize:
         if initial_key:
             self.api_key_entry.setText(initial_key)
         self.api_key_entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.api_key_entry.editingFinished.connect(self._start_provider_model_catalog_refresh)
         self.frame.addWidget(self.api_key_entry, 8, 1, 1, 3)
         
         # Show/Hide API Key button (row 8)

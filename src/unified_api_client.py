@@ -21117,6 +21117,9 @@ class UnifiedClient:
     def _send_cohere(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Cohere API"""
         max_retries = self._get_max_retries()
+        cohere_model = str(self.model or '')
+        if cohere_model.lower().startswith('cohere/'):
+            cohere_model = cohere_model[len('cohere/'):]
 
         if cohere is not None:
             # Use Cohere SDK, but do NOT reuse clients across calls.
@@ -21134,7 +21137,7 @@ class UnifiedClient:
                         elif msg['role'] == 'system':
                             message = msg['content'] + "\n\n" + message
                     response = client.chat(
-                        model=self.model,
+                        model=cohere_model,
                         message=message,
                         chat_history=chat_history,
                         temperature=temperature,
@@ -21171,7 +21174,7 @@ class UnifiedClient:
                 chat_history.append({"role": "CHATBOT", "message": msg['content']})
 
         data = {
-            "model": self.model,
+            "model": cohere_model,
             "message": message,
             "chat_history": chat_history,
             "max_tokens": max_tokens
@@ -21369,6 +21372,9 @@ class UnifiedClient:
         elif provider == 'sambanova':
             if effective_model.startswith('sam/'):
                 effective_model = effective_model[4:]  # Remove 'sam/' prefix
+        elif provider == 'together':
+            if effective_model.startswith('together/'):
+                effective_model = effective_model[len('together/'):]
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -27393,7 +27399,7 @@ class UnifiedClient:
             'tii': "https://api.tii.ae/v1",
             'microsoft': "https://api.microsoft.com/v1",
             'databricks': lambda: f"{os.getenv('DATABRICKS_API_URL', 'https://YOUR-WORKSPACE.databricks.com')}/serving/endpoints",
-            'together': "https://api.together.xyz/v1",
+            'together': lambda: os.getenv("TOGETHER_API_URL", "https://api.together.xyz/v1"),
             'openrouter': "https://openrouter.ai/api/v1",
             'literouter': "https://api.literouter.com/v1",
             'opencode': lambda: os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1"),
