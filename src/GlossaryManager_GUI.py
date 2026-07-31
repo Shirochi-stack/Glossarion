@@ -705,6 +705,9 @@ class GlossaryManagerMixin:
         """Clear the inline glossary editor (tree, file combo, stats and the
         in-memory data). Called when the associated input file has been cleared
         so stale auto-loaded entries do not linger in the editor."""
+        stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+        if callable(stop_refresh_animation):
+            stop_refresh_animation(force=True)
         try:
             tree = getattr(self, 'glossary_tree', None)
             if tree is not None:
@@ -779,6 +782,72 @@ class GlossaryManagerMixin:
                 break
             current = parent
         return '/'.join(reversed(parts)) if parts else os.path.basename(path)
+
+    def _glossary_type_count_summary(self, entries, max_custom_types=7):
+        """Return built-in and prioritized custom entry-type counts for editor status."""
+        counts = {}
+        display_names = {}
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            raw_type = str(entry.get('type') or '').strip()
+            if not raw_type:
+                continue
+            normalized = raw_type.casefold()
+            counts[normalized] = counts.get(normalized, 0) + 1
+            display_names.setdefault(normalized, raw_type)
+
+        characters = counts.get('character', 0)
+        terms = counts.get('terms', 0) + counts.get('term', 0)
+        parts = [f"Characters: {characters}", f"Terms: {terms}"]
+
+        configured_types = (
+            getattr(self, 'custom_entry_types', None)
+            or getattr(self, 'config', {}).get('custom_entry_types', {})
+            or {}
+        )
+        configured_meta = {}
+        if isinstance(configured_types, dict):
+            for order, (type_name, type_config) in enumerate(configured_types.items()):
+                normalized = str(type_name or '').strip().casefold()
+                if not normalized:
+                    continue
+                type_config = type_config if isinstance(type_config, dict) else {}
+                configured_meta[normalized] = {
+                    'has_gender': bool(type_config.get('has_gender', False)),
+                    'order': order,
+                    'display_name': str(type_name).strip(),
+                }
+
+        built_in_types = {'character', 'term', 'terms'}
+        custom_types = [
+            normalized
+            for normalized, count in counts.items()
+            if normalized not in built_in_types and count > 0
+        ]
+        custom_types.sort(
+            key=lambda normalized: (
+                not configured_meta.get(normalized, {}).get('has_gender', False),
+                -counts[normalized],
+                configured_meta.get(normalized, {}).get('order', float('inf')),
+                normalized,
+            )
+        )
+
+        try:
+            custom_limit = max(0, int(max_custom_types))
+        except (TypeError, ValueError):
+            custom_limit = 7
+        for normalized in custom_types[:custom_limit]:
+            raw_label = (
+                configured_meta.get(normalized, {}).get('display_name')
+                or display_names.get(normalized)
+                or normalized
+            )
+            label = str(raw_label).replace('_', ' ').strip().title()
+            parts.append(f"{label}: {counts[normalized]}")
+
+        return ", ".join(parts)
 
     def _parse_editor_token_glossary_async(self, lines):
         """Parse token-efficient glossary CSV text without touching Qt widgets."""
@@ -1104,9 +1173,7 @@ class GlossaryManagerMixin:
 
         stats = [f"Total entries: {len(entries)}"]
         if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
-            characters = sum(1 for e in entries if e.get('type') == 'character')
-            terms = sum(1 for e in entries if e.get('type') == 'terms')
-            stats.append(f"Characters: {characters}, Terms: {terms}")
+            stats.append(self._glossary_type_count_summary(entries))
         elif current_format == 'list':
             chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
             locs = sum(1 for e in entries if 'locations' in e and e['locations'])
@@ -6642,9 +6709,7 @@ Do not stop after the glossary."""
         def _loaded_glossary_stats_text(entries):
             stats = [f"Total entries: {len(entries)}"]
             if self.current_glossary_format in ['list', 'token_csv'] and entries and isinstance(entries[0], dict) and 'type' in entries[0]:
-                characters = sum(1 for e in entries if isinstance(e, dict) and e.get('type') == 'character')
-                terms = sum(1 for e in entries if isinstance(e, dict) and e.get('type') == 'terms')
-                stats.append(f"Characters: {characters}, Terms: {terms}")
+                stats.append(self._glossary_type_count_summary(entries))
             elif self.current_glossary_format == 'list':
                 chars = sum(1 for e in entries if isinstance(e, dict) and ('original_name' in e or 'name' in e))
                 locs = sum(1 for e in entries if isinstance(e, dict) and 'locations' in e and e['locations'])
@@ -6671,6 +6736,9 @@ Do not stop after the glossary."""
                     _repair_loading_stats_label_if_tree_loaded()
                 return
             self._editor_load_token = None
+            stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+            if callable(stop_refresh_animation):
+                stop_refresh_animation()
             if not payload.get('ok'):
                 error = payload.get('error', 'Unknown error')
                 print(f"load_glossary_for_editing failed: {error}")
@@ -7171,9 +7239,7 @@ Do not stop after the glossary."""
                
                if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New format stats
-                   characters = sum(1 for e in entries if e.get('type') == 'character')
-                   terms = sum(1 for e in entries if e.get('type') == 'terms')
-                   stats.append(f"Characters: {characters}, Terms: {terms}")
+                   stats.append(self._glossary_type_count_summary(entries))
                elif self.current_glossary_format == 'list':
                    # Old format stats
                    chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
@@ -7729,9 +7795,7 @@ Do not stop after the glossary."""
             
             # For new format, show type breakdown
             if self.current_glossary_format in ['list', 'token_csv'] and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
-                characters = sum(1 for e in self.current_glossary_data if e.get('type') == 'character')
-                terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'terms')
-                stats_layout.addWidget(QLabel(f"Characters: {characters}, Terms: {terms}"))
+                stats_layout.addWidget(QLabel(self._glossary_type_count_summary(self.current_glossary_data)))
             
             main_layout.addSpacing(15)
             
@@ -9947,6 +10011,9 @@ Do not stop after the glossary."""
 
         def force_refresh_glossary_editor():
             """Reload the selected glossary from disk without relying on mtime."""
+            start_refresh_animation = getattr(self, '_start_force_refresh_animation', None)
+            if callable(start_refresh_animation):
+                start_refresh_animation()
             path = self.editor_file_entry.text()
             if path and os.path.exists(path):
                 try:
@@ -9968,25 +10035,104 @@ Do not stop after the glossary."""
             auto_select_current_glossary()
             refreshed_path = self.editor_file_entry.text()
             if not refreshed_path or not os.path.exists(refreshed_path):
+                stop_refresh_animation = getattr(self, '_stop_force_refresh_animation', None)
+                if callable(stop_refresh_animation):
+                    stop_refresh_animation(force=True)
                 QMessageBox.warning(
                     parent,
                     "No Glossary Found",
                     "No glossary file is available to refresh.",
                 )
 
-        self.force_refresh_glossary_btn = QPushButton("Force Refresh")
-        self.force_refresh_glossary_btn.setFixedWidth(110)
+        self.force_refresh_glossary_btn = QPushButton("🔄 Force Refresh")
+        self.force_refresh_glossary_btn.setFixedWidth(135)
         self.force_refresh_glossary_btn.setToolTip(
             "Reload the glossary directly from disk, even when automatic change detection misses it."
         )
-        self.force_refresh_glossary_btn.clicked.connect(
-            force_refresh_glossary_editor
+        def _set_force_refresh_button_style(background, hover="#0e7490"):
+            try:
+                self.force_refresh_glossary_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {background}; color: white; padding: 8px; "
+                    "font-weight: bold; } "
+                    f"QPushButton:hover {{ background-color: {hover}; }}"
+                )
+            except RuntimeError:
+                pass
+
+        self._force_refresh_animation_timer = QTimer(self.force_refresh_glossary_btn)
+        self._force_refresh_animation_timer.setInterval(160)
+        self._force_refresh_animation_frame = 0
+        self._force_refresh_animation_started_at = 0.0
+        self._force_refresh_animation_generation = 0
+        self._force_refresh_animation_stop_pending = False
+        refresh_animation_frames = (
+            ("🔄 Refreshing", "#0891b2"),
+            ("🔄 Refreshing.", "#0ea5c6"),
+            ("🔄 Refreshing..", "#22b8cf"),
+            ("🔄 Refreshing...", "#0ea5c6"),
         )
-        self.force_refresh_glossary_btn.setStyleSheet(
-            "QPushButton { background-color: #0891b2; color: white; padding: 8px; "
-            "font-weight: bold; } "
-            "QPushButton:hover { background-color: #0e7490; }"
-        )
+
+        def _advance_force_refresh_animation():
+            try:
+                frame = self._force_refresh_animation_frame % len(refresh_animation_frames)
+                text, background = refresh_animation_frames[frame]
+                self.force_refresh_glossary_btn.setText(text)
+                _set_force_refresh_button_style(background, background)
+                self._force_refresh_animation_frame = frame + 1
+            except (AttributeError, RuntimeError):
+                self._force_refresh_animation_timer.stop()
+
+        def _start_force_refresh_animation():
+            if self._force_refresh_animation_timer.isActive():
+                return
+            self._force_refresh_animation_generation += 1
+            self._force_refresh_animation_stop_pending = False
+            self._force_refresh_animation_started_at = time.monotonic()
+            self._force_refresh_animation_frame = 0
+            self.force_refresh_glossary_btn.setEnabled(False)
+            _advance_force_refresh_animation()
+            self._force_refresh_animation_timer.start()
+
+        def _finish_force_refresh_animation(generation):
+            if generation != self._force_refresh_animation_generation:
+                return
+            try:
+                self._force_refresh_animation_timer.stop()
+                self._force_refresh_animation_frame = 0
+                self._force_refresh_animation_started_at = 0.0
+                self._force_refresh_animation_stop_pending = False
+                self.force_refresh_glossary_btn.setText("🔄 Force Refresh")
+                self.force_refresh_glossary_btn.setEnabled(True)
+                _set_force_refresh_button_style("#0891b2")
+            except (AttributeError, RuntimeError):
+                pass
+
+        def _stop_force_refresh_animation(force=False):
+            try:
+                if not self._force_refresh_animation_timer.isActive():
+                    return
+                generation = self._force_refresh_animation_generation
+                elapsed = time.monotonic() - self._force_refresh_animation_started_at
+                remaining_ms = max(0, int((0.9 - elapsed) * 1000))
+                if not force and remaining_ms > 0:
+                    if not self._force_refresh_animation_stop_pending:
+                        self._force_refresh_animation_stop_pending = True
+                        QTimer.singleShot(
+                            remaining_ms,
+                            lambda current_generation=generation: _finish_force_refresh_animation(
+                                current_generation
+                            ),
+                        )
+                    return
+                _finish_force_refresh_animation(generation)
+            except (AttributeError, RuntimeError):
+                pass
+
+        self._force_refresh_animation_timer.timeout.connect(_advance_force_refresh_animation)
+        self._start_force_refresh_animation = _start_force_refresh_animation
+        self._stop_force_refresh_animation = _stop_force_refresh_animation
+        self.force_refresh_glossary_btn.clicked.connect(force_refresh_glossary_editor)
+        _set_force_refresh_button_style("#0891b2")
         file_layout.addWidget(self.force_refresh_glossary_btn)
 
         # Load-Glossary shortcut: mirrors the main toolbar's "Load Glossary"
