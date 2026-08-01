@@ -1619,6 +1619,35 @@ def check_account_status(access_token: str, account_id: int = 0) -> Dict:
     return result
 
 
+def fetch_available_models(
+    access_token: str,
+    timeout: int = 15,
+    account_id: int = 0,
+) -> List[str]:
+    """Return Code Assist models exposed by account-specific quota buckets."""
+    del timeout  # ``check_account_status`` owns bounded per-request timeouts.
+    status = check_account_status(access_token, account_id=account_id)
+    error = str(status.get("error") or "").strip()
+    if error:
+        raise RuntimeError(error)
+    models: List[str] = []
+    seen = set()
+    for bucket in status.get("quota_buckets", []) or []:
+        if not isinstance(bucket, dict):
+            continue
+        model = str(
+            bucket.get("modelId")
+            or bucket.get("model_id")
+            or bucket.get("model")
+            or ""
+        ).strip()
+        key = model.casefold()
+        if model and key not in seen:
+            seen.add(key)
+            models.append(model)
+    return models
+
+
 def send_chat_completion_aistudio(
     access_token: str,
     messages: List[Dict],

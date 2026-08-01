@@ -453,6 +453,29 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
     return metadata
 
 
+def fetch_available_models(timeout: int = 15) -> List[str]:
+    """Return NVIDIA's current public NIM catalog model IDs."""
+    response = requests.get(
+        "https://integrate.api.nvidia.com/v1/models",
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        timeout=max(1, int(round(timeout))),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    entries = payload.get("data", []) if isinstance(payload, dict) else []
+    models: List[str] = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model = str(entry.get("id") or entry.get("name") or "").strip()
+        key = model.casefold()
+        if model and key not in seen:
+            seen.add(key)
+            models.append(model)
+    return models
+
+
 def _content_to_text(content: Any) -> str:
     if content is None:
         return ""

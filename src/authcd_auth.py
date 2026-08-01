@@ -531,6 +531,37 @@ def get_store(account_id: Optional[int] = None) -> AuthCDTokenStore:
         return store
 
 
+def fetch_available_models(access_token: str, timeout: int = 10) -> List[str]:
+    """List Anthropic models available to the existing Claude OAuth session."""
+    response = requests.get(
+        "https://api.anthropic.com/v1/models",
+        params={"limit": 1000},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "User-Agent": _CLAUDE_CODE_USER_AGENT,
+            "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
+            "x-app": "cli",
+        },
+        timeout=max(1, int(round(timeout))),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    entries = payload.get("data", []) if isinstance(payload, dict) else []
+    models: List[str] = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model = str(entry.get("id") or entry.get("name") or "").strip()
+        key = model.casefold()
+        if model and key not in seen:
+            seen.add(key)
+            models.append(model)
+    return models
+
+
 # ===========================================================================
 # Anthropic Messages API adapter
 # ===========================================================================

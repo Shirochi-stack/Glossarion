@@ -605,12 +605,7 @@ PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
 
 
 STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
-    "authgpt/": "OAuth backend does not expose a stable general catalog endpoint",
-    "authcd/": "OAuth backend does not expose a stable general catalog endpoint",
-    "authgem/": "OAuth account and project context are required",
-    "authgem-vertex/": "Vertex catalogs are project and region specific",
-    "authnd/": "Browser-backed NVIDIA route uses the curated chat catalog",
-    "authza/": "Browser-backed model selector does not expose a stable catalog endpoint",
+    "authgem-vertex*/": "Vertex publisher inference resources do not expose a list operation",
     "vertex/": "Vertex catalogs are project and region specific",
     "search/": "Search route is a fixed service rather than a model catalog",
     "perplexity/": "The provider catalog currently lists Agent API models, not this chat route",
@@ -619,13 +614,8 @@ STATIC_ONLY_PROVIDER_PREFIXES: Mapping[str, str] = {
 
 _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("authgem-vertex/", "static"),
-    ("authgpt/", "static"),
     ("authgrok/", "authgrok"),
     ("authgem-key/", "authgem_key"),
-    ("authgem/", "static"),
-    ("authcd/", "static"),
-    ("authnd/", "static"),
-    ("authza/", "static"),
     ("ocagy/", "ocagy"),
     ("antigravity/", "antigravity"),
     ("vertex/", "static"),
@@ -674,6 +664,9 @@ _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 def _catalog_provider_for_model(model: str) -> Optional[str]:
     """Resolve a dropdown model to the catalog that owns its namespace."""
     value = str(model or "").strip().lower()
+    authenticated_target = _authenticated_catalog_target(value)
+    if authenticated_target is not None:
+        return authenticated_target[0]
     authgrok_match = re.match(r"^authgrok(\d{1,4})/", value)
     if authgrok_match:
         return f"authgrok:{int(authgrok_match.group(1))}"
@@ -684,6 +677,21 @@ def _catalog_provider_for_model(model: str) -> Optional[str]:
         if value.startswith(prefixes):
             return provider
     return None
+
+
+def _authenticated_catalog_target(
+    active_model: str,
+) -> Optional[Tuple[str, str, int, str]]:
+    """Return (cache name, dropdown prefix, account id, route) for auth routes."""
+    value = str(active_model or "").strip().lower()
+    match = re.match(r"^(authgpt|authcd|authgem|authnd|authza)(\d{0,4})/", value)
+    if not match:
+        return None
+    route = match.group(1)
+    account_id = int(match.group(2) or 0)
+    provider_name = route if not account_id else f"{route}:{account_id}"
+    prefix = f"{route}{account_id if account_id else ''}/"
+    return provider_name, prefix, account_id, route
 
 
 def _model_catalog_cache_path() -> str:
@@ -1029,6 +1037,90 @@ def _fetch_authgrok_catalog(active_model: str, timeout: float) -> Optional[Tuple
     return provider_name, models
 
 
+def _authenticated_catalog_has_session(active_model: str) -> bool:
+    """Check an auth route's local session without refreshing or opening login."""
+    target = _authenticated_catalog_target(active_model)
+    if target is None:
+        return False
+    _provider_name, _prefix, account_id, route = target
+    if route == "authnd":
+        # NVIDIA's advertised model list is public; WebEngine/hCaptcha is only
+        # needed when the user actually sends a request.
+        return True
+    module_name = {
+        "authgpt": "authgpt_auth",
+        "authcd": "authcd_auth",
+        "authgem": "authgem_auth",
+        "authza": "authza_auth",
+    }[route]
+    module = __import__(module_name)
+    store = module.get_store(account_id)
+    has_tokens = getattr(store, "has_tokens", False)
+    return bool(has_tokens() if callable(has_tokens) else has_tokens)
+
+
+def _fetch_authenticated_catalog(
+    active_model: str,
+    timeout: float,
+) -> Optional[Tuple[str, List[str]]]:
+    """Poll the selected auth account without initiating an interactive login."""
+    target = _authenticated_catalog_target(active_model)
+    if target is None:
+        return None
+    provider_name, prefix, account_id, route = target
+
+    if route == "authnd":
+        import authnd_auth
+
+        advertised = {
+            str(model).strip().casefold()
+            for model in authnd_auth.fetch_available_models(
+                timeout=max(1, int(round(timeout)))
+            )
+            if str(model).strip()
+        }
+        # AuthND's hidden /predict transport supports the curated chat subset,
+        # while NVIDIA's public endpoint also contains embeddings, parsers,
+        # safety models, and other incompatible NIM types. Preserve the trusted
+        # chat order and validate it against the live catalog.
+        raw_models = [
+            model[len("authnd/"):]
+            for model in _get_static_model_options()
+            if model.casefold().startswith("authnd/")
+            and model[len("authnd/"):].casefold() in advertised
+        ]
+    elif route == "authza":
+        import authza_auth
+
+        raw_models = authza_auth.fetch_available_models(
+            account_id=account_id,
+            # Restoring the persistent browser can include a 30s navigation
+            # plus its bounded network-idle wait.
+            timeout=max(60, int(round(timeout))),
+        )
+    else:
+        module_name = {
+            "authgpt": "authgpt_auth",
+            "authcd": "authcd_auth",
+            "authgem": "authgem_auth",
+        }[route]
+        module = __import__(module_name)
+        store = module.get_store(account_id)
+        access_token = store.get_valid_access_token(auto_login=False)
+        kwargs = {"timeout": max(1, int(round(timeout)))}
+        if route == "authgem":
+            kwargs["account_id"] = account_id
+        raw_models = module.fetch_available_models(access_token, **kwargs)
+
+    models = _deduplicate_models(
+        model if str(model).casefold().startswith(prefix.casefold()) else f"{prefix}{model}"
+        for model in raw_models
+    )
+    if not models:
+        raise ValueError(f"{route} returned no usable model IDs")
+    return provider_name, models
+
+
 def _ocagy_has_account() -> bool:
     """Check OcAgy's local OAuth store without exposing or refreshing tokens."""
     import ocagy_cli
@@ -1166,6 +1258,13 @@ def due_provider_catalog_for_model(
     if provider == "authgrok" or provider.startswith("authgrok:"):
         return provider
 
+    authenticated_target = _authenticated_catalog_target(active_model)
+    if authenticated_target is not None and authenticated_target[0] == provider:
+        try:
+            return provider if _authenticated_catalog_has_session(active_model) else None
+        except Exception:
+            return None
+
     if provider == "ocagy":
         try:
             return provider if _ocagy_has_account() else None
@@ -1238,6 +1337,31 @@ def refresh_provider_model_catalogs(
             failed.add(authgrok_name)
             statuses[authgrok_name] = _catalog_error_status(error)
 
+    authenticated_target = _authenticated_catalog_target(active_model)
+    if (
+        authenticated_target is not None
+        and (only_provider is None or authenticated_target[0] == only_provider)
+    ):
+        authenticated_name = authenticated_target[0]
+        try:
+            authenticated = _authenticated_catalog_has_session(active_model)
+        except Exception as error:
+            authenticated = False
+            statuses[authenticated_name] = _catalog_error_status(error)
+        if authenticated:
+            attempted.add(authenticated_name)
+            try:
+                authenticated_result = _fetch_authenticated_catalog(active_model, timeout)
+                if authenticated_result is not None:
+                    name, models = authenticated_result
+                    successful[name] = models
+                    statuses[name] = f"online ({len(models)} models)"
+            except Exception as error:
+                failed.add(authenticated_name)
+                statuses[authenticated_name] = _catalog_error_status(error)
+        elif authenticated_name not in statuses:
+            statuses[authenticated_name] = "static fallback (no provider credential)"
+
     if only_provider is None or only_provider == "ocagy":
         try:
             ocagy_authenticated = _ocagy_has_account()
@@ -1289,6 +1413,14 @@ def refresh_provider_model_catalogs(
         built_in_names.update(spec.name for spec in custom_specs)
         built_in_names.update(name for name in successful if name.startswith("authgrok"))
         built_in_names.update(name for name in failed if name.startswith("authgrok"))
+        built_in_names.update(
+            name for name in successful
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+        )
+        built_in_names.update(
+            name for name in failed
+            if name.split(":", 1)[0] in {"authgpt", "authcd", "authgem", "authnd", "authza"}
+        )
         for name in failed:
             if name in built_in_names:
                 providers.pop(name, None)

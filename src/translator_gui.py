@@ -19021,6 +19021,11 @@ Recent translations to summarize:
                 'openrouter': 'OpenRouter',
                 'openai': 'OpenAI',
                 'anthropic': 'Anthropic',
+                'authgpt': 'AuthGPT',
+                'authcd': 'AuthCD',
+                'authgem': 'AuthGem',
+                'authnd': 'AuthND',
+                'authza': 'AuthZA',
                 'authgem_key': 'AuthGem Key',
                 'ocagy': 'OcAgy',
                 'gemini': 'Gemini',
@@ -19028,7 +19033,10 @@ Recent translations to summarize:
                 'zai': 'Z.ai',
                 'zhipu': 'Zhipu',
             }
-            return aliases.get(str(name), str(name).replace('_', ' ').title())
+            raw_name = str(name)
+            base_name, separator, account = raw_name.partition(':')
+            label = aliases.get(base_name, base_name.replace('_', ' ').title())
+            return f"{label} #{account}" if separator and account else label
 
         online = [
             (name, status) for name, status in statuses.items()
@@ -19080,6 +19088,10 @@ Recent translations to summarize:
                 "   🔑 On-demand only: authgrok*/ — select an AuthGrok account model; "
                 "the existing signed-in session is then queried without opening a login"
             )
+        lines.append(
+            "   🔑 Signed-in route polling: authgpt*/, authcd*/, authgem*/, authnd*/, "
+            "and authza*/ are polled when that route/account is selected; login is never opened"
+        )
         self.append_log('\n'.join(lines))
 
     def _install_model_completer(self, model_list):

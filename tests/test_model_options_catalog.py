@@ -271,6 +271,141 @@ def test_logged_in_ocagy_is_eligible_for_automatic_polling(tmp_path, monkeypatch
     ) == "ocagy"
 
 
+def test_signed_in_authgpt_numbered_account_polls_codex_manifest(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    token_calls = []
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+        def get_valid_access_token(self, auto_login=True):
+            token_calls.append(auto_login)
+            return "chatgpt-oauth"
+
+    fake_authgpt = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout: (
+            fetch_calls.append((token, timeout))
+            or ["gpt-live", "gpt-next"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authgpt_auth", fake_authgpt)
+
+    assert model_options.catalog_provider_for_model("authgpt2/gpt-old") == "authgpt:2"
+    assert model_options.due_provider_catalog_for_model(
+        "authgpt2/gpt-old"
+    ) == "authgpt:2"
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgpt2/gpt-old",
+        only_provider="authgpt:2",
+        timeout=0.25,
+    )
+
+    assert token_calls == [False]
+    assert fetch_calls == [("chatgpt-oauth", 1)]
+    assert result.provider_models["authgpt:2"] == [
+        "authgpt2/gpt-live",
+        "authgpt2/gpt-next",
+    ]
+
+
+def test_authgem_poll_uses_selected_account_quota_catalog(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+        def get_valid_access_token(self, auto_login=True):
+            assert auto_login is False
+            return "google-oauth"
+
+    fake_authgem = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda token, timeout, account_id: (
+            fetch_calls.append((token, timeout, account_id))
+            or ["gemini-account-live"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authgem_auth", fake_authgem)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authgem7/gemini-old",
+        only_provider="authgem:7",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [("google-oauth", 1, 7)]
+    assert result.provider_models["authgem:7"] == [
+        "authgem7/gemini-account-live",
+    ]
+
+
+def test_authnd_poll_validates_curated_chat_models_against_public_catalog(
+    tmp_path, monkeypatch
+):
+    _isolated_cache(tmp_path, monkeypatch)
+    fake_authnd = types.SimpleNamespace(
+        fetch_available_models=lambda timeout: [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "baai/bge-m3",
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "authnd_auth", fake_authnd)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authnd/nvidia/old",
+        only_provider="authnd",
+        timeout=0.1,
+    )
+
+    assert result.provider_models["authnd"] == [
+        "authnd/nvidia/nemotron-3-ultra-550b-a55b",
+    ]
+    assert "authnd/baai/bge-m3" not in result.models
+
+
+def test_authza_poll_reads_existing_selector_without_login(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    fetch_calls = []
+
+    class FakeStore:
+        has_tokens = True
+
+    fake_authza = types.SimpleNamespace(
+        get_store=lambda account_id: FakeStore(),
+        fetch_available_models=lambda account_id, timeout: (
+            fetch_calls.append((account_id, timeout)) or ["GLM-5", "GLM-4.7"]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "authza_auth", fake_authza)
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="authza3/GLM-4.7",
+        only_provider="authza:3",
+        timeout=0.1,
+    )
+
+    assert fetch_calls == [(3, 60)]
+    assert result.provider_models["authza:3"] == [
+        "authza3/GLM-5",
+        "authza3/GLM-4.7",
+    ]
+
+
+def test_only_vertex_style_routes_remain_static_by_design():
+    static_routes = model_options.STATIC_ONLY_PROVIDER_PREFIXES
+
+    assert "authgpt/" not in static_routes
+    assert "authcd/" not in static_routes
+    assert "authgem/" not in static_routes
+    assert "authnd/" not in static_routes
+    assert "authza/" not in static_routes
+    assert "authgem-vertex*/" in static_routes
+
+
 def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
 

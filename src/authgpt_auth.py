@@ -618,6 +618,54 @@ def get_store(account_id: Optional[int] = None) -> AuthGPTTokenStore:
         return store
 
 
+def fetch_available_models(
+    access_token: str,
+    timeout: int = 10,
+    base_url: Optional[str] = None,
+) -> List[str]:
+    """Return the model manifest exposed to the signed-in ChatGPT account.
+
+    Codex uses ``GET /models`` on the same ``/backend-api/codex`` backend as
+    the Responses transport. This operation is read-only; callers obtain the
+    token with ``auto_login=False`` so polling can never open a login window.
+    """
+    effective_base = str(
+        base_url or os.getenv("AUTHGPT_BASE_URL", CHATGPT_BASE_URL) or ""
+    ).rstrip("/")
+    codex_base = (
+        effective_base
+        if effective_base.casefold().endswith("/codex")
+        else f"{effective_base}/codex"
+    )
+    response = requests.get(
+        f"{codex_base}/models",
+        # The backend validates this as a semantic version. A neutral value is
+        # sufficient for manifest compatibility filtering.
+        params={"client_version": "0.0.0"},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+        timeout=max(1, int(round(timeout))),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    entries = payload.get("models", []) if isinstance(payload, dict) else []
+    models: List[str] = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("visibility", "list") or "list").casefold() == "hide":
+            continue
+        model = str(entry.get("slug") or entry.get("id") or "").strip()
+        key = model.casefold()
+        if model and key not in seen:
+            seen.add(key)
+            models.append(model)
+    return models
+
+
 # ===========================================================================
 # ChatGPT backend API adapter (Codex Responses API)
 # ===========================================================================

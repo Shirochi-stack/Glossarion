@@ -17,6 +17,7 @@ Requires: pip install playwright && python -m playwright install chromium
 """
 import os
 import json
+import re
 import time
 import logging
 import threading
@@ -277,6 +278,112 @@ class _BrowserManager:
         _pw_thread.execute(_minimize, timeout=10)
 
         return True
+
+    def has_persisted_session(self) -> bool:
+        """Check for an existing browser session without opening login UI."""
+        if self._context is not None and self._page is not None:
+            try:
+                return bool(_pw_thread.execute(self._is_logged_in_impl, timeout=10))
+            except Exception:
+                pass
+
+        # Z.AI stores its login token in localStorage. Chromium persists that
+        # database below Local Storage/leveldb; merely having the profile
+        # directory is not sufficient because it is created at construction.
+        for root, _dirs, files in os.walk(self._profile_dir):
+            normalized = root.replace("\\", "/").casefold()
+            if "/local storage/" not in normalized:
+                continue
+            for filename in files:
+                try:
+                    if os.path.getsize(os.path.join(root, filename)) > 0:
+                        return True
+                except OSError:
+                    continue
+        return False
+
+    def fetch_available_models(self, timeout: int = 30) -> List[str]:
+        """Read the model names from an already-authenticated UI selector.
+
+        This may restore the minimized persistent browser, but it never enters
+        ``ensure_logged_in`` and therefore never opens or waits for a login.
+        """
+        def _collect_model_texts():
+            if self._context is None or self._page is None or self._page.is_closed():
+                self._start_context_impl(headless=False)
+                self._minimize_window_impl()
+                self._navigate_impl()
+            elif not self._is_logged_in_impl():
+                self._navigate_impl()
+
+            if not self._is_logged_in_impl():
+                raise RuntimeError("AuthZA: no authenticated browser session")
+
+            page = self._page
+            opened = page.evaluate("""
+                () => {
+                    const visible = (element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = getComputedStyle(element);
+                        return rect.width > 0 && rect.height > 0 &&
+                            style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const buttons = [...document.querySelectorAll('button')].filter(visible);
+                    const target = buttons.find((button) =>
+                        /(?:glm|model)/i.test((button.innerText || button.textContent || '').trim())
+                    );
+                    if (!target) return false;
+                    target.click();
+                    return true;
+                }
+            """)
+            if not opened:
+                raise RuntimeError("AuthZA: model selector was not found")
+            page.wait_for_timeout(900)
+            return page.evaluate("""
+                () => {
+                    const visible = (element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = getComputedStyle(element);
+                        return rect.width > 0 && rect.height > 0 &&
+                            style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const selectors = [
+                        '[role="option"]', '[role="menuitem"]',
+                        '[role="listbox"] button', '[role="menu"] button',
+                        '[data-radix-popper-content-wrapper] button',
+                        '[data-radix-popper-content-wrapper] [tabindex]'
+                    ];
+                    const nodes = [...document.querySelectorAll(selectors.join(','))];
+                    return nodes.filter(visible).map((node) =>
+                        (node.innerText || node.textContent || '').trim()
+                    ).filter(Boolean);
+                }
+            """)
+
+        texts = _pw_thread.execute(
+            _collect_model_texts,
+            timeout=max(10, int(round(timeout))),
+        )
+        models: List[str] = []
+        seen = set()
+        pattern = re.compile(
+            r"\bGLM(?:[- ]\d+(?:\.\d+)*)(?:[- ][A-Za-z0-9]+){0,3}\b",
+            re.IGNORECASE,
+        )
+        for text in texts or []:
+            for line in str(text).splitlines():
+                match = pattern.search(line.strip())
+                if not match:
+                    continue
+                model = re.sub(r"\s+", "-", match.group(0)).strip("-.,:; ")
+                key = model.casefold()
+                if model and key not in seen:
+                    seen.add(key)
+                    models.append(model)
+        if not models:
+            raise RuntimeError("AuthZA: authenticated model selector returned no model names")
+        return models
 
     # -- send message via UI -------------------------------------------------
 
@@ -750,6 +857,10 @@ class AuthZATokenStore:
         self._manager.clear_session()
 
     @property
+    def has_tokens(self) -> bool:
+        return self._manager.has_persisted_session()
+
+    @property
     def manager(self) -> _BrowserManager:
         return self._manager
 
@@ -783,6 +894,14 @@ def get_store(account_id: Optional[int] = None) -> AuthZATokenStore:
         store = AuthZATokenStore(account_id=account_id)
         _account_stores[account_id] = store
         return store
+
+
+def fetch_available_models(account_id: int = 0, timeout: int = 30) -> List[str]:
+    """Poll the existing Z.AI browser session's live model selector."""
+    store = get_store(account_id)
+    if not store.has_tokens:
+        raise RuntimeError("AuthZA: no authenticated browser session")
+    return store.manager.fetch_available_models(timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
