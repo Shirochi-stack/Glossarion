@@ -1,7 +1,9 @@
 import json
 import os
+import queue
 import stat
 import sys
+import threading
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -140,6 +142,140 @@ def test_status_discovers_plugin_models_and_accounts(tmp_path, monkeypatch):
     assert "refreshToken" not in account_summary
 
 
+def test_quota_status_fetches_live_plugin_pools_without_exposing_tokens(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_enabled_account(config_dir)
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    calls = []
+
+    def fake_form(url, values, timeout):
+        calls.append((url, values["refresh_token"], timeout))
+        return {"access_token": "temporary-access-token"}
+
+    def fake_post(url, access_token, payload, timeout, *, user_agent=ocagy_cli._ANTIGRAVITY_QUOTA_USER_AGENT):
+        assert access_token == "temporary-access-token"
+        calls.append((url, dict(payload), user_agent))
+        if url.endswith(":loadCodeAssist"):
+            return {"cloudaicompanionProject": {"id": "managed-project"}}
+        assert payload == {"project": "managed-project"}
+        if url.endswith(":fetchAvailableModels"):
+            return {
+                "models": {
+                    "claude-sonnet-4-6": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.75,
+                            "resetTime": "2030-01-02T00:00:00Z",
+                        }
+                    },
+                    "gemini-3.1-pro-high": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.6,
+                            "resetTime": "2030-01-01T23:00:00Z",
+                        }
+                    },
+                    "gemini-3.1-pro-low": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.8,
+                            "resetTime": "2030-01-02T00:00:00Z",
+                        }
+                    },
+                    "gemini-3-flash": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.15,
+                            "resetTime": "2030-01-01T22:00:00Z",
+                        }
+                    },
+                }
+            }
+        if url.endswith(":retrieveUserQuota"):
+            return {
+                "buckets": [{
+                    "modelId": "gemini-2.5-pro",
+                    "remainingFraction": 0.9,
+                    "resetTime": "2030-01-02T00:00:00Z",
+                }]
+            }
+        raise AssertionError(f"Unexpected quota URL: {url}")
+
+    monkeypatch.setattr(ocagy_cli, "_quota_form_json", fake_form)
+    monkeypatch.setattr(ocagy_cli, "_quota_post_json", fake_post)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_plugin_oauth_client_credentials",
+        lambda: ("test-client-id", "test-client-secret"),
+    )
+
+    status = ocagy_cli.get_quota_status(timeout=7)
+
+    assert status["account_count"] == 1
+    account = status["quota_accounts"][0]
+    assert account["status"] == "ok"
+    assert account["antigravity"]["claude"]["remaining_fraction"] == 0.75
+    assert account["antigravity"]["gemini-pro"]["remaining_fraction"] == 0.6
+    assert account["antigravity"]["gemini-pro"]["model_count"] == 2
+    assert account["antigravity"]["gemini-flash"]["remaining_fraction"] == 0.15
+    assert account["gemini_cli"][0]["remaining_fraction"] == 0.9
+    serialized = json.dumps(status)
+    assert "secret" not in serialized
+    assert "temporary-access-token" not in serialized
+    assert any(call[0].endswith(":fetchAvailableModels") for call in calls)
+    assert any(call[0].endswith(":retrieveUserQuota") for call in calls)
+
+
+def test_oauth_application_metadata_is_loaded_from_installed_plugin(tmp_path, monkeypatch):
+    plugin_root = tmp_path / "opencode-antigravity-auth"
+    constants = plugin_root / "dist" / "src" / "constants.js"
+    constants.parent.mkdir(parents=True)
+    constants.write_text(
+        "export const ANTIGRAVITY_CLIENT_ID = 'test-client-id';\n"
+        "export const ANTIGRAVITY_CLIENT_SECRET = 'test-client-secret';\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OCAGY_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.delenv("OCAGY_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("OCAGY_GOOGLE_CLIENT_SECRET", raising=False)
+
+    assert ocagy_cli._plugin_oauth_client_credentials() == (
+        "test-client-id",
+        "test-client-secret",
+    )
+
+
+def test_poll_models_expands_opencode_models_into_ocagy_variants(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_enabled_account(config_dir)
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+
+    models = ocagy_cli.poll_models(timeout=5)
+
+    assert models == [
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/gemini-3.1-pro-low",
+        "ocagy/gemini-3-flash-minimal",
+        "ocagy/gemini-3-flash-low",
+        "ocagy/gemini-3-flash-medium",
+        "ocagy/gemini-3-flash-high",
+    ]
+
+
+def test_polled_unknown_antigravity_model_remains_routable():
+    models = ocagy_cli.normalize_polled_models([
+        "google/gemini-2.5-pro",
+        "google/antigravity-future-model",
+    ])
+
+    assert models == ["ocagy/antigravity-future-model"]
+    assert ocagy_cli.resolve_model(models[0]) == (
+        "google/antigravity-future-model",
+        None,
+    )
+
+
 def test_send_without_oauth_account_stops_before_launch(tmp_path, monkeypatch):
     exe = _fake_opencode(tmp_path)
     config_dir = tmp_path / "empty-config"
@@ -249,6 +385,37 @@ def test_live_event_state_collects_deltas_reasoning_usage_and_completion():
     assert state.complete is True
     assert state.finish_reason == "stop"
     assert ocagy_cli._usage_from_value(state.step_events)["total_tokens"] == 10
+
+
+def test_httpx_sse_reader_emits_event_before_stream_finishes():
+    blocked_after_first_event = threading.Event()
+    release_stream = threading.Event()
+    output = queue.Queue()
+
+    class FakeHttpxResponse:
+        def iter_lines(self):
+            yield 'data: {"type":"server.connected"}'
+            yield ""
+            blocked_after_first_event.set()
+            release_stream.wait(timeout=2)
+            yield 'data: {"type":"session.idle","properties":{"sessionID":"s1"}}'
+            yield ""
+
+    reader = threading.Thread(
+        target=ocagy_cli._read_sse_events,
+        args=(FakeHttpxResponse(), output),
+        daemon=True,
+    )
+    reader.start()
+    try:
+        assert blocked_after_first_event.wait(timeout=1)
+        kind, event = output.get(timeout=1)
+        assert kind == "event"
+        assert event == {"type": "server.connected"}
+        assert reader.is_alive(), "The first event must arrive while the HTTP stream is still open"
+    finally:
+        release_stream.set()
+        reader.join(timeout=2)
 
 
 def test_prompt_preserves_roles():

@@ -17786,6 +17786,7 @@ Recent translations to summarize:
                 self.append_log(
                     f"✅ OpenCode Antigravity account linked. Login button updated to {count} account(s)."
                 )
+                self._schedule_current_provider_catalog_refresh(0)
                 return
         except Exception:
             pass
@@ -17793,7 +17794,7 @@ Recent translations to summarize:
         if self._ocagy_login_poll_attempts_remaining <= 0:
             self._stop_ocagy_login_poll()
             self.append_log(
-                "ℹ️ OpenCode Antigravity login watch ended. Click 📊 if the account was linked afterward."
+                "ℹ️ OpenCode Antigravity login watch ended. Click 📊 to refresh account status and check live quotas."
             )
 
     def _ocagy_login_clicked(self):
@@ -17823,7 +17824,7 @@ Recent translations to summarize:
         self.append_log(
             "🪐 Opened OpenCode login. Select Google → OAuth with Google (Antigravity), "
             "finish sign-in, and the account count will refresh automatically. "
-            "You can also click 📊 to refresh it manually."
+            "Click 📊 afterward to check live quotas."
         )
 
     @Slot()
@@ -17902,14 +17903,15 @@ Recent translations to summarize:
         dialog.exec()
 
     def _ocagy_status_clicked(self):
-        """Check OpenCode, plugin model visibility, and configured OAuth accounts."""
+        """Fetch live quota status for configured OpenCode Antigravity accounts."""
         self.ocagy_status_btn.setEnabled(False)
         self.ocagy_status_btn.setText("⏳")
+        self.append_log("📊 OcAgy: checking live Antigravity quotas…")
 
         def worker():
             try:
-                from ocagy_cli import get_status
-                self._ocagy_status_data = get_status()
+                from ocagy_cli import get_quota_status
+                self._ocagy_status_data = get_quota_status()
                 QMetaObject.invokeMethod(self, "_ocagy_status_result", Qt.QueuedConnection)
             except Exception as exc:
                 self._ocagy_status_error_msg = str(exc)
@@ -17927,30 +17929,69 @@ Recent translations to summarize:
             self.append_log(f"❌ OpenCode CLI not found: {status.get('error', '')}")
             self._show_ocagy_install_dialog()
             return
-        self.append_log(f"🪐 OpenCode CLI: {status.get('executable', '')}")
-        if status.get('version'):
-            self.append_log(f"   Version: {status.get('version')}")
-        self.append_log("   Plugin models: " + ("ready" if status.get('plugin_ready') else "not detected"))
-        self.append_log(f"   OAuth accounts: {int(status.get('account_count', 0) or 0)}")
+        accounts = status.get('quota_accounts') or []
         self.append_log(
-            "   Parallel account offset: "
-            + ("enabled" if status.get('pid_offset_enabled') else "not enabled")
+            f"🪐 OcAgy quota check complete | "
+            f"OAuth accounts: {int(status.get('account_count', 0) or 0)}"
         )
-        emails = status.get('emails') or []
-        if emails:
-            self.append_log("   Accounts: " + ", ".join(emails[:10]))
-        models = status.get('models') or []
-        if models:
-            self.append_log("   Models: " + ", ".join(models[:20]))
-        if status.get('error'):
-            self.append_log(f"   Status detail: {status.get('error')}")
+        if not accounts:
+            self.append_log("⚠️ No OpenCode Antigravity OAuth accounts were found.")
+            return
+
+        def quota_line(label, data, indent="      "):
+            remaining = data.get('remaining_fraction')
+            if isinstance(remaining, (int, float)):
+                percent = max(0, min(100, round(float(remaining) * 100)))
+                marker = "🟢" if percent >= 60 else "🟡" if percent >= 20 else "🔴"
+                value = f"{percent}% remaining"
+            else:
+                marker = "⚪"
+                value = "remaining quota unknown"
+            reset_in = str(data.get('reset_in', '') or '').strip()
+            reset = f" | resets in {reset_in}" if reset_in else ""
+            self.append_log(f"{indent}{marker} {label}: {value}{reset}")
+
+        group_labels = (
+            ('claude', 'Claude'),
+            ('gemini-pro', 'Gemini 3 Pro'),
+            ('gemini-flash', 'Gemini 3 Flash'),
+        )
+        for account in accounts:
+            email = account.get('email') or f"Account {int(account.get('index', 0) or 0) + 1}"
+            disabled = " (disabled)" if account.get('disabled') else ""
+            self.append_log(f"👤 {email}{disabled}")
+            if account.get('status') != 'ok':
+                self.append_log(f"   ❌ Quota check failed: {account.get('error', 'Unknown error')}")
+                continue
+
+            self.append_log("   🪐 Antigravity quota:")
+            antigravity = account.get('antigravity') or {}
+            if antigravity:
+                for key, label in group_labels:
+                    data = antigravity.get(key)
+                    if isinstance(data, dict):
+                        quota_line(label, data)
+            else:
+                self.append_log(
+                    f"      ⚠️ {account.get('antigravity_error', 'No quota information returned')}"
+                )
+
+            self.append_log("   ⌨️ Gemini CLI fallback quota:")
+            cli_models = account.get('gemini_cli') or []
+            if cli_models:
+                for item in cli_models:
+                    quota_line(item.get('model_id', 'Unknown model'), item)
+            else:
+                self.append_log(
+                    f"      ⚠️ {account.get('gemini_cli_error', 'No quota information returned')}"
+                )
 
     @Slot()
     def _ocagy_status_error(self):
         self.ocagy_status_btn.setEnabled(True)
         self.ocagy_status_btn.setText("📊")
         err = getattr(self, '_ocagy_status_error_msg', 'Unknown error')
-        self.append_log(f"❌ OpenCode Antigravity status check failed: {err}")
+        self.append_log(f"❌ OcAgy quota check failed: {err}")
 
     # ==================================================================
     # Antigravity proxy account controls
@@ -18870,6 +18911,7 @@ Recent translations to summarize:
                 'openai': 'OpenAI',
                 'anthropic': 'Anthropic',
                 'authgem_key': 'AuthGem Key',
+                'ocagy': 'OcAgy',
                 'gemini': 'Gemini',
                 'xai': 'xAI',
                 'zai': 'Z.ai',
@@ -19311,7 +19353,7 @@ Recent translations to summarize:
             "border: 1px solid #a78bfa;"
         )
         self.ocagy_status_btn.setToolTip(
-            "Check OpenCode, plugin model registration, and configured Antigravity OAuth accounts."
+            "Check live Antigravity and Gemini CLI fallback quota for each OcAgy OAuth account."
         )
         self.ocagy_status_btn.clicked.connect(self._ocagy_status_clicked)
         self.ocagy_status_btn.hide()

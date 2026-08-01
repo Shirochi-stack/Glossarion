@@ -25620,7 +25620,9 @@ class UnifiedClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=self.request_timeout,
-                log_fn=print,
+                # Force each httpx SSE-derived log line through stdout now;
+                # redirected GUI writers receive it synchronously as well.
+                log_fn=lambda message: print(message, flush=True),
                 log_stream=log_stream,
             )
             content = str(result.get("content", "") or "")

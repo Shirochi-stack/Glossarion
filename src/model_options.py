@@ -504,8 +504,8 @@ _MODEL_CATALOG_MEMORY_CACHE: Optional[dict] = None
 
 
 # These routes expose a model-list operation compatible with the current
-# Glossarion transport. AuthGrok is handled separately because its account
-# session uses a provider-specific catalog protocol.
+# Glossarion transport. AuthGrok and OcAgy are handled separately because their
+# OAuth sessions use provider-specific catalog mechanisms.
 PROVIDER_CATALOG_SPECS: Tuple[ProviderCatalogSpec, ...] = (
     ProviderCatalogSpec(
         "openrouter", "or/", "https://openrouter.ai/api/v1/models?output_modalities=text",
@@ -626,6 +626,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
     ("authcd/", "static"),
     ("authnd/", "static"),
     ("authza/", "static"),
+    ("ocagy/", "ocagy"),
     ("antigravity/", "antigravity"),
     ("vertex/", "static"),
     ("search/", "static"),
@@ -1028,6 +1029,24 @@ def _fetch_authgrok_catalog(active_model: str, timeout: float) -> Optional[Tuple
     return provider_name, models
 
 
+def _ocagy_has_account() -> bool:
+    """Check OcAgy's local OAuth store without exposing or refreshing tokens."""
+    import ocagy_cli
+
+    summary = ocagy_cli.get_account_summary()
+    return bool(int(summary.get("account_count", 0) or 0))
+
+
+def _fetch_ocagy_catalog(timeout: float) -> List[str]:
+    """Poll plugin-backed models through OpenCode's existing OAuth session."""
+    import ocagy_cli
+
+    models = _deduplicate_models(ocagy_cli.poll_models(timeout=timeout))
+    if not models:
+        raise ValueError("OcAgy returned no usable model IDs")
+    return models
+
+
 def _provider_key(
     spec: ProviderCatalogSpec,
     active_provider: Optional[str],
@@ -1126,6 +1145,12 @@ def due_provider_catalog_for_model(
     if provider == "authgrok" or provider.startswith("authgrok:"):
         return provider
 
+    if provider == "ocagy":
+        try:
+            return provider if _ocagy_has_account() else None
+        except Exception:
+            return None
+
     specs = list(PROVIDER_CATALOG_SPECS)
     specs.extend(_custom_catalog_specs(custom_routes, active_model))
     spec = next((item for item in specs if item.name == provider), None)
@@ -1192,6 +1217,24 @@ def refresh_provider_model_catalogs(
             failed.add(authgrok_name)
             statuses[authgrok_name] = _catalog_error_status(error)
 
+    if only_provider is None or only_provider == "ocagy":
+        try:
+            ocagy_authenticated = _ocagy_has_account()
+        except Exception as error:
+            ocagy_authenticated = False
+            statuses["ocagy"] = _catalog_error_status(error)
+        if ocagy_authenticated:
+            attempted.add("ocagy")
+            try:
+                ocagy_models = _fetch_ocagy_catalog(timeout)
+                successful["ocagy"] = ocagy_models
+                statuses["ocagy"] = f"online ({len(ocagy_models)} models)"
+            except Exception as error:
+                failed.add("ocagy")
+                statuses["ocagy"] = _catalog_error_status(error)
+        elif "ocagy" not in statuses:
+            statuses["ocagy"] = "static fallback (no provider credential)"
+
     def fetch(item: Tuple[ProviderCatalogSpec, str]):
         spec, key = item
         return spec, _fetch_provider_catalog(spec, key, timeout)
@@ -1221,6 +1264,7 @@ def refresh_provider_model_catalogs(
         attempts = cache.setdefault("attempts", {})
         now = time.time()
         built_in_names = {spec.name for spec in PROVIDER_CATALOG_SPECS}
+        built_in_names.add("ocagy")
         built_in_names.update(spec.name for spec in custom_specs)
         built_in_names.update(name for name in successful if name.startswith("authgrok"))
         built_in_names.update(name for name in failed if name.startswith("authgrok"))

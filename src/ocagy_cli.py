@@ -34,9 +34,16 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - httpx is a required app dependency
+    httpx = None
 
 _CANCEL_EVENT = threading.Event()
 _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
@@ -45,6 +52,28 @@ _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _PLUGIN_PACKAGE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "opencode-antigravity-auth@latest") or "opencode-antigravity-auth@latest").strip()
 OPENCODE_NPM_INSTALL_COMMAND = "npm install -g opencode-ai"
 NODEJS_WINGET_INSTALL_COMMAND = "winget install --id OpenJS.NodeJS.LTS --exact"
+_ANTIGRAVITY_CLOUD_CODE_BASE = "https://cloudcode-pa.googleapis.com"
+_ANTIGRAVITY_FALLBACK_PROJECT_ID = "rising-fact-p41fc"
+_ANTIGRAVITY_QUOTA_USER_AGENT = "antigravity/windows/amd64"
+
+# OpenCode lists the plugin's base model IDs, while Glossarion exposes the
+# selectable thinking variants as separate ocagy/ entries. Keep the expansion
+# here, next to the CLI integration that owns both representations.
+_CATALOG_MODEL_VARIANTS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("google/antigravity-gemini-3.1-pro", "gemini-3.1-pro", ("high", "low")),
+    ("google/antigravity-gemini-3-pro", "gemini-3-pro", ("high", "low")),
+    (
+        "google/antigravity-gemini-3-flash",
+        "gemini-3-flash",
+        ("minimal", "low", "medium", "high"),
+    ),
+    ("google/antigravity-claude-sonnet-4-6", "claude-sonnet-4-6", ()),
+    (
+        "google/antigravity-claude-opus-4-6-thinking",
+        "claude-opus-4-6-thinking",
+        ("low", "max"),
+    ),
+)
 
 
 class OcAgyError(RuntimeError):
@@ -417,6 +446,389 @@ def get_status() -> Dict[str, Any]:
     }
 
 
+def _quota_form_json(url: str, values: Dict[str, str], timeout: float) -> Dict[str, Any]:
+    data = urllib.parse.urlencode(values).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _plugin_install_candidates() -> Iterable[Path]:
+    """Yield likely roots for the OpenCode-owned Antigravity auth plugin."""
+    override = str(os.environ.get("OCAGY_PLUGIN_ROOT", "") or "").strip()
+    if override:
+        yield Path(override).expanduser()
+
+    package_name = "opencode-antigravity-auth"
+    cache_base = Path(
+        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+    ).expanduser() / "opencode"
+    yield cache_base / "node_modules" / package_name
+    yield cache_base / "packages" / _PLUGIN_PACKAGE / "node_modules" / package_name
+    packages_dir = cache_base / "packages"
+    if packages_dir.is_dir():
+        yield from sorted(
+            packages_dir.glob(f"{package_name}@*/node_modules/{package_name}"),
+            reverse=True,
+        )
+
+
+def _plugin_oauth_client_credentials() -> Tuple[str, str]:
+    """Read OAuth application metadata from the plugin that owns authentication.
+
+    The desktop OAuth application's metadata ships with the installed plugin.
+    Glossarion must not duplicate those values in its own source or Git history.
+    """
+    configured_id = str(os.environ.get("OCAGY_GOOGLE_CLIENT_ID", "") or "").strip()
+    configured_secret = str(os.environ.get("OCAGY_GOOGLE_CLIENT_SECRET", "") or "").strip()
+    if configured_id and configured_secret:
+        return configured_id, configured_secret
+
+    patterns = {
+        "client_id": re.compile(
+            r"\bANTIGRAVITY_CLIENT_ID\s*=\s*['\"]([^'\"]+)['\"]"
+        ),
+        "client_secret": re.compile(
+            r"\bANTIGRAVITY_CLIENT_SECRET\s*=\s*['\"]([^'\"]+)['\"]"
+        ),
+    }
+    for root in _plugin_install_candidates():
+        for constants_path in (
+            root / "dist" / "src" / "constants.js",
+            root / "src" / "constants.ts",
+        ):
+            if not constants_path.is_file():
+                continue
+            try:
+                source = constants_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            client_id_match = patterns["client_id"].search(source)
+            client_secret_match = patterns["client_secret"].search(source)
+            if client_id_match and client_secret_match:
+                return client_id_match.group(1), client_secret_match.group(1)
+
+    raise OcAgyError(
+        "Could not read OAuth application metadata from the installed "
+        "opencode-antigravity-auth plugin. Restart OpenCode once so the plugin "
+        "is installed, or set OCAGY_PLUGIN_ROOT to its package directory."
+    )
+
+
+def _quota_post_json(
+    url: str,
+    access_token: str,
+    payload: Dict[str, Any],
+    timeout: float,
+    *,
+    user_agent: str = _ANTIGRAVITY_QUOTA_USER_AGENT,
+) -> Dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    result = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+    return result if isinstance(result, dict) else {}
+
+
+def _quota_error_message(error: BaseException) -> str:
+    """Return bounded quota-check detail without reflecting credentials."""
+    if isinstance(error, urllib.error.HTTPError):
+        detail = ""
+        try:
+            body = error.read(4096).decode("utf-8", errors="replace")
+            payload = json.loads(body)
+            candidate = payload.get("error", payload) if isinstance(payload, dict) else payload
+            if isinstance(candidate, dict):
+                detail = str(
+                    candidate.get("message")
+                    or candidate.get("error_description")
+                    or candidate.get("status")
+                    or ""
+                )
+            elif isinstance(candidate, str):
+                detail = candidate
+        except Exception:
+            detail = ""
+        clean_detail = re.sub(r"\s+", " ", detail).strip()[:200]
+        suffix = f" — {clean_detail}" if clean_detail else ""
+        return f"HTTP {int(getattr(error, 'code', 0) or 0)}{suffix}"
+    return re.sub(r"\s+", " ", str(error or "")).strip()[:240] or type(error).__name__
+
+
+def _quota_reset_timestamp(value: Any) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _quota_reset_in(value: Any) -> str:
+    timestamp = _quota_reset_timestamp(value)
+    if timestamp is None:
+        return ""
+    remaining = max(0, int(round(timestamp - time.time())))
+    if remaining <= 0:
+        return "now"
+    days, remainder = divmod(remaining, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days}d {hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _normalize_quota_fraction(value: Any) -> Optional[float]:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return max(0.0, min(1.0, float(value)))
+
+
+def _aggregate_antigravity_quota(models: Any) -> Dict[str, Dict[str, Any]]:
+    groups: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(models, dict):
+        return groups
+    for model_name, raw_info in models.items():
+        info = raw_info if isinstance(raw_info, dict) else {}
+        combined = f"{model_name} {info.get('displayName', '')} {info.get('modelName', '')}".lower()
+        if "claude" in combined:
+            group = "claude"
+        elif "gemini-3" in combined or "gemini 3" in combined:
+            group = "gemini-flash" if "flash" in combined else "gemini-pro"
+        else:
+            continue
+        quota = info.get("quotaInfo")
+        if not isinstance(quota, dict):
+            continue
+        remaining = _normalize_quota_fraction(quota.get("remainingFraction"))
+        reset_time = str(quota.get("resetTime", "") or "")
+        existing = groups.setdefault(group, {"model_count": 0})
+        existing["model_count"] += 1
+        if remaining is not None:
+            current = existing.get("remaining_fraction")
+            existing["remaining_fraction"] = remaining if current is None else min(current, remaining)
+        reset_timestamp = _quota_reset_timestamp(reset_time)
+        existing_timestamp = _quota_reset_timestamp(existing.get("reset_time"))
+        if reset_timestamp is not None and (
+            existing_timestamp is None or reset_timestamp < existing_timestamp
+        ):
+            existing["reset_time"] = reset_time
+            existing["reset_in"] = _quota_reset_in(reset_time)
+    return groups
+
+
+def _aggregate_gemini_cli_quota(buckets: Any) -> List[Dict[str, Any]]:
+    models: List[Dict[str, Any]] = []
+    if not isinstance(buckets, list):
+        return models
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        model_id = str(bucket.get("modelId", "") or "").strip()
+        if not (model_id.startswith("gemini-3-") or model_id == "gemini-2.5-pro"):
+            continue
+        remaining = _normalize_quota_fraction(bucket.get("remainingFraction"))
+        entry: Dict[str, Any] = {"model_id": model_id}
+        if remaining is not None:
+            entry["remaining_fraction"] = remaining
+        reset_time = str(bucket.get("resetTime", "") or "")
+        if reset_time:
+            entry["reset_time"] = reset_time
+            entry["reset_in"] = _quota_reset_in(reset_time)
+        models.append(entry)
+    return sorted(models, key=lambda item: str(item.get("model_id", "")).casefold())
+
+
+def _check_account_quota(account: Dict[str, Any], index: int, timeout: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "index": index,
+        "email": str(account.get("email", "") or "") or f"Account {index + 1}",
+        "disabled": account.get("enabled", True) is False,
+        "status": "error",
+    }
+    refresh_token = str(account.get("refreshToken", "") or "").strip()
+    if not refresh_token:
+        result["error"] = "Stored OAuth account has no refresh token"
+        return result
+    try:
+        client_id, client_secret = _plugin_oauth_client_credentials()
+        token_payload = _quota_form_json(
+            "https://oauth2.googleapis.com/token",
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout,
+        )
+        access_token = str(token_payload.get("access_token", "") or "").strip()
+        if not access_token:
+            raise OcAgyError("Google did not return an OAuth access token")
+
+        project_id = str(
+            account.get("managedProjectId") or account.get("projectId") or ""
+        ).strip()
+        if not project_id:
+            try:
+                project_payload = _quota_post_json(
+                    f"{_ANTIGRAVITY_CLOUD_CODE_BASE}/v1internal:loadCodeAssist",
+                    access_token,
+                    {"metadata": {"ideType": "ANTIGRAVITY"}},
+                    timeout,
+                )
+                project_value = project_payload.get("cloudaicompanionProject")
+                if isinstance(project_value, str):
+                    project_id = project_value
+                elif isinstance(project_value, dict):
+                    project_id = str(project_value.get("id", "") or "")
+            except Exception:
+                project_id = ""
+        project_id = project_id or _ANTIGRAVITY_FALLBACK_PROJECT_ID
+        body = {"project": project_id}
+
+        try:
+            antigravity_payload = _quota_post_json(
+                f"{_ANTIGRAVITY_CLOUD_CODE_BASE}/v1internal:fetchAvailableModels",
+                access_token,
+                body,
+                timeout,
+            )
+            result["antigravity"] = _aggregate_antigravity_quota(
+                antigravity_payload.get("models")
+            )
+            if not result["antigravity"]:
+                result["antigravity_error"] = "No Antigravity quota information returned"
+        except Exception as exc:
+            result["antigravity"] = {}
+            result["antigravity_error"] = _quota_error_message(exc)
+
+        try:
+            cli_payload = _quota_post_json(
+                f"{_ANTIGRAVITY_CLOUD_CODE_BASE}/v1internal:retrieveUserQuota",
+                access_token,
+                body,
+                timeout,
+                user_agent="GeminiCLI/1.0.0/gemini-2.5-pro",
+            )
+            result["gemini_cli"] = _aggregate_gemini_cli_quota(cli_payload.get("buckets"))
+            if not result["gemini_cli"]:
+                result["gemini_cli_error"] = "No Gemini CLI quota information returned"
+        except Exception as exc:
+            result["gemini_cli"] = []
+            result["gemini_cli_error"] = _quota_error_message(exc)
+
+        result["status"] = "ok"
+        return result
+    except Exception as exc:
+        result["error"] = _quota_error_message(exc)
+        return result
+
+
+def get_quota_status(timeout: float = 15.0) -> Dict[str, Any]:
+    """Fetch sanitized live quota data using the plugin's stored OAuth accounts."""
+    executable = find_executable()
+    _require_oauth_account()
+    account_path = _config_dir() / "antigravity-accounts.json"
+    try:
+        payload = json.loads(account_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise OcAgyError(f"Could not read the OpenCode Antigravity account store: {exc}") from exc
+    accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
+    if not isinstance(accounts, list):
+        accounts = []
+    timeout = max(1.0, float(timeout))
+    results = [
+        _check_account_quota(account, index, timeout)
+        for index, account in enumerate(accounts)
+        if isinstance(account, dict)
+    ]
+    enabled_count = sum(1 for item in results if not item.get("disabled"))
+    return {
+        "installed": True,
+        "authenticated": enabled_count > 0,
+        "plugin_ready": True,
+        "executable": executable,
+        "account_count": enabled_count,
+        "emails": [item["email"] for item in results if not item.get("disabled")],
+        "quota_accounts": results,
+        "checked_at": time.time(),
+    }
+
+
+def normalize_polled_models(raw_models: Iterable[str]) -> List[str]:
+    """Convert OpenCode plugin model IDs into selectable Glossarion IDs."""
+    available = {
+        str(model or "").strip().casefold(): str(model or "").strip()
+        for model in raw_models
+        if str(model or "").strip().casefold().startswith("google/antigravity-")
+    }
+    result: List[str] = []
+    known = set()
+    for raw_model, friendly, variants in _CATALOG_MODEL_VARIANTS:
+        key = raw_model.casefold()
+        known.add(key)
+        if key not in available:
+            continue
+        if variants:
+            result.extend(f"ocagy/{friendly}-{variant}" for variant in variants)
+        else:
+            result.append(f"ocagy/{friendly}")
+
+    # Preserve future plugin models even before Glossarion gives them a friendly
+    # alias. resolve_model() already accepts the retained antigravity-* suffix.
+    for key in sorted(set(available) - known):
+        raw_model = available[key]
+        result.append(f"ocagy/{raw_model.split('/', 1)[1]}")
+    return list(dict.fromkeys(result))
+
+
+def poll_models(timeout: float = 8.0) -> List[str]:
+    """Poll OpenCode's Google catalog using the existing OcAgy OAuth account."""
+    _require_oauth_account()
+    try:
+        listing = _run_short(
+            ["models", "google"],
+            timeout=max(1, int(round(float(timeout)))),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OcAgyError("OpenCode model polling timed out") from exc
+    combined = _clean_text((listing.stdout or "") + "\n" + (listing.stderr or ""))
+    if listing.returncode != 0:
+        raise _classify_error(
+            combined or f"opencode models exited with code {listing.returncode}",
+            listing.returncode,
+        )
+    raw_models = re.findall(r"google/[A-Za-z0-9._-]+", combined)
+    models = normalize_polled_models(raw_models)
+    if not models:
+        raise OcAgyError("OpenCode returned no usable Antigravity OAuth model IDs")
+    return models
+
+
 def launch_login() -> Dict[str, Any]:
     """Open OpenCode's plugin-aware OAuth login in a visible terminal."""
     exe = find_executable()
@@ -429,7 +841,7 @@ def launch_login() -> Dict[str, Any]:
             "Write-Host 'Select Google, then OAuth with Google (Antigravity).' -ForegroundColor Yellow; "
             f"Set-Location -LiteralPath {json.dumps(str(workspace))}; "
             f"& {json.dumps(exe)} auth login; "
-            "Write-Host ''; Write-Host 'When login is complete, return to Glossarion and click the status button.' -ForegroundColor Green"
+            "Write-Host ''; Write-Host 'When login is complete, return to Glossarion. The account count updates automatically; click the quota button for live usage.' -ForegroundColor Green"
         )
         proc = subprocess.Popen(
             ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -670,10 +1082,15 @@ def _drain_process_pipe(pipe: Any, output: List[str]) -> None:
 
 
 def _read_sse_events(response: Any, output: "queue.Queue[Tuple[str, Any]]") -> None:
+    """Forward each httpx SSE event immediately instead of buffering the body."""
     data_lines: List[str] = []
     try:
-        for raw in response:
-            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        for raw in response.iter_lines():
+            line = (
+                raw.decode("utf-8", errors="replace")
+                if isinstance(raw, bytes)
+                else str(raw)
+            ).rstrip("\r\n")
             if not line:
                 if data_lines:
                     value = "\n".join(data_lines)
@@ -868,6 +1285,7 @@ def _send_via_server(
             ).start()
 
     event_response = None
+    event_stream_context = None
     session_id = ""
     started = time.time()
     try:
@@ -901,13 +1319,33 @@ def _send_via_server(
             raise OcAgyError("OpenCode Antigravity could not create a streaming session.")
         session_id = str(session["id"])
 
+        if httpx is None:
+            raise OcAgyError(
+                "OcAgy real-time streaming requires httpx, but it is not installed."
+            )
         event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
-        event_request = urllib.request.Request(
-            base_url + "/event",
-            headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
-            method="GET",
+        connect_timeout = min(30.0, float(timeout_seconds))
+        stream_timeout = httpx.Timeout(
+            float(timeout_seconds),
+            connect=connect_timeout,
         )
-        event_response = urllib.request.urlopen(event_request, timeout=timeout_seconds)
+        event_stream_context = httpx.stream(
+            "GET",
+            base_url + "/event",
+            headers={
+                "Accept": "text/event-stream",
+                "Accept-Encoding": "identity",
+                "Cache-Control": "no-cache",
+            },
+            timeout=stream_timeout,
+        )
+        event_response = event_stream_context.__enter__()
+        if event_response.status_code != 200:
+            try:
+                detail = event_response.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = f"HTTP {event_response.status_code}"
+            raise _classify_error(detail, int(event_response.status_code or 1))
         threading.Thread(
             target=_read_sse_events,
             args=(event_response, event_queue),
@@ -1043,10 +1481,25 @@ def _send_via_server(
         raise _classify_error(detail, int(getattr(exc, "code", 1) or 1))
     except urllib.error.URLError as exc:
         raise OcAgyError(f"OpenCode Antigravity local streaming connection failed: {exc}")
+    except Exception as exc:
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            raise OcAgyError(
+                f"OpenCode Antigravity real-time stream timed out after {timeout_seconds}s."
+            ) from exc
+        if httpx is not None and isinstance(exc, httpx.RequestError):
+            raise OcAgyError(
+                f"OpenCode Antigravity local real-time stream failed: {exc}"
+            ) from exc
+        raise
     finally:
         if event_response is not None:
             try:
                 event_response.close()
+            except Exception:
+                pass
+        if event_stream_context is not None:
+            try:
+                event_stream_context.__exit__(None, None, None)
             except Exception:
                 pass
         _terminate_process_tree(proc)

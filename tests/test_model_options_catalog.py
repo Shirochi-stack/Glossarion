@@ -10,6 +10,9 @@ def _isolated_cache(tmp_path, monkeypatch):
     cache_path = tmp_path / "model_catalog_cache.json"
     monkeypatch.setenv("GLOSSARION_MODEL_CATALOG_CACHE", str(cache_path))
     monkeypatch.setattr(model_options, "_MODEL_CATALOG_MEMORY_CACHE", None)
+    # Never let catalog tests discover or invoke the developer's real OcAgy
+    # account. Individual OcAgy tests explicitly opt into a fake account.
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "empty-opencode-config"))
     for spec in model_options.PROVIDER_CATALOG_SPECS:
         for env_name in spec.api_key_envs:
             monkeypatch.delenv(env_name, raising=False)
@@ -190,6 +193,70 @@ def test_selected_authgrok_uses_existing_session_without_login(tmp_path, monkeyp
         "authgrok2/grok-live",
         "authgrok2/grok-build",
     ]
+
+
+def test_logged_in_ocagy_catalog_replaces_its_static_section(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: True)
+    monkeypatch.setattr(
+        model_options,
+        "_fetch_ocagy_catalog",
+        lambda timeout: calls.append(timeout) or [
+            "ocagy/gemini-3.1-pro-high",
+            "ocagy/future-live-model",
+        ],
+    )
+
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="ocagy/gemini-3.1-pro-high",
+        only_provider="ocagy",
+        timeout=0.25,
+    )
+
+    assert calls == [0.25]
+    assert result.statuses["ocagy"] == "online (2 models)"
+    assert result.provider_models["ocagy"] == [
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/future-live-model",
+    ]
+    assert "ocagy/future-live-model" in result.models
+    assert "ocagy/gemini-3.1-pro-low" not in result.models
+
+
+def test_ocagy_poll_requires_a_logged_in_account(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: False)
+    monkeypatch.setattr(
+        model_options,
+        "_fetch_ocagy_catalog",
+        lambda _timeout: (_ for _ in ()).throw(AssertionError("OcAgy should not be polled")),
+    )
+
+    assert model_options.due_provider_catalog_for_model(
+        "ocagy/gemini-3.1-pro-high"
+    ) is None
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="ocagy/gemini-3.1-pro-high",
+        only_provider="ocagy",
+        timeout=0.1,
+    )
+
+    assert result.statuses["ocagy"] == "static fallback (no provider credential)"
+    assert result.provider_models == {}
+    assert "ocagy/gemini-3.1-pro-high" in result.models
+
+
+def test_logged_in_ocagy_is_eligible_for_automatic_polling(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_options, "_ocagy_has_account", lambda: True)
+
+    assert model_options.catalog_provider_for_model(
+        "ocagy/gemini-3.1-pro-high"
+    ) == "ocagy"
+    assert model_options.due_provider_catalog_for_model(
+        "ocagy/gemini-3.1-pro-high"
+    ) == "ocagy"
 
 
 def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch):
