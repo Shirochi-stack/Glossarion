@@ -2207,8 +2207,14 @@ def _missing_ending_quotation_paragraphs(
     html_content,
     allow_plain_text=False,
     include_square_brackets=False,
+    ignore_consecutive=False,
 ):
-    """Return paragraphs missing a straight, directional, or CJK closing quote."""
+    """Return paragraphs missing a straight, directional, or CJK closing quote.
+
+    When ``ignore_consecutive`` is enabled, findings in adjacent paragraphs are
+    treated as a multi-paragraph dialogue run and suppressed. Isolated findings
+    remain reportable.
+    """
     normalized_html = _MISTYPED_HEX_APOSTROPHE_RE.sub("'", str(html_content or ""))
     soup = BeautifulSoup(normalized_html, 'html.parser')
     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
@@ -2255,6 +2261,22 @@ def _missing_ending_quotation_paragraphs(
                 'text': paragraph_text.strip(),
                 'missing_marks': missing_marks,
             })
+
+    if ignore_consecutive and len(missing) > 1:
+        missing_indexes = {item['paragraph_index'] for item in missing}
+        consecutive_indexes = {
+            paragraph_index
+            for paragraph_index in missing_indexes
+            if (
+                paragraph_index - 1 in missing_indexes
+                or paragraph_index + 1 in missing_indexes
+            )
+        }
+        missing = [
+            item
+            for item in missing
+            if item['paragraph_index'] not in consecutive_indexes
+        ]
     return missing
 
 
@@ -7959,6 +7981,10 @@ def process_html_file_batch(args):
                     'include_square_brackets_as_quotations',
                     False,
                 ),
+                ignore_consecutive=qa_settings.get(
+                    'ignore_consecutive_missing_quotations',
+                    False,
+                ),
             )
             for missing_ending in missing_ending_quotations:
                 paragraph_index = missing_ending['paragraph_index']
@@ -8637,6 +8663,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_quotation_mismatch': False,
             'ignore_excess_quotation_marks': False,
             'only_check_incomplete_quotations': False,
+            'ignore_consecutive_missing_quotations': False,
             'skip_stylistic_single_quotes': False,
             'include_square_brackets_as_quotations': False,
             'paragraph_threshold': 0.3,

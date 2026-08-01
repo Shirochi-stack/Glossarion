@@ -523,6 +523,7 @@ class QAScannerMixin:
                     'check_quotation_mismatch': False,
                     'ignore_excess_quotation_marks': False,
                     'only_check_incomplete_quotations': False,
+                    'ignore_consecutive_missing_quotations': False,
                     'skip_stylistic_single_quotes': False,
                     'include_square_brackets_as_quotations': False,
                     'check_glossary_leakage': True,
@@ -3304,6 +3305,28 @@ class QAScannerMixin:
             only_check_incomplete_quotations_layout.addStretch()
             detection_layout.addWidget(only_check_incomplete_quotations_widget)
 
+            ignore_consecutive_quotations_widget = QWidget()
+            ignore_consecutive_quotations_layout = QHBoxLayout(
+                ignore_consecutive_quotations_widget
+            )
+            ignore_consecutive_quotations_layout.setContentsMargins(20, 0, 0, 5)
+            ignore_consecutive_quotations_checkbox = self._create_styled_checkbox(
+                "Multi-dialogue mode (ignore adjacent missing endings)"
+            )
+            ignore_consecutive_quotations_checkbox.setChecked(
+                qa_settings.get('ignore_consecutive_missing_quotations', False)
+            )
+            ignore_consecutive_quotations_checkbox.setToolTip(
+                "Suppresses missing-ending warnings when they occur in two or more consecutive "
+                "paragraphs (pN, pN+1, ...). Isolated missing endings and the source/output "
+                "quotation-count comparison are still checked."
+            )
+            ignore_consecutive_quotations_layout.addWidget(
+                ignore_consecutive_quotations_checkbox
+            )
+            ignore_consecutive_quotations_layout.addStretch()
+            detection_layout.addWidget(ignore_consecutive_quotations_widget)
+
             skip_stylistic_single_quotes_widget = QWidget()
             skip_stylistic_single_quotes_layout = QHBoxLayout(skip_stylistic_single_quotes_widget)
             skip_stylistic_single_quotes_layout.setContentsMargins(20, 0, 0, 5)
@@ -3345,6 +3368,7 @@ class QAScannerMixin:
                     enabled and not only_check_incomplete_quotations_checkbox.isChecked()
                 )
                 only_check_incomplete_quotations_checkbox.setEnabled(enabled)
+                ignore_consecutive_quotations_checkbox.setEnabled(enabled)
                 ignore_excess_quotation_checkbox.setEnabled(count_comparison_enabled)
                 skip_stylistic_single_quotes_checkbox.setEnabled(count_comparison_enabled)
                 include_square_brackets_checkbox.setEnabled(enabled)
@@ -5061,6 +5085,7 @@ class QAScannerMixin:
                         'check_quotation_mismatch': (check_quotation_checkbox, lambda x: x.isChecked()),
                         'ignore_excess_quotation_marks': (ignore_excess_quotation_checkbox, lambda x: x.isChecked()),
                         'only_check_incomplete_quotations': (only_check_incomplete_quotations_checkbox, lambda x: x.isChecked()),
+                        'ignore_consecutive_missing_quotations': (ignore_consecutive_quotations_checkbox, lambda x: x.isChecked()),
                         'skip_stylistic_single_quotes': (skip_stylistic_single_quotes_checkbox, lambda x: x.isChecked()),
                         'include_square_brackets_as_quotations': (include_square_brackets_checkbox, lambda x: x.isChecked()),
                         'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
@@ -5474,6 +5499,7 @@ class QAScannerMixin:
                     ('check_quotation_mismatch', check_quotation_checkbox, False),
                     ('ignore_excess_quotation_marks', ignore_excess_quotation_checkbox, False),
                     ('only_check_incomplete_quotations', only_check_incomplete_quotations_checkbox, False),
+                    ('ignore_consecutive_missing_quotations', ignore_consecutive_quotations_checkbox, False),
                     ('skip_stylistic_single_quotes', skip_stylistic_single_quotes_checkbox, False),
                     ('include_square_brackets_as_quotations', include_square_brackets_checkbox, False),
                     ('check_glossary_leakage', check_glossary_checkbox, True),
@@ -5645,6 +5671,7 @@ class QAScannerMixin:
                     check_quotation_checkbox.setChecked(False)
                     ignore_excess_quotation_checkbox.setChecked(False)
                     only_check_incomplete_quotations_checkbox.setChecked(False)
+                    ignore_consecutive_quotations_checkbox.setChecked(False)
                     skip_stylistic_single_quotes_checkbox.setChecked(False)
                     include_square_brackets_checkbox.setChecked(False)
 

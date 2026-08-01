@@ -209,6 +209,7 @@ def test_quotation_check_defaults_off():
     assert settings["check_quotation_mismatch"] is False
     assert settings["ignore_excess_quotation_marks"] is False
     assert settings["only_check_incomplete_quotations"] is False
+    assert settings["ignore_consecutive_missing_quotations"] is False
     assert settings["skip_stylistic_single_quotes"] is False
     assert settings["include_square_brackets_as_quotations"] is False
 
@@ -284,6 +285,27 @@ def test_missing_ending_quotation_uses_odd_straight_quote_paragraph_check():
     assert [item["paragraph_index"] for item in missing] == [2, 3, 5]
     assert missing[1]["missing_marks"] == ["”"]
     assert missing[2]["missing_marks"] == ["』"]
+
+
+def test_multi_dialogue_option_suppresses_only_consecutive_missing_endings():
+    html = (
+        '<p>"first paragraph without an ending</p>'
+        '<p>"second paragraph without an ending</p>'
+        '<p>plain paragraph</p>'
+        '<p>"isolated paragraph without an ending</p>'
+    )
+
+    assert [
+        item["paragraph_index"]
+        for item in _missing_ending_quotation_paragraphs(html)
+    ] == [1, 2, 4]
+    assert [
+        item["paragraph_index"]
+        for item in _missing_ending_quotation_paragraphs(
+            html,
+            ignore_consecutive=True,
+        )
+    ] == [4]
 
 
 def test_quotation_mismatch_allows_style_changes_and_reports_count_changes():
@@ -604,6 +626,42 @@ def test_quotation_scan_can_only_check_incomplete_quotes_without_source_counts(t
         "missing_ending_quotation_p3": "[broken bracket",
     }
     assert not any("quotation_marks" in issue for issue in results[0]["issues"])
+
+
+def test_quotation_scan_applies_multi_dialogue_setting_to_reported_issues(tmp_path):
+    chapter_path = tmp_path / "chapter.html"
+    chapter_path.write_text(
+        '<p>"first adjacent opening</p>'
+        '<p>"second adjacent opening</p>'
+        '<p>plain paragraph</p>'
+        '<p>"isolated opening</p>',
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update({
+        "check_quotation_mismatch": True,
+        "only_check_incomplete_quotations": True,
+        "ignore_consecutive_missing_quotations": True,
+        "check_missing_html_tag": False,
+        "check_missing_images": False,
+        "check_repetition": False,
+        "check_translation_artifacts": False,
+        "check_ai_artifacts": False,
+        "check_glossary_leakage": False,
+        "check_word_count_ratio": False,
+    })
+
+    results = process_html_file_batch((
+        [(0, "chapter.html")], str(tmp_path), settings, "quick-scan",
+        {}, {}, True, {}, {}, {},
+    ))
+
+    assert "missing_ending_quotation_p1" not in results[0]["issues"]
+    assert "missing_ending_quotation_p2" not in results[0]["issues"]
+    assert "missing_ending_quotation_p4" in results[0]["issues"]
+    assert results[0]["qa_issue_previews"] == {
+        "missing_ending_quotation_p4": '"isolated opening',
+    }
 
 
 def test_missing_quotation_preview_is_saved_with_progress_entry(tmp_path):
