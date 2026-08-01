@@ -6331,7 +6331,8 @@ Do not stop after the glossary."""
             headers = ['#']
             for field in fields:
                 label = field.replace('_', ' ').title()
-                headers.append(f"{label} {'\U0001f53d' if field in filters else '\u25be'}")
+                filter_indicator = '🔽' if field in filters else '▾'
+                headers.append(f"{label} {filter_indicator}")
             self.glossary_tree.setHeaderLabels(headers)
             header_item = self.glossary_tree.headerItem()
             if header_item is not None:
