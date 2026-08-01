@@ -14,8 +14,57 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 @pytest.fixture(autouse=True)
 def _reset_antigravity_cancel_state():
     antigravity_proxy.reset_cancel()
+    antigravity_proxy.set_proxy_started_callback(None)
     yield
     antigravity_proxy.reset_cancel()
+    antigravity_proxy.set_proxy_started_callback(None)
+
+
+def test_proxy_started_callback_is_optional_and_notified_once():
+    calls = []
+    antigravity_proxy.set_proxy_started_callback(lambda: calls.append("ready"))
+
+    antigravity_proxy._notify_proxy_started()
+
+    assert calls == ["ready"]
+
+
+def test_manual_proxy_start_can_suppress_automatic_started_callback(tmp_path, monkeypatch):
+    calls = []
+    health_checks = iter([
+        {"healthy": False},
+        {"healthy": False},
+        {"healthy": True},
+    ])
+
+    class FakeProcess:
+        pid = 1234
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(antigravity_proxy, "_proxy_process", None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_config", lambda: str(tmp_path))
+    monkeypatch.setattr(antigravity_proxy, "check_proxy_health", lambda: next(health_checks))
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_proxy_runtime",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_find_proxy_launch_command",
+        lambda _runtime_dir: ["fake-proxy"],
+    )
+    monkeypatch.setattr(antigravity_proxy.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
+    antigravity_proxy.set_proxy_started_callback(lambda: calls.append("ready"))
+
+    status = antigravity_proxy.ensure_proxy_running(notify_started=False)
+
+    assert status == {"running": True, "auto_launched": True}
+    assert calls == []
 
 
 class FakeStreamResponse:

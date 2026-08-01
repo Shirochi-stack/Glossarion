@@ -1107,23 +1107,39 @@ def provider_model_catalog_refresh_due(
     provider: str,
     *,
     max_age: int = _MODEL_CATALOG_CACHE_TTL_SECONDS,
+    successful_only: bool = False,
 ) -> bool:
-    """Return whether an automatic provider poll is due under the persisted TTL."""
+    """Return whether an automatic provider poll is due under the persisted TTL.
+
+    ``successful_only`` is used when a previously unavailable local service has
+    just become ready. In that case, an earlier failed attempt must not suppress
+    the first usable poll, while a successful catalog from the last 24 hours
+    should still be reused.
+    """
     provider = str(provider or "").strip()
     if not provider:
         return False
     cache = _load_model_catalog_cache()
     attempts = cache.get("attempts", {})
     providers = cache.get("providers", {})
+    last_successful = cache.get("last_successful", {})
     timestamps: List[float] = []
-    try:
-        timestamps.append(float(attempts.get(provider, 0) or 0))
-    except (AttributeError, TypeError, ValueError):
-        pass
+    if not successful_only:
+        try:
+            timestamps.append(float(attempts.get(provider, 0) or 0))
+        except (AttributeError, TypeError, ValueError):
+            pass
     try:
         timestamps.append(float((providers.get(provider, {}) or {}).get("fetched_at", 0) or 0))
     except (AttributeError, TypeError, ValueError):
         pass
+    if successful_only:
+        try:
+            timestamps.append(
+                float((last_successful.get(provider, {}) or {}).get("fetched_at", 0) or 0)
+            )
+        except (AttributeError, TypeError, ValueError):
+            pass
     last_attempt = max(timestamps or [0.0])
     return (time.time() - last_attempt) >= max(0, int(max_age))
 
@@ -1137,6 +1153,11 @@ def due_provider_catalog_for_model(
 ) -> Optional[str]:
     """Return the selected provider when it is credentialed and due for auto-polling."""
     provider = catalog_provider_for_model(active_model, custom_routes)
+    # The Antigravity catalog lives behind a local proxy. Typing/selecting its
+    # prefix must not spend the 24-hour attempt TTL while that proxy is offline;
+    # its dedicated proxy-start hook polls once the service is healthy instead.
+    if provider == "antigravity":
+        return None
     if not provider or not provider_model_catalog_refresh_due(provider, max_age=max_age):
         return None
 

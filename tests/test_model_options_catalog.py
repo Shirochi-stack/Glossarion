@@ -162,6 +162,18 @@ def test_running_antigravity_proxy_replaces_its_static_catalog(tmp_path, monkeyp
     assert "antigravity/gemini-3-flash" not in result.models
 
 
+def test_selecting_antigravity_does_not_poll_before_proxy_start(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    assert model_options.catalog_provider_for_model(
+        "antigravity/gemini-3-flash"
+    ) == "antigravity"
+    assert model_options.provider_model_catalog_refresh_due("antigravity")
+    assert model_options.due_provider_catalog_for_model(
+        "antigravity/gemini-3-flash"
+    ) is None
+
+
 def test_selected_authgrok_uses_existing_session_without_login(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
     token_calls = []
@@ -357,6 +369,47 @@ def test_scoped_auto_poll_contacts_only_selected_provider_once_per_day(tmp_path,
     assert model_options.due_provider_catalog_for_model(
         "grok-3-mini", "xai-secret"
     ) == "xai"
+
+
+def test_proxy_start_poll_ignores_failed_attempt_but_reuses_fresh_success(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+    now = 1_800_000_000.0
+    monkeypatch.setattr(model_options.time, "time", lambda: now)
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: (_ for _ in ()).throw(
+            OSError("local proxy is not running")
+        ),
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="antigravity/gemini-3-flash",
+        only_provider="antigravity",
+        timeout=0.1,
+    )
+
+    assert not model_options.provider_model_catalog_refresh_due("antigravity")
+    assert model_options.provider_model_catalog_refresh_due(
+        "antigravity", successful_only=True
+    )
+
+    monkeypatch.setattr(
+        model_options,
+        "_http_get_json",
+        lambda _url, _headers, _timeout: {
+            "data": [{"id": "gemini-3-flash"}]
+        },
+    )
+    model_options.refresh_provider_model_catalogs(
+        active_model="antigravity/gemini-3-flash",
+        only_provider="antigravity",
+        timeout=0.1,
+    )
+
+    assert not model_options.provider_model_catalog_refresh_due(
+        "antigravity", successful_only=True
+    )
 
 
 def test_model_catalog_cache_uses_macos_caches_directory(monkeypatch):

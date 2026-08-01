@@ -543,6 +543,7 @@ from model_options import (
     due_provider_catalog_for_model,
     get_last_successful_provider_models,
     get_model_options,
+    provider_model_catalog_refresh_due,
     start_provider_model_catalog_refresh,
 )
 
@@ -11488,6 +11489,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     input_files_updated_signal = Signal(list)
     # Worker-to-GUI bridge for online provider model catalogs.
     model_catalog_updated_signal = Signal(object)
+    # The proxy may be auto-launched by an API worker rather than a GUI button.
+    antigravity_proxy_started_signal = Signal()
     # Worker-to-GUI bridge used to pause a Direct Text run after automatic
     # glossary generation without opening Qt dialogs from the worker thread.
     direct_text_glossary_approval_signal = Signal(str, object)
@@ -11796,6 +11799,14 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.direct_text_glossary_approval_signal.connect(
             self._show_direct_text_glossary_approval
         )
+        self.antigravity_proxy_started_signal.connect(
+            self._antigravity_proxy_started
+        )
+        try:
+            from antigravity_proxy import set_proxy_started_callback
+            set_proxy_started_callback(self.antigravity_proxy_started_signal.emit)
+        except Exception:
+            pass
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -13062,6 +13073,12 @@ Text to analyze:
         """Handle window close event properly"""
         try:
             print("[CLOSE] Window closing...")
+
+            try:
+                from antigravity_proxy import set_proxy_started_callback
+                set_proxy_started_callback(None)
+            except Exception:
+                pass
 
             self._request_hard_stop_for_shutdown()
             
@@ -18552,6 +18569,100 @@ Recent translations to summarize:
             self._current_provider_catalog_timer = timer
         timer.start(max(0, int(delay_ms)))
 
+    @Slot()
+    def _antigravity_proxy_started(self):
+        """Poll Antigravity once its local proxy is actually ready."""
+        if getattr(self, '_antigravity_post_start_poll_pending', False):
+            return
+        self._antigravity_post_start_poll_pending = True
+        QTimer.singleShot(0, self._poll_antigravity_catalog_after_proxy_start)
+
+    def _poll_antigravity_catalog_after_proxy_start(self):
+        """Reuse the catalog TTL while ignoring an offline pre-start attempt."""
+        if not provider_model_catalog_refresh_due(
+            "antigravity",
+            successful_only=True,
+        ):
+            self._antigravity_post_start_poll_pending = False
+            return
+
+        started = self._start_provider_model_catalog_refresh(
+            only_provider="antigravity",
+            automatic=True,
+        )
+        if started:
+            self._antigravity_post_start_poll_pending = False
+            return
+
+        # Another catalog refresh is finishing. Retry on the GUI thread; the
+        # successful-only TTL check above prevents a duplicate network poll.
+        QTimer.singleShot(1500, self._poll_antigravity_catalog_after_proxy_start)
+
+    def _start_provider_catalog_refresh_with_antigravity(self, show_feedback=False):
+        """Start Antigravity first, then perform the requested full catalog poll."""
+        manager = getattr(self, '_model_manager_dialog', None)
+        self._antigravity_preflight_catalog_show_feedback = bool(show_feedback)
+
+        poll_status = getattr(manager, '_model_poll_status', None) if manager is not None else None
+        if poll_status is not None:
+            poll_status.setText("Starting Antigravity proxy before polling providers…")
+        elif show_feedback:
+            self.append_log("🛸 Starting Antigravity proxy before refreshing online models…")
+
+        def _worker():
+            try:
+                from antigravity_proxy import ensure_proxy_running
+                self._manual_catalog_proxy_status = ensure_proxy_running(
+                    notify_started=False,
+                )
+            except Exception as exc:
+                self._manual_catalog_proxy_status = {
+                    "running": False,
+                    "error": str(exc),
+                }
+            try:
+                QMetaObject.invokeMethod(
+                    self,
+                    "_continue_manual_provider_catalog_refresh",
+                    Qt.QueuedConnection,
+                )
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @Slot()
+    def _continue_manual_provider_catalog_refresh(self):
+        """Continue the full refresh on Qt's thread after proxy startup finishes."""
+        manager = getattr(self, '_model_manager_dialog', None)
+
+        status = getattr(self, '_manual_catalog_proxy_status', {}) or {}
+        show_feedback = bool(
+            getattr(self, '_antigravity_preflight_catalog_show_feedback', False)
+        )
+        poll_button = getattr(manager, '_model_poll_button', None) if manager is not None else None
+        poll_status = getattr(manager, '_model_poll_status', None) if manager is not None else None
+        if poll_button is not None:
+            poll_button.setText("⏳ Polling…")
+        if status.get("running"):
+            if poll_status is not None:
+                poll_status.setText("Antigravity proxy ready. Contacting provider catalogs…")
+        else:
+            error = str(status.get("error") or "proxy could not be started")
+            self.append_log(
+                f"⚠️ Antigravity proxy startup failed before model polling: {error}"
+            )
+            if poll_status is not None:
+                poll_status.setText(
+                    "Antigravity proxy unavailable; polling the remaining providers…"
+                )
+
+        started = self._start_provider_model_catalog_refresh(
+            show_feedback=show_feedback,
+        )
+        if not started and poll_status is not None:
+            poll_status.setText("Waiting for the current catalog refresh to finish…")
+
     def _auto_poll_current_provider_catalog(self):
         """Poll only the selected provider when its persisted 24-hour TTL is due."""
         try:
@@ -20116,7 +20227,16 @@ Recent translations to summarize:
         action = menu.exec(self.model_combo.mapToGlobal(position))
 
         if action == refresh_action:
-            self._start_provider_model_catalog_refresh(show_feedback=True)
+            try:
+                active_model = self.model_combo.currentText().strip().lower()
+            except Exception:
+                active_model = str(self.config.get('model', '') or '').strip().lower()
+            if active_model.startswith('antigravity'):
+                self._start_provider_catalog_refresh_with_antigravity(
+                    show_feedback=True,
+                )
+            else:
+                self._start_provider_model_catalog_refresh(show_feedback=True)
         elif action == manage_action:
             self._open_model_manager()
         elif action == cut_action and line_edit is not None:
@@ -20497,9 +20617,19 @@ Recent translations to summarize:
         def poll_provider_catalogs():
             dialog._catalog_poll_pending = True
             poll_btn.setEnabled(False)
+            poll_status.setStyleSheet("color: #73b9e6; font-size: 8pt;")
+            try:
+                active_model = self.model_combo.currentText().strip().lower()
+            except Exception:
+                active_model = str(self.config.get('model', '') or '').strip().lower()
+
+            if active_model.startswith('antigravity'):
+                poll_btn.setText("⏳ Starting…")
+                self._start_provider_catalog_refresh_with_antigravity()
+                return
+
             poll_btn.setText("⏳ Polling…")
             poll_status.setText("Contacting provider catalogs in the background…")
-            poll_status.setStyleSheet("color: #73b9e6; font-size: 8pt;")
             started = self._start_provider_model_catalog_refresh()
             if not started:
                 poll_status.setText("Waiting for the current catalog refresh to finish…")

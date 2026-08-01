@@ -38,7 +38,7 @@ import threading
 import time
 import webbrowser
 import zipfile
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 try:
@@ -87,6 +87,8 @@ _active_responses: Dict[int, Any] = {}
 # Module-level proxy subprocess tracking.
 _proxy_process: Optional[subprocess.Popen] = None
 _proxy_launch_lock = threading.Lock()
+_proxy_started_callback: Optional[Callable[[], None]] = None
+_proxy_started_callback_lock = threading.Lock()
 
 # Auth browser tracking - only open the browser once per session.
 _auth_browser_opened = False
@@ -95,6 +97,25 @@ _auth_browser_lock = threading.Lock()
 
 def _log_noop(_: str) -> None:
     return None
+
+
+def set_proxy_started_callback(callback: Optional[Callable[[], None]]) -> None:
+    """Register the desktop notification invoked after an auto-launch is healthy."""
+    global _proxy_started_callback
+    with _proxy_started_callback_lock:
+        _proxy_started_callback = callback
+
+
+def _notify_proxy_started() -> None:
+    """Notify the UI without coupling this transport module to Qt."""
+    with _proxy_started_callback_lock:
+        callback = _proxy_started_callback
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as exc:
+        logger.debug("Antigravity proxy-start callback failed: %s", exc)
 
 
 def _proxy_command_for_humans() -> str:
@@ -1851,8 +1872,13 @@ def _proxy_launch_error() -> str:
     )
 
 
-def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
-    """Ensure the Antigravity proxy is running, auto-launching if needed."""
+def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, Any]:
+    """Ensure the Antigravity proxy is running, auto-launching if needed.
+
+    ``notify_started`` is disabled by callers that already own the follow-up
+    action, such as a manual full catalog refresh, to avoid scheduling a second
+    Antigravity-only poll for the same launch.
+    """
     global _proxy_process
 
     _log = log_fn or _log_noop
@@ -1893,6 +1919,8 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
                     time.sleep(2)
                     health = check_proxy_health()
                     if health.get("healthy"):
+                        if notify_started:
+                            _notify_proxy_started()
                         return {"running": True, "auto_launched": True}
                 return {
                     "running": False,
@@ -1972,6 +2000,8 @@ def ensure_proxy_running(log_fn=None) -> Dict[str, Any]:
             health = check_proxy_health()
             if health.get("healthy"):
                 _log("✅ Antigravity proxy is now running.")
+                if notify_started:
+                    _notify_proxy_started()
                 return {"running": True, "auto_launched": True}
 
         return {
