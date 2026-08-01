@@ -6,6 +6,7 @@ Complete implementation - no truncation
 
 import os
 import json
+import ast
 
 # GUI imports - optional for non-GUI usage
 try:
@@ -2425,15 +2426,37 @@ class BatchHeaderTranslator:
     def _fallback_parse(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
         """Fallback parsing if JSON fails"""
         result = {}
-        pattern = r'["\']?(\d+)["\']?\s*:\s*["\']([^"\']+)["\']'
+        pattern = re.compile(
+            r"""
+            (?P<key_quote>["']?)
+            (?P<key>\d+)
+            (?P=key_quote)
+            \s*:\s*
+            (?P<value_quote>["'])
+            (?P<value>
+                (?:
+                    \\[^\r\n]
+                    |
+                    (?!(?P=value_quote))[^\r\n]
+                )*
+            )
+            (?P=value_quote)
+            """,
+            re.VERBOSE,
+        )
         
         for match in re.finditer(pattern, response):
             try:
-                num = int(match.group(1))
-                title = match.group(2).strip()
+                num = int(match.group('key'))
+                quote = match.group('value_quote')
+                raw_title = match.group('value')
+                try:
+                    title = ast.literal_eval(f"{quote}{raw_title}{quote}").strip()
+                except (SyntaxError, ValueError):
+                    title = raw_title.strip()
                 if num in original_headers and title:
                     result[num] = title
-            except:
+            except (TypeError, ValueError):
                 continue
                 
         return result

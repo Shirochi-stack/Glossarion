@@ -35,6 +35,25 @@ from scan_html_folder import (
 )
 
 
+def test_header_fallback_parser_respects_matched_quote_delimiters():
+    translator = BatchHeaderTranslator(None, {})
+    malformed_response = (
+        "Translation results:\n"
+        '"1": "It\'s \\"ready\\".",\n'
+        "'2': 'She said \"go\"; it\\'s time.',\n"
+        '3: "Punctuation: commas, braces {}, and [brackets]"\n'
+    )
+
+    assert translator._parse_json_response(
+        malformed_response,
+        {1: "source one", 2: "source two", 3: "source three"},
+    ) == {
+        1: 'It\'s "ready".',
+        2: 'She said "go"; it\'s time.',
+        3: "Punctuation: commas, braces {}, and [brackets]",
+    }
+
+
 def test_cancelled_native_folder_dialog_values_are_rejected(tmp_path):
     assert _normalize_qa_dialog_path(False) == ""
     assert _normalize_qa_dialog_path(None) == ""
