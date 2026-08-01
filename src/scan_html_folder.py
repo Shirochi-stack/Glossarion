@@ -4991,12 +4991,57 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT", "API_ERROR", "TIMEOUT"}
 
     def _protected_issue_types(chapter_info):
+        import re
         protected = []
-        for issue in chapter_info.get("qa_issues_found", []) or []:
-            issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
-            if issue_type in PROTECTED_ISSUES:
-                protected.append(issue_type)
+        current = chapter_info
+        seen = set()
+        while isinstance(current, dict) and id(current) not in seen:
+            seen.add(id(current))
+            issues = current.get("qa_issues_found", []) or []
+            if isinstance(issues, dict):
+                issues = [issues] if "type" in issues else list(issues)
+            elif not isinstance(issues, (list, tuple, set)):
+                issues = [issues]
+            for issue in issues:
+                issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
+                issue_type = re.sub(r"[\s-]+", "_", str(issue_type or "").strip().upper())
+                if issue_type in PROTECTED_ISSUES and issue_type not in protected:
+                    protected.append(issue_type)
+            current = current.get("previous_progress_entry")
         return protected
+
+    def _normalized_output_name(filename):
+        base = os.path.basename(str(filename or "")).lower()
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            stem, ext = os.path.splitext(base)
+            if not ext:
+                return base
+            base = stem
+
+    def _matching_progress_entries(chapter_key, filename):
+        selected = prog["chapters"][chapter_key]
+        target_output = _normalized_output_name(selected.get("output_file"))
+        scanned_output = _normalized_output_name(filename)
+        target_num = selected.get("actual_num", selected.get("chapter_num"))
+        matches = []
+        for candidate_key, candidate in prog["chapters"].items():
+            if not isinstance(candidate, dict):
+                continue
+            candidate_output = _normalized_output_name(candidate.get("output_file"))
+            candidate_num = candidate.get("actual_num", candidate.get("chapter_num"))
+            same_output = bool(
+                candidate_output
+                and candidate_output in {target_output, scanned_output}
+            )
+            same_number = bool(
+                target_num not in (None, 0, "0")
+                and (candidate_num == target_num or str(candidate_num) == str(target_num))
+            )
+            if candidate_key == chapter_key or same_output or same_number:
+                matches.append(candidate)
+        return matches
 
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
@@ -5008,7 +5053,11 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             actual_num_being_updated = chapter_info.get("actual_num")
             log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
 
-            protected_found = _protected_issue_types(chapter_info)
+            protected_found = []
+            for matching_info in _matching_progress_entries(chapter_key, faulty_filename):
+                for issue_type in _protected_issue_types(matching_info):
+                    if issue_type not in protected_found:
+                        protected_found.append(issue_type)
             if protected_found:
                 chapter_num = _choose_log_num(
                     chapter_info,

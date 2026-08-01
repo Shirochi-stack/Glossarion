@@ -667,10 +667,10 @@ def test_qa_scan_does_not_replace_protected_issue_on_duplicate_entry(tmp_path):
             },
             "special_86": {
                 "actual_num": 86,
-                "output_file": "chapter0086.xhtml",
+                "output_file": "response_chapter0086.html",
                 "status": "qa_failed",
                 "qa_issues": True,
-                "qa_issues_found": ["PROHIBITED_CONTENT"],
+                "qa_issues_found": {"type": "prohibited content"},
             },
         }
     }
@@ -684,12 +684,11 @@ def test_qa_scan_does_not_replace_protected_issue_on_duplicate_entry(tmp_path):
         progress, faulty_chapters, [], lambda _message: None, str(tmp_path)
     )
 
-    assert progress["chapters"]["86"]["qa_issues_found"] == [
-        "unwrapped_text_content"
-    ]
-    assert progress["chapters"]["special_86"]["qa_issues_found"] == [
-        "PROHIBITED_CONTENT"
-    ]
+    assert progress["chapters"]["86"]["status"] == "completed"
+    assert "qa_issues_found" not in progress["chapters"]["86"]
+    assert progress["chapters"]["special_86"]["qa_issues_found"] == {
+        "type": "prohibited content"
+    }
 
 
 def test_quotation_scan_can_skip_stylistic_single_quote_pairs(tmp_path):
