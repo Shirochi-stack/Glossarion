@@ -201,7 +201,7 @@ The built-in model list is a safety net, not a promise that every entry is still
 **Credentials and privacy:**
 
 - Public catalogs such as OpenRouter are checked without a key.
-- For a private catalog, the key in the **API Key** box is used **only for the provider selected in the Model box**. Glossarion never tries that key against every company.
+- For a private catalog, the key in the **API Key** box is used **only for the provider selected in the Model box**. Glossarion never tries that key against every provider.
 - Example: select `grok-3-mini`, paste an xAI key, then poll to check xAI. Select an unprefixed `gemini-...` model with a Gemini key to check Google Gemini.
 - Provider-specific environment variables such as `OPENAI_API_KEY`, `GEMINI_API_KEY`, or `GROQ_API_KEY` may also authorize their matching catalogs.
 - Subscription/OAuth and project-specific routes may stay static when their backend has no safe general catalog endpoint. AuthGrok is queried only when an `authgrok.../` model for an existing signed-in account is selected.
@@ -219,13 +219,7 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. A browser window opens, you log in once, and Glossarion uses that. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, or `antigravity/...` model. For Antigravity specifically, also read [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds).
 
-### Which model should a beginner pick?
-
-- **Cheapest / fastest to try:** `gemini-3.5-flash` or `deepseek-v4-flash`.
-- **Best quality for tricky novels:** `gpt-5.5`, `claude-opus-4-8`, `gemini-3-pro`, or `deepseek-v4-pro`.
-- Start cheap, translate 1–2 chapters, and only move to a pricier model if the quality isn't good enough.
-
-> **💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
+**💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
 
 > **⚠️ DON'T paste a key from one company and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
 
@@ -689,12 +683,12 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | Method | What you type in **Model** | What you need | The catch |
 |--------|----------------------------|---------------|-----------|
 | **NVIDIA browser routing** | `authnd/...` (e.g. `authnd/z-ai/glm-5.1`) | **Nothing** — no key, no login | Routes through the built-in NVIDIA browser; needs the **standard `L_Glossarion` build** (has the EPUB Library). |
-| **NVIDIA API (free tier)** | `nd/...` (e.g. `nd/deepseek-ai/deepseek-v4-flash`) | A **free NVIDIA API key** | Free, but **only available in certain regions**. |
+| **NVIDIA API (free tier)** | `nd/...` (e.g. `nd/deepseek-ai/deepseek-v4-flash`) | A **[free NVIDIA API key](https://build.nvidia.com/explore/discover?api-key=true)** | Free, but **only available in certain regions**. |
 | **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
-| **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **free Google AI Studio key** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
+| **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Gemini coding endpoint** | `authgem/...` | A **Google login** (🔐 button) | Free, but throttled to **1 request per minute (RPM)**. |
 | **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login** plus **Node.js LTS or Bun** for compiled `.exe` builds | Free Cloud Code routing through a local proxy on `localhost:3000` using `frieser/antigravity-proxy`; see [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds). |
-| **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **free OpenRouter key** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
+| **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **[free OpenRouter key](https://openrouter.ai/settings/keys)** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
 | **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
 | **Your own local AI** | your model name (e.g. `llama3`) | **LM Studio or Ollama** on your PC | Free and private, but quality and speed depend on your computer. |
 
