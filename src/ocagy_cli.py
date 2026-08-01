@@ -1145,6 +1145,7 @@ class _OpenCodeStreamState:
         self.text_order: List[str] = []
         self.text_by_part: Dict[str, str] = {}
         self.reasoning_by_part: Dict[str, str] = {}
+        self.part_types: Dict[str, str] = {}
         self.step_events: List[Dict[str, Any]] = []
         self.finish_reason = "stop"
         self.error = ""
@@ -1206,8 +1207,10 @@ class _OpenCodeStreamState:
             if message_id not in self.assistant_message_ids:
                 return emitted
             part_type = str(part.get("type", "") or "")
+            part_id = str(part.get("id", "") or "")
+            if part_id and part_type:
+                self.part_types[part_id] = part_type
             if part_type == "text":
-                part_id = str(part.get("id", "") or "")
                 if part_id and part_id not in self.text_order:
                     self.text_order.append(part_id)
                 fragment = self._merge_part(part, properties.get("delta"), self.text_by_part)
@@ -1222,6 +1225,37 @@ class _OpenCodeStreamState:
                 reason = str(part.get("reason", "") or "")
                 if reason:
                     self.finish_reason = reason
+            return emitted
+
+        # OpenCode 1.18+ publishes the actual live token fragments separately
+        # from message.part.updated. The updated event identifies the part and
+        # the delta event carries each new piece of its text. Ignoring this
+        # event makes an otherwise-live SSE connection appear buffered until
+        # OpenCode sends the final accumulated part snapshot.
+        if event_type == "message.part.delta":
+            if properties.get("sessionID") != self.session_id:
+                return emitted
+            message_id = str(properties.get("messageID", "") or "")
+            if message_id not in self.assistant_message_ids:
+                return emitted
+            if str(properties.get("field", "") or "") != "text":
+                return emitted
+            part_id = str(properties.get("partID", "") or "")
+            delta = properties.get("delta")
+            delta_text = str(delta) if isinstance(delta, str) else ""
+            if not part_id or not delta_text:
+                return emitted
+            part_type = self.part_types.get(part_id, "")
+            if part_type == "text":
+                if part_id not in self.text_order:
+                    self.text_order.append(part_id)
+                self.text_by_part[part_id] = self.text_by_part.get(part_id, "") + delta_text
+                emitted.append(("text", delta_text))
+            elif part_type == "reasoning":
+                self.reasoning_by_part[part_id] = (
+                    self.reasoning_by_part.get(part_id, "") + delta_text
+                )
+                emitted.append(("reasoning", delta_text))
             return emitted
 
         if event_type == "session.error":

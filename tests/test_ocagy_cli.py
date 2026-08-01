@@ -387,6 +387,50 @@ def test_live_event_state_collects_deltas_reasoning_usage_and_completion():
     assert ocagy_cli._usage_from_value(state.step_events)["total_tokens"] == 10
 
 
+def test_live_event_state_handles_opencode_part_delta_events():
+    state = ocagy_cli._OpenCodeStreamState("session-1")
+    state.feed({
+        "type": "message.updated",
+        "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
+    })
+    state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "text-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "text",
+            }
+        },
+    })
+
+    first = state.feed({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "assistant-1",
+            "partID": "text-1",
+            "field": "text",
+            "delta": "Hel",
+        },
+    })
+    second = state.feed({
+        "type": "message.part.delta",
+        "properties": {
+            "sessionID": "session-1",
+            "messageID": "assistant-1",
+            "partID": "text-1",
+            "field": "text",
+            "delta": "lo",
+        },
+    })
+
+    assert first == [("text", "Hel")]
+    assert second == [("text", "lo")]
+    assert state.content() == "Hello"
+
+
 def test_httpx_sse_reader_emits_event_before_stream_finishes():
     blocked_after_first_event = threading.Event()
     release_stream = threading.Event()
