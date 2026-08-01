@@ -127,10 +127,13 @@ async function startTranslationJob(tabId) {
     id: `job_${Date.now().toString(36)}_${nextJobId++}`,
     tabId,
     status: "running",
+    phase: "preparing",
     translated: 0,
     total: 0,
     error: "",
     startedAt: Date.now(),
+    phaseStartedAt: Date.now(),
+    lastActivityAt: Date.now(),
     finishedAt: null
   };
   translationJobs.set(tabId, job);
@@ -186,11 +189,14 @@ function getJobSnapshot(tabId) {
     id: job.id,
     tabId: job.tabId,
     status: job.status,
+    phase: job.phase || "preparing",
     translated: job.translated,
     total: job.total,
     error: job.error,
     savedRecordId: job.savedRecordId || "",
     startedAt: job.startedAt,
+    phaseStartedAt: job.phaseStartedAt || job.startedAt,
+    lastActivityAt: job.lastActivityAt || job.startedAt,
     finishedAt: job.finishedAt
   };
 }
@@ -207,6 +213,9 @@ function updateTranslationProgress(message, sender) {
   if (typeof message.translated === "number") {
     job.translated = message.translated;
   }
+  if (message.phase) {
+    setJobPhase(job, message.phase);
+  }
   if (message.status) {
     job.status = message.status;
   }
@@ -216,9 +225,34 @@ function updateTranslationProgress(message, sender) {
   if (message.savedRecordId) {
     job.savedRecordId = message.savedRecordId;
   }
+  job.lastActivityAt = Date.now();
   if (job.status === "complete" || job.status === "error") {
+    setJobPhase(job, job.status);
     job.finishedAt = Date.now();
   }
+}
+
+function setJobPhase(job, phase) {
+  const nextPhase = String(phase || "").trim();
+  if (!nextPhase) {
+    return;
+  }
+  const now = Date.now();
+  if (job.phase !== nextPhase) {
+    job.phase = nextPhase;
+    job.phaseStartedAt = now;
+  }
+  job.lastActivityAt = now;
+}
+
+function updateContextJobPhase(context, phase) {
+  const tabId = Number(context?.sender?.tab?.id || 0);
+  const jobId = String(context?.jobId || "");
+  const job = translationJobs.get(tabId);
+  if (!job || !jobId || job.id !== jobId || job.status !== "running") {
+    return;
+  }
+  setJobPhase(job, phase);
 }
 
 async function saveCompletedTranslation(message, sender) {
@@ -313,6 +347,7 @@ async function translateBatch(items, context = {}) {
   }
 
   if (isTraditionalTranslationRoute(route)) {
+    updateContextJobPhase(context, "translating");
     return translateTraditionalBatch({ route, items, settings });
   }
 
@@ -322,7 +357,9 @@ async function translateBatch(items, context = {}) {
     targetLanguage: settings.targetLanguage
   });
 
+  updateContextJobPhase(context, settings.thinkingEnabled ? "thinking" : "waiting");
   const content = await sendChatCompletion({ route, messages, settings, context });
+  updateContextJobPhase(context, "applying");
   return { items: parseTranslatedItems(content, items) };
 }
 
@@ -332,7 +369,8 @@ async function sendChatCompletion({ route, messages, settings, context = {} }) {
       route,
       messages,
       settings,
-      onStreamItems: buildStreamItemsForwarder(context)
+      onStreamItems: buildStreamItemsForwarder(context),
+      onActivity: buildJobActivityForwarder(context)
     });
   }
   if (route.provider === "authnd") {
@@ -377,6 +415,19 @@ function buildStreamItemsForwarder(context = {}) {
     }).catch(() => {
       // Streaming updates are opportunistic; final batch response still applies.
     });
+  };
+}
+
+function buildJobActivityForwarder(context = {}) {
+  const tabId = Number(context.sender?.tab?.id || 0);
+  const jobId = String(context.jobId || "");
+  if (!tabId || !jobId) {
+    return null;
+  }
+  return (activity = {}) => {
+    if (activity.phase) {
+      updateContextJobPhase(context, activity.phase);
+    }
   };
 }
 

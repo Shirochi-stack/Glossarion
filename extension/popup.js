@@ -55,6 +55,7 @@ async function init() {
   const settings = await loadSettings();
   applySettings(settings);
   bindEvents();
+  await resumeActiveTranslationStatus();
 }
 
 async function loadSettings() {
@@ -181,13 +182,14 @@ function startStatusPolling(tabId) {
       }
 
       if (job.status === "running") {
-        setStatus(`Translating ${job.translated}/${job.total || "..."} text nodes.`);
+        setStatus(formatRunningJobStatus(job));
         return;
       }
 
       if (job.status === "complete") {
         const saved = job.savedRecordId ? " Saved." : " Save skipped.";
-        setStatus(`Translated ${job.translated}/${job.total} text nodes.${saved}`);
+        const duration = formatElapsed((job.finishedAt || Date.now()) - job.startedAt);
+        setStatus(`Translated ${job.translated}/${job.total} text nodes in ${duration}.${saved}`);
         stopStatusPolling();
         setBusy(false);
         return;
@@ -205,7 +207,57 @@ function startStatusPolling(tabId) {
   };
 
   poll();
-  activeStatusTimer = setInterval(poll, 1200);
+  activeStatusTimer = setInterval(poll, 800);
+}
+
+async function resumeActiveTranslationStatus() {
+  try {
+    const tab = await getActiveTab();
+    if (!tab?.id) {
+      return;
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: "GLOSSARION_GET_TRANSLATION_JOB",
+      tabId: tab.id
+    });
+    if (response?.ok && response.job?.status === "running") {
+      setBusy(true);
+      startStatusPolling(tab.id);
+    }
+  } catch {
+    // There may not be a translation job for the active tab yet.
+  }
+}
+
+function formatRunningJobStatus(job) {
+  const translated = Math.max(0, Number(job.translated || 0));
+  const total = Math.max(0, Number(job.total || 0));
+  const progress = total
+    ? `${translated}/${total} translated (${Math.min(100, Math.round((translated / total) * 100))}%)`
+    : `${translated}/... translated`;
+  const phaseElapsed = formatElapsed(Date.now() - Number(job.phaseStartedAt || job.startedAt || Date.now()));
+
+  switch (job.phase) {
+    case "preparing":
+      return `Preparing page text... ${progress}`;
+    case "thinking":
+      return `Model is thinking... ${phaseElapsed} - ${progress}`;
+    case "waiting":
+      return `Waiting for the model... ${phaseElapsed} - ${progress}`;
+    case "translating":
+      return `Receiving translations... ${phaseElapsed} - ${progress}`;
+    case "applying":
+      return `Applying the model response... ${phaseElapsed} - ${progress}`;
+    default:
+      return `Translation is running... ${phaseElapsed} - ${progress}`;
+  }
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function stopStatusPolling() {

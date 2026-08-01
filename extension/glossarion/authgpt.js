@@ -9,7 +9,7 @@ const TOKEN_REFRESH_MARGIN_SECONDS = 300;
 
 const loginPromises = new Map();
 
-export async function sendAuthgptChatCompletion({ route, messages, settings, onStreamItems = null }) {
+export async function sendAuthgptChatCompletion({ route, messages, settings, onStreamItems = null, onActivity = null }) {
   const modelForAccount = route.rawModel || settings.model || "authgpt/gpt-5.5";
   const actualModel = normalizeAuthgptModel(stripAuthgptPrefix(route.model || modelForAccount) || "gpt-5.5");
   const tokenParamCandidates = ["max_tokens", ""];
@@ -50,7 +50,7 @@ export async function sendAuthgptChatCompletion({ route, messages, settings, onS
           throw new Error(`AuthGPT HTTP ${response.status}: ${detail}`);
         }
 
-        const result = await readAuthgptStream(response, { onStreamItems });
+        const result = await readAuthgptStream(response, { onStreamItems, onActivity });
         if (result.error_details) {
           throw new Error(`AuthGPT failed: ${formatErrorDetail(result.error_details)}`);
         }
@@ -405,7 +405,7 @@ function contentToResponsesParts(content, role) {
   return parts.length ? parts : [{ type: textType, text: "" }];
 }
 
-async function readAuthgptStream(response, { onStreamItems = null } = {}) {
+async function readAuthgptStream(response, { onStreamItems = null, onActivity = null } = {}) {
   if (!response.body) {
     return parseSseText(await response.text());
   }
@@ -424,7 +424,7 @@ async function readAuthgptStream(response, { onStreamItems = null } = {}) {
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() || "";
     for (const line of lines) {
-      if (processSseLine(line, state, onStreamItems)) {
+      if (processSseLine(line, state, onStreamItems, onActivity)) {
         try {
           await reader.cancel();
         } catch {
@@ -438,7 +438,7 @@ async function readAuthgptStream(response, { onStreamItems = null } = {}) {
   buffer += decoder.decode();
   if (buffer) {
     for (const line of buffer.split(/\r?\n/)) {
-      processSseLine(line, state, onStreamItems);
+      processSseLine(line, state, onStreamItems, onActivity);
     }
   }
   return finalizeSseState(state);
@@ -452,11 +452,12 @@ function newStreamState() {
     failedResult: null,
     contentParts: [],
     emittedItemIds: new Set(),
+    activityPhase: "",
     done: false
   };
 }
 
-function processSseLine(rawLine, state, onStreamItems = null) {
+function processSseLine(rawLine, state, onStreamItems = null, onActivity = null) {
   const line = String(rawLine || "").trim();
   if (!line) {
     return false;
@@ -485,13 +486,19 @@ function processSseLine(rawLine, state, onStreamItems = null) {
   const eventType = String(data.type || state.pendingEventType || "");
   state.lastData = data;
 
+  if (eventType.includes("reasoning")) {
+    notifyStreamPhase(state, onActivity, "thinking");
+  }
+
   if (eventType === "response.output_text.delta") {
+    notifyStreamPhase(state, onActivity, "translating");
     state.contentParts.push(String(data.delta || ""));
     emitCompletedStreamItems(state, onStreamItems);
     return false;
   }
 
   if (eventType === "response.output_text.done" && !state.contentParts.length && typeof data.text === "string") {
+    notifyStreamPhase(state, onActivity, "translating");
     state.contentParts.push(data.text);
     emitCompletedStreamItems(state, onStreamItems);
     return false;
@@ -521,6 +528,14 @@ function processSseLine(rawLine, state, onStreamItems = null) {
   }
 
   return false;
+}
+
+function notifyStreamPhase(state, onActivity, phase) {
+  if (typeof onActivity !== "function" || state.activityPhase === phase) {
+    return;
+  }
+  state.activityPhase = phase;
+  onActivity({ phase });
 }
 
 function emitCompletedStreamItems(state, onStreamItems) {

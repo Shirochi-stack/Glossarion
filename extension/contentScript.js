@@ -114,10 +114,10 @@
       const items = collectVisibleTextItems();
       state.activeTotal = items.length;
       if (items.length === 0) {
-        sendProgress(jobId, { status: "complete", translated: 0, total: 0 });
+        sendProgress(jobId, { status: "complete", phase: "complete", translated: 0, total: 0 });
         return { translated: 0, total: 0 };
       }
-      sendProgress(jobId, { status: "running", translated: 0, total: items.length });
+      sendProgress(jobId, { status: "running", phase: "preparing", translated: 0, total: items.length });
 
       const settings = await chrome.storage.local.get({
         batchSize: 1000,
@@ -149,12 +149,12 @@
         }
         translated = state.streamedIds.size;
         await saveTranslationSnapshot(jobId, translated, items.length, "partial");
-        sendProgress(jobId, { status: "running", translated, total: items.length });
+        sendProgress(jobId, { status: "running", phase: "translating", translated, total: items.length });
       }
 
       state.lastTranslated = translated;
       const savedRecordId = await saveTranslationSnapshot(jobId, translated, items.length, "complete");
-      sendProgress(jobId, { status: "complete", translated, total: items.length, savedRecordId });
+      sendProgress(jobId, { status: "complete", phase: "complete", translated, total: items.length, savedRecordId });
       return { translated, total: items.length };
     } catch (error) {
       if (state.translations.size > 0) {
@@ -322,6 +322,7 @@
     }
     sendProgress(jobId, {
       status: "running",
+      phase: "translating",
       translated: state.streamedIds.size,
       total: state.activeTotal
     });
