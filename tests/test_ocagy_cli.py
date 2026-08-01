@@ -462,6 +462,13 @@ def test_httpx_sse_reader_emits_event_before_stream_finishes():
         reader.join(timeout=2)
 
 
+def test_ocagy_forced_stream_includes_thinking_when_thinking_toggle_is_off(monkeypatch):
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
+
+    assert ocagy_cli._forced_stream_thinking_logging_enabled(True) is True
+    assert ocagy_cli._forced_stream_thinking_logging_enabled(False) is False
+
+
 def test_prompt_preserves_roles():
     prompt = ocagy_cli.build_prompt([
         {"role": "system", "content": "SYS"},

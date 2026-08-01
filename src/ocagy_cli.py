@@ -1136,6 +1136,11 @@ def _stream_log_text(text: str, buffer: List[str], logger: Callable[[str], None]
             buffer.clear()
 
 
+def _forced_stream_thinking_logging_enabled(log_stream: bool) -> bool:
+    """Reasoning is part of OcAgy's forced live stream visibility."""
+    return bool(log_stream)
+
+
 class _OpenCodeStreamState:
     """Collect authoritative output while exposing incremental SSE deltas."""
 
@@ -1429,9 +1434,7 @@ def _send_via_server(
         thinking_buffer: List[str] = []
         thinking_started = False
         first_text = False
-        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
-            "", "0", "false", "no", "off",
-        )
+        stream_thinking = _forced_stream_thinking_logging_enabled(log_stream)
 
         def consume(event: Dict[str, Any]) -> None:
             nonlocal thinking_started, first_text

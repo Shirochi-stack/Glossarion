@@ -2498,12 +2498,9 @@ def _consume_openai_stream(resp: Any, log_fn=None, log_stream: bool = True) -> D
     log_buf: List[str] = []
     thinking_buf: List[str] = []
     thinking_started = False
-    stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    # Antigravity always streams. When its live log is visible, reasoning is
+    # part of that same forced stream rather than a separately gated channel.
+    stream_thinking = bool(log_stream)
 
     _raise_if_cancelled()
     _register_active_response(resp)

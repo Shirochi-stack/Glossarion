@@ -167,6 +167,28 @@ def test_consume_openai_stream_collects_content_and_usage():
     assert response.closed is True
 
 
+def test_forced_antigravity_stream_includes_reasoning_when_thinking_toggle_is_off(monkeypatch):
+    response = FakeStreamResponse(
+        [
+            _sse_event({"choices": [{"delta": {"reasoning_content": "Think live"}}]}),
+            _sse_event({"choices": [{"delta": {"content": "Answer"}, "finish_reason": "stop"}]}),
+            "data: [DONE]",
+        ]
+    )
+    logs = []
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
+
+    result = antigravity_proxy._consume_openai_stream(
+        response,
+        log_fn=logs.append,
+        log_stream=True,
+    )
+
+    assert result["content"] == "Answer"
+    assert any("Thinking" in line for line in logs)
+    assert any("Think live" in line for line in logs)
+
+
 def test_consume_openai_stream_supports_httpx_iter_lines():
     response = FakeHttpxStreamResponse(
         [

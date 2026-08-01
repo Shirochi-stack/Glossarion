@@ -3065,7 +3065,8 @@ def _create_response_handling_section(self, parent):
     self.stream_thinking_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
-        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, AuthGem, Antigravity, and OcAgy. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGrok, and AuthGem. "
+        "Antigravity and OcAgy include thinking whenever their forced live stream is visible. "
         "AuthGrok reasoning summaries always stream outside batch mode; this setting still applies to AuthGrok during batch mode. "
         "For other providers, disable this to suppress thinking output and show only final text.</p></qt>"
     )
@@ -3132,7 +3133,7 @@ def _create_response_handling_section(self, parent):
         "AuthGPT (authgpt/), AuthGrok (authgrok/), AuthGem (authgem/), AuthCD (authcd/), "
         "Antigravity (antigravity/), and OcAgy (ocagy/) always stream internally. "
         "During batch translation this can flood the log. Enable this to see streaming "
-        "tokens in the log during batch mode. Off by default.</p></qt>"
+        "tokens and reasoning in the log during batch mode. Off by default.</p></qt>"
     )
     try:
         self.allow_authgpt_batch_stream_logs_checkbox.setChecked(bool(self.allow_authgpt_batch_stream_logs_var))
