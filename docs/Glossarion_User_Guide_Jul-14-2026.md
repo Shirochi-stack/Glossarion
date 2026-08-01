@@ -223,7 +223,7 @@ If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Goo
 
 **💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
 
-> **⚠️ DON'T paste a key from one company and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
+> **⚠️ DON'T paste a key from one provider and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
 
 ---
 
