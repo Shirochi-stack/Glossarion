@@ -14496,7 +14496,7 @@ Recent translations to summarize:
             ('process_webnovel_images_var', 'process_webnovel_images', True),
             # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
-            ('retry_timeout_var', 'retry_timeout', True),
+            ('retry_timeout_var', 'retry_timeout', False),
             ('batch_translation_var', 'batch_translation', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
@@ -38276,7 +38276,7 @@ Important rules:
                 {
                     "key": "retry_timeout", "emoji": "⏱️", "title": "Auto-retry API Timeouts",
                     "desc": "Automatically retry text/image chunks that take too long to process.\nDefault timeout: 1800s (30 min). Configurable in Other Settings.",
-                    "default": True,
+                    "default": False,
                     "bg": "#2a1a14", "accent": "#f0a060",
                 },
                 {
@@ -38726,7 +38726,7 @@ Important rules:
                     self.enable_image_compression_var = tb_imgcomp
                     tb_scan = toggle_states.get('scan_phase_enabled', False)
                     self._set_scan_phase_enabled(tb_scan)
-                    tb_retry = toggle_states.get('retry_timeout', True)
+                    tb_retry = toggle_states.get('retry_timeout', False)
                     self.config['retry_timeout'] = tb_retry
                     self.retry_timeout_var = tb_retry
                     enabled_toggles = []
