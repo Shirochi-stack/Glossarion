@@ -16272,6 +16272,21 @@ Recent translations to summarize:
                 if hasattr(self, 'authgem_project_combo'):
                     self.authgem_project_combo.hide()
 
+        # Show/hide OpenCode Antigravity OAuth controls
+        if hasattr(self, 'ocagy_login_btn'):
+            needs_ocagy = (model or '').strip().lower().startswith('ocagy')
+            if not needs_ocagy:
+                needs_ocagy = self._has_ocagy_in_key_pools()
+            if needs_ocagy:
+                self.ocagy_login_btn.show()
+                if hasattr(self, 'ocagy_status_btn'):
+                    self.ocagy_status_btn.show()
+                self._update_ocagy_login_status()
+            else:
+                self.ocagy_login_btn.hide()
+                if hasattr(self, 'ocagy_status_btn'):
+                    self.ocagy_status_btn.hide()
+
         # Show/hide Antigravity proxy controls
         if hasattr(self, 'antigravity_login_btn'):
             needs_antigravity = (model or '').strip().lower().startswith('antigravity')
@@ -16445,6 +16460,16 @@ Recent translations to summarize:
                         import re as _re
                         if _re.match(r'^authgem-vertex\d{0,4}/', m):
                             return True
+        except Exception:
+            pass
+        return False
+
+    def _has_ocagy_in_key_pools(self):
+        """Check if any enabled key pool contains an OpenCode Antigravity model."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                if str(model or '').strip().lower().startswith('ocagy'):
+                    return True
         except Exception:
             pass
         return False
@@ -17645,6 +17670,126 @@ Recent translations to summarize:
         self.authgem_status_btn.setText("📊")
         err = getattr(self, '_authgem_status_error_msg', 'Unknown error')
         self.append_log(f"❌ Gemini status check failed: {err}")
+
+    # ==================================================================
+    # OpenCode Antigravity account controls
+    # ==================================================================
+
+    def _update_ocagy_login_status(self):
+        """Update the OpenCode Antigravity button from cached status."""
+        if not hasattr(self, 'ocagy_login_btn'):
+            return
+        status = getattr(self, '_ocagy_status_data', None)
+        if (
+            isinstance(status, dict)
+            and status.get('installed')
+            and status.get('authenticated')
+            and status.get('plugin_ready')
+        ):
+            count = int(status.get('account_count', 0) or 0)
+            self.ocagy_login_btn.setText(f"✅ OpenCode Antigravity ({count})")
+            self.ocagy_login_btn.setToolTip(
+                "OpenCode and opencode-antigravity-auth are ready. "
+                "The plugin manages OAuth, quota handling, and account rotation."
+            )
+            self.ocagy_login_btn.setStyleSheet(
+                "background-color: #16803c; color: white; font-weight: bold; "
+                "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+            )
+            return
+
+        self.ocagy_login_btn.setText("🔐 OpenCode Antigravity Login")
+        self.ocagy_login_btn.setToolTip(
+            "Uses the OpenCode terminal CLI with the opencode-antigravity-auth plugin. "
+            "Install OpenCode or set OCAGY_CLI_PATH if it is not on PATH."
+        )
+        self.ocagy_login_btn.setStyleSheet(
+            "background-color: #7c3aed; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+
+    def _ocagy_login_clicked(self):
+        """Open plugin-aware OpenCode OAuth login in a separate terminal."""
+        self.ocagy_login_btn.setEnabled(False)
+        self.ocagy_login_btn.setText("⏳ Opening OpenCode…")
+
+        def worker():
+            try:
+                from ocagy_cli import launch_login
+                self._ocagy_login_data = launch_login()
+                QMetaObject.invokeMethod(self, "_ocagy_login_finished", Qt.QueuedConnection)
+            except Exception as exc:
+                self._ocagy_login_error = str(exc)
+                QMetaObject.invokeMethod(self, "_ocagy_login_failed", Qt.QueuedConnection)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def _ocagy_login_finished(self):
+        self.ocagy_login_btn.setEnabled(True)
+        self._update_ocagy_login_status()
+        self.append_log(
+            "🪐 Opened OpenCode login. Select Google → OAuth with Google (Antigravity), "
+            "finish sign-in, then click 📊 to verify the plugin and accounts."
+        )
+
+    @Slot()
+    def _ocagy_login_failed(self):
+        self.ocagy_login_btn.setEnabled(True)
+        self._update_ocagy_login_status()
+        err = getattr(self, '_ocagy_login_error', 'Unknown error')
+        self.append_log(f"❌ OpenCode Antigravity login could not be opened: {err}")
+        QMessageBox.warning(self, "OpenCode Antigravity", err)
+
+    def _ocagy_status_clicked(self):
+        """Check OpenCode, plugin model visibility, and configured OAuth accounts."""
+        self.ocagy_status_btn.setEnabled(False)
+        self.ocagy_status_btn.setText("⏳")
+
+        def worker():
+            try:
+                from ocagy_cli import get_status
+                self._ocagy_status_data = get_status()
+                QMetaObject.invokeMethod(self, "_ocagy_status_result", Qt.QueuedConnection)
+            except Exception as exc:
+                self._ocagy_status_error_msg = str(exc)
+                QMetaObject.invokeMethod(self, "_ocagy_status_error", Qt.QueuedConnection)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @Slot()
+    def _ocagy_status_result(self):
+        self.ocagy_status_btn.setEnabled(True)
+        self.ocagy_status_btn.setText("📊")
+        status = getattr(self, '_ocagy_status_data', {}) or {}
+        self._update_ocagy_login_status()
+        if not status.get('installed'):
+            self.append_log(f"❌ OpenCode CLI not found: {status.get('error', '')}")
+            return
+        self.append_log(f"🪐 OpenCode CLI: {status.get('executable', '')}")
+        if status.get('version'):
+            self.append_log(f"   Version: {status.get('version')}")
+        self.append_log("   Plugin models: " + ("ready" if status.get('plugin_ready') else "not detected"))
+        self.append_log(f"   OAuth accounts: {int(status.get('account_count', 0) or 0)}")
+        self.append_log(
+            "   Parallel account offset: "
+            + ("enabled" if status.get('pid_offset_enabled') else "not enabled")
+        )
+        emails = status.get('emails') or []
+        if emails:
+            self.append_log("   Accounts: " + ", ".join(emails[:10]))
+        models = status.get('models') or []
+        if models:
+            self.append_log("   Models: " + ", ".join(models[:20]))
+        if status.get('error'):
+            self.append_log(f"   Status detail: {status.get('error')}")
+
+    @Slot()
+    def _ocagy_status_error(self):
+        self.ocagy_status_btn.setEnabled(True)
+        self.ocagy_status_btn.setText("📊")
+        err = getattr(self, '_ocagy_status_error_msg', 'Unknown error')
+        self.append_log(f"❌ OpenCode Antigravity status check failed: {err}")
 
     # ==================================================================
     # Antigravity proxy account controls
@@ -18903,6 +19048,36 @@ Recent translations to summarize:
         # Start in the button row; _reposition will move it if needed
         model_btn_layout.addWidget(self.authgem_project_combo)
         self._authgem_combo_in_own_row = False  # track current placement
+
+        # OpenCode Antigravity OAuth controls (visible for ocagy/* models)
+        self.ocagy_login_btn = QPushButton("🔐 OpenCode Antigravity Login")
+        self.ocagy_login_btn.setStyleSheet(
+            "background-color: #7c3aed; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.ocagy_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 42em; margin: 0;'>"
+            "Use <b>OpenCode</b> with <b>opencode-antigravity-auth</b>.<br>"
+            "The plugin owns Google OAuth, token refresh, quota fallback, and multi-account rotation.<br>"
+            "This is an unofficial integration and may carry account risk.</p></qt>"
+        )
+        self.ocagy_login_btn.clicked.connect(self._ocagy_login_clicked)
+        self.ocagy_login_btn.hide()
+        model_btn_layout.addWidget(self.ocagy_login_btn)
+
+        self.ocagy_status_btn = QPushButton("📊")
+        self.ocagy_status_btn.setFixedWidth(36)
+        self.ocagy_status_btn.setStyleSheet(
+            "background-color: #4c1d95; color: white; font-weight: bold; "
+            "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
+            "border: 1px solid #a78bfa;"
+        )
+        self.ocagy_status_btn.setToolTip(
+            "Check OpenCode, plugin model registration, and configured Antigravity OAuth accounts."
+        )
+        self.ocagy_status_btn.clicked.connect(self._ocagy_status_clicked)
+        self.ocagy_status_btn.hide()
+        model_btn_layout.addWidget(self.ocagy_status_btn)
 
         # Antigravity proxy controls (visible only for antigravity* models)
         self.antigravity_login_btn = QPushButton("🔐 Antigravity Login")

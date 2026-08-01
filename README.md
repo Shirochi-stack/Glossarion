@@ -104,6 +104,7 @@
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
 * **AuthGrok Browser Login** — use the `authgrok/` model prefix to sign in to an xAI/Grok account through your browser, including Google sign-in
+* **OpenCode Antigravity OAuth** — use the `ocagy/` prefix with OpenCode and `opencode-antigravity-auth`, including Gemini 3.1 Pro High
 
 ---
 
@@ -130,6 +131,7 @@
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
+| **OcAgy (OpenCode Antigravity)** | `ocagy/*` | ocagy/gemini-3.1-pro-high, ocagy/gemini-3-flash-high, ocagy/claude-sonnet-4-6 |
 | **AuthND** | `authnd/*` | authnd/z-ai/glm-5.1 |
 | **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
@@ -148,6 +150,8 @@
 
 > **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
 
+> **OcAgy login:** The `ocagy/` prefix is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, select a model such as `ocagy/gemini-3.1-pro-high`, click **OpenCode Antigravity Login**, then choose **Google → OAuth with Google (Antigravity)** in the terminal. No API key is required; OpenCode loads `opencode-antigravity-auth` and the plugin manages OAuth, quota fallback, and account rotation.
+
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
 > **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
@@ -159,8 +163,9 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
-5. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
-6. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
+5. **OcAgy** — install OpenCode, type `ocagy/gemini-3.1-pro-high`, and use **OpenCode Antigravity Login** (no API key needed)
+6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
+7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 
 ### Manga Translation Setup
 1. Create a Google Cloud Project (or Azure AI resource)
@@ -376,6 +381,7 @@ Built using:
 - Community feedback and contributions
 - OMORIO - contributed the SDLXLIFF source-to-output reviewer workflow
 - TK - contributed the Gemma stray p&gt; and number spacing token fixes
+- Jin - contributed the `ocagy/` prefix routing implementation
 - Open source libraries and tools
 - comic-translate by ogkalu2 — https://github.com/ogkalu2/comic-translate
 

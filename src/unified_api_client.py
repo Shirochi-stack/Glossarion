@@ -1212,6 +1212,20 @@ except ImportError:
     _authgem_reset_verification = None
     AUTHGEM_AVAILABLE = False
 
+# OcAgy - OpenCode + opencode-antigravity-auth OAuth plugin (optional)
+try:
+    from ocagy_cli import send_chat_completion as _ocagy_send
+    from ocagy_cli import cancel_stream as _ocagy_cancel_stream
+    from ocagy_cli import reset_cancel as _ocagy_reset_cancel
+    from ocagy_cli import is_cancelled as _ocagy_is_cancelled
+    OCAGY_AVAILABLE = True
+except ImportError:
+    _ocagy_send = None
+    _ocagy_cancel_stream = None
+    _ocagy_reset_cancel = None
+    _ocagy_is_cancelled = None
+    OCAGY_AVAILABLE = False
+
 # Antigravity Cloud Code proxy (optional)
 try:
     from antigravity_proxy import send_message as _antigravity_send
@@ -2481,6 +2495,8 @@ class UnifiedClient:
         'authgem-vertex': 'authgem_vertex',
         'authgem/': 'authgem',
         'authgem': 'authgem',
+        'ocagy/': 'ocagy',
+        'ocagy': 'ocagy',
         'antigravity/': 'antigravity',
         'antigravity': 'antigravity',
         'za/': 'za',
@@ -2516,7 +2532,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgrok/', 'authgrok', 'authgem', 'authgem-vertex', 'vertex/', 'ocagy/', 'ocagy', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'search/', 'search', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -8292,6 +8308,14 @@ class UnifiedClient:
                     "Antigravity proxy module not found. Make sure 'antigravity_proxy.py' exists in src/."
                 )
             logger.info("🛸 Antigravity will use local proxy (frieser/antigravity-proxy)")
+
+        elif self.client_type == 'ocagy':
+            # OpenCode and opencode-antigravity-auth own OAuth and requests.
+            if not OCAGY_AVAILABLE:
+                raise ImportError(
+                    "OpenCode Antigravity adapter not found. Make sure 'ocagy_cli.py' exists under src/."
+                )
+            logger.info("🪐 OcAgy will use OpenCode with opencode-antigravity-auth")
 
         elif self.client_type == 'authza':
             # AuthZA uses Z.AI API via pseudo-OAuth key capture – no persistent SDK client
@@ -15524,7 +15548,7 @@ class UnifiedClient:
             return f" (reasoning_effort: {effort})"
 
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authgrok', 'authza', 'authcd', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authgrok', 'authza', 'authcd', 'ocagy', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -17550,6 +17574,7 @@ class UnifiedClient:
             'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
             'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
+            'ocagy': self._send_ocagy,  # OpenCode + opencode-antigravity-auth
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
@@ -25531,6 +25556,93 @@ class UnifiedClient:
 
         return self._authgem_retry_loop(_do_send, label, actual_model, messages, temperature, max_tokens, store=store)
 
+    def _send_ocagy(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send one request through OpenCode + opencode-antigravity-auth.
+
+        Friendly model names use the ``ocagy/`` prefix, for example
+        ``ocagy/gemini-3.1-pro-high``. OpenCode and the plugin own OAuth,
+        token refresh, quota fallback, and multi-account rotation.
+        """
+        if not OCAGY_AVAILABLE or _ocagy_send is None:
+            raise UnifiedClientError(
+                "OpenCode Antigravity provider is unavailable. Ensure ocagy_cli.py exists under src/.",
+                error_type="config_error",
+            )
+        if self._should_abort_retry():
+            if _ocagy_cancel_stream is not None:
+                _ocagy_cancel_stream()
+            raise UnifiedClientError(
+                "OpenCode Antigravity: Translation stopped by user",
+                error_type="cancelled",
+            )
+
+        request_model = self._get_active_request_model()
+        actual_model = str(request_model or "")
+        if actual_model.lower().startswith("ocagy/"):
+            actual_model = actual_model.split("/", 1)[1]
+        elif actual_model.lower().startswith("ocagy"):
+            actual_model = actual_model[len("ocagy"):].lstrip("/")
+        actual_model = actual_model.strip() or "gemini-3.1-pro-high"
+
+        try:
+            stale_cancel = bool(_ocagy_is_cancelled is not None and _ocagy_is_cancelled())
+        except Exception:
+            stale_cancel = False
+        if stale_cancel and not self._should_abort_retry() and _ocagy_reset_cancel is not None:
+            _ocagy_reset_cancel()
+
+        try:
+            result = _ocagy_send(
+                messages=messages,
+                model=actual_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=self.request_timeout,
+                log_fn=print,
+            )
+            content = str(result.get("content", "") or "")
+            finish_reason = self._normalize_finish_reason(result.get("finish_reason", "stop")) or "stop"
+            if finish_reason == "stop" and not content.strip():
+                raise UnifiedClientError(
+                    "OpenCode Antigravity returned an empty response.",
+                    error_type="provider_error",
+                )
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=result.get("usage"),
+                raw_response=result,
+            )
+        except UnifiedClientError:
+            raise
+        except RuntimeError as exc:
+            text = str(exc)
+            lower = text.lower()
+            if "cancel" in lower or self._should_abort_retry():
+                raise UnifiedClientError(
+                    "OpenCode Antigravity: Translation stopped by user",
+                    error_type="cancelled",
+                )
+            if any(marker in lower for marker in (
+                "quota", "rate limit", "rate-limited", "resource_exhausted",
+                "too many requests", "429",
+            )):
+                raise UnifiedClientError(text, error_type="rate_limit")
+            if any(marker in lower for marker in (
+                "authentication", "oauth", "auth login", "invalid_grant",
+                "credential", "api key missing",
+            )):
+                raise UnifiedClientError(text, error_type="auth_error")
+            if any(marker in lower for marker in (
+                "model error", "unknown model", "model not found", "cannot be resolved",
+            )):
+                raise UnifiedClientError(text, error_type="config_error")
+            if any(marker in lower for marker in (
+                "not found", "ocagy_cli_path", "opencode cli", "plugin/configuration",
+            )):
+                raise UnifiedClientError(text, error_type="config_error")
+            raise UnifiedClientError(text, error_type="provider_error")
+
     def _send_antigravity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via the Antigravity Cloud Code proxy.
 
@@ -29171,6 +29283,17 @@ def set_stop_flag(value: bool = True):
             UnifiedClient.reset_api_call_stagger()
         except Exception:
             pass
+    # OpenCode Antigravity cancellation is process-wide.
+    if value and _ocagy_cancel_stream is not None:
+        try:
+            _ocagy_cancel_stream()
+        except Exception:
+            pass
+    elif not value and _ocagy_reset_cancel is not None:
+        try:
+            _ocagy_reset_cancel()
+        except Exception:
+            pass
     # Antigravity cancellation is process-wide. Workers must never reset it;
     # only this explicit lifecycle reset (called before a new run) may clear it.
     if value and _antigravity_cancel_stream is not None:
@@ -29216,6 +29339,12 @@ def hard_cancel_all():
         UnifiedClient.hard_cancel_all()
     except Exception:
         pass
+    # Also terminate OpenCode Antigravity subprocesses.
+    if _ocagy_cancel_stream is not None:
+        try:
+            _ocagy_cancel_stream()
+        except Exception:
+            pass
     # Also signal the antigravity proxy cancel event
     if _antigravity_cancel_stream is not None:
         try:

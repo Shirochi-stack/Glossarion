@@ -318,6 +318,19 @@ def _get_static_model_options() -> List[str]:
         "authgem-vertex/gemini-2.0-flash", "authgem-vertex/gemini-2.0-flash-lite",
         "authgem-vertex/gemini-3.1-pro-preview", "authgem-vertex/gemini-3.1-flash-lite", "authgem-vertex/gemini-3-flash-preview",
 
+        # OpenCode + opencode-antigravity-auth (OAuth; no API key needed)
+        "ocagy/gemini-3.1-pro-high",
+        "ocagy/gemini-3.1-pro-low",
+        "ocagy/gemini-3-pro-high",
+        "ocagy/gemini-3-pro-low",
+        "ocagy/gemini-3-flash-minimal",
+        "ocagy/gemini-3-flash-low",
+        "ocagy/gemini-3-flash-medium",
+        "ocagy/gemini-3-flash-high",
+        "ocagy/claude-sonnet-4-6",
+        "ocagy/claude-opus-4-6-thinking-low",
+        "ocagy/claude-opus-4-6-thinking-max",
+
         # Antigravity Cloud Code proxy (frieser/antigravity-proxy dashboard catalog)
         "antigravity/gemini-3-flash",
         "antigravity/gemini-3-flash-agent",

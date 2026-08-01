@@ -194,6 +194,7 @@ app_files = [
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
+	('ocagy_cli.py', '.'),  # OpenCode + opencode-antigravity-auth
 	('antigravity_proxy.py', '.'),
 
 	# gRPC Gemini client
@@ -297,6 +298,7 @@ app_modules = [
 	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'gemini_free',  # Google Search/Gemini browser-backed route
 	'token_encryption',  # Encrypted token storage
+	'ocagy_cli',  # OpenCode + opencode-antigravity-auth
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
 	'epub_library',  # EPUB Library & Reader

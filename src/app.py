@@ -3420,6 +3420,18 @@ class GlossarionWeb:
                                 size="sm"
                             )
                             
+                            # OpenCode Antigravity login button (for ocagy/* models)
+                            _show_ocagy = _initial_model.startswith('ocagy/')
+                            ocagy_login_btn = gr.Button(
+                                "🪐 OpenCode Antigravity Login",
+                                variant="secondary",
+                                visible=_show_ocagy
+                            )
+                            ocagy_login_status = gr.Textbox(
+                                label="", interactive=False, visible=False,
+                                max_lines=2
+                            )
+
                             # Antigravity proxy login button (for antigravity/* models)
                             _show_antigravity = _initial_model.startswith('antigravity/')
                             antigravity_login_btn = gr.Button(
@@ -4035,9 +4047,10 @@ class GlossarionWeb:
                     
                     # --- Model change handlers: toggle API key & AuthGPT login ---
                     def _on_model_change(model):
-                        """Return visibility updates for API key, AuthGPT login/logout, token input, and Antigravity login."""
+                        """Return visibility updates for API key and provider login controls."""
                         hide_key = _model_needs_no_api_key(model or '')
                         is_authgpt = (model or '').lower().startswith('authgpt/')
+                        is_ocagy = (model or '').lower().startswith('ocagy/')
                         is_antigravity = (model or '').lower().startswith('antigravity/')
                         _hf = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
                         return (
@@ -4045,13 +4058,14 @@ class GlossarionWeb:
                             gr.update(visible=is_authgpt),             # authgpt_login_btn
                             gr.update(visible=is_authgpt and _hf),     # authgpt_token_input
                             gr.update(visible=is_authgpt),             # authgpt_logout_btn
+                            gr.update(visible=is_ocagy),               # ocagy_login_btn
                             gr.update(visible=is_antigravity),         # antigravity_login_btn
                         )
                     
                     epub_model.change(
                         fn=_on_model_change,
                         inputs=[epub_model],
-                        outputs=[epub_api_key, authgpt_login_btn, authgpt_token_input, authgpt_logout_btn, antigravity_login_btn]
+                        outputs=[epub_api_key, authgpt_login_btn, authgpt_token_input, authgpt_logout_btn, ocagy_login_btn, antigravity_login_btn]
                     )
                     manga_model.change(
                         fn=lambda m: gr.update(visible=not _model_needs_no_api_key(m or '')),
@@ -4143,6 +4157,34 @@ class GlossarionWeb:
                         outputs=[authgpt_login_status]
                     )
                     
+                    # --- OpenCode Antigravity Login handler ---
+                    def _ocagy_login():
+                        """Launch OpenCode's interactive Google OAuth flow."""
+                        if os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true':
+                            return gr.update(
+                                value="❌ OpenCode login must be completed on your local computer.",
+                                visible=True,
+                            )
+                        try:
+                            from ocagy_cli import launch_login
+                            data = launch_login()
+                            executable = data.get('executable', 'opencode')
+                            return gr.update(
+                                value=(
+                                    f"🪐 Opened {executable}. Select Google → OAuth with Google "
+                                    "(Antigravity), complete sign-in, then start translating."
+                                ),
+                                visible=True,
+                            )
+                        except Exception as e:
+                            return gr.update(value=f"❌ Failed: {e}", visible=True)
+
+                    ocagy_login_btn.click(
+                        fn=_ocagy_login,
+                        inputs=[],
+                        outputs=[ocagy_login_status]
+                    )
+
                     # --- Antigravity Proxy Login handler ---
                     def _antigravity_login():
                         """Open the Antigravity proxy auth page in the browser and check status."""

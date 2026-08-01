@@ -27,7 +27,7 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 15. [Refinement & output modes](#15-refinement--output-modes)
 16. [Translation editing & review (.sdlxliff and formats)](#16-translation-editing--review-sdlxliff-and-supported-formats)
 17. [How to translate for free](#17-how-to-translate-for-free)
-18. [Antigravity proxy setup for compiled `.exe` builds](#18-antigravity-proxy-setup-for-compiled-exe-builds)
+18. [Antigravity and OcAgy setup for compiled `.exe` builds](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)
 19. [When things go wrong (troubleshooting)](#19-when-things-go-wrong-troubleshooting)
 20. [One-page cheat sheet](#20-one-page-cheat-sheet)
 
@@ -131,7 +131,8 @@ The top of the window is the control strip you'll use every time.
   - **🔐 ChatGPT Login** — "Log in with your ChatGPT Plus/Pro subscription via browser. No API key needed."
   - **🔐 Claude Login** — "Log in with your Claude Pro/Max subscription via browser. No API key needed."
   - **🔐 Gemini Login** — "Log in with your Google account via browser. No API key needed – uses your Google Cloud project."
-  - **🔐 Antigravity Login** — "Log in with your Google account for `antigravity/...` models." See [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds) for the extra `.exe` requirements.
+  - **🔐 OpenCode Antigravity Login** — opens OpenCode's interactive Google OAuth flow for `ocagy/...` models. Choose **Google → OAuth with Google (Antigravity)** in the terminal, then use **📊** to check the plugin and linked accounts.
+  - **🔐 Antigravity Login** — "Log in with your Google account for `antigravity/...` models." See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds) for the extra `.exe` requirements.
   - Each has an account-slot dropdown so you can keep several accounts.
 - **Profile:** The instruction set (language + rules). Use the dropdown to switch.
   - **+ New Profile** — make a blank one.
@@ -177,6 +178,7 @@ Glossarion doesn't translate by itself — it sends your text to an AI company a
 | `eh/...` | ElectronHub (one key, many providers) |
 | `or/...` | OpenRouter |
 | `authnd/...` | AuthND (browser/token routing — needs the EPUB Library build) |
+| `ocagy/...` | OpenCode plus `opencode-antigravity-auth` — no API key; requires the OpenCode terminal CLI |
 | `antigravity/...` | Local Antigravity proxy — needs a Google login plus Node/npm or Bun in compiled `.exe` builds |
 
 > Glossarion supports **40+ providers**. If yours isn't obvious, open **Manage Models → ℹ️ Model Provider Information** for the full list and the exact prefixes.
@@ -217,7 +219,7 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 ### Option 2 — Log in with a subscription (no key)
 
-If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. A browser window opens, you log in once, and Glossarion uses that. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, or `antigravity/...` model. For Antigravity specifically, also read [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds).
+If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, `ocagy/...`, or `antigravity/...` model. The `ocagy/...` route opens an interactive OpenCode terminal instead of a browser directly. For both Antigravity routes, also read [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds).
 
 ### Option 3 — Translate for free
 
@@ -689,7 +691,8 @@ Yes — you can run Glossarion **without spending a cent.** There are several fr
 | **ChatGPT login** | `authgpt/...` | A **ChatGPT login** (🔐 button) | Only **a few free requests**. |
 | **Google AI Studio key (Gemini)** | `gemini-...` (e.g. `gemini-3.1-flash-lite`) | A **[free Google AI Studio key](https://aistudio.google.com/apikey)** | A few free requests on most models — but **~500 free requests/day when used with Gemini 3.1 Flash Lite**. |
 | **Gemini coding endpoint** | `authgem/...` | A **Google login** (🔐 button) | Free, but throttled to **1 request per minute (RPM)**. |
-| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login** plus **Node.js LTS or Bun** for compiled `.exe` builds | Free Cloud Code routing through a local proxy on `localhost:3000` using `frieser/antigravity-proxy`; see [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds). |
+| **Antigravity login** | `antigravity/...` (e.g. `antigravity/gemini-3.5-flash-low`) | A **Google login** plus **Node.js LTS or Bun** for compiled `.exe` builds | Free Cloud Code routing through a local proxy on `localhost:3000` using `frieser/antigravity-proxy`; see [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **OcAgy login** | `ocagy/...` (e.g. `ocagy/gemini-3.1-pro-high`) | The **OpenCode terminal CLI** and a **Google login** | Uses `opencode-antigravity-auth`; supports the Gemini 3.1 Pro High variant without using Glossarion's local Antigravity proxy. See [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **OpenRouter free models** | `or/...:free` (e.g. `or/deepseek/deepseek-v4-flash:free`) | A **[free OpenRouter key](https://openrouter.ai/settings/keys)** | Limited to OpenRouter's **free-tier models** (the ones ending in `:free`). |
 | **Google Translate (free)** | `google-translate-free` | **Nothing** | It's plain **machine translation**, not an AI — fast and free, but lower quality / no context. |
 | **Your own local AI** | your model name (e.g. `llama3`) | **LM Studio or Ollama** on your PC | Free and private, but quality and speed depend on your computer. |
@@ -712,15 +715,18 @@ Go to Google AI Studio, create a **free API key** (this is a *Google AI Studio k
 Log in with the **🔐 Gemini Login** and use an `authgem/...` model. This routes through **Gemini's coding endpoint**, which is free but **capped at 1 request per minute**. Fine for slow background translation; frustrating if you're in a hurry. (Tip: raise your **API call delay** in Section 6 so you don't trip the limit.)
 
 **6. `antigravity/` — Antigravity through the local proxy.**
-Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `frieser/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds)**.
+Click the **🔐 Antigravity Login** button, log in with Google, and type a model like `antigravity/gemini-3.5-flash-low`. This is a free no-API-key route that runs through the local **Antigravity proxy** on `http://localhost:3000`. Glossarion uses the `frieser/antigravity-proxy` runtime for that helper server; compiled `.exe` builds need **Node.js LTS** or **Bun** available so Glossarion can start it. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
 
-**7. `or/` — free models on OpenRouter.**
+**7. `ocagy/` — OpenCode Antigravity OAuth, including Gemini 3.1 Pro High.**
+Install the **OpenCode terminal CLI**, type `ocagy/gemini-3.1-pro-high`, and click **🔐 OpenCode Antigravity Login**. In the terminal, choose **Google → OAuth with Google (Antigravity)** and finish signing in. Glossarion then runs requests through OpenCode and `opencode-antigravity-auth`; the plugin manages OAuth, quota fallback, and account rotation. This route does **not** use the local port-3000 proxy and needs no API key. Full setup is in **[Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds)**.
+
+**8. `or/` — free models on OpenRouter.**
 Make a **free OpenRouter key** and type an OpenRouter model with the `:free` suffix, e.g. `or/deepseek/deepseek-v4-flash:free`. OpenRouter rotates which models are free, so check their site for the current `:free` list.
 
-**8. `google-translate-free` — free machine translation.**
+**9. `google-translate-free` — free machine translation.**
 Type exactly `google-translate-free` in the Model box. This is **classic machine translation** (like the Google Translate website), not an AI model — so it needs no key and costs nothing, but it won't follow your profile/glossary or keep long-range context. Good for a rough, instant draft.
 
-**9. Host your own local AI (totally free, fully private).**
+**10. Host your own local AI (totally free, fully private).**
 Install **LM Studio** or **Ollama**, download a model, and point Glossarion at it. Nothing leaves your computer and there's no usage cost — the only "price" is your own hardware doing the work. Full setup (all three ways to connect a local model) is in **[Section 9](#9-local-ai--custom-endpoints--the-3-methods)**.
 
 > **✅ Best free starting point:** try **`authnd/`** (zero setup) or a **free Google AI Studio key** used with **Gemini 3.1 Flash Lite** (~500/day). If you have a decent PC and care about privacy, set up a **local model** instead.
@@ -729,7 +735,16 @@ Install **LM Studio** or **Ollama**, download a model, and point Glossarion at i
 
 ---
 
-## 18. Antigravity proxy setup for compiled `.exe` builds
+## 18. Antigravity and OcAgy setup for compiled `.exe` builds
+
+Glossarion has two separate Google Antigravity routes. Their prefixes are not aliases:
+
+| Prefix | Request path | What you install | Notable model |
+|--------|--------------|------------------|---------------|
+| `antigravity/...` | Glossarion's local `frieser/antigravity-proxy` server on `localhost:3000` | Node.js LTS or Bun | `antigravity/gemini-3.1-pro-low` |
+| `ocagy/...` | OpenCode with `opencode-antigravity-auth` | OpenCode terminal CLI | `ocagy/gemini-3.1-pro-high` |
+
+### `antigravity/`: local proxy setup
 
 Antigravity models use a **local helper server** called the **Antigravity proxy**, based on the `frieser/antigravity-proxy` repository. When you type a model such as `antigravity/gemini-3.5-flash-low`, Glossarion starts that proxy on your computer, logs you in with Google, and sends requests through `http://localhost:3000`.
 
@@ -800,12 +815,36 @@ The log will show the account actually being used, for example:
 🧭 Antigravity: using account slot #2 (your-email@gmail.com)
 ```
 
+### `ocagy/`: OpenCode setup
+
+The `ocagy/...` prefix bypasses Glossarion's local port-3000 proxy. Glossarion launches `opencode run` in an isolated, tool-disabled workspace, while `opencode-antigravity-auth` owns Google OAuth, token refresh, quota fallback, and multi-account rotation.
+
+1. Install the **OpenCode terminal CLI** and make sure the `opencode` command is available on `PATH`. Advanced users can instead set `OCAGY_CLI_PATH` to the executable.
+2. Restart Glossarion after installing OpenCode.
+3. Select a model such as **`ocagy/gemini-3.1-pro-high`**. The API Key box is not required for this route.
+4. Click **🔐 OpenCode Antigravity Login**.
+5. In the terminal, select **Google → OAuth with Google (Antigravity)** and complete the sign-in flow.
+6. Back in Glossarion, click **📊** beside the login button. The log should show the OpenCode executable, plugin models, and linked OAuth-account count.
+7. Run a one- or two-chapter test before starting a full book.
+
+Useful model examples:
+
+- `ocagy/gemini-3.1-pro-high` — Gemini 3.1 Pro with the plugin's High thinking variant.
+- `ocagy/gemini-3.1-pro-low` — the corresponding Low variant.
+- `ocagy/gemini-3-flash-high` — Gemini 3 Flash with High thinking.
+- `ocagy/claude-sonnet-4-6` — Claude Sonnet 4.6 through the same plugin.
+
+You do **not** need Node.js/Bun specifically for Glossarion's local proxy, port `3000`, or an API key when using `ocagy/...`. OpenCode and the plugin still need internet access, and the initial plugin load may take longer than later requests.
+
 ### Quick fixes
 
 - **"Could not find Bun or npx"** — install **Node.js LTS** or **Bun**, then restart Glossarion.
 - **Login opens but account is not detected** — finish the Google login in the browser, then click the Antigravity status/refresh button or restart Glossarion.
 - **Proxy says unsupported version** — Glossarion should auto-update the cached proxy runtime. If it keeps happening, close Glossarion, delete `C:\Users\<you>\.config\antigravity-proxy\runtime`, then start Glossarion again so it can download a fresh copy.
 - **Port 3000 error** — another local server is using the Antigravity proxy port. Close that program or restart Windows.
+- **"OpenCode CLI was not found"** — install OpenCode, restart Glossarion, or set `OCAGY_CLI_PATH` to the OpenCode executable.
+- **OcAgy login finished but 📊 shows no accounts** — repeat **OpenCode Antigravity Login**, make sure you chose **Google → OAuth with Google (Antigravity)**, then click **📊** again.
+- **OcAgy plugin models are not detected** — confirm internet access, run the login flow once so OpenCode can load the plugin, and retry the status check.
 
 ---
 
@@ -823,7 +862,8 @@ The log will show the account actually being used, for example:
 | **A character's gender/pronouns flip mid-book** | Gender tracker is off | Turn **Include Gender Context** on and keep the `*_gender_tracker.json` sidecar (Section 8.4). |
 | **EPUB won't build** | Missing/broken files in the folder | Run **Validate EPUB Structure** in Other Settings (Section 12). |
 | **`authnd/` model won't work** | Using a `Lite`/`TurboLite` build | Those builds drop the EPUB Library and `authnd/` routing — use the standard `L_Glossarion` build (Section 2). |
-| **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds). |
+| **`antigravity/...` model won't launch** | Node/npm or Bun is not installed, login is unfinished, or port `3000` is busy | Install **Node.js LTS** or **Bun**, finish **🔐 Antigravity Login**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
+| **`ocagy/...` model won't launch** | OpenCode is missing, the Google OAuth flow is unfinished, or the plugin has not loaded | Install the **OpenCode terminal CLI**, finish **🔐 OpenCode Antigravity Login**, click **📊**, and check [Section 18](#18-antigravity-and-ocagy-setup-for-compiled-exe-builds). |
 | **Local model isn't used** | Endpoint not enabled, or wrong precedence | Check the right method in Section 9; remember per-key endpoints need **Multi-Key Mode**. |
 | **The window seems frozen during a big job** | It's just working hard | Watch the bottom log — if lines are still appearing, it's fine. **GUI Yield** (Other Settings) reduces freezing. |
 | **Settings reset after restart** | Didn't save | Click **Save Config** (Section 4). |
@@ -860,6 +900,7 @@ The log will show the account actually being used, for example:
 - ✅ Press **Save Config** when you like your setup.
 - ✅ Use a **glossary** for anything longer than a few chapters.
 - ✅ Want `authnd/` + the EPUB Library? Use the **standard `L_Glossarion` build**, not Lite/TurboLite.
+- ✅ Want Gemini 3.1 Pro High through Antigravity OAuth? Use `ocagy/gemini-3.1-pro-high` after completing **OpenCode Antigravity Login**.
 - ⚠️ Match your **model** to your **API key**'s provider.
 - ⚠️ Don't run `app.py` — the program is **`translator_gui.py`**.
 
