@@ -10001,6 +10001,15 @@ class UnifiedClient:
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
+                # OcAgy is OAuth-only. Missing authentication or local setup cannot
+                # improve through backoff, so surface the actionable error immediately.
+                if (
+                    self.client_type == "ocagy"
+                    and e.error_type in ("auth_error", "config_error")
+                ):
+                    print("OpenCode Antigravity setup/authentication error - not retrying")
+                    raise
+
                 if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
                     self._enable_image_request_quality_retry()
                     self._last_retry_error_type = 'payload_too_large_image_quality'
@@ -25592,6 +25601,19 @@ class UnifiedClient:
             _ocagy_reset_cancel()
 
         try:
+            # Match Antigravity's stream visibility controls exactly. The
+            # transport always streams; these toggles only control live logs.
+            if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                log_stream = os.getenv(
+                    "ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0"
+                ).strip().lower() not in ("", "0", "false", "no", "off")
+            else:
+                log_stream = (
+                    self._streaming_enabled()
+                    and os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower()
+                    not in ("0", "false", "no", "off")
+                )
+
             result = _ocagy_send(
                 messages=messages,
                 model=actual_model,
@@ -25599,6 +25621,7 @@ class UnifiedClient:
                 max_tokens=max_tokens,
                 timeout=self.request_timeout,
                 log_fn=print,
+                log_stream=log_stream,
             )
             content = str(result.get("content", "") or "")
             finish_reason = self._normalize_finish_reason(result.get("finish_reason", "stop")) or "stop"

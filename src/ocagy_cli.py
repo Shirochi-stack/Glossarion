@@ -24,13 +24,17 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -39,10 +43,31 @@ _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 _ACTIVE_LOCK = threading.RLock()
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _PLUGIN_PACKAGE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "opencode-antigravity-auth@latest") or "opencode-antigravity-auth@latest").strip()
+OPENCODE_NPM_INSTALL_COMMAND = "npm install -g opencode-ai"
+NODEJS_WINGET_INSTALL_COMMAND = "winget install --id OpenJS.NodeJS.LTS --exact"
 
 
 class OcAgyError(RuntimeError):
     """Raised when OpenCode or the Antigravity OAuth plugin cannot complete a request."""
+
+
+def get_install_instructions() -> str:
+    """Return concise, copyable OpenCode setup instructions."""
+    if os.name == "nt":
+        return (
+            "OpenCode CLI was not found.\n\n"
+            "Open a new PowerShell window and run:\n"
+            f"  {OPENCODE_NPM_INSTALL_COMMAND}\n\n"
+            "If npm is not installed, install Node.js LTS first (it includes npm):\n"
+            f"  {NODEJS_WINGET_INSTALL_COMMAND}\n\n"
+            "After installing Node.js, close and reopen PowerShell, run the OpenCode command, "
+            "then restart Glossarion. Advanced users may instead set OCAGY_CLI_PATH."
+        )
+    return (
+        "OpenCode CLI was not found. Install Node.js/npm if needed, then run:\n"
+        f"  {OPENCODE_NPM_INSTALL_COMMAND}\n\n"
+        "Restart Glossarion afterward. Advanced users may instead set OCAGY_CLI_PATH."
+    )
 
 
 def cancel_stream() -> None:
@@ -109,12 +134,7 @@ def find_executable(explicit_path: Optional[str] = None) -> str:
         if candidate.is_file():
             return str(candidate.resolve())
 
-    searched = "\n".join(f"  - {item}" for item in candidates)
-    raise OcAgyError(
-        "OpenCode CLI was not found. Install the OpenCode terminal CLI, add it to PATH, "
-        "or set OCAGY_CLI_PATH. On Windows, Scoop or Chocolatey is recommended.\n"
-        "Searched:\n" + searched
-    )
+    raise OcAgyError(get_install_instructions())
 
 
 def _workspace_dir() -> Path:
@@ -262,6 +282,28 @@ def _account_summary() -> Dict[str, Any]:
     except Exception as exc:
         result["accounts_error"] = str(exc)
     return result
+
+
+def get_account_summary() -> Dict[str, Any]:
+    """Return the plugin's local OAuth account summary without exposing tokens."""
+    return _account_summary()
+
+
+def _require_oauth_account() -> None:
+    """Fail before launching OpenCode when the plugin has no usable OAuth account."""
+    account = _account_summary()
+    if account.get("account_count"):
+        return
+
+    detail = ""
+    if account.get("accounts_error"):
+        detail = f" The OAuth account store could not be read: {account['accounts_error']}"
+    raise OcAgyError(
+        "OpenCode Antigravity OAuth is not configured. The ocagy/ route does not use or require "
+        "a Google API key. Click the OpenCode Antigravity Login button, select Google, then "
+        "OAuth with Google (Antigravity), finish signing in, and retry. Do not select "
+        f"Manually enter API Key.{detail}"
+    )
 
 
 def _creation_flags(*, visible: bool = False) -> int:
@@ -580,9 +622,452 @@ def _event_error(events: List[Dict[str, Any]]) -> str:
     return "\n".join(messages)
 
 
+def _http_json(
+    base_url: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: float = 10.0,
+) -> Any:
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        base_url.rstrip("/") + path,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    if not raw:
+        return None
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _drain_process_pipe(pipe: Any, output: List[str]) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            output.append(str(line))
+            if len(output) > 500:
+                del output[:100]
+    except Exception:
+        pass
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+
+def _read_sse_events(response: Any, output: "queue.Queue[Tuple[str, Any]]") -> None:
+    data_lines: List[str] = []
+    try:
+        for raw in response:
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    value = "\n".join(data_lines)
+                    data_lines.clear()
+                    try:
+                        event = json.loads(value)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict):
+                        output.put(("event", event))
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            try:
+                event = json.loads("\n".join(data_lines))
+            except json.JSONDecodeError:
+                event = None
+            if isinstance(event, dict):
+                output.put(("event", event))
+    except Exception as exc:
+        output.put(("error", exc))
+    finally:
+        output.put(("eof", None))
+
+
+def _stream_log_text(text: str, buffer: List[str], logger: Callable[[str], None]) -> None:
+    """Emit readable line-sized chunks, matching the Antigravity stream logger."""
+    if not text:
+        return
+    combined = "".join(buffer) + text
+    for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+        combined = combined.replace(tag, tag + "\n")
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            logger(part)
+        buffer[:] = [parts[-1]]
+    else:
+        buffer[:] = [combined]
+        if len(combined) > 150:
+            logger(combined)
+            buffer.clear()
+
+
+class _OpenCodeStreamState:
+    """Collect authoritative output while exposing incremental SSE deltas."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.assistant_message_ids: set[str] = set()
+        self.text_order: List[str] = []
+        self.text_by_part: Dict[str, str] = {}
+        self.reasoning_by_part: Dict[str, str] = {}
+        self.step_events: List[Dict[str, Any]] = []
+        self.finish_reason = "stop"
+        self.error = ""
+        self.complete = False
+
+    @staticmethod
+    def _merge_part(
+        part: Dict[str, Any],
+        delta: Any,
+        store: Dict[str, str],
+    ) -> str:
+        part_id = str(part.get("id", "") or "")
+        if not part_id:
+            return ""
+        previous = store.get(part_id, "")
+        full = part.get("text")
+        full_text = str(full) if isinstance(full, str) else ""
+        delta_text = str(delta) if isinstance(delta, str) else ""
+        if full_text:
+            fragment = full_text[len(previous):] if full_text.startswith(previous) else delta_text
+            if not fragment and full_text != previous:
+                fragment = full_text
+            store[part_id] = full_text
+            return fragment
+        if delta_text:
+            store[part_id] = previous + delta_text
+            return delta_text
+        return ""
+
+    @staticmethod
+    def _error_text(error: Any) -> str:
+        if isinstance(error, dict):
+            data = error.get("data")
+            if isinstance(data, dict) and data.get("message"):
+                return str(data.get("message"))
+            return str(error.get("message") or error.get("name") or json.dumps(error, ensure_ascii=False))
+        return str(error or "OpenCode session failed")
+
+    def feed(self, event: Dict[str, Any]) -> List[Tuple[str, str]]:
+        emitted: List[Tuple[str, str]] = []
+        event_type = str(event.get("type", "") or "")
+        properties = event.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+
+        if event_type == "message.updated":
+            info = properties.get("info")
+            if isinstance(info, dict) and info.get("role") == "assistant":
+                message_id = str(info.get("id", "") or "")
+                if message_id:
+                    self.assistant_message_ids.add(message_id)
+            return emitted
+
+        if event_type == "message.part.updated":
+            part = properties.get("part")
+            if not isinstance(part, dict) or part.get("sessionID") != self.session_id:
+                return emitted
+            message_id = str(part.get("messageID", "") or "")
+            if message_id not in self.assistant_message_ids:
+                return emitted
+            part_type = str(part.get("type", "") or "")
+            if part_type == "text":
+                part_id = str(part.get("id", "") or "")
+                if part_id and part_id not in self.text_order:
+                    self.text_order.append(part_id)
+                fragment = self._merge_part(part, properties.get("delta"), self.text_by_part)
+                if fragment:
+                    emitted.append(("text", fragment))
+            elif part_type == "reasoning":
+                fragment = self._merge_part(part, properties.get("delta"), self.reasoning_by_part)
+                if fragment:
+                    emitted.append(("reasoning", fragment))
+            elif part_type == "step-finish":
+                self.step_events.append({"type": "step_finish", "part": part})
+                reason = str(part.get("reason", "") or "")
+                if reason:
+                    self.finish_reason = reason
+            return emitted
+
+        if event_type == "session.error":
+            event_session = str(properties.get("sessionID", "") or "")
+            if not event_session or event_session == self.session_id:
+                self.error = self._error_text(properties.get("error"))
+                self.complete = True
+            return emitted
+
+        if event_type == "session.idle" and properties.get("sessionID") == self.session_id:
+            self.complete = True
+        elif event_type == "session.status" and properties.get("sessionID") == self.session_id:
+            status = properties.get("status")
+            if isinstance(status, dict) and status.get("type") == "idle":
+                self.complete = True
+        return emitted
+
+    def content(self) -> str:
+        return "".join(self.text_by_part.get(part_id, "") for part_id in self.text_order)
+
+
+def _send_via_server(
+    *,
+    exe: str,
+    request_dir: Path,
+    prompt: str,
+    model_id: str,
+    variant: Optional[str],
+    timeout_seconds: int,
+    logger: Callable[[str], None],
+    log_stream: bool,
+) -> Dict[str, Any]:
+    """Run an isolated OpenCode server and consume true token deltas over SSE."""
+    port = _loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    command = [exe, "serve", "--hostname", "127.0.0.1", "--port", str(port)]
+    proc = subprocess.Popen(
+        command,
+        cwd=str(request_dir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_creation_flags(),
+        start_new_session=(os.name != "nt"),
+        env=_subprocess_env(),
+    )
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCESSES.add(proc)
+
+    server_stdout: List[str] = []
+    server_stderr: List[str] = []
+    for pipe, target in ((proc.stdout, server_stdout), (proc.stderr, server_stderr)):
+        if pipe is not None:
+            threading.Thread(
+                target=_drain_process_pipe,
+                args=(pipe, target),
+                daemon=True,
+            ).start()
+
+    event_response = None
+    session_id = ""
+    started = time.time()
+    try:
+        startup_deadline = min(started + timeout_seconds, started + 45)
+        while time.time() < startup_deadline:
+            if is_cancelled():
+                raise OcAgyError("OpenCode Antigravity request cancelled by user")
+            if proc.poll() is not None:
+                detail = _clean_text("".join(server_stderr + server_stdout))
+                raise OcAgyError(
+                    "OpenCode Antigravity server exited during startup."
+                    + (f" Details: {detail}" if detail else "")
+                )
+            try:
+                health = _http_json(base_url, "/global/health", timeout=0.75)
+                if isinstance(health, dict) and health.get("healthy"):
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise OcAgyError("OpenCode Antigravity server did not become ready within 45 seconds.")
+
+        session = _http_json(
+            base_url,
+            "/session",
+            method="POST",
+            payload={"title": "Glossarion translation"},
+            timeout=10,
+        )
+        if not isinstance(session, dict) or not session.get("id"):
+            raise OcAgyError("OpenCode Antigravity could not create a streaming session.")
+        session_id = str(session["id"])
+
+        event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+        event_request = urllib.request.Request(
+            base_url + "/event",
+            headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+            method="GET",
+        )
+        event_response = urllib.request.urlopen(event_request, timeout=timeout_seconds)
+        threading.Thread(
+            target=_read_sse_events,
+            args=(event_response, event_queue),
+            daemon=True,
+        ).start()
+
+        connected = False
+        connect_deadline = min(started + timeout_seconds, time.time() + 10)
+        pending_events: List[Dict[str, Any]] = []
+        while time.time() < connect_deadline:
+            try:
+                kind, value = event_queue.get(timeout=0.5)
+            except queue.Empty:
+                if is_cancelled():
+                    raise OcAgyError("OpenCode Antigravity request cancelled by user")
+                continue
+            if kind == "event" and isinstance(value, dict):
+                if value.get("type") == "server.connected":
+                    connected = True
+                    break
+                pending_events.append(value)
+            elif kind == "error":
+                raise OcAgyError(f"OpenCode Antigravity event stream failed: {value}")
+            elif kind == "eof":
+                break
+        if not connected:
+            raise OcAgyError("OpenCode Antigravity event stream did not connect.")
+
+        provider_id, model_name = model_id.split("/", 1)
+        payload: Dict[str, Any] = {
+            "agent": "glossarion",
+            "model": {"providerID": provider_id, "modelID": model_name},
+            "parts": [{"type": "text", "text": prompt}],
+        }
+        if variant:
+            payload["variant"] = variant
+        _http_json(
+            base_url,
+            f"/session/{session_id}/prompt_async",
+            method="POST",
+            payload=payload,
+            timeout=15,
+        )
+
+        state = _OpenCodeStreamState(session_id)
+        text_buffer: List[str] = []
+        thinking_buffer: List[str] = []
+        thinking_started = False
+        first_text = False
+        stream_thinking = os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in (
+            "", "0", "false", "no", "off",
+        )
+
+        def consume(event: Dict[str, Any]) -> None:
+            nonlocal thinking_started, first_text
+            for fragment_type, fragment in state.feed(event):
+                if fragment_type == "reasoning" and log_stream and stream_thinking:
+                    if not thinking_started:
+                        thinking_started = True
+                        logger("🧠 [ocagy] Thinking...")
+                    _stream_log_text(fragment, thinking_buffer, logger)
+                elif fragment_type == "text" and log_stream:
+                    if not first_text:
+                        first_text = True
+                        logger(f"OpenCode Antigravity: first token in {time.time() - started:.1f}s, streaming...")
+                    _stream_log_text(fragment, text_buffer, logger)
+
+        for event in pending_events:
+            consume(event)
+
+        stream_eof = False
+        while not state.complete:
+            if is_cancelled():
+                try:
+                    _http_json(
+                        base_url,
+                        f"/session/{session_id}/abort",
+                        method="POST",
+                        payload={},
+                        timeout=2,
+                    )
+                except Exception:
+                    pass
+                raise OcAgyError("OpenCode Antigravity request cancelled by user")
+            if time.time() - started >= timeout_seconds:
+                raise OcAgyError(
+                    f"OpenCode Antigravity timed out after {timeout_seconds}s. "
+                    "Increase the API timeout or use a shorter chunk."
+                )
+            if proc.poll() is not None:
+                detail = _clean_text("".join(server_stderr + server_stdout))
+                raise OcAgyError(
+                    "OpenCode Antigravity server exited before the response completed."
+                    + (f" Details: {detail}" if detail else "")
+                )
+            try:
+                kind, value = event_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if kind == "event" and isinstance(value, dict):
+                consume(value)
+            elif kind == "error":
+                raise OcAgyError(f"OpenCode Antigravity event stream failed: {value}")
+            elif kind == "eof":
+                stream_eof = True
+                break
+
+        if stream_eof and not state.complete:
+            raise OcAgyError("OpenCode Antigravity event stream closed before completion.")
+        if state.error:
+            raise _classify_error(state.error, 1)
+
+        if log_stream and thinking_buffer:
+            tail = "".join(thinking_buffer).strip()
+            if tail:
+                logger(f"    {tail}")
+        if log_stream and text_buffer:
+            tail = "".join(text_buffer).strip()
+            if tail:
+                logger(tail)
+
+        return {
+            "content": state.content(),
+            "finish_reason": state.finish_reason,
+            "usage": _usage_from_value(state.step_events),
+            "raw_response": state.step_events,
+        }
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise _classify_error(detail, int(getattr(exc, "code", 1) or 1))
+    except urllib.error.URLError as exc:
+        raise OcAgyError(f"OpenCode Antigravity local streaming connection failed: {exc}")
+    finally:
+        if event_response is not None:
+            try:
+                event_response.close()
+            except Exception:
+                pass
+        _terminate_process_tree(proc)
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROCESSES.discard(proc)
+
+
 def _classify_error(detail: str, returncode: int) -> OcAgyError:
     text = _clean_text(detail) or f"opencode exited with code {returncode}"
     lower = text.lower()
+    if any(x in lower for x in (
+        "api key is missing",
+        "api key missing",
+        "google_generative_ai_api_key",
+    )):
+        return OcAgyError(
+            "OpenCode did not find an Antigravity OAuth session and fell back to its built-in "
+            "Google provider. The ocagy/ route does not use or require a Google API key. Click "
+            "the OpenCode Antigravity Login button, select Google, then OAuth with Google "
+            "(Antigravity), finish signing in, and retry. Do not select Manually enter API Key."
+        )
     if any(x in lower for x in ("invalid_grant", "not authenticated", "auth login", "oauth", "credential", "api key missing")):
         return OcAgyError(
             "OpenCode Antigravity authentication failed. Click the OpenCode Antigravity Login button, "
@@ -597,7 +1082,7 @@ def _classify_error(detail: str, returncode: int) -> OcAgyError:
     return OcAgyError(f"OpenCode Antigravity failed (exit {returncode}): {text}")
 
 
-def send_chat_completion(
+def _send_chat_completion_buffered(
     *,
     messages: List[Dict[str, Any]],
     model: str,
@@ -611,6 +1096,7 @@ def send_chat_completion(
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
     exe = find_executable()
+    _require_oauth_account()
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
     logger = log_fn or (lambda _message: None)
@@ -716,3 +1202,69 @@ def send_chat_completion(
         "raw_response": events,
     }
 
+
+def send_chat_completion(
+    *,
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: float = 0.3,
+    max_tokens: int = 65536,
+    timeout: int = 1800,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+) -> Dict[str, Any]:
+    """Run one isolated request through OpenCode's live local event API."""
+    if is_cancelled():
+        raise OcAgyError("OpenCode Antigravity request cancelled by user")
+
+    exe = find_executable()
+    _require_oauth_account()
+    model_id, variant = resolve_model(model)
+    prompt = build_prompt(messages)
+    logger = log_fn or (lambda _message: None)
+    timeout_seconds = max(30, int(timeout or 1800))
+
+    base = _workspace_dir()
+    request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))
+    _write_workspace_config(request_dir)
+    logger(
+        f"🪐 OpenCode Antigravity: {Path(exe).name} live stream --model {model_id}"
+        + (f" --variant {variant}" if variant else "")
+    )
+    logger(
+        "🎛️ OpenCode/plugin manages temperature and output limits internally "
+        f"(Glossarion requested temperature={temperature}, max_tokens={max_tokens:,})."
+    )
+
+    start = time.time()
+    try:
+        result = _send_via_server(
+            exe=exe,
+            request_dir=request_dir,
+            prompt=prompt,
+            model_id=model_id,
+            variant=variant,
+            timeout_seconds=timeout_seconds,
+            logger=logger,
+            log_stream=bool(log_stream),
+        )
+    finally:
+        shutil.rmtree(request_dir, ignore_errors=True)
+
+    elapsed = time.time() - start
+    content = _clean_text(str(result.get("content", "") or ""))
+    if not content:
+        raise OcAgyError("OpenCode Antigravity returned an empty response.")
+
+    logger(f"✅ OpenCode Antigravity: stream finished in {elapsed:.1f}s")
+    return {
+        "content": content,
+        "finish_reason": str(result.get("finish_reason", "stop") or "stop"),
+        "usage": result.get("usage"),
+        "model": model_id,
+        "variant": variant,
+        "provider": "ocagy",
+        "elapsed_seconds": elapsed,
+        "stderr": "",
+        "raw_response": result.get("raw_response"),
+    }

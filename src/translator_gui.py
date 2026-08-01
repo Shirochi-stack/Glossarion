@@ -17676,10 +17676,27 @@ Recent translations to summarize:
     # ==================================================================
 
     def _update_ocagy_login_status(self):
-        """Update the OpenCode Antigravity button from cached status."""
+        """Update the OpenCode Antigravity button from cached and local status."""
         if not hasattr(self, 'ocagy_login_btn'):
             return
-        status = getattr(self, '_ocagy_status_data', None)
+        status = getattr(self, '_ocagy_status_data', None) or {}
+        try:
+            # Reading the plugin's account file is cheap and avoids leaving the
+            # button stale after the external OAuth flow completes.
+            from ocagy_cli import get_account_summary
+            local_summary = get_account_summary()
+            local_count = int(local_summary.get('account_count', 0) or 0)
+            cached_count = int(status.get('account_count', 0) or 0)
+            if local_count >= cached_count and local_count:
+                status = dict(status)
+                status.update(local_summary)
+                status['installed'] = True
+                status['authenticated'] = True
+                # The account file is created by the loaded Antigravity plugin.
+                status['plugin_ready'] = True
+                self._ocagy_status_data = status
+        except Exception:
+            pass
         if (
             isinstance(status, dict)
             and status.get('installed')
@@ -17708,8 +17725,82 @@ Recent translations to summarize:
             "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
         )
 
+    def _ocagy_current_account_count(self):
+        try:
+            from ocagy_cli import get_account_summary
+            summary = get_account_summary()
+            return int(summary.get('account_count', 0) or 0)
+        except Exception:
+            status = getattr(self, '_ocagy_status_data', {}) or {}
+            return int(status.get('account_count', 0) or 0)
+
+    def _stop_ocagy_login_poll(self):
+        timer = getattr(self, '_ocagy_login_poll_timer', None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._ocagy_login_poll_timer = None
+
+    def _start_ocagy_login_poll(self):
+        """Watch the plugin account file until the external OAuth flow finishes."""
+        self._stop_ocagy_login_poll()
+        self._ocagy_login_poll_baseline = int(
+            getattr(
+                self,
+                '_ocagy_login_start_account_count',
+                self._ocagy_current_account_count(),
+            )
+            or 0
+        )
+        self._ocagy_login_poll_attempts_remaining = 150  # 5 minutes at 2 seconds
+
+        timer = QTimer(self)
+        timer.setInterval(2000)
+        timer.timeout.connect(self._poll_ocagy_login_status)
+        self._ocagy_login_poll_timer = timer
+        timer.start()
+
+    @Slot()
+    def _poll_ocagy_login_status(self):
+        """Refresh the button from the local account store without blocking Qt."""
+        self._ocagy_login_poll_attempts_remaining = max(
+            0,
+            int(getattr(self, '_ocagy_login_poll_attempts_remaining', 0)) - 1,
+        )
+        try:
+            from ocagy_cli import get_account_summary
+            account_summary = get_account_summary()
+            count = int(account_summary.get('account_count', 0) or 0)
+            baseline = int(getattr(self, '_ocagy_login_poll_baseline', 0) or 0)
+            if count > baseline:
+                status = dict(getattr(self, '_ocagy_status_data', {}) or {})
+                status.update(account_summary)
+                status.update({
+                    'installed': True,
+                    'authenticated': True,
+                    'plugin_ready': True,
+                })
+                self._ocagy_status_data = status
+                self._update_ocagy_login_status()
+                self._stop_ocagy_login_poll()
+                self.append_log(
+                    f"✅ OpenCode Antigravity account linked. Login button updated to {count} account(s)."
+                )
+                return
+        except Exception:
+            pass
+
+        if self._ocagy_login_poll_attempts_remaining <= 0:
+            self._stop_ocagy_login_poll()
+            self.append_log(
+                "ℹ️ OpenCode Antigravity login watch ended. Click 📊 if the account was linked afterward."
+            )
+
     def _ocagy_login_clicked(self):
         """Open plugin-aware OpenCode OAuth login in a separate terminal."""
+        self._stop_ocagy_login_poll()
+        self._update_ocagy_login_status()
+        self._ocagy_login_start_account_count = self._ocagy_current_account_count()
         self.ocagy_login_btn.setEnabled(False)
         self.ocagy_login_btn.setText("⏳ Opening OpenCode…")
 
@@ -17728,18 +17819,87 @@ Recent translations to summarize:
     def _ocagy_login_finished(self):
         self.ocagy_login_btn.setEnabled(True)
         self._update_ocagy_login_status()
+        self._start_ocagy_login_poll()
         self.append_log(
             "🪐 Opened OpenCode login. Select Google → OAuth with Google (Antigravity), "
-            "finish sign-in, then click 📊 to verify the plugin and accounts."
+            "finish sign-in, and the account count will refresh automatically. "
+            "You can also click 📊 to refresh it manually."
         )
 
     @Slot()
     def _ocagy_login_failed(self):
+        self._stop_ocagy_login_poll()
         self.ocagy_login_btn.setEnabled(True)
         self._update_ocagy_login_status()
         err = getattr(self, '_ocagy_login_error', 'Unknown error')
         self.append_log(f"❌ OpenCode Antigravity login could not be opened: {err}")
+        if "opencode cli was not found" in err.lower():
+            self._show_ocagy_install_dialog()
+            return
         QMessageBox.warning(self, "OpenCode Antigravity", err)
+
+    def _show_ocagy_install_dialog(self):
+        """Show copyable Windows setup commands instead of executable search paths."""
+        from ocagy_cli import (
+            NODEJS_WINGET_INSTALL_COMMAND,
+            OPENCODE_NPM_INSTALL_COMMAND,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Install OpenCode Antigravity")
+        dialog.setMinimumWidth(680)
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(
+            "OpenCode CLI is not installed. Open a new PowerShell window and run "
+            "the OpenCode command below."
+        )
+        intro.setWordWrap(True)
+        intro.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        layout.addWidget(intro)
+
+        def add_command(label_text, command):
+            label = QLabel(label_text)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+
+            row = QHBoxLayout()
+            command_edit = QLineEdit(command)
+            command_edit.setReadOnly(True)
+            command_edit.setCursorPosition(0)
+            command_edit.setToolTip("Select the command or use Copy, then paste it into PowerShell.")
+            copy_button = QPushButton("Copy")
+            copy_button.setFixedWidth(80)
+            copy_button.clicked.connect(
+                lambda _checked=False, value=command: QApplication.clipboard().setText(value)
+            )
+            row.addWidget(command_edit, 1)
+            row.addWidget(copy_button)
+            layout.addLayout(row)
+
+        add_command("Install OpenCode:", OPENCODE_NPM_INSTALL_COMMAND)
+        add_command(
+            "If PowerShell says npm is not recognized, install Node.js LTS first (it includes npm):",
+            NODEJS_WINGET_INSTALL_COMMAND,
+        )
+
+        note = QLabel(
+            "After installing Node.js, close and reopen PowerShell, run the OpenCode command, "
+            "then restart Glossarion and click OpenCode Antigravity Login again."
+        )
+        note.setWordWrap(True)
+        note.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        layout.addWidget(note)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.setDefault(True)
+        close_button.clicked.connect(dialog.accept)
+        close_row.addWidget(close_button)
+        layout.addLayout(close_row)
+
+        dialog.exec()
 
     def _ocagy_status_clicked(self):
         """Check OpenCode, plugin model visibility, and configured OAuth accounts."""
@@ -17765,6 +17925,7 @@ Recent translations to summarize:
         self._update_ocagy_login_status()
         if not status.get('installed'):
             self.append_log(f"❌ OpenCode CLI not found: {status.get('error', '')}")
+            self._show_ocagy_install_dialog()
             return
         self.append_log(f"🪐 OpenCode CLI: {status.get('executable', '')}")
         if status.get('version'):
@@ -17799,21 +17960,30 @@ Recent translations to summarize:
         """Update Antigravity button text from cached status only.
 
         Never call the local proxy here. This method runs from UI paths like
-        model-change, so blocking HTTP here freezes the entire Qt window.
+        model-change, so blocking HTTP here freezes the entire Qt window. The
+        local account file is cheap to read and prevents a stale cached count
+        after an OAuth login adds another account.
         """
+        summary = getattr(self, '_antigravity_status_data', {}) or {}
+        accounts = summary.get("accounts") or [] if summary.get("healthy") else []
         try:
-            summary = getattr(self, '_antigravity_status_data', {}) or {}
-            accounts = summary.get("accounts") or [] if summary.get("healthy") else []
-            if not accounts:
-                # Cheap local-file check only. Do not query the proxy from this UI path.
-                from antigravity_proxy import get_stored_account_summary
-                stored_summary = get_stored_account_summary()
-                stored_accounts = stored_summary.get("accounts") or []
+            # Cheap local-file check only. Do not query the proxy from this UI path.
+            # Prefer it when it contains at least as many accounts as the cached
+            # network status, which is commonly stale immediately after login.
+            from antigravity_proxy import get_stored_account_summary
+            stored_summary = get_stored_account_summary()
+            stored_accounts = stored_summary.get("accounts") or []
+            if len(stored_accounts) >= len(accounts):
                 if stored_accounts:
-                    self._antigravity_status_data = stored_summary
-                    accounts = stored_accounts
+                    merged_summary = dict(summary or stored_summary)
+                    merged_summary["accounts"] = stored_accounts
+                    merged_summary["healthy"] = True
+                    self._antigravity_status_data = merged_summary
+                accounts = stored_accounts
         except Exception:
-            accounts = []
+            # Keep the last known-good cached count if the account file is being
+            # replaced while OAuth completes or is temporarily unreadable.
+            pass
 
         if accounts:
             self.antigravity_login_btn.setText(f"➕ Antigravity ({len(accounts)})")
@@ -17838,8 +18008,71 @@ Recent translations to summarize:
                 "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
             )
 
+    def _antigravity_current_account_count(self):
+        summary = getattr(self, '_antigravity_status_data', {}) or {}
+        accounts = summary.get("accounts") or [] if summary.get("healthy") else []
+        return len(accounts)
+
+    def _stop_antigravity_login_poll(self):
+        timer = getattr(self, '_antigravity_login_poll_timer', None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._antigravity_login_poll_timer = None
+
+    def _start_antigravity_login_poll(self):
+        """Watch the local account file until OAuth adds a new account."""
+        self._stop_antigravity_login_poll()
+        self._antigravity_login_poll_baseline = int(
+            getattr(
+                self,
+                '_antigravity_login_start_account_count',
+                self._antigravity_current_account_count(),
+            )
+            or 0
+        )
+        self._antigravity_login_poll_attempts_remaining = 150  # 5 minutes at 2 seconds
+
+        timer = QTimer(self)
+        timer.setInterval(2000)
+        timer.timeout.connect(self._poll_antigravity_login_status)
+        self._antigravity_login_poll_timer = timer
+        timer.start()
+
+    @Slot()
+    def _poll_antigravity_login_status(self):
+        """Refresh the login button without blocking the GUI or querying HTTP."""
+        self._antigravity_login_poll_attempts_remaining = max(
+            0,
+            int(getattr(self, '_antigravity_login_poll_attempts_remaining', 0)) - 1,
+        )
+        try:
+            from antigravity_proxy import get_stored_account_summary
+            stored_summary = get_stored_account_summary()
+            accounts = stored_summary.get("accounts") or []
+            baseline = int(getattr(self, '_antigravity_login_poll_baseline', 0) or 0)
+            if len(accounts) > baseline:
+                self._antigravity_status_data = stored_summary
+                self._update_antigravity_login_status()
+                self._stop_antigravity_login_poll()
+                self.append_log(
+                    f"✅ Antigravity account linked. Login button updated to {len(accounts)} account(s)."
+                )
+                return
+        except Exception:
+            pass
+
+        if self._antigravity_login_poll_attempts_remaining <= 0:
+            self._stop_antigravity_login_poll()
+            self.append_log(
+                "ℹ️ Antigravity login watch ended. Click 📊 if the account was linked afterward."
+            )
+
     def _antigravity_login_clicked(self):
         """Open the local Antigravity proxy Google login route."""
+        self._stop_antigravity_login_poll()
+        self._update_antigravity_login_status()
+        self._antigravity_login_start_account_count = self._antigravity_current_account_count()
         self.antigravity_login_btn.setText("⏳ Opening…")
         self.antigravity_login_btn.setEnabled(False)
         self.append_log("🔐 Antigravity: starting local proxy and opening Google login…")
@@ -17859,12 +18092,17 @@ Recent translations to summarize:
     def _antigravity_login_finished(self):
         self.antigravity_login_btn.setEnabled(True)
         self._update_antigravity_login_status()
+        self._start_antigravity_login_poll()
         url = getattr(self, '_antigravity_login_url', '')
         self.append_log(f"🔗 Antigravity login opened: {url}")
-        self.append_log("💡 Finish Google login in the browser, then click 📊 to refresh account status.")
+        self.append_log(
+            "💡 Finish Google login in the browser. The account count will refresh automatically; "
+            "you can also click 📊 to refresh it manually."
+        )
 
     @Slot()
     def _antigravity_login_failed(self):
+        self._stop_antigravity_login_poll()
         self.antigravity_login_btn.setEnabled(True)
         self._update_antigravity_login_status()
         err = getattr(self, '_antigravity_login_error', 'Unknown error')
