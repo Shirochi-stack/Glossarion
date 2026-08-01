@@ -25601,18 +25601,18 @@ class UnifiedClient:
             _ocagy_reset_cancel()
 
         try:
-            # Match Antigravity's stream visibility controls exactly. The
-            # transport always streams; these toggles only control live logs.
+            # OcAgy is a forced-stream provider. Outside batch mode, the
+            # general ENABLE_STREAMING toggle must not hide its live output;
+            # only the shared chunk-log toggle applies. Batch visibility uses
+            # the dedicated forced-stream toggle.
             if os.getenv("BATCH_TRANSLATION", "0") == "1":
                 log_stream = os.getenv(
                     "ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0"
                 ).strip().lower() not in ("", "0", "false", "no", "off")
             else:
-                log_stream = (
-                    self._streaming_enabled()
-                    and os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower()
-                    not in ("0", "false", "no", "off")
-                )
+                log_stream = os.getenv(
+                    "LOG_STREAM_CHUNKS", "1"
+                ).strip().lower() not in ("0", "false", "no", "off")
 
             result = _ocagy_send(
                 messages=messages,
@@ -25745,11 +25745,13 @@ class UnifiedClient:
                 )
 
             try:
-                # Determine stream log visibility from the GUI toggles.
+                # Antigravity is a forced-stream provider. ENABLE_STREAMING
+                # controls optional-stream transports and must not hide these
+                # live chunks outside batch mode.
                 if os.getenv("BATCH_TRANSLATION", "0") == "1":
                     log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
                 else:
-                    log_stream = self._streaming_enabled() and os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("0", "false", "no", "off")
+                    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("0", "false", "no", "off")
 
                 # Never clear Antigravity's process-wide cancel event from a
                 # worker. Recheck immediately before the POST so a Stop racing

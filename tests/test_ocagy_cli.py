@@ -538,3 +538,35 @@ def test_unified_client_routes_ocagy_without_api_key(monkeypatch):
     assert response.content == "ROUTED"
     assert response.usage["total_tokens"] == 3
     assert captured["log_stream"] is True
+
+
+def test_ocagy_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "LIVE", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    response = client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert response.content == "LIVE"
+    assert captured["log_stream"] is True

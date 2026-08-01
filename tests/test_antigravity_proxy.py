@@ -311,6 +311,38 @@ def test_antigravity_worker_never_resets_shared_cancel_event(monkeypatch):
     assert reset_calls == []
 
 
+def test_antigravity_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):
+    client = _unified_antigravity_client()
+    client.request_timeout = 300
+    client._should_abort_retry = lambda: False
+    client._get_max_retries = lambda: 1
+    client._streaming_enabled = lambda: False
+
+    captured = {}
+
+    def successful_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "LIVE", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setattr(unified_api_client, "ANTIGRAVITY_AVAILABLE", True)
+    monkeypatch.setattr(unified_api_client, "_antigravity_send", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        unified_api_client,
+        "_antigravity_ensure_running",
+        lambda log_fn=None: {"running": True},
+    )
+    monkeypatch.setattr(unified_api_client, "_antigravity_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified_api_client, "_antigravity_send_stream", successful_send)
+
+    result = client._send_antigravity([], 0.2, 64000, "response.txt")
+
+    assert result.content == "LIVE"
+    assert captured["log_stream"] is True
+
+
 def test_antigravity_fresh_request_clears_orphaned_adapter_cancel(monkeypatch):
     """An adapter-only cancel from an older run must not kill a fresh request."""
     client = _unified_antigravity_client("antigravity/claude-opus-4-6-thinking")
