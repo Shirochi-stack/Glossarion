@@ -19736,13 +19736,19 @@ class UnifiedClient:
                     # Only add thinking_config if the model supports it
                     if supports_thinking:
                         # Create thinking config separately
+                        def _bool_env(name: str, default: str = "false") -> bool:
+                            val = os.getenv(name, default)
+                            return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+                        # Returning thought summaries is independent from the
+                        # thinking budget/level. Apply the UI's thoughts toggle
+                        # to both Gemini 3 and Gemini 2.5 native requests.
+                        include_thoughts = (
+                            self._stream_thinking_logging_enabled()
+                            or _bool_env("ENABLE_THOUGHTS", "false")
+                        )
                         if is_gemini_3:
                             # Gemini 3.0 uses thinking_level
-                            # include_thoughts controlled by ENABLE_THOUGHTS env (true/false/1/yes/on)
-                            def _bool_env(name: str, default: str = "false") -> bool:
-                                val = os.getenv(name, default)
-                                return str(val).strip().lower() in ("1", "true", "yes", "on")
-                            include_thoughts = _bool_env("ENABLE_THOUGHTS", "false")
                             thinking_config = types.ThinkingConfig(
                                 include_thoughts=include_thoughts,
                                 thinking_level=thinking_level
@@ -19750,6 +19756,7 @@ class UnifiedClient:
                         else:
                             # Gemini 2.5 uses thinking_budget
                             thinking_config = types.ThinkingConfig(
+                                include_thoughts=include_thoughts,
                                 thinking_budget=thinking_budget
                             )
                         
