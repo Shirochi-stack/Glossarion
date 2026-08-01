@@ -219,6 +219,8 @@ The built-in model list is a safety net, not a promise that every entry is still
 
 If you already pay for **ChatGPT Plus/Pro**, **Claude Pro/Max**, or have a **Google** account, use the **🔐 login buttons** on the main window instead of an API key. A browser window opens, you log in once, and Glossarion uses that. Pick the matching `authgpt/...`, `authcd/...`, `authgem/...`, or `antigravity/...` model. For Antigravity specifically, also read [Section 18](#18-antigravity-proxy-setup-for-compiled-exe-builds).
 
+### Option 3 — Translate for free
+
 **💸 Don't want to pay anything at all?** You don't have to. See **[Section 17 — How to translate for free](#17-how-to-translate-for-free)** for every no-cost option (free NVIDIA routing, free Google AI Studio keys, free OpenRouter models, your own local AI, and more).
 
 > **⚠️ DON'T paste a key from one company and a model from another.** An OpenAI key with a `claude-` model will fail. Key and model must match the same provider (the multi-provider hubs `eh/`, `or/` are the exception — one key, many models).
