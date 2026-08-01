@@ -4985,64 +4985,6 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         if isinstance(fallback_num, (int, float)) and fallback_num != 0:
             return fallback_num
         return None
-
-    # Provider/API failures require retranslation and must not be replaced by
-    # findings from a later folder scan.
-    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT", "API_ERROR", "TIMEOUT"}
-
-    def _protected_issue_types(chapter_info):
-        import re
-        protected = []
-        current = chapter_info
-        seen = set()
-        while isinstance(current, dict) and id(current) not in seen:
-            seen.add(id(current))
-            issues = current.get("qa_issues_found", []) or []
-            if isinstance(issues, dict):
-                issues = [issues] if "type" in issues else list(issues)
-            elif not isinstance(issues, (list, tuple, set)):
-                issues = [issues]
-            for issue in issues:
-                issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
-                issue_type = re.sub(r"[\s-]+", "_", str(issue_type or "").strip().upper())
-                if issue_type in PROTECTED_ISSUES and issue_type not in protected:
-                    protected.append(issue_type)
-            current = current.get("previous_progress_entry")
-        return protected
-
-    def _normalized_output_name(filename):
-        base = os.path.basename(str(filename or "")).lower()
-        if base.startswith("response_"):
-            base = base[len("response_"):]
-        while True:
-            stem, ext = os.path.splitext(base)
-            if not ext:
-                return base
-            base = stem
-
-    def _matching_progress_entries(chapter_key, filename):
-        selected = prog["chapters"][chapter_key]
-        target_output = _normalized_output_name(selected.get("output_file"))
-        scanned_output = _normalized_output_name(filename)
-        target_num = selected.get("actual_num", selected.get("chapter_num"))
-        matches = []
-        for candidate_key, candidate in prog["chapters"].items():
-            if not isinstance(candidate, dict):
-                continue
-            candidate_output = _normalized_output_name(candidate.get("output_file"))
-            candidate_num = candidate.get("actual_num", candidate.get("chapter_num"))
-            same_output = bool(
-                candidate_output
-                and candidate_output in {target_output, scanned_output}
-            )
-            same_number = bool(
-                target_num not in (None, 0, "0")
-                and (candidate_num == target_num or str(candidate_num) == str(target_num))
-            )
-            if candidate_key == chapter_key or same_output or same_number:
-                matches.append(candidate)
-        return matches
-
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
         chapter_key, is_merged_child, file_chapter_num = find_chapter_key(faulty_filename)
@@ -5052,20 +4994,6 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             old_status = chapter_info.get("status", "unknown")
             actual_num_being_updated = chapter_info.get("actual_num")
             log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
-
-            protected_found = []
-            for matching_info in _matching_progress_entries(chapter_key, faulty_filename):
-                for issue_type in _protected_issue_types(matching_info):
-                    if issue_type not in protected_found:
-                        protected_found.append(issue_type)
-            if protected_found:
-                chapter_num = _choose_log_num(
-                    chapter_info,
-                    faulty_row.get("chapter_num") or file_chapter_num,
-                    faulty_filename,
-                )
-                log(f"   ⚠️ Skipping chapter {chapter_num} - has protected QA issues: {', '.join(protected_found)} (requires retranslation)")
-                continue
             
             # MERGED CHILDREN FIX: Clear any merged children of this chapter before marking as qa_failed
             merged_child_nums = chapter_info.get("merged_chapters", [])
@@ -5106,8 +5034,6 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     if _sib_key == chapter_key or not isinstance(_sib, dict):
                         continue
                     if _sib.get("output_file") != _target_output:
-                        continue
-                    if _protected_issue_types(_sib):
                         continue
                     _sib["status"] = "qa_failed"
                     _sib["qa_issues"] = True
@@ -5192,6 +5118,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
     # Note: We do NOT clear qa_failed for protected issues because they
     # require retranslation, not just QA re-scanning
+    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT", "API_ERROR", "TIMEOUT"}
     
     resolved_count = 0
     skipped_count = 0
@@ -5209,7 +5136,12 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
 
         if was_qa_failed:
             # Check if this chapter has any protected issues that should NOT be auto-cleared
-            protected_found = _protected_issue_types(chapter_info)
+            existing_issues = chapter_info.get("qa_issues_found", [])
+            protected_found = []
+            for issue in existing_issues:
+                issue_type = issue.get("type") if isinstance(issue, dict) else str(issue)
+                if issue_type in PROTECTED_ISSUES:
+                    protected_found.append(issue_type)
             
             if protected_found:
                 # Do NOT clear - this chapter has issues that require manual retranslation
@@ -5243,7 +5175,12 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
                     if _sib.get("output_file") != _target_output:
                         continue
                     # Respect protected issues on the sibling, same as above.
-                    if _protected_issue_types(_sib):
+                    _sib_issues = _sib.get("qa_issues_found", []) or []
+                    _sib_protected = any(
+                        (i.get("type") if isinstance(i, dict) else str(i)) in PROTECTED_ISSUES
+                        for i in _sib_issues
+                    )
+                    if _sib_protected:
                         continue
                     _sib["status"] = "completed"
                     _sib["qa_issues"] = False
