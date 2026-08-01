@@ -329,7 +329,7 @@ def _require_oauth_account() -> None:
         detail = f" The OAuth account store could not be read: {account['accounts_error']}"
     raise OcAgyError(
         "OpenCode Antigravity OAuth is not configured. The ocagy/ route does not use or require "
-        "a Google API key. Click the OpenCode Antigravity Login button, select Google, then "
+        "a Google API key. Click the OCAGY Login button, select Google, then "
         "OAuth with Google (Antigravity), finish signing in, and retry. Do not select "
         f"Manually enter API Key.{detail}"
     )
@@ -836,8 +836,8 @@ def launch_login() -> Dict[str, Any]:
     if os.name == "nt":
         # The project-local opencode.json already declares the plugin and models.
         command = (
-            "$Host.UI.RawUI.WindowTitle='Glossarion OpenCode Antigravity Login'; "
-            "Write-Host 'Glossarion OpenCode Antigravity OAuth setup' -ForegroundColor Cyan; "
+            "$Host.UI.RawUI.WindowTitle='Glossarion OCAGY Login'; "
+            "Write-Host 'Glossarion OCAGY OAuth setup' -ForegroundColor Cyan; "
             "Write-Host 'Select Google, then OAuth with Google (Antigravity).' -ForegroundColor Yellow; "
             f"Set-Location -LiteralPath {json.dumps(str(workspace))}; "
             f"& {json.dumps(exe)} auth login; "
@@ -1555,12 +1555,12 @@ def _classify_error(detail: str, returncode: int) -> OcAgyError:
         return OcAgyError(
             "OpenCode did not find an Antigravity OAuth session and fell back to its built-in "
             "Google provider. The ocagy/ route does not use or require a Google API key. Click "
-            "the OpenCode Antigravity Login button, select Google, then OAuth with Google "
+            "the OCAGY Login button, select Google, then OAuth with Google "
             "(Antigravity), finish signing in, and retry. Do not select Manually enter API Key."
         )
     if any(x in lower for x in ("invalid_grant", "not authenticated", "auth login", "oauth", "credential", "api key missing")):
         return OcAgyError(
-            "OpenCode Antigravity authentication failed. Click the OpenCode Antigravity Login button, "
+            "OpenCode Antigravity authentication failed. Click the OCAGY Login button, "
             "select Google → OAuth with Google (Antigravity), then retry. Details: " + text
         )
     if any(x in lower for x in ("rate limit", "rate-limited", "quota", "resource_exhausted", "too many requests", "429")):

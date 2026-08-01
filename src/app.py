@@ -3423,7 +3423,7 @@ class GlossarionWeb:
                             # OpenCode Antigravity login button (for ocagy/* models)
                             _show_ocagy = _initial_model.startswith('ocagy/')
                             ocagy_login_btn = gr.Button(
-                                "🪐 OpenCode Antigravity Login",
+                                "🪐 OCAGY Login",
                                 variant="secondary",
                                 visible=_show_ocagy
                             )

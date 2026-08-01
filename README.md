@@ -150,7 +150,7 @@
 
 > **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
 
-> **OcAgy login:** The `ocagy/` prefix is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, select a model such as `ocagy/gemini-3.1-pro-high`, click **OpenCode Antigravity Login**, then choose **Google → OAuth with Google (Antigravity)** in the terminal. No API key is required; OpenCode loads `opencode-antigravity-auth` and the plugin manages OAuth, quota fallback, and account rotation.
+> **OcAgy login:** The `ocagy/` prefix is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, select a model such as `ocagy/gemini-3.1-pro-high`, click **OCAGY Login**, then choose **Google → OAuth with Google (Antigravity)** in the terminal. No API key is required; OpenCode loads `opencode-antigravity-auth` and the plugin manages OAuth, quota fallback, and account rotation.
 
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
@@ -163,7 +163,7 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
-5. **OcAgy** — install OpenCode, type `ocagy/gemini-3.1-pro-high`, and use **OpenCode Antigravity Login** (no API key needed)
+5. **OcAgy** — install OpenCode, type `ocagy/gemini-3.1-pro-high`, and use **OCAGY Login** (no API key needed)
 6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
 7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 

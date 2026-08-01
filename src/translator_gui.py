@@ -17704,7 +17704,7 @@ Recent translations to summarize:
             and status.get('plugin_ready')
         ):
             count = int(status.get('account_count', 0) or 0)
-            self.ocagy_login_btn.setText(f"✅ OpenCode Antigravity ({count})")
+            self.ocagy_login_btn.setText(f"➕ OCAGY ({count})")
             self.ocagy_login_btn.setToolTip(
                 "OpenCode and opencode-antigravity-auth are ready. "
                 "The plugin manages OAuth, quota handling, and account rotation."
@@ -17715,7 +17715,7 @@ Recent translations to summarize:
             )
             return
 
-        self.ocagy_login_btn.setText("🔐 OpenCode Antigravity Login")
+        self.ocagy_login_btn.setText("🔐 OCAGY Login")
         self.ocagy_login_btn.setToolTip(
             "Uses the OpenCode terminal CLI with the opencode-antigravity-auth plugin. "
             "Install OpenCode or set OCAGY_CLI_PATH if it is not on PATH."
@@ -17784,7 +17784,7 @@ Recent translations to summarize:
                 self._update_ocagy_login_status()
                 self._stop_ocagy_login_poll()
                 self.append_log(
-                    f"✅ OpenCode Antigravity account linked. Login button updated to {count} account(s)."
+                    f"✅ OCAGY account linked. Login button updated to {count} account(s)."
                 )
                 self._schedule_current_provider_catalog_refresh(0)
                 return
@@ -17886,7 +17886,7 @@ Recent translations to summarize:
 
         note = QLabel(
             "After installing Node.js, close and reopen PowerShell, run the OpenCode command, "
-            "then restart Glossarion and click OpenCode Antigravity Login again."
+            "then restart Glossarion and click OCAGY Login again."
         )
         note.setWordWrap(True)
         note.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -19330,7 +19330,7 @@ Recent translations to summarize:
         self._authgem_combo_in_own_row = False  # track current placement
 
         # OpenCode Antigravity OAuth controls (visible for ocagy/* models)
-        self.ocagy_login_btn = QPushButton("🔐 OpenCode Antigravity Login")
+        self.ocagy_login_btn = QPushButton("🔐 OCAGY Login")
         self.ocagy_login_btn.setStyleSheet(
             "background-color: #7c3aed; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
