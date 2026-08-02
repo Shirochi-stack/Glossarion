@@ -454,10 +454,14 @@ def _log_mei_cleanup_on_exit():
 
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
+from collections import deque
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
 import platform
+
+_GUI_LOG_BATCH_MAX_MESSAGES = 250
+_GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
 
 # macOS GPU rendering safety — must be set BEFORE any Qt/PySide6 import.
 # On Hackintosh (AMD CPU) systems, Qt6's default Metal backend can segfault
@@ -12668,6 +12672,10 @@ class _InputOutputDialog(QDialog):
 class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QMainWindow):
     # Qt Signal for thread-safe logging
     log_signal = Signal(str)
+    # Coalesced wake-up for the worker-to-GUI log queue. Unlike log_signal,
+    # this emits at most once while a drain is pending, so high-volume runs do
+    # not create an unbounded number of Qt events.
+    log_queue_ready_signal = Signal()
     # Qt Signal for notifying when threads complete
     thread_complete_signal = Signal()
     # Qt Signal for triggering QA scan from background thread
@@ -12974,9 +12982,17 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     def __init__(self, parent=None):
         # Initialize QMainWindow
         super().__init__(parent)
-        
+
+        self._pending_gui_logs = deque()
+        self._pending_gui_log_lock = threading.Lock()
+        self._gui_log_drain_scheduled = False
+        self._gui_log_drain_timer = QTimer(self)
+        self._gui_log_drain_timer.setSingleShot(True)
+        self._gui_log_drain_timer.timeout.connect(self._drain_gui_log_queue)
+
         # Connect the log signal to append_log_direct
         self.log_signal.connect(self.append_log_direct)
+        self.log_queue_ready_signal.connect(self._schedule_gui_log_drain)
         # Connect thread complete signal to update buttons
         self.thread_complete_signal.connect(self.update_run_button)
         # Connect QA scan trigger signal
@@ -13223,7 +13239,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                                 print(f"⚠️ Could not set Windows taskbar icon: {e}")
                         
                         # Defer icon setting until window is fully created
-                        from PySide6.QtCore import QTimer
                         QTimer.singleShot(100, set_window_icon)
                 except Exception:
                     pass
@@ -13896,7 +13911,6 @@ Text to analyze:
             auto_check_enabled = self.config.get('auto_update_check', True)
             
             if auto_check_enabled:
-                from PySide6.QtCore import QTimer
                 QTimer.singleShot(5000, self._check_updates_on_startup)
             
             # Show first-time glossary mode selection dialog after the main
@@ -25578,6 +25592,13 @@ Recent translations to summarize:
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
+
+        # Reuse one scroll timer. Creating a QTimer.singleShot for every log
+        # line can flood the event loop during long, highly parallel runs.
+        self._log_scroll_timer = QTimer(self)
+        self._log_scroll_timer.setSingleShot(True)
+        self._log_scroll_timer.setInterval(75)
+        self._log_scroll_timer.timeout.connect(self._scroll_log_after_append)
         
         # Auto-scroll helper button (appears when scrolled up)
         from PySide6.QtWidgets import QToolButton
@@ -36380,6 +36401,28 @@ Important rules:
         except Exception:
             return True
 
+    def _scroll_log_after_append(self):
+        """Scroll once after a burst of log writes, if auto-scroll is active."""
+        try:
+            if self._should_log_autoscroll() and hasattr(self, 'log_text') and self.log_text:
+                scrollbar = self.log_text.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+        except Exception:
+            pass
+
+    def _schedule_log_autoscroll(self):
+        """Coalesce repeated scroll requests into one reusable timer."""
+        try:
+            if not self._should_log_autoscroll():
+                return
+            timer = getattr(self, '_log_scroll_timer', None)
+            if timer is not None:
+                timer.start()
+            else:
+                self._scroll_log_after_append()
+        except Exception:
+            pass
+
     def _set_log_auto_scroll_disabled(self, disabled):
         try:
             self._log_auto_scroll_disabled = bool(disabled)
@@ -37021,72 +37064,145 @@ Important rules:
         except Exception:
             return
     
-    def append_log_direct(self, message):
-        """Direct append - MUST be called from main thread only"""
+    def _direct_log_message_is_suppressed(self, message):
+        """Return whether a queued worker message is expected stop-time noise."""
         try:
-            try:
-                msg_low = str(message).lower()
-                stopping_now = (
-                    bool(getattr(self, 'stop_requested', False))
-                    or os.environ.get('TRANSLATION_CANCELLED') == '1'
-                    or os.environ.get('GRACEFUL_STOP') == '1'
-                )
-                noisy_stop_keys = (
-                    'stopped before api call',
-                    'translation returned empty result',
-                    'image chunk size',
-                    'calling vision api',
-                    'using temperature:',
-                    'output token limit:',
-                    'graceful stop active - not starting new api call',
-                    'skipped (graceful stop)',
-                    'failed to get vision key from pool',
-                    'image translation stopped:',
-                    'image translation stopped by user',
-                    'generation returned empty',
-                    'stopped while preparing chunk',
-                    'stopped at chunk',
-                    'queued request (image_translation)',
-                    'reserved slot:',
-                    'subsequent threads:',
-                )
-                if stopping_now and any(k in msg_low for k in noisy_stop_keys):
-                    return
-            except Exception:
-                pass
+            stopping_now = (
+                bool(getattr(self, 'stop_requested', False))
+                or os.environ.get('TRANSLATION_CANCELLED') == '1'
+                or os.environ.get('GRACEFUL_STOP') == '1'
+            )
+            if not stopping_now:
+                return False
+            msg_low = str(message).lower()
+            noisy_stop_keys = (
+                'stopped before api call',
+                'translation returned empty result',
+                'image chunk size',
+                'calling vision api',
+                'using temperature:',
+                'output token limit:',
+                'graceful stop active - not starting new api call',
+                'skipped (graceful stop)',
+                'failed to get vision key from pool',
+                'image translation stopped:',
+                'image translation stopped by user',
+                'generation returned empty',
+                'stopped while preparing chunk',
+                'stopped at chunk',
+                'queued request (image_translation)',
+                'reserved slot:',
+                'subsequent threads:',
+            )
+            return any(key in msg_low for key in noisy_stop_keys)
+        except Exception:
+            return False
 
+    def _append_gui_log_batch(self, messages):
+        """Append a batch to QTextEdit in one document edit on the GUI thread."""
+        try:
             if not hasattr(self, 'log_text') or not self.log_text:
                 return
-            
             try:
                 _ = self.log_text.document()
             except RuntimeError:
                 return
-            
-            # Use textCursor for more compact logging (no extra spacing)
+
+            visible_messages = [
+                str(message)
+                for message in messages
+                if not self._direct_log_message_is_suppressed(message)
+            ]
+            if not visible_messages:
+                return
+
             cursor = self.log_text.textCursor()
             cursor.movePosition(QTextCursor.End)
-            
-            # Add newline if not first message
+            text = "\n".join(visible_messages)
             if not cursor.atStart():
-                cursor.insertText("\n")
-            
-            cursor.insertText(message)
-            
-            # AGGRESSIVE: Scroll to bottom (respect delay and manual scrolling)
+                text = "\n" + text
+            cursor.beginEditBlock()
             try:
-                import time as _time
-                from PySide6.QtCore import QTimer
-                # Only auto-scroll if delay passed AND user hasn't scrolled up
-                if self._should_log_autoscroll():
-                    scrollbar = self.log_text.verticalScrollBar()
-                    scrollbar.setValue(scrollbar.maximum())
-                    # Use single delayed timer instead of 8 timers to prevent handle exhaustion
-                    QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if self._should_log_autoscroll() else None)
+                cursor.insertText(text)
+            finally:
+                cursor.endEditBlock()
+            self._schedule_log_autoscroll()
+        except Exception:
+            # GUI logging must never interrupt translation workers.
+            pass
+
+    def append_log_direct(self, message):
+        """Append one message directly; must be called from the GUI thread."""
+        self._append_gui_log_batch((message,))
+
+    def _queue_gui_log_message(self, message):
+        """Queue a worker log line and emit only one outstanding GUI wake-up."""
+        should_wake = False
+        try:
+            with self._pending_gui_log_lock:
+                self._pending_gui_logs.append(str(message))
+                if not self._gui_log_drain_scheduled:
+                    self._gui_log_drain_scheduled = True
+                    should_wake = True
+            if should_wake:
+                self.log_queue_ready_signal.emit()
+        except Exception:
+            try:
+                print(message)
             except Exception:
                 pass
-        except Exception as e:
-            pass  # Silent failure
+
+    def _schedule_gui_log_drain(self):
+        """Schedule a fair GUI-queue drain without blocking other UI timers."""
+        try:
+            if not self._gui_log_drain_timer.isActive():
+                self._gui_log_drain_timer.start(0)
+        except Exception:
+            try:
+                with self._pending_gui_log_lock:
+                    self._gui_log_drain_scheduled = False
+            except Exception:
+                pass
+
+    def _take_gui_log_batch(
+        self,
+        max_messages=_GUI_LOG_BATCH_MAX_MESSAGES,
+        max_chars=_GUI_LOG_BATCH_MAX_CHARS,
+    ):
+        """Take a bounded batch and report whether more queued logs remain."""
+        batch = []
+        char_count = 0
+        with self._pending_gui_log_lock:
+            while self._pending_gui_logs and len(batch) < max_messages:
+                next_message = self._pending_gui_logs[0]
+                next_size = len(next_message)
+                if batch and char_count + next_size > max_chars:
+                    break
+                batch.append(self._pending_gui_logs.popleft())
+                char_count += next_size
+            has_more = bool(self._pending_gui_logs)
+            if not has_more:
+                self._gui_log_drain_scheduled = False
+        return batch, has_more
+
+    def _drain_gui_log_queue(self):
+        """Drain one bounded batch, yielding between batches to keep Qt live."""
+        try:
+            batch, has_more = self._take_gui_log_batch()
+            if batch:
+                self._append_gui_log_batch(batch)
+            if has_more:
+                self._gui_log_drain_timer.start(0)
+        except Exception:
+            try:
+                with self._pending_gui_log_lock:
+                    has_more = bool(self._pending_gui_logs)
+                    if not has_more:
+                        self._gui_log_drain_scheduled = False
+                if has_more:
+                    self._gui_log_drain_timer.start(10)
+            except Exception:
+                pass
     
     def add_log_listener(self, callback):
         """Register an external log listener (e.g. the EPUB Reader's live
@@ -37212,14 +37328,6 @@ Important rules:
                    print(message)
                    return
                
-               at_bottom = False
-               try:
-                   # Get scrollbar and check if at bottom
-                   scrollbar = self.log_text.verticalScrollBar()
-                   at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
-               except Exception:
-                   at_bottom = True  # Default to scrolling to bottom
-               
                msg_text = str(message)
                msg_low = msg_text.lower()
                is_memory = (
@@ -37245,17 +37353,10 @@ Important rules:
                    # Regular text append
                    self.log_text.append(message)
                
-               # AGGRESSIVE: Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window and manual scrolling
+               # Coalesce auto-scroll work so a log burst does not create one
+               # Qt timer per line.
                try:
-                   import time as _time
-                   from PySide6.QtCore import QTimer
-                   # Only auto-scroll if delay passed AND user hasn't scrolled up
-                   if self._should_log_autoscroll():
-                       scrollbar = self.log_text.verticalScrollBar()
-                       if at_bottom or True:
-                           scrollbar.setValue(scrollbar.maximum())
-                           # Use single delayed timer instead of 8 timers to prevent handle exhaustion
-                           QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if self._should_log_autoscroll() else None)
+                   self._schedule_log_autoscroll()
                    if not stopping_now:
                        self.log_text.update()
                except Exception:
@@ -37270,11 +37371,10 @@ Important rules:
        if threading.current_thread() is threading.main_thread():
            _append()
        else:
-           # Use Qt Signal for thread-safe logging
-           try:
-               self.log_signal.emit(message)
-           except Exception:
-               pass  # Silent failure
+           # Queue worker output and coalesce its GUI wake-up. Emitting one Qt
+           # event per line lets verbose parallel runs permanently outrun the
+           # event loop even though translation itself remains healthy.
+           self._queue_gui_log_message(message)
 
     def update_status_line(self, message, progress_percent=None):
        """Update a status line in the log safely (fallback to print)."""

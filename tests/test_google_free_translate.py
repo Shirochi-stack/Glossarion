@@ -1,7 +1,9 @@
 import os
 import sys
+import threading
 import time
 import types
+from collections import deque
 
 import pytest
 
@@ -341,6 +343,84 @@ def test_translation_idle_cleanup_clears_latched_stop_after_worker_exits(monkeyp
     assert os.environ.get("GRACEFUL_STOP_COMPLETED") == "0"
     assert os.environ.get("WAIT_FOR_CHUNKS") == "0"
     assert "TRANSLATION_CANCELLED" not in os.environ
+
+
+class _TranslatorLogWakeSignal:
+    def __init__(self):
+        self.calls = 0
+
+    def emit(self):
+        self.calls += 1
+
+
+def _translator_log_queue_harness():
+    return types.SimpleNamespace(
+        _pending_gui_logs=deque(),
+        _pending_gui_log_lock=threading.Lock(),
+        _gui_log_drain_scheduled=False,
+        log_queue_ready_signal=_TranslatorLogWakeSignal(),
+    )
+
+
+def test_translator_gui_init_uses_the_module_qtimer():
+    import translator_gui
+
+    # A function-local QTimer import anywhere in __init__ shadows the module
+    # import and makes early timer construction raise UnboundLocalError.
+    assert "QTimer" not in translator_gui.TranslatorGUI.__init__.__code__.co_varnames
+
+
+def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    line_count = 12_000
+
+    def produce(start, stop):
+        for index in range(start, stop):
+            translator_gui.TranslatorGUI._queue_gui_log_message(gui, f"line {index}")
+
+    threads = [
+        threading.Thread(target=produce, args=(start, start + 3_000))
+        for start in range(0, line_count, 3_000)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert gui.log_queue_ready_signal.calls == 1
+
+    drained = []
+    has_more = True
+    while has_more:
+        batch, has_more = translator_gui.TranslatorGUI._take_gui_log_batch(gui)
+        drained.extend(batch)
+
+    assert len(drained) == line_count
+    assert len(set(drained)) == line_count
+    assert gui._gui_log_drain_scheduled is False
+
+    translator_gui.TranslatorGUI._queue_gui_log_message(gui, "after drain")
+    assert gui.log_queue_ready_signal.calls == 2
+
+
+def test_translator_gui_log_batch_takes_an_oversized_first_message():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    oversized = "x" * 100
+    gui._pending_gui_logs.extend((oversized, "next"))
+    gui._gui_log_drain_scheduled = True
+
+    batch, has_more = translator_gui.TranslatorGUI._take_gui_log_batch(
+        gui,
+        max_messages=10,
+        max_chars=10,
+    )
+
+    assert batch == [oversized]
+    assert has_more is True
 
 
 def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):
