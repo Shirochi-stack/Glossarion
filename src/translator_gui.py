@@ -13308,7 +13308,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             ))
             remote_image_download_interval = max(
                 0.0, min(60.0, float(
-                    self.config.get('remote_image_download_interval', 0.0)
+                    self.config.get('remote_image_download_interval', 0.5)
                 ))
             )
             os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{remote_image_download_interval:g}"
@@ -13782,11 +13782,11 @@ Text to analyze:
         try:
             self.remote_image_download_interval_var = max(
                 0.0, min(60.0, float(
-                    self.config.get('remote_image_download_interval', 0.0)
+                    self.config.get('remote_image_download_interval', 0.5)
                 ))
             )
         except (TypeError, ValueError):
-            self.remote_image_download_interval_var = 0.0
+            self.remote_image_download_interval_var = 0.5
         
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
@@ -42869,7 +42869,7 @@ Important rules:
                 ('retain_source_extension', ['retain_source_extension_var'], False, bool),
                 ('download_remote_image_urls', ['download_remote_image_urls_var'], False, bool),
                 ('remote_image_download_workers', ['remote_image_download_workers_var'], 4, lambda v: max(1, min(32, safe_int(v, 4)))),
-                ('remote_image_download_interval', ['remote_image_download_interval_var'], 0.0, lambda v: max(0.0, min(60.0, safe_float(v, 0.0)))),
+                ('remote_image_download_interval', ['remote_image_download_interval_var'], 0.5, lambda v: max(0.0, min(60.0, safe_float(v, 0.5)))),
                 ('enable_gui_yield', ['enable_gui_yield_var'], True, bool),
                 ('use_thread_pool_extraction', ['use_thread_pool_extraction_var'], False, bool),
                 
@@ -43105,7 +43105,7 @@ Important rules:
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('DOWNLOAD_REMOTE_IMAGE_URLS', self.config.get('download_remote_image_urls'), is_bool=True))
             env_vars_set.append(_update_env('REMOTE_IMAGE_DOWNLOAD_WORKERS', _config_int('remote_image_download_workers', 4, 1, 32)))
-            env_vars_set.append(_update_env('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _config_float('remote_image_download_interval', 0.0, 0.0, 60.0)))
+            env_vars_set.append(_update_env('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _config_float('remote_image_download_interval', 0.5, 0.0, 60.0)))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
             env_vars_set.append(_update_env('PARTIAL_B2_ENTRIES_PER_REQUEST', self.config.get('partial_b2_entries_per_request', -1)))
             authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
@@ -43258,7 +43258,7 @@ Important rules:
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
                     ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls') else '0'),
                     ('REMOTE_IMAGE_DOWNLOAD_WORKERS', str(max(1, min(32, safe_int(self.config.get('remote_image_download_workers', 4), 4))))),
-                    ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', f"{max(0.0, min(60.0, safe_float(self.config.get('remote_image_download_interval', 0.0), 0.0))):g}"),
+                    ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', f"{max(0.0, min(60.0, safe_float(self.config.get('remote_image_download_interval', 0.5), 0.5))):g}"),
                 ]
                 total_issues = 0
                 for env_key, expected_str in critical_vars_to_check:
@@ -43674,7 +43674,7 @@ Important rules:
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
                 ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls', False) else '0'),
                 ('REMOTE_IMAGE_DOWNLOAD_WORKERS', str(_int_config('remote_image_download_workers', 4, 1, 32))),
-                ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _float_config('remote_image_download_interval', 0.0, 0.0, 60.0)),
+                ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _float_config('remote_image_download_interval', 0.5, 0.0, 60.0)),
                 ('AUTHND_TOKEN_CONCURRENCY_AUTO', '1' if authnd_auto_enabled else '0'),
                 ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),

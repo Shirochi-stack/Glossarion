@@ -8613,7 +8613,7 @@ def _create_prompt_management_section(self, parent):
         )))
     except Exception:
         remote_image_interval_spin.setValue(max(0.0, min(
-            60.0, float(self.config.get('remote_image_download_interval', 0.0))
+            60.0, float(self.config.get('remote_image_download_interval', 0.5))
         )))
     remote_image_interval_spin.setToolTip(
         "Minimum global delay between consecutive HTTP/HTTPS request starts. "

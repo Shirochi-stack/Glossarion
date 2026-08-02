@@ -631,10 +631,10 @@ def _localize_remote_images(
     worker_count = min(len(remote_urls), max(1, configured_workers))
     try:
         download_interval = float(os.getenv(
-            'REMOTE_IMAGE_DOWNLOAD_INTERVAL', '0'
+            'REMOTE_IMAGE_DOWNLOAD_INTERVAL', '0.5'
         ))
     except (TypeError, ValueError):
-        download_interval = 0.0
+        download_interval = 0.5
     download_interval = max(0.0, min(60.0, download_interval))
     request_throttle = _RemoteImageStartThrottle(download_interval)
 
