@@ -3072,25 +3072,47 @@ class _InputOutputDialog(QDialog):
         return not remainder.strip()
 
     def _generated_image_preview_pixmap(self, candidate):
-        """Return one pre-scaled pixmap whose intrinsic size matches the card."""
+        """Return a device-resolution preview for the logical card size."""
         pixmap = QPixmap(str(candidate or ''))
         if pixmap.isNull():
             return QPixmap()
-        viewport_width = max(320, self.output_box.viewport().width())
-        maximum_width = max(280, min(980, int(viewport_width * 0.76)))
-        maximum_height = 760
+        logical_width, logical_height = self._generated_image_preview_size(candidate)
+        if not logical_width or not logical_height:
+            return QPixmap()
+        try:
+            pixel_ratio = max(
+                1.0,
+                float(self.output_box.viewport().devicePixelRatioF()),
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pixel_ratio = 1.0
+        render_size = QSize(
+            max(1, int(round(logical_width * pixel_ratio))),
+            max(1, int(round(logical_height * pixel_ratio))),
+        )
+        # QTextDocument paints ordinary embedded PNGs as device-independent
+        # images. Give it one physical source pixel per display pixel so Qt
+        # never has to enlarge the reduced preview with its aliased rich-text
+        # image path on 125%/150%/200% displays.
         return pixmap.scaled(
-            QSize(maximum_width, maximum_height),
-            Qt.KeepAspectRatio,
+            render_size,
+            Qt.IgnoreAspectRatio,
             Qt.SmoothTransformation,
         )
 
     def _generated_image_preview_size(self, candidate):
-        """Return the intended logical preview size for one local image."""
-        preview = self._generated_image_preview_pixmap(candidate)
-        if preview.isNull():
+        """Return the intended device-independent preview size."""
+        pixmap = QPixmap(str(candidate or ''))
+        if pixmap.isNull():
             return 0, 0
-        return max(1, preview.width()), max(1, preview.height())
+        viewport_width = max(320, self.output_box.viewport().width())
+        maximum_width = max(280, min(980, int(viewport_width * 0.76)))
+        maximum_height = 760
+        logical_size = pixmap.size().scaled(
+            QSize(maximum_width, maximum_height),
+            Qt.KeepAspectRatio,
+        )
+        return max(1, logical_size.width()), max(1, logical_size.height())
 
     def _generated_image_render_source(self, content, preferred_path=''):
         """Replace generated-image sentinels with scaled local image markup."""
@@ -3115,8 +3137,8 @@ class _InputOutputDialog(QDialog):
                     f"<code>{unavailable}</code></p>"
                 )
 
+            width, height = self._generated_image_preview_size(candidate)
             preview = self._generated_image_preview_pixmap(candidate)
-            width = max(1, preview.width()) if not preview.isNull() else 0
             image_url = ''
             if not preview.isNull():
                 encoded_bytes = QByteArray()
@@ -3131,13 +3153,13 @@ class _InputOutputDialog(QDialog):
             if not image_url:
                 image_url = QUrl.fromLocalFile(candidate).toString()
             safe_url = html_lib.escape(image_url, quote=True)
-            # A data-backed preview has the final display dimensions baked
-            # into its intrinsic PNG size. This keeps QTextDocument's reserved
-            # layout box identical to the pixels it paints. The local-file
-            # fallback retains only a width constraint.
+            # Keep the rich-text layout in logical pixels while the embedded
+            # PNG carries the denser physical pixels needed by HiDPI screens.
+            # Explicit paired dimensions also keep Qt's reserved image box and
+            # the painted bitmap at the same aspect ratio.
             dimensions = (
-                ''
-                if image_url.startswith('data:image/')
+                f" width='{width}' height='{height}'"
+                if width and height
                 else (f" width='{width}'" if width else '')
             )
             return (
