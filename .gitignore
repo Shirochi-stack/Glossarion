@@ -109,6 +109,7 @@ tests/**
 !tests/test_openrouter_thinking.py
 !tests/test_model_options_catalog.py
 !tests/test_shutdown_utils_cleanup.py
+!tests/test_authnd_captcha_navigation.py
 !tests/test_authgrok_auth.py
 !tests/test_antigravity_proxy.py
 !tests/test_ocagy_cli.py

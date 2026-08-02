@@ -37,6 +37,8 @@ DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 1
 TOKEN_CONCURRENCY_ENV = "AUTHND_TOKEN_CONCURRENCY"
 TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
 TOKEN_CONCURRENCY_AUTO_ENV = "AUTHND_TOKEN_CONCURRENCY_AUTO"
+CAPTCHA_DOCUMENT_STABLE_SECONDS = 1.5
+CAPTCHA_MAX_INJECTION_ATTEMPTS = 3
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -62,6 +64,36 @@ _active_response_lock = threading.Lock()
 def _debug_enabled() -> bool:
     value = os.getenv("AUTHND_DEBUG", "").strip().lower()
     return value in ("1", "true", "yes", "on", "debug")
+
+
+def _captcha_debug(message: str) -> None:
+    """Write token-safe browser diagnostics for the standalone Qt helper."""
+    if not _debug_enabled():
+        return
+    try:
+        print(
+            f"AuthND captcha debug: {_sanitize_error_text(message)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _captcha_debug_url(url: Any) -> str:
+    """Keep navigation logs useful without exposing query or fragment values."""
+    text = str(url or "").strip()
+    text = text.split("#", 1)[0].split("?", 1)[0]
+    return text[:500]
+
+
+def _is_injectable_captcha_document(url: Any, title: Any) -> bool:
+    """Reject Qt's blank/intermediate documents before captcha injection."""
+    normalized_url = str(url or "").strip().lower()
+    return bool(
+        str(title or "").strip()
+        and normalized_url.startswith(("https://", "http://"))
+    )
 
 
 def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: bool = False) -> None:
@@ -971,6 +1003,13 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
 
     page = QWebEnginePage(profile, app)
     try:
+        def _page_url() -> str:
+            try:
+                value = page.url()
+                return value.toString() if hasattr(value, "toString") else str(value)
+            except Exception:
+                return ""
+
         def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
             holder: Dict[str, Any] = {}
             loop = QEventLoop()
@@ -984,8 +1023,19 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
             loop.exec()
             return holder.get("value")
 
-        load_loop = QEventLoop()
-        load_state: Dict[str, Any] = {"ok": False, "error": "", "last_event": ""}
+        def _pump_events(delay_ms: int = 100) -> None:
+            loop = QEventLoop()
+            QTimer.singleShot(delay_ms, loop.quit)
+            loop.exec()
+
+        load_state: Dict[str, Any] = {
+            "generation": 0,
+            "finished_generation": -1,
+            "finished_at": 0.0,
+            "ok": False,
+            "error": "",
+            "last_event": "",
+        }
 
         def _qt_value_text(value: Any) -> str:
             try:
@@ -996,9 +1046,32 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
                 pass
             return str(value)
 
+        def _load_started() -> None:
+            load_state["generation"] = int(load_state.get("generation", 0)) + 1
+            load_state["finished_generation"] = -1
+            load_state["finished_at"] = 0.0
+            load_state["ok"] = False
+            load_state["error"] = ""
+            _captcha_debug(
+                "loadStarted "
+                f"generation={load_state['generation']} "
+                f"url={_captcha_debug_url(_page_url())}"
+            )
+
         def _loaded(ok: bool) -> None:
+            generation = int(load_state.get("generation", 0))
             load_state["ok"] = bool(ok)
-            load_loop.quit()
+            load_state["finished_generation"] = generation
+            load_state["finished_at"] = time.monotonic() if ok else 0.0
+            try:
+                has_title = bool(str(page.title() or "").strip())
+            except Exception:
+                has_title = False
+            _captcha_debug(
+                "loadFinished "
+                f"generation={generation} ok={bool(ok)} has_title={has_title} "
+                f"url={_captcha_debug_url(_page_url())}"
+            )
 
         def _loading_changed(info: Any) -> None:
             try:
@@ -1011,7 +1084,6 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
                 info_url = ""
                 if info_url_obj is not None:
                     info_url = info_url_obj.toString() if hasattr(info_url_obj, "toString") else str(info_url_obj)
-                page_current_url = page.url().toString()
                 detail_parts = [
                     f"status={status_text}",
                     f"error_domain={domain}",
@@ -1020,35 +1092,83 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
                 if err:
                     detail_parts.append(f"error={err}")
                 if info_url:
-                    detail_parts.append(f"url={info_url}")
+                    detail_parts.append(f"url={_captcha_debug_url(info_url)}")
+                page_current_url = _page_url()
                 if page_current_url:
-                    detail_parts.append(f"current_url={page_current_url}")
+                    detail_parts.append(f"current_url={_captcha_debug_url(page_current_url)}")
                 detail = ", ".join(detail_parts)
                 load_state["last_event"] = detail
                 if "loadfailed" in status_lower or "failed" in status_lower or "stopped" in status_lower:
                     load_state["error"] = detail
+                _captcha_debug(f"loadingChanged generation={load_state['generation']} {detail}")
             except Exception:
                 pass
 
+        def _wait_for_stable_document(deadline: float) -> int:
+            while time.monotonic() < deadline:
+                if _is_cancelled():
+                    raise RuntimeError("stream cancelled")
+                generation = int(load_state.get("generation", 0))
+                finished_generation = int(load_state.get("finished_generation", -1))
+                if load_state.get("ok") and finished_generation == generation:
+                    current_url = _page_url()
+                    try:
+                        title = str(page.title() or "").strip()
+                    except Exception:
+                        title = ""
+                    finished_at = float(load_state.get("finished_at") or 0.0)
+                    stable_for = time.monotonic() - finished_at if finished_at else 0.0
+                    if (
+                        _is_injectable_captcha_document(current_url, title)
+                        and stable_for >= CAPTCHA_DOCUMENT_STABLE_SECONDS
+                    ):
+                        _captcha_debug(
+                            "stable document "
+                            f"generation={generation} stable_for={stable_for:.2f}s "
+                            f"url={_captcha_debug_url(current_url)}"
+                        )
+                        return generation
+                _pump_events()
+
+            detail = str(load_state.get("error") or load_state.get("last_event") or "").strip()
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"AuthND browser did not reach a stable document for {_captcha_debug_url(page_url)}{suffix}"
+            )
+
+        page.loadStarted.connect(_load_started)
         page.loadFinished.connect(_loaded)
         try:
             page.loadingChanged.connect(_loading_changed)
         except Exception:
             pass
+
+        initial_load_deadline = time.monotonic() + min(max(timeout, 15), 60)
         page.load(QUrl(page_url))
-        QTimer.singleShot(min(max(timeout * 1000, 15000), 60000), load_loop.quit)
-        load_loop.exec()
-        if not load_state.get("ok"):
-            detail = str(load_state.get("error") or load_state.get("last_event") or "").strip()
-            if detail:
-                raise RuntimeError(f"AuthND browser failed to load {page_url}: {detail}")
-            raise RuntimeError(f"AuthND browser failed to load {page_url}")
+        stable_generation = _wait_for_stable_document(initial_load_deadline)
 
         sitekey = os.getenv("AUTHND_HCAPTCHA_SITEKEY", DEFAULT_HCAPTCHA_SITEKEY)
-        script = f"""
+        injection_id = uuid.uuid4().hex
+        deadline = time.monotonic() + max(timeout, 30)
+        last_summary: Dict[str, Any] = {}
+        invalidation_detail = ""
+
+        for injection_attempt in range(1, CAPTCHA_MAX_INJECTION_ATTEMPTS + 1):
+            if injection_attempt > 1:
+                stable_generation = _wait_for_stable_document(deadline)
+
+            marker = f"{injection_id}:{injection_attempt}:{stable_generation}"
+            onload_name = f"__authndHcaptchaOnload_{injection_id}_{injection_attempt}"
+            script = f"""
 (() => {{
-  window.__authndResult = {{pending: true, step: "starting"}};
+  const marker = {json.dumps(marker)};
   const sitekey = {json.dumps(sitekey)};
+  const onloadName = {json.dumps(onload_name)};
+  window.__authndInjectionMarker = marker;
+  window.__authndResult = {{marker, pending: true, step: "starting"}};
+  const isReady = () => Boolean(
+    window.hcaptcha && window.hcaptcha.render && window.hcaptcha.execute
+  );
   const waitFor = (fn, timeoutMs = 20000) => new Promise((resolve, reject) => {{
     const start = Date.now();
     const tick = () => {{
@@ -1061,25 +1181,40 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
     tick();
   }});
   const loadScript = () => new Promise((resolve, reject) => {{
-    if (window.hcaptcha) return resolve(true);
+    if (isReady()) return resolve(true);
+    let settled = false;
+    const finish = () => {{
+      if (settled) return;
+      settled = true;
+      resolve(true);
+    }};
+    const fail = (error) => {{
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }};
+    window[onloadName] = finish;
     const existing = document.querySelector("script[src*='hcaptcha.com/1/api.js']");
     if (existing) {{
-      existing.addEventListener("load", () => resolve(true), {{once: true}});
-      existing.addEventListener("error", () => reject(new Error("hcaptcha script failed")), {{once: true}});
+      existing.addEventListener("error", () => fail(new Error("hcaptcha script failed")), {{once: true}});
+      waitFor(isReady).then(finish, fail);
       return;
     }}
-    const script = document.createElement("script");
-    script.src = "https://js.hcaptcha.com/1/api.js?render=explicit";
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve(true);
-    script.onerror = () => reject(new Error("hcaptcha script failed"));
-    document.head.appendChild(script);
+    const apiScript = document.createElement("script");
+    apiScript.src = "https://js.hcaptcha.com/1/api.js?render=explicit&onload=" + encodeURIComponent(onloadName);
+    apiScript.async = true;
+    apiScript.defer = true;
+    apiScript.onerror = () => fail(new Error("hcaptcha script failed"));
+    (document.head || document.documentElement).appendChild(apiScript);
+    waitFor(isReady).then(finish, fail);
   }});
   (async () => {{
     try {{
+      window.__authndResult.step = "loading-script";
       await loadScript();
-      await waitFor(() => window.hcaptcha && window.hcaptcha.render && window.hcaptcha.execute);
+      await waitFor(isReady);
+      if (window.__authndInjectionMarker !== marker) return;
+      window.__authndResult.step = "rendering";
       let container = document.getElementById("__authnd_hcaptcha");
       if (!container) {{
         container = document.createElement("div");
@@ -1087,50 +1222,135 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
         container.style.position = "fixed";
         container.style.left = "-10000px";
         container.style.top = "0";
-        document.body.appendChild(container);
+        (document.body || document.documentElement).appendChild(container);
       }}
       let widgetId = window.__authndWidgetId;
       if (widgetId === undefined || widgetId === null) {{
         widgetId = window.hcaptcha.render(container, {{sitekey, size: "invisible"}});
         window.__authndWidgetId = widgetId;
       }}
+      window.__authndResult.step = "executing";
       const execResult = await window.hcaptcha.execute(widgetId, {{async: true}});
+      if (window.__authndInjectionMarker !== marker) return;
       const token = (execResult && execResult.response) || window.hcaptcha.getResponse(widgetId) || "";
-      window.__authndResult = {{pending: false, token, execResult, error: null}};
+      window.__authndResult = {{marker, pending: false, step: "complete", token, error: null}};
     }} catch (error) {{
+      if (window.__authndInjectionMarker !== marker) return;
       window.__authndResult = {{
+        marker,
         pending: false,
+        step: "failed",
         token: "",
         error: String(error && (error.stack || error.message || error))
       }};
     }}
   }})();
-  return true;
+  return marker;
 }})();
 """
-        run_js(script, js_timeout_ms=10000)
+            injected_marker = run_js(script, js_timeout_ms=10000)
+            if str(injected_marker or "") != marker:
+                invalidation_detail = (
+                    f"attempt={injection_attempt}, generation={stable_generation}, marker was not installed"
+                )
+                _captcha_debug(f"injection invalidated immediately {invalidation_detail}")
+                continue
 
-        deadline = time.time() + max(timeout, 30)
-        last_result: Dict[str, Any] = {}
-        while time.time() < deadline:
-            raw = run_js("JSON.stringify(window.__authndResult || {pending:true})", js_timeout_ms=5000)
-            try:
-                result = json.loads(raw or "{}")
-            except Exception:
-                result = {}
-            last_result = result
-            if result and not result.get("pending", True):
-                token = str(result.get("token") or "").strip()
-                if token:
-                    return token
-                raise RuntimeError(f"AuthND hCaptcha failed: {result.get('error') or result}")
-            if _is_cancelled():
-                raise RuntimeError("stream cancelled")
-            wait_loop = QEventLoop()
-            QTimer.singleShot(100, wait_loop.quit)
-            wait_loop.exec()
+            _captcha_debug(
+                f"injected attempt={injection_attempt} generation={stable_generation}"
+            )
+            last_debug_state: Optional[Tuple[Any, ...]] = None
+            while time.monotonic() < deadline:
+                if _is_cancelled():
+                    raise RuntimeError("stream cancelled")
 
-        raise RuntimeError(f"AuthND hCaptcha timed out: {last_result}")
+                current_generation = int(load_state.get("generation", 0))
+                if current_generation != stable_generation:
+                    invalidation_detail = (
+                        f"attempt={injection_attempt}, generation={stable_generation}, "
+                        f"superseded_by={current_generation}"
+                    )
+                    _captcha_debug(f"injection invalidated by navigation {invalidation_detail}")
+                    break
+
+                raw = run_js(
+                    "JSON.stringify({"
+                    "marker: window.__authndInjectionMarker || '',"
+                    "result: window.__authndResult || null,"
+                    "readyState: document.readyState || ''"
+                    "})",
+                    js_timeout_ms=5000,
+                )
+                current_generation = int(load_state.get("generation", 0))
+                if current_generation != stable_generation:
+                    invalidation_detail = (
+                        f"attempt={injection_attempt}, generation={stable_generation}, "
+                        f"superseded_by={current_generation}"
+                    )
+                    _captcha_debug(f"injection invalidated by navigation {invalidation_detail}")
+                    break
+                try:
+                    snapshot = json.loads(raw or "{}")
+                except Exception:
+                    snapshot = {}
+                if not isinstance(snapshot, dict):
+                    snapshot = {}
+
+                observed_marker = str(snapshot.get("marker") or "")
+                result = snapshot.get("result")
+                if not isinstance(result, dict):
+                    result = {}
+                if observed_marker != marker or str(result.get("marker") or "") != marker:
+                    invalidation_detail = (
+                        f"attempt={injection_attempt}, generation={stable_generation}, document marker disappeared"
+                    )
+                    _captcha_debug(f"injection state destroyed {invalidation_detail}")
+                    break
+
+                last_summary = {
+                    "attempt": injection_attempt,
+                    "generation": stable_generation,
+                    "pending": bool(result.get("pending", True)),
+                    "step": str(result.get("step") or ""),
+                    "error": _short_error(result.get("error") or ""),
+                }
+                debug_state = (
+                    last_summary["pending"],
+                    last_summary["step"],
+                    bool(last_summary["error"]),
+                )
+                if debug_state != last_debug_state:
+                    _captcha_debug(
+                        "captcha state "
+                        f"attempt={injection_attempt} generation={stable_generation} "
+                        f"pending={last_summary['pending']} step={last_summary['step']} "
+                        f"has_error={bool(last_summary['error'])}"
+                    )
+                    last_debug_state = debug_state
+
+                if result and not result.get("pending", True):
+                    token = str(result.get("token") or "").strip()
+                    if token:
+                        _captcha_debug(
+                            "token acquired "
+                            f"attempt={injection_attempt} generation={stable_generation} "
+                            f"token_length={len(token)}"
+                        )
+                        return token
+                    raise RuntimeError(
+                        f"AuthND hCaptcha failed: {_short_error(result.get('error') or 'no token returned')}"
+                    )
+                _pump_events()
+
+            if time.monotonic() >= deadline:
+                break
+
+        if invalidation_detail:
+            raise RuntimeError(
+                "AuthND hCaptcha injection was invalidated after "
+                f"{CAPTCHA_MAX_INJECTION_ATTEMPTS} attempts: {invalidation_detail}"
+            )
+        raise RuntimeError(f"AuthND hCaptcha timed out: {last_summary}")
     finally:
         try:
             page.deleteLater()
