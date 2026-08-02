@@ -3,11 +3,14 @@ import os
 import re
 import sys
 import json
+import io
 import threading
 import time
 import shutil
 import hashlib
 import warnings
+import urllib.parse
+import urllib.request
 
 # Lazy import for PatternManager to speed up ProcessPoolExecutor worker startup on Windows
 # The heavy TransateKRtoEN import is deferred until actually needed
@@ -216,6 +219,270 @@ def _collect_image_srcs(soup):
                     image_srcs.append(url)
     
     return image_srcs
+
+
+def _is_remote_image_url(value):
+    """Return True when *value* is an absolute HTTP(S) image reference."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return urllib.parse.urlsplit(value.strip()).scheme.lower() in {'http', 'https'}
+    except (TypeError, ValueError):
+        return False
+
+
+def _convert_remote_image_to_png(image_bytes):
+    """Convert downloaded raster (or SVG, when supported) bytes to real PNG data."""
+    if not image_bytes:
+        raise ValueError("Remote image response was empty")
+
+    stripped = image_bytes.lstrip()
+    looks_like_svg = (
+        stripped.startswith(b'<svg')
+        or (stripped.startswith(b'<?xml') and b'<svg' in stripped[:4096].lower())
+    )
+    if looks_like_svg:
+        try:
+            from cairosvg import svg2png
+        except ImportError as exc:
+            raise ValueError("Remote SVG conversion requires CairoSVG") from exc
+        return svg2png(bytestring=image_bytes)
+
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(image_bytes)) as source_image:
+        source_image.seek(0)
+        source_image.load()
+        image = ImageOps.exif_transpose(source_image)
+        has_transparency = (
+            'A' in image.getbands()
+            or (image.mode == 'P' and 'transparency' in image.info)
+        )
+        if has_transparency:
+            image = image.convert('RGBA')
+        elif image.mode not in {'RGB', 'L'}:
+            image = image.convert('RGB')
+
+        output = io.BytesIO()
+        image.save(output, format='PNG')
+        return output.getvalue()
+
+
+def _download_remote_image_as_png(remote_url):
+    """Download one remote image and return it converted to PNG bytes."""
+    parsed = urllib.parse.urlsplit(remote_url)
+    request_url = urllib.parse.urlunsplit(parsed._replace(fragment=''))
+    origin = f"{parsed.scheme}://{parsed.netloc}/"
+    request = urllib.request.Request(
+        request_url,
+        headers={
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/126.0 Safari/537.36'
+            ),
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': origin,
+        },
+    )
+    try:
+        timeout = max(1.0, float(os.getenv('REMOTE_IMAGE_DOWNLOAD_TIMEOUT', '60')))
+    except (TypeError, ValueError):
+        timeout = 60.0
+
+    response = urllib.request.urlopen(request, timeout=timeout)
+    try:
+        image_bytes = response.read()
+    finally:
+        close = getattr(response, 'close', None)
+        if callable(close):
+            close()
+    return _convert_remote_image_to_png(image_bytes)
+
+
+def _replace_remote_image_refs_in_soup(soup, replacements):
+    """Rewrite successfully downloaded remote image references in one document."""
+    modified = False
+
+    def _replace_attr(tag, attr):
+        nonlocal modified
+        value = tag.get(attr, '')
+        if not isinstance(value, str):
+            return
+        replacement = replacements.get(value.strip())
+        if replacement:
+            tag[attr] = replacement
+            modified = True
+
+    for tag in soup.find_all('img'):
+        _replace_attr(tag, 'src')
+
+    for tag in soup.find_all('image'):
+        for attr in ['xlink:href', 'href', '{http://www.w3.org/1999/xlink}href']:
+            _replace_attr(tag, attr)
+
+    for tag in soup.find_all('object'):
+        _replace_attr(tag, 'data')
+
+    for tag in soup.find_all('video'):
+        _replace_attr(tag, 'poster')
+
+    for tag in soup.find_all(style=True):
+        style = tag.get('style', '')
+        if not isinstance(style, str) or 'url(' not in style:
+            continue
+        new_style = style
+        for match in re.finditer(r'url\(["\']?([^"\')\s]+)["\']?\)', style):
+            remote_url = match.group(1)
+            replacement = replacements.get(remote_url.strip())
+            if replacement:
+                new_style = new_style.replace(remote_url, replacement)
+        if new_style != style:
+            tag['style'] = new_style
+            modified = True
+
+    return modified
+
+
+def _localize_remote_images(chapters, output_dir, progress_callback=None):
+    """Download remote chapter image references and rewrite them to local PNGs.
+
+    This deliberately runs before ``_rename_images_to_chapter_format`` so the
+    normal image ownership and rename-map logic treats downloaded files exactly
+    like images that were packaged in the source EPUB.
+    """
+    markup_keys = ('body', 'original_html', 'source_html', 'raw_html')
+    remote_urls = []
+    seen_urls = set()
+
+    def _collect_markup(markup):
+        if not isinstance(markup, str) or not markup:
+            return
+        try:
+            soup = BeautifulSoup(markup, 'html.parser')
+            candidates = _collect_image_srcs(soup)
+        except Exception:
+            return
+        for candidate in candidates:
+            if not _is_remote_image_url(candidate):
+                continue
+            remote_url = candidate.strip()
+            if remote_url not in seen_urls:
+                seen_urls.add(remote_url)
+                remote_urls.append(remote_url)
+
+    for chapter in chapters:
+        for key in markup_keys:
+            _collect_markup(chapter.get(key))
+
+    disk_html_paths = []
+    if os.path.isdir(output_dir):
+        try:
+            for root, _dirs, files in os.walk(output_dir):
+                for filename in files:
+                    if not filename.lower().endswith(('.html', '.xhtml', '.htm')):
+                        continue
+                    path = os.path.join(root, filename)
+                    disk_html_paths.append(path)
+                    try:
+                        with open(path, 'r', encoding='utf-8') as handle:
+                            _collect_markup(handle.read())
+                    except Exception as exc:
+                        print(f"   Warning: could not scan remote images in {path}: {exc}")
+        except Exception as exc:
+            print(f"   Warning: could not scan output HTML files for remote images: {exc}")
+
+    if not remote_urls:
+        print("Remote image download enabled: no HTTP/HTTPS image URLs found")
+        return chapters
+
+    images_dir = os.path.join(output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+    replacements = {}
+
+    try:
+        configured_workers = int(os.getenv('REMOTE_IMAGE_DOWNLOAD_WORKERS', '4'))
+    except (TypeError, ValueError):
+        configured_workers = 4
+    worker_count = min(len(remote_urls), max(1, configured_workers))
+
+    print(f"Downloading {len(remote_urls)} remote image URL(s) as PNG...")
+    if progress_callback:
+        progress_callback(f"Downloading {len(remote_urls)} remote image URL(s)...")
+
+    def _download_and_store(remote_url):
+        filename = f"remote_{hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]}.png"
+        destination = os.path.join(images_dir, filename)
+        png_bytes = _download_remote_image_as_png(remote_url)
+        temporary = f"{destination}.{threading.get_ident()}.tmp"
+        try:
+            with open(temporary, 'wb') as handle:
+                handle.write(png_bytes)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+        return remote_url, f"images/{filename}"
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_url = {
+            executor.submit(_download_and_store, remote_url): remote_url
+            for remote_url in remote_urls
+        }
+        for future in as_completed(future_to_url):
+            remote_url = future_to_url[future]
+            completed += 1
+            try:
+                downloaded_url, local_reference = future.result()
+                replacements[downloaded_url] = local_reference
+                print(f"   Downloaded remote image {completed}/{len(remote_urls)}")
+            except Exception as exc:
+                print(f"   Warning: remote image download failed; keeping URL {remote_url}: {exc}")
+
+    if not replacements:
+        print("Remote image download finished: no images could be localized")
+        return chapters
+
+    updated_chapters = 0
+    for chapter in chapters:
+        chapter_modified = False
+        for key in markup_keys:
+            markup = chapter.get(key)
+            if not isinstance(markup, str) or not markup:
+                continue
+            try:
+                soup = BeautifulSoup(markup, 'html.parser')
+                if _replace_remote_image_refs_in_soup(soup, replacements):
+                    chapter[key] = str(soup)
+                    chapter_modified = True
+            except Exception as exc:
+                print(f"   Warning: could not rewrite remote images in chapter {chapter.get('num', '?')}: {exc}")
+        if chapter_modified:
+            updated_chapters += 1
+
+    disk_updated = 0
+    for path in disk_html_paths:
+        try:
+            with open(path, 'r', encoding='utf-8') as handle:
+                content = handle.read()
+            soup = BeautifulSoup(content, 'html.parser')
+            if _replace_remote_image_refs_in_soup(soup, replacements):
+                with open(path, 'w', encoding='utf-8') as handle:
+                    handle.write(str(soup))
+                disk_updated += 1
+        except Exception as exc:
+            print(f"   Warning: could not rewrite remote images in {path}: {exc}")
+
+    print(
+        f"Remote image download complete: {len(replacements)}/{len(remote_urls)} localized "
+        f"as PNG ({updated_chapters} chapter(s), {disk_updated} saved HTML file(s) updated)"
+    )
+    return chapters
+
 
 def _update_image_refs_in_soup(soup, rename_map):
     """Update all image references in a BeautifulSoup document using the rename map.
@@ -907,6 +1174,13 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         print("❌ No chapters could be extracted!")
         return []
     
+    # Remote URLs must be localized before the regular image ownership,
+    # chapter rename, and image_rename_map.json pass.
+    if os.getenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0').strip().lower() in {
+        '1', 'true', 'yes', 'on'
+    }:
+        chapters = _localize_remote_images(chapters, output_dir, progress_callback)
+
     # Rename images to chapter-based format (chapter001_img_1.jpg, etc.).
     # Image output mode also needs this map; its passthrough HTML copy applies
     # image_rename_map.json before writing response files.

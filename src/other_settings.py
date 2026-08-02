@@ -8556,7 +8556,7 @@ def _create_prompt_management_section(self, parent):
     download_remote_images_cb.setContentsMargins(0, 5, 0, 5)
     download_remote_images_cb.setToolTip(
         "Download HTTP/HTTPS image URLs referenced by EPUB chapters and "
-        "store them as local EPUB image resources."
+        "convert them to local PNG resources before image rename/mapping."
     )
     section_v.addWidget(download_remote_images_cb)
     

@@ -1,11 +1,15 @@
 import ast
+import hashlib
+import io
 import json
 import os
 import zipfile
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+import Chapter_Extractor as chapter_extractor
 import epub_converter
 import translate_headers_standalone
 from QA_Scanner_GUI import _normalize_qa_dialog_path
@@ -1117,3 +1121,107 @@ def test_epub_writer_renames_windows_invalid_and_too_long_title(tmp_path, monkey
     assert output_name.endswith(".epub")
     assert not output_stem.endswith(".")
     assert len(output_path) <= max_path
+
+
+def _remote_test_png_bytes(color=(30, 80, 140, 255)):
+    output = io.BytesIO()
+    Image.new('RGBA', (3, 2), color).save(output, format='PNG')
+    return output.getvalue()
+
+
+def test_remote_raster_bytes_are_converted_to_real_png():
+    jpeg = io.BytesIO()
+    Image.new('RGB', (4, 3), (140, 80, 30)).save(jpeg, format='JPEG')
+
+    converted = chapter_extractor._convert_remote_image_to_png(jpeg.getvalue())
+
+    assert converted.startswith(b'\x89PNG\r\n\x1a\n')
+    with Image.open(io.BytesIO(converted)) as image:
+        assert image.format == 'PNG'
+        assert image.size == (4, 3)
+
+
+def test_remote_images_are_localized_once_before_chapter_rename(monkeypatch, tmp_path):
+    remote_url = (
+        'https://images.novelpia.com/imagebox/b1/'
+        'b1b11a46e497175bfdc6278959170d99_1958056_1779373634_ori.file'
+    )
+    markup = f'''<html><body>
+        <img class="remote-image" src="{remote_url}"/>
+        <svg><image href="{remote_url}"/></svg>
+        <object data="{remote_url}"></object>
+        <video poster="{remote_url}"></video>
+        <div style="background-image: url('{remote_url}')"></div>
+    </body></html>'''
+    chapters = [{
+        'num': 1,
+        'title': 'Chapter 1',
+        'filename': 'chapter0001.xhtml',
+        'original_basename': 'chapter0001',
+        'body': markup,
+        'original_html': markup,
+    }]
+    saved_html = tmp_path / 'chapter0001.xhtml'
+    saved_html.write_text(markup, encoding='utf-8')
+
+    calls = []
+
+    def fake_download(url):
+        calls.append(url)
+        return _remote_test_png_bytes()
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        fake_download,
+    )
+
+    localized = chapter_extractor._localize_remote_images(chapters, str(tmp_path))
+
+    digest = hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]
+    temporary_name = f'remote_{digest}.png'
+    temporary_ref = f'images/{temporary_name}'
+    temporary_path = tmp_path / 'images' / temporary_name
+    assert calls == [remote_url]
+    assert temporary_path.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+    assert remote_url not in localized[0]['body']
+    assert localized[0]['body'].count(temporary_ref) == 5
+    assert remote_url not in localized[0]['original_html']
+    assert remote_url not in saved_html.read_text(encoding='utf-8')
+
+    renamed = chapter_extractor._rename_images_to_chapter_format(
+        localized,
+        str(tmp_path),
+    )
+
+    final_name = 'chapter0001_img_1.png'
+    assert not temporary_path.exists()
+    assert (tmp_path / 'images' / final_name).is_file()
+    assert renamed[0]['body'].count(f'images/{final_name}') == 5
+    assert remote_url not in renamed[0]['body']
+    rename_map = json.loads(
+        (tmp_path / 'image_rename_map.json').read_text(encoding='utf-8')
+    )
+    assert rename_map == {temporary_name: final_name}
+
+
+def test_failed_remote_image_download_keeps_original_url(monkeypatch, tmp_path):
+    remote_url = 'https://images.example.invalid/blocked.file'
+    chapters = [{
+        'num': 2,
+        'body': f'<img src="{remote_url}">',
+    }]
+
+    def fail_download(_url):
+        raise OSError('download failed')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        fail_download,
+    )
+
+    localized = chapter_extractor._localize_remote_images(chapters, str(tmp_path))
+
+    assert remote_url in localized[0]['body']
+    assert not list((tmp_path / 'images').glob('*.png'))
