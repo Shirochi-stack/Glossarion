@@ -43,7 +43,7 @@ except Exception:
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
     _HAS_WEBENGINE = True
 except ImportError:
     _HAS_WEBENGINE = False
@@ -51,6 +51,26 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _ORPHANED_QTHREADS: set[QThread] = set()
+
+
+def _configure_epub_reader_web_settings(view) -> bool:
+    """Allow local reader pages to render remote HTTP(S) images."""
+    if not _HAS_WEBENGINE or view is None:
+        return False
+    try:
+        settings = view.settings()
+        settings.setAttribute(QWebEngineSettings.AutoLoadImages, True)
+        settings.setAttribute(
+            QWebEngineSettings.LocalContentCanAccessRemoteUrls,
+            True,
+        )
+        return True
+    except Exception:
+        logger.debug(
+            "Could not enable remote images for EPUB reader: %s",
+            traceback.format_exc(),
+        )
+        return False
 
 
 class _FlowLayout(QLayout):
@@ -893,6 +913,51 @@ def _cover_cache_dir() -> str:
     return d
 
 
+def _download_remote_cover_image(url: str) -> bytes | None:
+    """Download and validate an HTTP(S) image referenced by a cover page."""
+    try:
+        from urllib.parse import urlparse
+        from urllib.request import Request, urlopen
+
+        parsed = urlparse(str(url or "").strip())
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            return None
+
+        request = Request(
+            parsed.geturl(),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Glossarion EPUB Reader)",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
+        max_bytes = 32 * 1024 * 1024
+        with urlopen(request, timeout=20) as response:
+            length_header = response.headers.get("Content-Length", "")
+            try:
+                if length_header and int(length_header) > max_bytes:
+                    return None
+            except (TypeError, ValueError):
+                pass
+            data = response.read(max_bytes + 1)
+        if not data or len(data) > max_bytes:
+            return None
+
+        # Some novel sites serve extensionless image URLs as
+        # application/octet-stream. Validate the bytes themselves instead of
+        # requiring an image MIME type or filename extension.
+        image = QImage.fromData(data)
+        if image.isNull():
+            return None
+        return data
+    except Exception:
+        logger.debug(
+            "Remote cover download failed for %s: %s",
+            url,
+            traceback.format_exc(),
+        )
+        return None
+
+
 def _epub_cache_dir() -> str:
     d = os.path.join(tempfile.gettempdir(), "Glossarion_EpubCache")
     os.makedirs(d, exist_ok=True)
@@ -1322,30 +1387,46 @@ def _extract_cover(epub_path: str) -> str | None:
                         cover_data = zf.read(zname)
                         break
 
-            # --- Step 5: First <img> in first HTML chapter ---
+            # --- Step 5: First <img> in the cover page / first HTML chapter ---
             if not cover_data:
                 try:
                     from html import unescape
                     html_exts = (".xhtml", ".html", ".htm")
-                    for zname in sorted(names):
-                        if any(zname.lower().endswith(ext) for ext in html_exts):
-                            html = zf.read(zname).decode("utf-8", errors="replace")
-                            img_match = re.search(
-                                r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^'\"\s>]+))",
-                                html,
-                                re.IGNORECASE,
-                            )
-                            if img_match:
-                                src = next(
-                                    (g for g in img_match.groups() if g),
-                                    "",
-                                )
-                                html_dir = posixpath.dirname(zname)
-                                img_path = posixpath.normpath(
-                                    posixpath.join(html_dir, unescape(src)))
-                                if img_path in names_set:
-                                    cover_data = zf.read(img_path)
+                    html_names = [
+                        zname for zname in names
+                        if any(zname.lower().endswith(ext) for ext in html_exts)
+                    ]
+                    # A cover document may only reference a remote image and
+                    # therefore have no manifest image item. Prefer files such
+                    # as cover.html before falling back to ordinary chapters.
+                    html_names.sort(key=lambda zname: (
+                        0 if "cover" in os.path.basename(zname).casefold() else 1,
+                        zname.casefold(),
+                    ))
+                    for zname in html_names:
+                        html = zf.read(zname).decode("utf-8", errors="replace")
+                        img_match = re.search(
+                            r"<img\b[^>]*\bsrc\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^'\"\s>]+))",
+                            html,
+                            re.IGNORECASE,
+                        )
+                        if img_match:
+                            src = unescape(next(
+                                (g for g in img_match.groups() if g),
+                                "",
+                            ))
+                            if re.match(r"^https?://", src, re.IGNORECASE):
+                                cover_data = _download_remote_cover_image(src)
+                                if cover_data:
                                     break
+                                continue
+                            html_dir = posixpath.dirname(zname)
+                            img_path = posixpath.normpath(
+                                posixpath.join(html_dir, src)
+                            )
+                            if img_path in names_set:
+                                cover_data = zf.read(img_path)
+                                break
                 except Exception:
                     pass
 
@@ -18566,6 +18647,7 @@ class EpubReaderDialog(QDialog):
                 # can drive page navigation / font zoom instead of being
                 # silently swallowed by the internal Chromium scroller.
                 w = _WheelCapturingView()
+                _configure_epub_reader_web_settings(w)
                 w.setUrl(QUrl("about:blank"))
                 # Set page background to match theme (prevents white flash)
                 from PySide6.QtGui import QColor
@@ -22224,6 +22306,12 @@ class EpubReaderDialog(QDialog):
             for img_tag in soup.find_all("img"):
                 src = img_tag.get("src", "")
                 if not src:
+                    continue
+                # Remote image URLs are loaded directly by QWebEngine. Do not
+                # reinterpret them as relative filesystem paths; the reader
+                # view explicitly permits its local file:// page to request
+                # HTTP(S) image resources.
+                if QUrl(src).scheme().lower() in ("http", "https"):
                     continue
                 image_data = None
                 candidates = [src, os.path.basename(src), src.lstrip("../"), src.lstrip("./")]

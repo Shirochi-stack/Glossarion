@@ -1,5 +1,6 @@
 import os
 import time
+import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -7,14 +8,17 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+import epub_library
 from PySide6.QtCore import QEventLoop, QRect
 from PySide6.QtWidgets import QApplication, QWidget
 
 from epub_library import (
     BookDetailsDialog,
     EpubLibraryDialog,
+    EpubReaderDialog,
     SIZE_NORMAL,
     _FlowLayout,
+    _configure_epub_reader_web_settings,
     _merge_manual_metadata_edits,
 )
 
@@ -185,6 +189,90 @@ def test_details_tags_keep_full_text_and_wrap_to_multiple_rows(qapp):
     assert len({chip.y() for chip in chips}) > 1
     assert height > max(chip.height() for chip in chips)
     assert all(chip.width() >= chip.sizeHint().width() for chip in chips)
+
+
+def test_reader_enables_remote_images_for_local_chapter_pages():
+    if not epub_library._HAS_WEBENGINE:
+        pytest.skip("Qt WebEngine is unavailable")
+
+    class FakeSettings:
+        def __init__(self):
+            self.attributes = {}
+
+        def setAttribute(self, attribute, enabled):
+            self.attributes[attribute] = enabled
+
+    class FakeView:
+        def __init__(self):
+            self.web_settings = FakeSettings()
+
+        def settings(self):
+            return self.web_settings
+
+    view = FakeView()
+
+    assert _configure_epub_reader_web_settings(view) is True
+    assert view.web_settings.attributes[
+        epub_library.QWebEngineSettings.AutoLoadImages
+    ] is True
+    assert view.web_settings.attributes[
+        epub_library.QWebEngineSettings.LocalContentCanAccessRemoteUrls
+    ] is True
+
+
+def test_remote_image_url_survives_local_image_processing(tmp_path):
+    remote_url = (
+        "https://images.novelpia.com/imagebox/b1/"
+        "b1b11a46e497175bfdc6278959170d99_1958056_1779373634_ori.file"
+    )
+    reader = EpubReaderDialog.__new__(EpubReaderDialog)
+    reader._epub_path = str(tmp_path / "book.epub")
+    reader._images = {}
+    reader._extra_image_dirs = []
+
+    processed = reader._process_html(
+        f'<p><img class="remote-image" alt="Image 1" src="{remote_url}"/></p>'
+    )
+
+    assert remote_url in processed
+    assert 'class="remote-image"' in processed
+
+
+def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
+    remote_url = (
+        "https://images.novelpia.com/imagebox/cover/"
+        "7699c81bc9ee1228b9fb46cf4c3af980_358677_ori.file"
+    )
+    remote_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6360f8cff00000040101005fe5c34b0000000049454e44"
+        "ae426082"
+    )
+    epub_path = tmp_path / "remote-cover.epub"
+    with zipfile.ZipFile(epub_path, "w") as epub:
+        epub.writestr(
+            "OEBPS/Text/chapter0001.xhtml",
+            '<html><body><img src="https://example.com/chapter.file"/></body></html>',
+        )
+        epub.writestr(
+            "OEBPS/Text/cover.html",
+            f'<html><body><img class="remote-image" src="{remote_url}"/></body></html>',
+        )
+
+    seen_urls = []
+    monkeypatch.setattr(epub_library, "_cover_cache_dir", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        epub_library,
+        "_download_remote_cover_image",
+        lambda url: seen_urls.append(url) or remote_bytes,
+    )
+    (tmp_path / "cache").mkdir()
+
+    cover_path = epub_library._extract_cover(str(epub_path))
+
+    assert seen_urls == [remote_url]
+    assert cover_path
+    assert open(cover_path, "rb").read() == remote_bytes
 
 
 def test_details_tags_prefer_translated_metadata_subjects():
