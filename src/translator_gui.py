@@ -3442,6 +3442,7 @@ class _InputOutputDialog(QDialog):
         media_kind='',
         preferred_path='',
         message_index=-1,
+        placeholder_width=0,
     ):
         """Render images normally and reserve native audio/video player space."""
         import html as html_lib
@@ -3459,6 +3460,23 @@ class _InputOutputDialog(QDialog):
         marker_pattern = r'\[GENERATED_(?:IMAGE|VIDEO|AUDIO):(.+?)\]'
         placeholder_marker = self._direct_media_placeholder_marker(message_index)
         placeholder_height = 430 if media_kind == 'video' else 96
+        default_placeholder_width = 920 if media_kind == 'video' else 760
+        try:
+            placeholder_width = int(placeholder_width or 0)
+        except (TypeError, ValueError):
+            placeholder_width = 0
+        if placeholder_width <= 0:
+            placeholder_width = default_placeholder_width
+        placeholder_width = min(default_placeholder_width, max(260, placeholder_width))
+        # QTextDocument collapses a fixed-height table when it is nested inside
+        # the rounded response card's own tables.  The native player overlay
+        # then extends past the document and cannot be reached by scrolling.
+        # A transparent one-pixel PNG retains its requested height even through
+        # those nested tables, so it provides a real scrollable media slot.
+        transparent_pixel = (
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+            'AAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='
+        )
         marker_html = (
             "<span class='direct-media-marker'>"
             f"{placeholder_marker}</span>"
@@ -3466,9 +3484,9 @@ class _InputOutputDialog(QDialog):
         placeholder = (
             "<div class='generated-media-preview'>"
             f"{marker_html}"
-            "<table class='generated-media-spacer' width='100%' "
-            f"height='{placeholder_height}' cellspacing='0' cellpadding='0'>"
-            f"<tr><td height='{placeholder_height}'>&nbsp;</td></tr></table>"
+            "<img class='generated-media-spacer-image' "
+            f"src='data:image/png;base64,{transparent_pixel}' "
+            f"width='{placeholder_width}' height='{placeholder_height}' alt=''>"
             "</div>"
         )
 
@@ -7846,11 +7864,19 @@ class _InputOutputDialog(QDialog):
                     continue
                 cursor.setPosition(cursor.selectionStart())
                 marker_rect = self.output_box.cursorRect(cursor)
+                block_rect = document.documentLayout().blockBoundingRect(
+                    cursor.block()
+                )
                 media_kind = str(overlay.media_kind or '')
                 height = 414 if media_kind == 'video' else 82
                 x_pos = max(8, int(marker_rect.x()))
                 maximum_width = 920 if media_kind == 'video' else 760
-                width = min(maximum_width, max(300, viewport_width - x_pos - 18))
+                card_slot_width = max(1, int(block_rect.width()))
+                width = min(
+                    maximum_width,
+                    card_slot_width,
+                    max(260, viewport_width - x_pos - 18),
+                )
                 y_pos = int(marker_rect.y()) + 4
                 if y_pos >= viewport_height or y_pos + height <= 0:
                     overlay.hide()
@@ -10798,6 +10824,12 @@ class _InputOutputDialog(QDialog):
                             generated_media_kind,
                             generated_media_path,
                             message_index,
+                            (
+                                max(260, compact_image_bubble_width - 30)
+                                if generated_media_kind in {'video', 'audio'}
+                                and compact_image_bubble_width
+                                else 0
+                            ),
                         )
                         rendered = self._markup_to_html(rendered_source)
                         if message_index < len(self._chat_messages):
@@ -11274,9 +11306,8 @@ class _InputOutputDialog(QDialog):
             "line-height: 100%; }"
             ".generated-image-preview img { border: 1px solid #4a5568; "
             "vertical-align: top; }"
-            ".generated-media-preview, .generated-media-spacer, "
-            ".generated-media-spacer td { border: none; margin: 0; padding: 0; "
-            "background: transparent; }"
+            ".generated-media-preview, .generated-media-spacer-image { "
+            "border: none; margin: 0; padding: 0; background: transparent; }"
             ".direct-media-marker { color:#242424; font-size:1px; "
             "line-height:1px; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
@@ -11320,9 +11351,6 @@ class _InputOutputDialog(QDialog):
             "table { border-collapse: collapse; }"
             ".message-content table th, .message-content table td { "
             "border: 1px solid #596171; padding: 4px 7px; }"
-            ".message-content table.generated-media-spacer, "
-            ".message-content table.generated-media-spacer td { "
-            "border: none; padding: 0; }"
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
         )

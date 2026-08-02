@@ -1905,10 +1905,36 @@ def test_direct_text_video_marker_reserves_native_player_slot(tmp_path):
     assert '[GENERATED_VIDEO:' not in rendered
     assert 'DIRECT_TEXT_MEDIA_PLAYER_6_7F31' in rendered
     assert "height='430'" in rendered
+    assert "width='920'" in rendered
+    assert "class='generated-media-spacer-image'" in rendered
+    assert 'data:image/png;base64,' in rendered
+    assert "<table class='generated-media-spacer'" not in rendered
     assert video_path.name not in rendered
     sanitized = dialog_class._markup_to_html(rendered)
     assert "class=\"direct-media-marker\"" in sanitized
     assert 'DIRECT_TEXT_MEDIA_PLAYER_6_7F31' in sanitized
+
+    # Regression: QTextDocument collapses a height-constrained table when it
+    # is nested in the response card tables.  The transparent image must keep
+    # the native video slot part of the document's scrollable geometry.
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    application = QApplication.instance() or QApplication([])
+    document = QTextDocument()
+    document.setTextWidth(1000)
+    document.setHtml(
+        "<table width='100%'><tr><td width='38'>A</td><td>"
+        "<table width='900'><tr><td>"
+        + sanitized
+        + "</td></tr></table></td></tr></table>"
+    )
+    assert document.size().height() >= 430
+    marker_cursor = document.find('DIRECT_TEXT_MEDIA_PLAYER_6_7F31')
+    marker_block_rect = document.documentLayout().blockBoundingRect(
+        marker_cursor.block()
+    )
+    assert marker_block_rect.width() >= 900
 
 
 def test_direct_text_indexed_image_copy_records_persistent_artifact(tmp_path):
