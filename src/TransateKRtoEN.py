@@ -16168,6 +16168,67 @@ def _preferred_tts_audio_extension(config, client) -> str:
         return "wav"
     return audio_format or "mp3"
 
+
+def _process_direct_text_tts_input(input_path: str, out: str, config, client, check_stop) -> str:
+    """Generate Direct Text speech/music directly instead of searching for HTML."""
+    if check_stop():
+        raise RuntimeError("Direct Text TTS cancelled before synthesis")
+    try:
+        with open(input_path, "r", encoding="utf-8-sig", errors="replace") as source_file:
+            text = source_file.read().strip()
+    except OSError as exc:
+        raise RuntimeError(f"Could not read Direct Text TTS input: {exc}") from exc
+    if not text:
+        raise RuntimeError("Direct Text TTS input is empty")
+
+    active_model_getter = getattr(client, "_get_active_request_model", None)
+    selected_model = str(
+        (active_model_getter() if callable(active_model_getter) else None)
+        or getattr(client, "model", "")
+        or ""
+    ).strip()
+    is_music_model = bool(
+        getattr(client, "_is_music_gen_model", lambda _model: False)(selected_model)
+    )
+    music_kind = (
+        getattr(client, "_gemini_music_model_kind", lambda _model: None)(selected_model)
+        if is_music_model
+        else None
+    )
+    audio_extension = (
+        "wav" if music_kind == "realtime" else "mp3"
+    ) if is_music_model else _preferred_tts_audio_extension(config, client)
+    safe_extension = str(audio_extension or "mp3").strip().lower().lstrip(".")
+    if safe_extension not in {"wav", "mp3", "pcm", "m4a", "aac", "ogg", "opus", "flac"}:
+        safe_extension = "mp3"
+    source_stem = os.path.splitext(os.path.basename(input_path))[0] or "direct_text"
+    tts_dir = os.path.join(out, "text_to_speech")
+    os.makedirs(tts_dir, exist_ok=True)
+    audio_path = os.path.join(tts_dir, f"{source_stem}.{safe_extension}")
+
+    print("\n" + "=" * 50)
+    if is_music_model:
+        print("🎵 DIRECT TEXT MUSIC MODE")
+        print("=" * 50)
+        print(f"Generating music from the Direct Text prompt ({len(text):,} characters).")
+        actual_audio_path = client.generate_music(text, audio_path) or audio_path
+    else:
+        print("🔊 DIRECT TEXT AUDIO / TTS MODE")
+        print("=" * 50)
+        print(f"Synthesizing the Direct Text input ({len(text):,} characters).")
+        actual_audio_path = client.text_to_speech(
+            text,
+            audio_path,
+            audio_format=safe_extension,
+        ) or audio_path
+    actual_audio_path = os.path.abspath(str(actual_audio_path))
+    if not os.path.isfile(actual_audio_path) or os.path.getsize(actual_audio_path) <= 0:
+        raise RuntimeError(
+            f"Direct Text audio generation returned no usable file: {actual_audio_path}"
+        )
+    print(f"🔊 Direct Text audio ready: {actual_audio_path}")
+    return actual_audio_path
+
 def _tts_stem_variants(output_file: str):
     stem = os.path.splitext(os.path.basename(output_file or ""))[0]
     if not stem:
@@ -23439,6 +23500,20 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
     
+    if (
+        config.OUTPUT_MODE == "audio"
+        and os.getenv("DIRECT_TEXT_ACTIVE", "0") == "1"
+        and is_text_file
+    ):
+        _process_direct_text_tts_input(
+            input_path,
+            out,
+            config,
+            client,
+            check_stop,
+        )
+        return
+
     if config.OUTPUT_MODE in ("refinement", "audio"):
         direct_multipass_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
         if direct_multipass_mode not in MULTIPASS_REFINEMENT_MODES:

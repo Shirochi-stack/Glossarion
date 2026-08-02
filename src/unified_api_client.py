@@ -149,6 +149,7 @@ except Exception as e:
 import re
 import base64
 import contextlib
+import asyncio
 # PIL Image import removed — unused in this module. The top-level import
 # added 200-500ms cold-start latency (plugin discovery + codec loading).
 import io
@@ -175,6 +176,7 @@ except ImportError:
             def __init__(self): pass
 import threading
 import uuid
+import wave
 from threading import RLock
 from collections import defaultdict
 logger = logging.getLogger(__name__)
@@ -2391,6 +2393,8 @@ class UnifiedClient:
         'o3': 'openai',
         'o4': 'openai',
         'gemini': 'gemini',
+        'veo': 'gemini',  # Veo uses Gemini's native long-running video API
+        'lyria': 'gemini',  # Lyria uses Gemini's native music APIs
         'gemma': 'gemini',  # Gemma models are served via the Gemini API (generativelanguage.googleapis.com)
         'claude': 'anthropic',
         'chutes': 'chutes',
@@ -3480,10 +3484,18 @@ class UnifiedClient:
           - seedance  (ByteDance video model)
           - kling     (Kuaishou video model)
           - pixverse  (PixVerse video model)
+          - veo-* and gemini-omni-* (Google native video models)
         """
         m = model_name.lower()
-        _VIDEO_ALIASES = ('seedance', 'kling', 'pixverse')
+        _VIDEO_ALIASES = ('seedance', 'kling', 'pixverse', 'veo-', 'gemini-omni-')
         return 'video' in m or any(alias in m for alias in _VIDEO_ALIASES)
+
+    @staticmethod
+    def _is_music_gen_model(model_name: str) -> bool:
+        """Return True for Google's native Lyria music-generation models."""
+        value = str(model_name or "").strip().casefold()
+        bare = value.rsplit("/", 1)[-1]
+        return bare.startswith("lyria-")
 
     # Class-level cancellation flag for all instances
     _global_cancelled = False
@@ -19050,6 +19062,602 @@ class UnifiedClient:
             if not self._is_stop_requested():
                 print(f"Failed to save Gemini safety config: {e}")
 
+    @staticmethod
+    def _gemini_video_model_kind(model_name: str) -> Optional[str]:
+        """Return the native Gemini video transport required by *model_name*."""
+        value = str(model_name or "").strip().casefold()
+        bare = value.rsplit("/", 1)[-1]
+        if bare.startswith("gemini-omni-"):
+            return "omni"
+        if bare.startswith("veo-"):
+            return "veo"
+        return None
+
+    @staticmethod
+    def _gemini_music_model_kind(model_name: str) -> Optional[str]:
+        """Return the Gemini transport used by a Lyria model."""
+        value = str(model_name or "").strip().casefold()
+        bare = value.rsplit("/", 1)[-1]
+        if bare.startswith(("lyria-3-clip", "lyria-3-pro")):
+            return "interactions"
+        if bare.startswith("lyria-realtime"):
+            return "realtime"
+        return None
+
+    @staticmethod
+    def _response_field(value, name: str, default=None):
+        """Read a field from either an SDK object or its dictionary form."""
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    def _gemini_video_output_path(self, response_name: str) -> str:
+        """Build the MP4 path inside the current request's output directory."""
+        output_dir = os.getenv("OUTPUT_DIRECTORY", "") or getattr(self, "output_dir", None) or "."
+        clean_name = str(response_name or "").strip()
+        if clean_name:
+            base_name, _old_extension = os.path.splitext(clean_name)
+            relative_name = f"{base_name}.mp4"
+        else:
+            relative_name = f"generated_video_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}.mp4"
+        output_path = os.path.abspath(os.path.join(output_dir, relative_name))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        return output_path
+
+    def _gemini_music_output_path(self, response_name: str, model_name: str) -> str:
+        """Build an MP3 (Lyria 3) or WAV (Lyria RealTime) output path."""
+        output_dir = os.getenv("OUTPUT_DIRECTORY", "") or getattr(self, "output_dir", None) or "."
+        extension = ".wav" if self._gemini_music_model_kind(model_name) == "realtime" else ".mp3"
+        clean_name = str(response_name or "").strip()
+        if clean_name:
+            base_name, _old_extension = os.path.splitext(clean_name)
+            relative_name = f"{base_name}{extension}"
+        else:
+            relative_name = (
+                f"generated_music_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}{extension}"
+            )
+        output_path = os.path.abspath(os.path.join(output_dir, relative_name))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        return output_path
+
+    def _decode_gemini_video_input_image(self, image_value: Optional[str]) -> Tuple[Optional[bytes], Optional[str]]:
+        """Return image bytes and MIME type for a data URL, URL, or raw base64 string."""
+        value = str(image_value or "").strip()
+        if not value:
+            return None, None
+        try:
+            if value.startswith("data:") and "," in value:
+                header, encoded = value.split(",", 1)
+                mime_type = header[5:].split(";", 1)[0] or "image/png"
+                return base64.b64decode(encoded), mime_type
+            if value.startswith(("http://", "https://")):
+                _connect, read_timeout = self._get_timeouts()
+                response = requests.get(
+                    value,
+                    timeout=read_timeout,
+                    headers={"User-Agent": "Glossarion/GeminiVideo"},
+                )
+                response.raise_for_status()
+                mime_type = (response.headers.get("content-type") or "image/png").split(";", 1)[0]
+                return response.content, mime_type
+            return base64.b64decode(value, validate=True), "image/png"
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"Could not read the Gemini video input image: {exc}",
+                error_type="validation",
+            ) from exc
+
+    def _gemini_video_request_parts(self, messages, image_base64=None):
+        prompt, image_value = self._extract_generation_prompt_and_image_url(messages)
+        if image_base64 and not image_value:
+            image_value = image_base64
+        prompt = str(prompt or "").strip() or "Generate a video"
+        image_bytes, image_mime = self._decode_gemini_video_input_image(image_value)
+        return prompt, image_bytes, image_mime
+
+    def _gemini_video_poll_interval(self) -> float:
+        try:
+            return max(1.0, float(os.getenv("GEMINI_VIDEO_POLL_INTERVAL_SECONDS", "10") or "10"))
+        except (TypeError, ValueError):
+            return 10.0
+
+    def _gemini_video_request_timeout(self) -> Optional[float]:
+        """Honor the user's timeout toggle; ``None`` means no client read deadline."""
+        retry_setting = str(os.getenv("RETRY_TIMEOUT", "") or "").strip().casefold()
+        if retry_setting in {"0", "false", "off"}:
+            return None
+        try:
+            _connect, read_timeout = self._get_timeouts()
+            if read_timeout is None:
+                return None
+            return max(1.0, float(read_timeout))
+        except Exception:
+            return None
+
+    def _save_gemini_video(self, video_bytes: bytes, response_name: str, raw_response=None) -> UnifiedResponse:
+        if not isinstance(video_bytes, (bytes, bytearray)) or not video_bytes:
+            raise UnifiedClientError("Gemini returned an empty video file", error_type="empty_response")
+        output_path = self._gemini_video_output_path(response_name)
+        with open(output_path, "wb") as output_file:
+            output_file.write(bytes(video_bytes))
+        marker = f"[GENERATED_VIDEO:{output_path}]"
+        try:
+            tls = self._get_thread_local_client()
+            tls._last_generated_video_bytes = bytes(video_bytes)
+            tls._last_generated_video_path = output_path
+        except Exception:
+            pass
+        self._actual_output_filename = output_path
+        print(f"💾 Gemini video saved to: {output_path}")
+        return UnifiedResponse(
+            content=marker,
+            finish_reason="stop",
+            raw_response=raw_response,
+        )
+
+    @staticmethod
+    def _gemini_video_state_name(value) -> str:
+        state = getattr(value, "name", value)
+        return str(state or "").strip().upper()
+
+    def _download_gemini_video_content(self, client, video_content) -> bytes:
+        """Download an SDK video object, polling a Files API URI when necessary."""
+        inline_data = self._response_field(video_content, "data")
+        if inline_data:
+            if isinstance(inline_data, str):
+                return base64.b64decode(inline_data)
+            return bytes(inline_data)
+
+        video_bytes = self._response_field(video_content, "video_bytes")
+        if video_bytes:
+            return bytes(video_bytes)
+
+        uri = str(self._response_field(video_content, "uri", "") or "").strip()
+        if not uri:
+            return b""
+
+        file_match = re.search(r"(?:^|/)files/([^/:?]+)", uri)
+        if file_match:
+            file_name = f"files/{file_match.group(1)}"
+            poll_interval = self._gemini_video_poll_interval()
+            while True:
+                if self._should_abort_retry():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                file_info = client.files.get(name=file_name)
+                state_name = self._gemini_video_state_name(self._response_field(file_info, "state"))
+                if state_name in {"ACTIVE", "SUCCEEDED", "COMPLETE", "COMPLETED"}:
+                    break
+                if state_name in {"FAILED", "ERROR", "CANCELLED"}:
+                    raise UnifiedClientError(
+                        f"Gemini video file processing ended with state {state_name}",
+                        error_type="api_error",
+                    )
+                print(f"🎬 Gemini video file processing: {state_name or 'PENDING'}")
+                if not self._sleep_with_cancel(poll_interval, 0.2):
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+        # Interactions returns its own VideoContent type, while files.download
+        # accepts a URI string or google.genai.types.Video. Passing the URI is
+        # compatible with both Omni and Veo SDK response shapes.
+        downloaded = client.files.download(file=uri or video_content)
+        if isinstance(downloaded, (bytes, bytearray)):
+            return bytes(downloaded)
+        downloaded_bytes = self._response_field(downloaded, "video_bytes")
+        return bytes(downloaded_bytes or b"")
+
+    def _extract_omni_video_content(self, interaction):
+        output_video = self._response_field(interaction, "output_video")
+        if output_video:
+            return output_video
+        for step in self._response_field(interaction, "steps", []) or []:
+            for content in self._response_field(step, "content", []) or []:
+                if str(self._response_field(content, "type", "") or "").casefold() == "video":
+                    return content
+        return None
+
+    def _raise_gemini_video_error(self, prefix: str, exc) -> None:
+        if isinstance(exc, UnifiedClientError) and exc.error_type != "api_error":
+            raise exc
+        message = str(exc or "Unknown Gemini video error")
+        lowered = message.casefold()
+        prohibited = any(token in lowered for token in (
+            "content filter", "content_filter", "prohibited", "safety", "rai", "blocked",
+        ))
+        status = (
+            getattr(exc, "http_status", None)
+            or getattr(exc, "status_code", None)
+            or getattr(exc, "code", None)
+        )
+        raise UnifiedClientError(
+            f"{prefix}: {message}",
+            error_type="prohibited_content" if prohibited else "api_error",
+            http_status=status,
+        ) from exc
+
+    def _send_gemini_omni_video(
+        self, client, messages, response_name: str, model_name: str, image_base64=None
+    ) -> UnifiedResponse:
+        prompt, image_bytes, image_mime = self._gemini_video_request_parts(messages, image_base64)
+        interaction_input = prompt
+        if image_bytes:
+            interaction_input = [
+                {
+                    "type": "image",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "mime_type": image_mime or "image/png",
+                },
+                {"type": "text", "text": prompt},
+            ]
+        response_format = {"type": "video", "delivery": "uri"}
+        aspect_ratio = self._get_image_output_aspect_ratio("auto")
+        if aspect_ratio in {"16:9", "9:16"}:
+            response_format["aspect_ratio"] = aspect_ratio
+        print(f"🎬 Gemini Omni: creating video with Interactions API ({model_name})")
+        try:
+            interaction = client.interactions.create(
+                model=model_name,
+                input=interaction_input,
+                response_format=response_format,
+                timeout=self._gemini_video_request_timeout(),
+            )
+            status = str(self._response_field(interaction, "status", "") or "").casefold()
+            if status in {"failed", "error", "cancelled"}:
+                detail = self._response_field(interaction, "error", status)
+                raise UnifiedClientError(
+                    f"Gemini Omni interaction failed: {detail}",
+                    error_type="api_error",
+                )
+            video_content = self._extract_omni_video_content(interaction)
+            if video_content is None:
+                raise UnifiedClientError(
+                    "Gemini Omni completed without a video output",
+                    error_type="empty_response",
+                )
+            video_bytes = self._download_gemini_video_content(client, video_content)
+            return self._save_gemini_video(video_bytes, response_name, interaction)
+        except Exception as exc:
+            self._raise_gemini_video_error("Gemini Omni failed", exc)
+
+    def _send_gemini_veo_video(
+        self, client, messages, response_name: str, model_name: str, image_base64=None
+    ) -> UnifiedResponse:
+        try:
+            from google.genai import types as gemini_types
+        except ImportError as exc:
+            raise UnifiedClientError(
+                "The google-genai package is required for Veo video generation",
+                error_type="configuration",
+            ) from exc
+
+        prompt, image_bytes, image_mime = self._gemini_video_request_parts(messages, image_base64)
+        input_image = None
+        if image_bytes:
+            input_image = gemini_types.Image(
+                image_bytes=image_bytes,
+                mime_type=image_mime or "image/png",
+            )
+        config_values = {}
+        aspect_ratio = self._get_image_output_aspect_ratio("auto")
+        if aspect_ratio in {"16:9", "9:16"}:
+            config_values["aspect_ratio"] = aspect_ratio
+        config = gemini_types.GenerateVideosConfig(**config_values) if config_values else None
+        print(f"🎬 Veo: submitting long-running video generation ({model_name})")
+        try:
+            operation = client.models.generate_videos(
+                model=model_name,
+                prompt=prompt,
+                image=input_image,
+                config=config,
+            )
+            poll_interval = self._gemini_video_poll_interval()
+            started_at = time.monotonic()
+            while not bool(self._response_field(operation, "done", False)):
+                if self._should_abort_retry():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                print(
+                    f"🎬 Veo generation in progress: {time.monotonic() - started_at:.0f}s elapsed "
+                    f"(polling every {poll_interval:g}s)"
+                )
+                if not self._sleep_with_cancel(poll_interval, 0.2):
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                operation = client.operations.get(operation)
+
+            operation_error = self._response_field(operation, "error")
+            if operation_error:
+                raise UnifiedClientError(
+                    f"Veo operation failed: {operation_error}",
+                    error_type="api_error",
+                )
+            response = self._response_field(operation, "response") or self._response_field(operation, "result")
+            filtered_count = int(self._response_field(response, "rai_media_filtered_count", 0) or 0)
+            generated_videos = self._response_field(response, "generated_videos", []) or []
+            if not generated_videos:
+                reasons = self._response_field(response, "rai_media_filtered_reasons", []) or []
+                if filtered_count or reasons:
+                    raise UnifiedClientError(
+                        f"Veo blocked the video output: {', '.join(map(str, reasons)) or 'provider safety filter'}",
+                        error_type="prohibited_content",
+                        http_status=400,
+                    )
+                raise UnifiedClientError("Veo completed without a video output", error_type="empty_response")
+
+            generated_video = generated_videos[0]
+            video_content = self._response_field(generated_video, "video", generated_video)
+            video_bytes = self._download_gemini_video_content(client, video_content)
+            return self._save_gemini_video(video_bytes, response_name, operation)
+        except Exception as exc:
+            self._raise_gemini_video_error("Veo generation failed", exc)
+
+    def _send_gemini_native_video(
+        self, messages, response_name: str, model_name: str, api_key: str, image_base64=None
+    ) -> UnifiedResponse:
+        try:
+            tls = self._get_thread_local_client()
+        except Exception:
+            tls = None
+        client = getattr(tls, "gemini_client", None) if tls is not None else None
+        if client is None:
+            client = getattr(self, "gemini_client", None)
+        if client is None:
+            if genai is None:
+                raise UnifiedClientError(
+                    "The google-genai package is required for Gemini video generation",
+                    error_type="configuration",
+                )
+            client = genai.Client(api_key=api_key)
+            if tls is not None:
+                tls.gemini_client = client
+
+        kind = self._gemini_video_model_kind(model_name)
+        if kind == "omni":
+            return self._send_gemini_omni_video(
+                client, messages, response_name, model_name, image_base64=image_base64
+            )
+        if kind == "veo":
+            return self._send_gemini_veo_video(
+                client, messages, response_name, model_name, image_base64=image_base64
+            )
+        raise UnifiedClientError(
+            f"Unsupported Gemini video model: {model_name}",
+            error_type="validation",
+        )
+
+    def _get_gemini_native_client(self, api_key: str):
+        """Reuse the request-local Gemini SDK client for native media calls."""
+        try:
+            tls = self._get_thread_local_client()
+        except Exception:
+            tls = None
+        client = getattr(tls, "gemini_client", None) if tls is not None else None
+        if client is None:
+            client = getattr(self, "gemini_client", None)
+        if client is None:
+            if genai is None:
+                raise UnifiedClientError(
+                    "The google-genai package is required for Gemini media generation",
+                    error_type="configuration",
+                )
+            client = genai.Client(api_key=api_key)
+            if tls is not None:
+                tls.gemini_client = client
+        return client
+
+    def _extract_lyria_interaction_audio(self, interaction) -> Tuple[bytes, str]:
+        """Extract the MP3 block exposed by a Lyria 3 Interaction."""
+        audio = self._response_field(interaction, "output_audio")
+        if audio is None:
+            for step in self._response_field(interaction, "steps", []) or []:
+                for content in self._response_field(step, "content", []) or []:
+                    if str(self._response_field(content, "type", "") or "").casefold() == "audio":
+                        audio = content
+                        break
+                if audio is not None:
+                    break
+        if audio is None:
+            return b"", "audio/mpeg"
+        data = self._response_field(audio, "data")
+        mime_type = str(
+            self._response_field(audio, "mime_type", "")
+            or self._response_field(audio, "mimeType", "")
+            or "audio/mpeg"
+        )
+        if isinstance(data, str):
+            encoded = data.split(",", 1)[-1] if data.startswith("data:") else data
+            try:
+                return base64.b64decode(encoded), mime_type
+            except Exception as exc:
+                raise UnifiedClientError(
+                    f"Lyria returned invalid base64 audio: {exc}",
+                    error_type="invalid_response",
+                ) from exc
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data), mime_type
+        return b"", mime_type
+
+    async def _capture_lyria_realtime_pcm(self, client, prompt: str, model_name: str) -> bytes:
+        """Capture a bounded Lyria RealTime stream as raw 48 kHz stereo PCM."""
+        try:
+            from google.genai import types as gemini_types
+        except ImportError as exc:
+            raise UnifiedClientError(
+                "The google-genai package is required for Lyria RealTime",
+                error_type="configuration",
+            ) from exc
+        try:
+            duration_seconds = float(os.getenv("LYRIA_REALTIME_DURATION_SECONDS", "30") or "30")
+        except (TypeError, ValueError):
+            duration_seconds = 30.0
+        duration_seconds = min(300.0, max(1.0, duration_seconds))
+        target_bytes = int(48000 * 2 * 2 * duration_seconds)
+        chunks = []
+        total_bytes = 0
+        bare_model = str(model_name or "").strip().rsplit("/", 1)[-1]
+        print(
+            f"\U0001f3b5 Lyria RealTime: generating {duration_seconds:g}s of music "
+            f"({bare_model})"
+        )
+        async with client.aio.live.music.connect(model=f"models/{bare_model}") as session:
+            await session.set_weighted_prompts(
+                prompts=[gemini_types.WeightedPrompt(text=prompt, weight=1.0)]
+            )
+            await session.set_music_generation_config(
+                config=gemini_types.LiveMusicGenerationConfig()
+            )
+            await session.play()
+            async for message in session.receive():
+                if self._should_abort_retry():
+                    await session.stop()
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                filtered = self._response_field(message, "filtered_prompt")
+                if filtered is not None:
+                    reason = (
+                        self._response_field(filtered, "filtered_reason", "")
+                        or self._response_field(filtered, "text", "")
+                        or "provider safety filter"
+                    )
+                    await session.stop()
+                    raise UnifiedClientError(
+                        f"Lyria blocked the music prompt: {reason}",
+                        error_type="prohibited_content",
+                        http_status=400,
+                    )
+                server_content = self._response_field(message, "server_content")
+                for chunk in self._response_field(server_content, "audio_chunks", []) or []:
+                    data = self._response_field(chunk, "data")
+                    if isinstance(data, str):
+                        data = base64.b64decode(data)
+                    if data:
+                        remaining = target_bytes - total_bytes
+                        audio_bytes = bytes(data)[:remaining]
+                        chunks.append(audio_bytes)
+                        total_bytes += len(audio_bytes)
+                if total_bytes >= target_bytes:
+                    await session.stop()
+                    break
+        return b"".join(chunks)
+
+    def _generate_lyria_audio(self, client, prompt: str, model_name: str) -> Tuple[bytes, str, object]:
+        """Generate Lyria audio and return (bytes, MIME type, raw response)."""
+        kind = self._gemini_music_model_kind(model_name)
+        if kind == "interactions":
+            print(f"\U0001f3b5 Lyria 3: generating music with Interactions API ({model_name})")
+            interaction = client.interactions.create(
+                model=model_name,
+                input=prompt,
+                timeout=self._gemini_video_request_timeout(),
+            )
+            status = str(self._response_field(interaction, "status", "") or "").casefold()
+            if status in {"failed", "error", "cancelled"}:
+                detail = self._response_field(interaction, "error", status)
+                raise UnifiedClientError(
+                    f"Lyria interaction failed: {detail}",
+                    error_type="api_error",
+                )
+            audio_bytes, mime_type = self._extract_lyria_interaction_audio(interaction)
+            return audio_bytes, mime_type, interaction
+        if kind == "realtime":
+            pcm_bytes = asyncio.run(
+                self._capture_lyria_realtime_pcm(client, prompt, model_name)
+            )
+            return pcm_bytes, "audio/pcm", None
+        raise UnifiedClientError(
+            f"Unsupported Lyria music model: {model_name}",
+            error_type="validation",
+        )
+
+    def _write_lyria_audio(
+        self,
+        audio_bytes: bytes,
+        output_path: str,
+        model_name: str,
+    ) -> str:
+        if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
+            raise UnifiedClientError("Lyria returned an empty audio file", error_type="empty_response")
+        output_path = os.path.abspath(str(output_path))
+        expected_extension = ".wav" if self._gemini_music_model_kind(model_name) == "realtime" else ".mp3"
+        output_path = os.path.splitext(output_path)[0] + expected_extension
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if expected_extension == ".wav":
+            with wave.open(output_path, "wb") as wav_file:
+                wav_file.setnchannels(2)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(48000)
+                wav_file.writeframes(bytes(audio_bytes))
+        else:
+            with open(output_path, "wb") as output_file:
+                output_file.write(bytes(audio_bytes))
+        self._actual_output_filename = output_path
+        print(f"\U0001f4be Lyria music saved to: {output_path}")
+        return output_path
+
+    def _send_gemini_native_music(
+        self,
+        messages,
+        response_name: str,
+        model_name: str,
+        api_key: str,
+    ) -> UnifiedResponse:
+        prompt, _unused_image = self._extract_generation_prompt_and_image_url(messages)
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise UnifiedClientError("Lyria music prompt is empty", error_type="validation")
+        client = self._get_gemini_native_client(api_key)
+        try:
+            audio_bytes, _mime_type, raw_response = self._generate_lyria_audio(
+                client, prompt, model_name
+            )
+            output_path = self._write_lyria_audio(
+                audio_bytes,
+                self._gemini_music_output_path(response_name, model_name),
+                model_name,
+            )
+            return UnifiedResponse(
+                content=f"[GENERATED_AUDIO:{output_path}]",
+                finish_reason="stop",
+                raw_response=raw_response,
+            )
+        except Exception as exc:
+            self._raise_gemini_video_error("Lyria generation failed", exc)
+
+    def generate_music(self, prompt: str, output_path: str) -> str:
+        """Generate music with the selected native Lyria model."""
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise UnifiedClientError("Lyria music prompt is empty", error_type="validation")
+        model_name = str(self._get_active_request_model() or getattr(self, "model", "") or "").strip()
+        if not self._gemini_music_model_kind(model_name):
+            raise UnifiedClientError(
+                f"Selected model is not a supported Lyria music model: {model_name or '(empty)'}",
+                error_type="validation",
+            )
+        batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
+        started_at = time.time()
+        if not batch_mode:
+            self._sequential_send_lock.acquire()
+        try:
+            self.reset_cleanup_state()
+            self._apply_thread_submission_delay()
+            self._apply_api_call_stagger()
+            if self._should_abort_retry():
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            client = self._get_gemini_native_client(self._get_active_request_api_key())
+            audio_bytes, _mime_type, _raw_response = self._generate_lyria_audio(
+                client, prompt, model_name
+            )
+            result = self._write_lyria_audio(audio_bytes, output_path, model_name)
+            self._track_stats("music", True, None, time.time() - started_at)
+            self._mark_key_success()
+            self._update_stagger_timestamp()
+            return result
+        except Exception as exc:
+            self._track_stats("music", False, exc, time.time() - started_at)
+            if isinstance(exc, UnifiedClientError):
+                raise
+            self._raise_gemini_video_error("Lyria generation failed", exc)
+        finally:
+            if not batch_mode:
+                self._sequential_send_lock.release()
+
     def _send_gemini(self, messages, temperature, max_tokens, response_name, image_base64=None) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages
         
@@ -19063,6 +19671,23 @@ class UnifiedClient:
                 f"Routing guard: refusing to send model '{request_model}' through Gemini endpoint "
                 f"(resolved provider: {expected_provider})",
                 error_type="routing"
+            )
+
+        if self._gemini_video_model_kind(request_model):
+            return self._send_gemini_native_video(
+                messages,
+                response_name,
+                request_model,
+                request_api_key,
+                image_base64=image_base64,
+            )
+
+        if self._gemini_music_model_kind(request_model):
+            return self._send_gemini_native_music(
+                messages,
+                response_name,
+                request_model,
+                request_api_key,
             )
 
         try:

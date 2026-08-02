@@ -41,6 +41,11 @@ def _get_static_model_options() -> List[str]:
         "gemini-3.1-pro-preview","gemini-3.5-flash-lite","gemini-3.1-flash-lite",
         "gemini-3.1-flash-image-preview",
         "gemini-3-pro-image-preview",
+        "gemini-omni-flash-preview",
+        "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview",
+        "veo-3.1-lite-generate-preview",
+        "lyria-3-clip-preview", "lyria-3-pro-preview",
+        "lyria-realtime-exp",
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
         "gemini-2.0-flash","gemini-2.0-flash-lite",
         # Gemma models (served via the Gemini API endpoint)
@@ -497,7 +502,7 @@ class ModelCatalogRefreshResult:
     requested_provider: Optional[str] = None
 
 
-_MODEL_CATALOG_CACHE_VERSION = 1
+_MODEL_CATALOG_CACHE_VERSION = 3
 _MODEL_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
 _MODEL_CATALOG_LOCK = threading.RLock()
 _MODEL_CATALOG_MEMORY_CACHE: Optional[dict] = None
@@ -644,7 +649,7 @@ _PREFIX_PROVIDER_MAP: Tuple[Tuple[str, str], ...] = (
 _BARE_PROVIDER_PREFIXES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("openai", ("gpt-", "chatgpt-", "o1", "o3", "o4")),
     ("anthropic", ("claude-",)),
-    ("gemini", ("gemini-", "gemma-")),
+    ("gemini", ("gemini-", "gemma-", "veo-", "lyria-")),
     ("xai", ("grok-",)),
     ("deepseek", ("deepseek-",)),
     ("mistral", (
@@ -989,8 +994,28 @@ def _fetch_provider_catalog(
                     continue
             if spec.name in ("gemini", "authgem_key"):
                 actions = entry.get("supportedGenerationMethods", entry.get("supported_actions", []))
-                if isinstance(actions, list) and actions and "generateContent" not in actions:
-                    continue
+                if isinstance(actions, list) and actions:
+                    normalized_actions = {str(action).strip().casefold() for action in actions}
+                    # Veo advertises predictLongRunning instead of generateContent.
+                    # Gemini Omni is served by the Interactions API and some
+                    # catalog revisions do not expose that API in this field.
+                    compatible_actions = {
+                        "generatecontent",
+                        "predictlongrunning",
+                        "predict",
+                        "interactions",
+                        "createinteraction",
+                        "interactionsonly",
+                    }
+                    candidate_id = str(
+                        next((entry.get(field) for field in spec.id_fields if entry.get(field)), "")
+                        or ""
+                    ).removeprefix("models/").casefold()
+                    if (
+                        not normalized_actions.intersection(compatible_actions)
+                        and not candidate_id.startswith(("gemini-omni-", "lyria-"))
+                    ):
+                        continue
             if spec.name == "cohere":
                 endpoints = entry.get("endpoints", [])
                 if isinstance(endpoints, list) and endpoints and not {"chat", "generate"}.intersection(endpoints):

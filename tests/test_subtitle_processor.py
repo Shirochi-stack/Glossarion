@@ -1758,6 +1758,81 @@ def test_direct_text_generated_media_classifies_legacy_video_and_audio(tmp_path)
     ) == []
 
 
+def test_direct_text_audio_synthesizes_typed_input_without_html_lookup(
+    tmp_path,
+    monkeypatch,
+):
+    from TransateKRtoEN import _process_direct_text_tts_input
+
+    source = tmp_path / "direct_text_message.txt"
+    source.write_text("MONKEY MONKEY", encoding="utf-8")
+    calls = []
+
+    class FakeTtsClient:
+        model = "gpt-5"
+        api_key = "test-key"
+
+        def text_to_speech(self, text, output_path, audio_format=None):
+            calls.append((text, output_path, audio_format))
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"fake-mp3-audio")
+            return output_path
+
+    monkeypatch.setenv("TTS_AUDIO_FORMAT", "mp3")
+    monkeypatch.delenv("TTS_PROVIDER", raising=False)
+    output = _process_direct_text_tts_input(
+        str(source),
+        str(tmp_path / "output"),
+        object(),
+        FakeTtsClient(),
+        lambda: False,
+    )
+
+    assert Path(output).read_bytes() == b"fake-mp3-audio"
+    assert Path(output).suffix == ".mp3"
+    assert calls == [("MONKEY MONKEY", output, "mp3")]
+
+
+def test_direct_text_audio_uses_lyria_music_generation(tmp_path):
+    from TransateKRtoEN import _process_direct_text_tts_input
+
+    source = tmp_path / "direct_text_music_prompt.txt"
+    source.write_text("Upbeat synthwave with a bright saxophone", encoding="utf-8")
+    calls = []
+
+    class FakeLyriaClient:
+        model = "lyria-3-clip-preview"
+
+        @staticmethod
+        def _is_music_gen_model(model):
+            return model.startswith("lyria-")
+
+        @staticmethod
+        def _gemini_music_model_kind(_model):
+            return "interactions"
+
+        def generate_music(self, prompt, output_path):
+            calls.append((prompt, output_path))
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"fake-lyria-mp3")
+            return output_path
+
+        def text_to_speech(self, *_args, **_kwargs):
+            raise AssertionError("Lyria must not enter the TTS path")
+
+    output = _process_direct_text_tts_input(
+        str(source),
+        str(tmp_path / "output"),
+        object(),
+        FakeLyriaClient(),
+        lambda: False,
+    )
+
+    assert Path(output).read_bytes() == b"fake-lyria-mp3"
+    assert Path(output).suffix == ".mp3"
+    assert calls == [("Upbeat synthwave with a bright saxophone", output)]
+
+
 def test_direct_text_generated_video_is_promoted_to_persistent_path(tmp_path):
     dialog_class = _direct_text_dialog_class()
     temporary_video = tmp_path / 'temporary.mp4'

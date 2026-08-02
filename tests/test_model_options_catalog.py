@@ -1,9 +1,13 @@
+import base64
 import io
 import sys
 import types
 import urllib.error
+from types import SimpleNamespace
 
 import model_options
+import pytest
+from unified_api_client import UnifiedClient, UnifiedClientError
 
 
 def _isolated_cache(tmp_path, monkeypatch):
@@ -435,6 +439,229 @@ def test_authgem_key_catalog_strips_gemini_resource_prefix(tmp_path, monkeypatch
     assert result.provider_models["authgem_key"] == [
         "authgem-key/gemini-current",
     ]
+
+
+def test_gemini_catalog_keeps_native_video_and_lyria_music_models(tmp_path, monkeypatch):
+    _isolated_cache(tmp_path, monkeypatch)
+
+    def fake_get(url, headers, timeout):
+        assert "generativelanguage.googleapis.com" in url
+        assert "key=gemini-secret" in url
+        return {
+            "models": [
+                {
+                    "name": "models/gemini-current",
+                    "supportedGenerationMethods": ["generateContent"],
+                },
+                {
+                    "name": "models/veo-3.1-generate-preview",
+                    "supportedGenerationMethods": ["predictLongRunning"],
+                },
+                {
+                    "name": "models/gemini-omni-flash-preview",
+                    "supportedGenerationMethods": ["interactionsOnly"],
+                },
+                {
+                    "name": "models/lyria-3-clip-preview",
+                    "supportedGenerationMethods": ["interactionsOnly"],
+                },
+                {
+                    "name": "models/lyria-realtime-exp",
+                    "supportedGenerationMethods": ["bidiGenerateContent"],
+                },
+                {
+                    "name": "models/text-embedding-current",
+                    "supportedGenerationMethods": ["embedContent"],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(model_options, "_http_get_json", fake_get)
+    result = model_options.refresh_provider_model_catalogs(
+        active_model="veo-3.1-generate-preview",
+        active_api_key="gemini-secret",
+        only_provider="gemini",
+        timeout=0.1,
+    )
+
+    assert model_options.catalog_provider_for_model("veo-3.1-generate-preview") == "gemini"
+    assert model_options.catalog_provider_for_model("lyria-3-pro-preview") == "gemini"
+    assert result.provider_models["gemini"] == [
+        "gemini-current",
+        "veo-3.1-generate-preview",
+        "gemini-omni-flash-preview",
+        "lyria-3-clip-preview",
+        "lyria-realtime-exp",
+    ]
+    assert "text-embedding-current" not in result.models
+
+
+def _bare_gemini_video_client(tmp_path, monkeypatch):
+    client = UnifiedClient.__new__(UnifiedClient)
+    client.output_dir = str(tmp_path)
+    client.request_timeout = 36000
+    client._actual_output_filename = None
+    client._get_image_output_aspect_ratio = lambda default="auto": "auto"
+    client._extract_generation_prompt_and_image_url = lambda _messages: (
+        "A cinematic waterfall",
+        None,
+    )
+    client._get_thread_local_client = lambda: SimpleNamespace()
+    client._should_abort_retry = lambda: False
+    client._sleep_with_cancel = lambda *_args, **_kwargs: True
+    monkeypatch.setenv("OUTPUT_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    return client
+
+
+def test_veo_and_omni_are_detected_as_native_video_models():
+    assert UnifiedClient._is_video_gen_model("veo-3.1-generate-preview")
+    assert UnifiedClient._is_video_gen_model("gemini-omni-flash-preview")
+    assert UnifiedClient._gemini_video_model_kind("veo-3.1-fast-generate-preview") == "veo"
+    assert UnifiedClient._gemini_video_model_kind("gemini-omni-flash-preview") == "omni"
+    assert UnifiedClient._provider_from_model_name("veo-3.1-generate-preview") == "gemini"
+
+
+def test_lyria_is_detected_as_native_gemini_music():
+    assert UnifiedClient._is_music_gen_model("lyria-3-clip-preview")
+    assert UnifiedClient._is_music_gen_model("models/lyria-realtime-exp")
+    assert UnifiedClient._gemini_music_model_kind("lyria-3-pro-preview") == "interactions"
+    assert UnifiedClient._gemini_music_model_kind("lyria-realtime-exp") == "realtime"
+    assert UnifiedClient._provider_from_model_name("lyria-3-clip-preview") == "gemini"
+
+
+def test_lyria_interactions_saves_mp3_and_returns_audio_marker(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    client._extract_generation_prompt_and_image_url = lambda _messages: (
+        "Upbeat orchestral game music",
+        None,
+    )
+    expected_audio = b"fake-lyria-mp3"
+    calls = []
+
+    class FakeInteractions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                status="completed",
+                output_audio=SimpleNamespace(
+                    data=base64.b64encode(expected_audio).decode("ascii"),
+                    mime_type="audio/mpeg",
+                ),
+            )
+
+    client._get_gemini_native_client = lambda _api_key: SimpleNamespace(
+        interactions=FakeInteractions()
+    )
+    response = client._send_gemini_native_music(
+        [{"role": "user", "content": "Upbeat orchestral game music"}],
+        "response.txt",
+        "lyria-3-clip-preview",
+        "gemini-secret",
+    )
+
+    output_path = tmp_path / "response.mp3"
+    assert output_path.read_bytes() == expected_audio
+    assert response.content == f"[GENERATED_AUDIO:{output_path}]"
+    assert calls[0]["model"] == "lyria-3-clip-preview"
+    assert calls[0]["input"] == "Upbeat orchestral game music"
+    assert calls[0]["timeout"] is None
+
+
+def test_gemini_omni_uses_interactions_and_saves_mp4(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    calls = []
+    expected_video = b"omni-mp4-bytes"
+
+    class FakeInteractions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                status="completed",
+                output_video=SimpleNamespace(
+                    data=base64.b64encode(expected_video).decode("ascii"),
+                    mime_type="video/mp4",
+                ),
+            )
+
+    fake_sdk = SimpleNamespace(interactions=FakeInteractions())
+    response = client._send_gemini_omni_video(
+        fake_sdk,
+        [{"role": "user", "content": "A cinematic waterfall"}],
+        "response.txt",
+        "gemini-omni-flash-preview",
+    )
+
+    output_path = tmp_path / "response.mp4"
+    assert output_path.read_bytes() == expected_video
+    assert response.content == f"[GENERATED_VIDEO:{output_path}]"
+    assert calls[0]["model"] == "gemini-omni-flash-preview"
+    assert calls[0]["response_format"] == {"type": "video", "delivery": "uri"}
+    assert calls[0]["timeout"] is None
+
+
+def test_veo_uses_long_running_operation_polling_and_saves_mp4(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    expected_video = b"veo-mp4-bytes"
+    submitted = []
+    pending = SimpleNamespace(done=False)
+    finished = SimpleNamespace(
+        done=True,
+        error=None,
+        response=SimpleNamespace(
+            generated_videos=[SimpleNamespace(video=SimpleNamespace(uri="video-result"))],
+            rai_media_filtered_count=0,
+            rai_media_filtered_reasons=[],
+        ),
+    )
+
+    class FakeModels:
+        def generate_videos(self, **kwargs):
+            submitted.append(kwargs)
+            return pending
+
+    class FakeOperations:
+        def get(self, operation):
+            assert operation is pending
+            return finished
+
+    class FakeFiles:
+        def download(self, *, file):
+            assert file == "video-result"
+            return expected_video
+
+    fake_sdk = SimpleNamespace(
+        models=FakeModels(),
+        operations=FakeOperations(),
+        files=FakeFiles(),
+    )
+    response = client._send_gemini_veo_video(
+        fake_sdk,
+        [{"role": "user", "content": "A cinematic waterfall"}],
+        "response.txt",
+        "veo-3.1-generate-preview",
+    )
+
+    output_path = tmp_path / "response.mp4"
+    assert output_path.read_bytes() == expected_video
+    assert response.content == f"[GENERATED_VIDEO:{output_path}]"
+    assert submitted[0]["model"] == "veo-3.1-generate-preview"
+    assert submitted[0]["prompt"] == "A cinematic waterfall"
+
+
+def test_gemini_video_provider_safety_error_is_prohibited_content(tmp_path, monkeypatch):
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    with pytest.raises(UnifiedClientError) as raised:
+        client._raise_gemini_video_error(
+            "Veo generation failed",
+            UnifiedClientError(
+                "Veo operation failed: response blocked by provider safety filter",
+                error_type="api_error",
+                http_status=400,
+            ),
+        )
+    assert raised.value.error_type == "prohibited_content"
+    assert raised.value.http_status == 400
 
 
 def test_http_catalog_failure_reports_status_and_safe_response_detail(tmp_path, monkeypatch):
