@@ -1807,6 +1807,8 @@ def test_direct_text_image_mode_prefers_generated_image_over_marker_text(tmp_pat
 
 
 def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
+    import base64
+
     dialog_class = _direct_text_dialog_class()
     from PySide6.QtGui import QImage, QTextDocument
     from PySide6.QtWidgets import QApplication
@@ -1822,6 +1824,10 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
         def width():
             return 900
 
+        @staticmethod
+        def devicePixelRatioF():
+            return 1.5
+
     class OutputBox:
         @staticmethod
         def viewport():
@@ -1834,6 +1840,9 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
         def _generated_image_paths_from_text(content):
             return dialog_class._generated_image_paths_from_text(content)
 
+        def _generated_image_preview_pixmap(self, candidate):
+            return dialog_class._generated_image_preview_pixmap(self, candidate)
+
         def _generated_image_preview_size(self, candidate):
             return dialog_class._generated_image_preview_size(self, candidate)
 
@@ -1843,16 +1852,25 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
     )
 
     assert marker not in rendered_source
-    assert "<img src='file:///" in rendered_source
+    assert "<img src='data:image/png;base64," in rendered_source
     assert "<div class='generated-image-preview'>" in rendered_source
     assert "<figure" not in rendered_source
     assert "<figcaption" not in rendered_source
     assert "alt='Generated image'" in rendered_source
     assert " width='" in rendered_source
-    assert " height='" not in rendered_source
+    assert " height='" in rendered_source
+    dimensions = re.search(
+        r" width='(\d+)' height='(\d+)'", rendered_source
+    )
+    embedded = re.search(r"base64,([^']+)'", rendered_source)
+    assert dimensions is not None
+    assert embedded is not None
+    embedded_image = QImage.fromData(base64.b64decode(embedded.group(1)))
+    assert embedded_image.width() == round(int(dimensions.group(1)) * 1.5)
+    assert embedded_image.height() == round(int(dimensions.group(2)) * 1.5)
     rendered_html = dialog_class._markup_to_html(rendered_source)
     assert "<img" in rendered_html
-    assert "file:///" in rendered_html
+    assert "data:image/png;base64," in rendered_html
     document = QTextDocument()
     document.setHtml(rendered_html)
     assert "Direct Text 1.png" not in document.toPlainText()
@@ -1915,6 +1933,9 @@ def test_direct_text_compact_card_does_not_collapse_generated_image(tmp_path):
         def _generated_image_paths_from_text(content):
             return dialog_class._generated_image_paths_from_text(content)
 
+        def _generated_image_preview_pixmap(self, candidate):
+            return dialog_class._generated_image_preview_pixmap(self, candidate)
+
         def _generated_image_preview_size(self, candidate):
             return dialog_class._generated_image_preview_size(self, candidate)
 
@@ -1940,6 +1961,59 @@ def test_direct_text_compact_card_does_not_collapse_generated_image(tmp_path):
     end_y = document.documentLayout().blockBoundingRect(end.block()).y()
 
     assert end_y - start_y > 250
+
+
+def test_direct_text_generated_image_does_not_inherit_text_line_spacing():
+    import inspect
+
+    dialog_class = _direct_text_dialog_class()
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    from PySide6.QtGui import QImage, QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    render_source = inspect.getsource(dialog_class._render_output)
+    assert (
+        '".generated-image-preview { margin: 8px 0 0 0; padding: 0; "'
+        in render_source
+    )
+    assert '"line-height: 100%; }"' in render_source
+
+    image = QImage(400, 200, QImage.Format_RGB32)
+    image.fill(0xFF336699)
+    encoded = QByteArray()
+    buffer = QBuffer(encoded)
+    assert buffer.open(QIODevice.WriteOnly)
+    assert image.save(buffer, "PNG")
+    buffer.close()
+    data_uri = (
+        "data:image/png;base64,"
+        + bytes(encoded.toBase64()).decode("ascii")
+    )
+
+    document = QTextDocument()
+    document.setTextWidth(700)
+    document.setHtml(
+        "<style>"
+        ".message-content { line-height: 148%; }"
+        ".generated-image-preview { line-height: 100%; }"
+        "</style>"
+        "<div>IMAGE_START</div>"
+        "<div class='message-content'>"
+        "<div class='generated-image-preview'>"
+        f"<img src='{data_uri}'>"
+        "</div></div>"
+        "<div>IMAGE_END</div>"
+    )
+    layout = document.documentLayout()
+    start = document.find("IMAGE_START")
+    end = document.find("IMAGE_END")
+    start_y = layout.blockBoundingRect(start.block()).y()
+    end_y = layout.blockBoundingRect(end.block()).y()
+
+    # The 200 px image plus the normal 14 px marker line should not acquire
+    # the text body's extra 48% line spacing (which would add about 96 px).
+    assert 200 <= end_y - start_y < 240
 
 
 def test_direct_text_save_image_as_copies_persistent_image(monkeypatch, tmp_path):
@@ -2038,6 +2112,69 @@ def test_direct_text_right_click_resolves_rendered_image_path(tmp_path):
     class FakeDialog:
         _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
         output_box = OutputBox()
+
+    resolved = dialog_class._generated_image_path_at_output_position(
+        FakeDialog(), None
+    )
+
+    assert resolved == str(image_path)
+
+
+def test_direct_text_right_click_maps_embedded_preview_to_original(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    from PySide6.QtGui import QImage, QTextCursor, QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    image_path = tmp_path / "Direct Text embedded preview.png"
+    image = QImage(8, 6, QImage.Format_RGB32)
+    image.fill(0xFF336699)
+    assert image.save(str(image_path), "PNG")
+    encoded = QByteArray()
+    buffer = QBuffer(encoded)
+    assert buffer.open(QIODevice.WriteOnly)
+    assert image.save(buffer, "PNG")
+    buffer.close()
+    data_uri = (
+        "data:image/png;base64,"
+        + bytes(encoded.toBase64()).decode("ascii")
+    )
+
+    document = QTextDocument()
+    document.setHtml(f'<p>before</p><img src="{data_uri}">')
+    image_position = None
+    for position in range(document.characterCount()):
+        cursor = QTextCursor(document)
+        cursor.setPosition(position)
+        if cursor.charFormat().isImageFormat():
+            image_position = position
+            break
+    assert image_position is not None
+
+    class OutputBox:
+        @staticmethod
+        def document():
+            return document
+
+        @staticmethod
+        def cursorForPosition(_position):
+            cursor = QTextCursor(document)
+            cursor.setPosition(image_position)
+            return cursor
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        output_box = OutputBox()
+
+        @staticmethod
+        def _message_index_at_output_position(_position):
+            return 3
+
+        @staticmethod
+        def _response_generated_image_path(message_index):
+            assert message_index == 3
+            return str(image_path)
 
     resolved = dialog_class._generated_image_path_at_output_position(
         FakeDialog(), None
