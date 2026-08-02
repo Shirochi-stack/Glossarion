@@ -1725,6 +1725,16 @@ def open_other_settings(self, *args, show=True):
                     os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.retain_source_extension_var else '0'
                 except Exception:
                     pass
+            if hasattr(self, 'download_remote_image_urls_var'):
+                try:
+                    self.config['download_remote_image_urls'] = bool(
+                        self.download_remote_image_urls_var
+                    )
+                    os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = (
+                        '1' if self.download_remote_image_urls_var else '0'
+                    )
+                except Exception:
+                    pass
             self.save_config(show_message=False)
             # CRITICAL: Reinitialize environment variables after saving
             # This ensures TRANSLATE_SPECIAL_FILES and other settings take effect immediately
@@ -8517,6 +8527,38 @@ def _create_prompt_management_section(self, parent):
     retain_row_h.addWidget(rename_btn)
     retain_row_h.addStretch()
     section_v.addWidget(retain_row)
+
+    # Remote image localization
+    download_remote_images_cb = self._create_styled_checkbox(
+        "Download remote image URLs"
+    )
+    try:
+        download_remote_images_cb.setChecked(bool(
+            self.download_remote_image_urls_var
+        ))
+    except Exception:
+        download_remote_images_cb.setChecked(bool(
+            self.config.get('download_remote_image_urls', False)
+        ))
+
+    def _on_download_remote_images_toggle(checked):
+        try:
+            enabled = bool(checked)
+            self.download_remote_image_urls_var = enabled
+            self.config['download_remote_image_urls'] = enabled
+            os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+    download_remote_images_cb.toggled.connect(
+        _on_download_remote_images_toggle
+    )
+    download_remote_images_cb.setContentsMargins(0, 5, 0, 5)
+    download_remote_images_cb.setToolTip(
+        "Download HTTP/HTTPS image URLs referenced by EPUB chapters and "
+        "store them as local EPUB image resources."
+    )
+    section_v.addWidget(download_remote_images_cb)
     
     # Place the section at row 0, column 0 to match the original grid
     try:

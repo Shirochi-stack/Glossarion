@@ -275,6 +275,24 @@ def test_remote_cover_page_is_downloaded_and_cached(tmp_path, monkeypatch):
     assert open(cover_path, "rb").read() == remote_bytes
 
 
+def test_other_settings_exposes_remote_image_download_toggle():
+    source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    settings_source = open(
+        os.path.join(source_root, "src", "other_settings.py"),
+        encoding="utf-8",
+    ).read()
+    gui_source = open(
+        os.path.join(source_root, "src", "translator_gui.py"),
+        encoding="utf-8",
+    ).read()
+
+    assert '"Download remote image URLs"' in settings_source
+    assert "self.config['download_remote_image_urls'] = enabled" in settings_source
+    assert "os.environ['DOWNLOAD_REMOTE_IMAGE_URLS']" in settings_source
+    assert "self.download_remote_image_urls_var = self.config.get(" in gui_source
+    assert "('download_remote_image_urls', ['download_remote_image_urls_var']" in gui_source
+
+
 def test_details_tags_prefer_translated_metadata_subjects():
     class DetailsStub:
         _details = {"subjects": ["판타지", "빙의"]}

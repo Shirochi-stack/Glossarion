@@ -12106,9 +12106,10 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             except Exception:
                 pass
             
-        # Initialize retain_source_extension env var on startup
+        # Initialize EPUB utility environment flags on startup
         try:
             os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.config.get('retain_source_extension', False) else '0'
+            os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = '1' if self.config.get('download_remote_image_urls', False) else '0'
         except Exception:
             pass
         
@@ -12565,6 +12566,9 @@ Text to analyze:
         
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
+        self.download_remote_image_urls_var = self.config.get(
+            'download_remote_image_urls', False
+        )
         
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
@@ -41645,6 +41649,7 @@ Important rules:
 
                 # Environment-backed settings
                 ('retain_source_extension', ['retain_source_extension_var'], False, bool),
+                ('download_remote_image_urls', ['download_remote_image_urls_var'], False, bool),
                 ('enable_gui_yield', ['enable_gui_yield_var'], True, bool),
                 ('use_thread_pool_extraction', ['use_thread_pool_extraction_var'], False, bool),
                 
@@ -41878,6 +41883,7 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity'), is_bool=True))
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
+            env_vars_set.append(_update_env('DOWNLOAD_REMOTE_IMAGE_URLS', self.config.get('download_remote_image_urls'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
             env_vars_set.append(_update_env('PARTIAL_B2_ENTRIES_PER_REQUEST', self.config.get('partial_b2_entries_per_request', -1)))
             authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
@@ -42028,6 +42034,7 @@ Important rules:
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
+                    ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls') else '0'),
                 ]
                 total_issues = 0
                 for env_key, expected_str in critical_vars_to_check:
@@ -42100,6 +42107,7 @@ Important rules:
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
             'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
+            'DOWNLOAD_REMOTE_IMAGE_URLS': 'Download remote EPUB image URLs',
             'GLOSSARY_PARALLEL_ENABLED': 'Glossary parallel processing enabled',
             
             # Debug/Logging
@@ -42440,6 +42448,7 @@ Important rules:
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
+                ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls', False) else '0'),
                 ('AUTHND_TOKEN_CONCURRENCY_AUTO', '1' if authnd_auto_enabled else '0'),
                 ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
