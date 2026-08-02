@@ -1333,6 +1333,197 @@ class _DirectChatTitleButton(QPushButton):
         event.accept()
 
 
+class _DirectTextMediaPlayerFrame(QFrame):
+    """Native audio/video controls positioned over a Direct Text card slot."""
+
+    def __init__(self, media_path, media_kind, save_callback=None, parent=None):
+        super().__init__(parent)
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWidgets import QSlider
+
+        self.media_path = os.path.abspath(str(media_path or ''))
+        self.media_kind = str(media_kind or '').strip().lower()
+        self._save_callback = save_callback
+        self._duration = 0
+        self._player = None
+        self._audio_output = None
+        self._video_widget = None
+
+        self.setObjectName('directGeneratedMediaPlayer')
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(
+            "QFrame#directGeneratedMediaPlayer { background:#191c22; "
+            "border:1px solid #4a5568; border-radius:8px; }"
+            "QLabel { color:#d8dee9; background:transparent; border:none; }"
+            "QPushButton { color:#eef2f7; background:#303641; "
+            "border:1px solid #566171; border-radius:5px; padding:5px 9px; }"
+            "QPushButton:hover { background:#3a4350; }"
+            "QSlider { background:transparent; border:none; }"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 7)
+        root.setSpacing(7)
+
+        try:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+            self._player = QMediaPlayer(self)
+            self._audio_output = QAudioOutput(self)
+            self._audio_output.setVolume(0.75)
+            self._player.setAudioOutput(self._audio_output)
+
+            if self.media_kind == 'video':
+                from PySide6.QtMultimediaWidgets import QVideoWidget
+
+                self._video_widget = QVideoWidget(self)
+                self._video_widget.setAspectRatioMode(Qt.KeepAspectRatio)
+                self._video_widget.setMinimumHeight(310)
+                self._video_widget.setStyleSheet(
+                    'background:#08090b;border:none;border-radius:5px;'
+                )
+                self._player.setVideoOutput(self._video_widget)
+                root.addWidget(self._video_widget, 1)
+            else:
+                audio_header = QLabel('🔊  Generated audio')
+                audio_header.setStyleSheet(
+                    'font-size:14px;font-weight:600;padding:4px 3px;'
+                )
+                root.addWidget(audio_header)
+
+            self._player.setSource(QUrl.fromLocalFile(self.media_path))
+        except Exception as exc:
+            unavailable = QLabel(
+                f"Native {self.media_kind or 'media'} playback is unavailable: {exc}"
+            )
+            unavailable.setWordWrap(True)
+            root.addWidget(unavailable, 1)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(7)
+        self.play_button = QPushButton('▶')
+        self.play_button.setFixedWidth(38)
+        self.play_button.setToolTip('Play or pause')
+        controls.addWidget(self.play_button)
+
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setRange(0, 0)
+        controls.addWidget(self.position_slider, 1)
+
+        self.time_label = QLabel('0:00 / 0:00')
+        self.time_label.setMinimumWidth(86)
+        self.time_label.setAlignment(Qt.AlignCenter)
+        controls.addWidget(self.time_label)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(75)
+        self.volume_slider.setFixedWidth(76)
+        self.volume_slider.setToolTip('Volume')
+        controls.addWidget(self.volume_slider)
+
+        self.open_button = QPushButton('↗')
+        self.open_button.setFixedWidth(36)
+        self.open_button.setToolTip('Open in the default media player')
+        controls.addWidget(self.open_button)
+
+        self.save_button = QPushButton('💾')
+        self.save_button.setFixedWidth(38)
+        self.save_button.setToolTip(f"Save {self.media_kind or 'media'} as…")
+        controls.addWidget(self.save_button)
+        root.addLayout(controls)
+
+        self.play_button.clicked.connect(self._toggle_playback)
+        self.position_slider.sliderMoved.connect(self._seek)
+        self.volume_slider.valueChanged.connect(self._set_volume)
+        self.open_button.clicked.connect(self._open_external)
+        self.save_button.clicked.connect(self._save_as)
+        if self._player is not None:
+            self._player.positionChanged.connect(self._position_changed)
+            self._player.durationChanged.connect(self._duration_changed)
+            self._player.playbackStateChanged.connect(
+                self._playback_state_changed
+            )
+
+    @staticmethod
+    def _time_text(milliseconds):
+        seconds = max(0, int(milliseconds or 0) // 1000)
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    def _toggle_playback(self):
+        if self._player is None:
+            self._open_external()
+            return
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+
+            if self._player.playbackState() == QMediaPlayer.PlayingState:
+                self._player.pause()
+            else:
+                self._player.play()
+        except Exception:
+            self._open_external()
+
+    def _playback_state_changed(self, state):
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+
+            playing = state == QMediaPlayer.PlayingState
+        except Exception:
+            playing = False
+        self.play_button.setText('⏸' if playing else '▶')
+
+    def _duration_changed(self, duration):
+        self._duration = max(0, int(duration or 0))
+        self.position_slider.setRange(0, self._duration)
+        self._position_changed(
+            self._player.position() if self._player is not None else 0
+        )
+
+    def _position_changed(self, position):
+        position = max(0, int(position or 0))
+        if not self.position_slider.isSliderDown():
+            self.position_slider.setValue(position)
+        self.time_label.setText(
+            f"{self._time_text(position)} / {self._time_text(self._duration)}"
+        )
+
+    def _seek(self, position):
+        if self._player is not None:
+            self._player.setPosition(max(0, int(position or 0)))
+
+    def _set_volume(self, value):
+        if self._audio_output is not None:
+            self._audio_output.setVolume(max(0.0, min(1.0, value / 100.0)))
+
+    def _open_external(self):
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.media_path))
+        except Exception:
+            pass
+
+    def _save_as(self):
+        if callable(self._save_callback):
+            self._save_callback(self.media_path, self.media_kind)
+
+    def dispose(self):
+        if self._player is not None:
+            try:
+                from PySide6.QtCore import QUrl
+
+                self._player.stop()
+                self._player.setSource(QUrl())
+            except Exception:
+                pass
+
+
 class _InputOutputDialog(QDialog):
     """Small chat-like front end for the normal text-file translation flow.
 
@@ -1360,6 +1551,14 @@ class _InputOutputDialog(QDialog):
     _IMAGE_ATTACHMENT_EXTENSIONS = {
         '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
         '.svg', '.ico', '.heic', '.heif', '.avif', '.jxl',
+    }
+    _VIDEO_OUTPUT_EXTENSIONS = {
+        '.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.mpeg', '.mpg',
+        '.ogv', '.wmv', '.3gp',
+    }
+    _AUDIO_OUTPUT_EXTENSIONS = {
+        '.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.opus', '.wma',
+        '.aiff', '.aif', '.oga', '.pcm',
     }
     _VISION_ARCHIVE_ATTACHMENT_EXTENSIONS = {'.cbz'}
     _OUTPUT_MODE_CHOICES = (
@@ -1702,6 +1901,7 @@ class _InputOutputDialog(QDialog):
         self._copied_message_key = None
         self._inline_response_editor_frame = None
         self._inline_response_editor_box = None
+        self._direct_media_overlays = {}
         self._inline_response_edit_index = -1
         self._inline_response_edit_session_id = None
         self._inline_response_original_source = ""
@@ -2154,10 +2354,16 @@ class _InputOutputDialog(QDialog):
             self._position_inline_response_editor
         )
         self.output_box.verticalScrollBar().valueChanged.connect(
+            self._position_direct_media_overlays
+        )
+        self.output_box.verticalScrollBar().valueChanged.connect(
             self._schedule_message_bookmark_controls_update
         )
         self.output_box.horizontalScrollBar().valueChanged.connect(
             self._position_inline_response_editor
+        )
+        self.output_box.horizontalScrollBar().valueChanged.connect(
+            self._position_direct_media_overlays
         )
         timeline_layout.addWidget(self.output_box, 1)
         self.chat_splitter.addWidget(timeline_shell)
@@ -2978,6 +3184,8 @@ class _InputOutputDialog(QDialog):
             "content_xhtml_path",
             "thinking_path",
             "image_path",
+            "media_path",
+            "media_kind",
         ):
             value = str(storage.get(key, "") or "").strip()
             if value:
@@ -3026,37 +3234,75 @@ class _InputOutputDialog(QDialog):
     @classmethod
     def _generated_image_paths_from_text(cls, content):
         """Extract generated-image sentinel paths without treating normal text as a path."""
-        paths = []
+        return [
+            path
+            for kind, path in cls._generated_media_references_from_text(content)
+            if kind == 'image'
+        ]
+
+    @classmethod
+    def _media_kind_for_path(cls, path, marker_kind=''):
+        """Classify one generated artifact by extension, then marker type."""
+        extension = os.path.splitext(str(path or ''))[1].lower()
+        if extension in cls._IMAGE_ATTACHMENT_EXTENSIONS:
+            return 'image'
+        if extension in cls._VIDEO_OUTPUT_EXTENSIONS:
+            return 'video'
+        if extension in cls._AUDIO_OUTPUT_EXTENSIONS:
+            return 'audio'
+        marker_kind = str(marker_kind or '').strip().lower()
+        return marker_kind if marker_kind in {'image', 'video', 'audio'} else ''
+
+    @classmethod
+    def _generated_media_references_from_text(cls, content):
+        """Extract typed image/video/audio sentinel paths from response text."""
+        references = []
         for match in re.finditer(
-            r'\[GENERATED_IMAGE:(.+?)\]',
+            r'\[GENERATED_(IMAGE|VIDEO|AUDIO):(.+?)\]',
             str(content or ''),
             flags=re.IGNORECASE,
         ):
-            value = str(match.group(1) or '').strip().strip('"\'')
+            marker_kind = str(match.group(1) or '').strip().lower()
+            value = str(match.group(2) or '').strip().strip('"\'')
             if not value:
                 continue
             path = os.path.abspath(os.path.expanduser(value))
-            if os.path.splitext(path)[1].lower() in cls._IMAGE_ATTACHMENT_EXTENSIONS:
-                paths.append(path)
-        return paths
+            kind = cls._media_kind_for_path(path, marker_kind)
+            if kind:
+                references.append((kind, path))
+        return references
+
+    def _assistant_generated_media(self, message, content=''):
+        """Resolve the durable generated media associated with one response."""
+        storage = self._assistant_storage_for(message)
+        reference = str(storage.get('media_path', '') or '').strip()
+        stored_kind = str(storage.get('media_kind', '') or '').strip().lower()
+        if reference:
+            candidate = self._resolve_history_file_reference(reference)
+            kind = self._media_kind_for_path(candidate, stored_kind)
+            if os.path.isfile(candidate) and kind:
+                return kind, candidate
+
+        # Image-only histories saved before media_path was introduced remain
+        # fully compatible.
+        image_reference = str(storage.get('image_path', '') or '').strip()
+        if image_reference:
+            candidate = self._resolve_history_file_reference(image_reference)
+            if (
+                os.path.isfile(candidate)
+                and self._media_kind_for_path(candidate) == 'image'
+            ):
+                return 'image', candidate
+
+        for kind, candidate in self._generated_media_references_from_text(content):
+            if os.path.isfile(candidate):
+                return kind, candidate
+        return '', ''
 
     def _assistant_generated_image_path(self, message, content=''):
         """Resolve the durable image associated with one assistant response."""
-        storage = self._assistant_storage_for(message)
-        reference = str(storage.get('image_path', '') or '').strip()
-        if reference:
-            candidate = self._resolve_history_file_reference(reference)
-            if (
-                os.path.isfile(candidate)
-                and os.path.splitext(candidate)[1].lower()
-                in self._IMAGE_ATTACHMENT_EXTENSIONS
-            ):
-                return candidate
-
-        for candidate in self._generated_image_paths_from_text(content):
-            if os.path.isfile(candidate):
-                return candidate
-        return ''
+        kind, path = self._assistant_generated_media(message, content)
+        return path if kind == 'image' else ''
 
     @staticmethod
     def _is_generated_image_only_content(content):
@@ -3070,6 +3316,17 @@ class _InputOutputDialog(QDialog):
             r'\[GENERATED_IMAGE:(.+?)\]', '', source, flags=re.IGNORECASE
         )
         return not remainder.strip()
+
+    @staticmethod
+    def _is_generated_media_only_content(content):
+        """Return whether a response consists solely of generated-media markers."""
+        source = str(content or '')
+        marker_pattern = r'\[GENERATED_(?:IMAGE|VIDEO|AUDIO):(.+?)\]'
+        if not re.search(marker_pattern, source, flags=re.IGNORECASE):
+            return False
+        return not re.sub(
+            marker_pattern, '', source, flags=re.IGNORECASE
+        ).strip()
 
     def _generated_image_preview_pixmap(self, candidate):
         """Return a device-resolution preview for the logical card size."""
@@ -3175,18 +3432,83 @@ class _InputOutputDialog(QDialog):
             flags=re.IGNORECASE,
         )
 
-    def _promote_generated_image_reference(self, persistent_path):
-        """Point the live response at its persistent Direct Text image artifact."""
+    @staticmethod
+    def _direct_media_placeholder_marker(message_index):
+        return f"DIRECT_TEXT_MEDIA_PLAYER_{int(message_index)}_7F31"
+
+    def _generated_media_render_source(
+        self,
+        content,
+        media_kind='',
+        preferred_path='',
+        message_index=-1,
+    ):
+        """Render images normally and reserve native audio/video player space."""
+        import html as html_lib
+
+        media_kind = str(media_kind or '').strip().lower()
+        preferred_path = (
+            os.path.abspath(str(preferred_path or '')) if preferred_path else ''
+        )
+        if media_kind == 'image':
+            return self._generated_image_render_source(content, preferred_path)
+        if media_kind not in {'video', 'audio'}:
+            return str(content or '')
+
+        source = str(content or '')
+        marker_pattern = r'\[GENERATED_(?:IMAGE|VIDEO|AUDIO):(.+?)\]'
+        placeholder_marker = self._direct_media_placeholder_marker(message_index)
+        placeholder_height = 430 if media_kind == 'video' else 96
+        marker_html = (
+            "<span class='direct-media-marker'>"
+            f"{placeholder_marker}</span>"
+        )
+        placeholder = (
+            "<div class='generated-media-preview'>"
+            f"{marker_html}"
+            "<table class='generated-media-spacer' width='100%' "
+            f"height='{placeholder_height}' cellspacing='0' cellpadding='0'>"
+            f"<tr><td height='{placeholder_height}'>&nbsp;</td></tr></table>"
+            "</div>"
+        )
+
+        replaced = False
+
+        def _render_marker(match):
+            nonlocal replaced
+            raw_path = str(match.group(1) or '').strip().strip('"\'')
+            candidate = preferred_path or os.path.abspath(os.path.expanduser(raw_path))
+            kind = self._media_kind_for_path(candidate)
+            if not replaced and kind == media_kind:
+                replaced = True
+                if os.path.isfile(candidate):
+                    return placeholder
+                unavailable = html_lib.escape(candidate or f'unknown {media_kind}')
+                return (
+                    f"<p><b>Generated {media_kind} unavailable.</b><br>"
+                    f"<code>{unavailable}</code></p>"
+                )
+            return match.group(0)
+
+        rendered = re.sub(
+            marker_pattern,
+            _render_marker,
+            source,
+            flags=re.IGNORECASE,
+        )
+        if not replaced and preferred_path and os.path.isfile(preferred_path):
+            rendered = f"{rendered.rstrip()}\n\n{placeholder}" if rendered.strip() else placeholder
+        return rendered
+
+    def _promote_generated_media_reference(self, persistent_path):
+        """Point the live response at a persistent Direct Text media artifact."""
         persistent_path = os.path.abspath(str(persistent_path or ''))
-        if (
-            not os.path.isfile(persistent_path)
-            or os.path.splitext(persistent_path)[1].lower()
-            not in self._IMAGE_ATTACHMENT_EXTENSIONS
-        ):
+        media_kind = _InputOutputDialog._media_kind_for_path(persistent_path)
+        if not os.path.isfile(persistent_path) or not media_kind:
             return False
 
-        marker = f"[GENERATED_IMAGE:{persistent_path}]"
-        marker_pattern = r'\[GENERATED_IMAGE:(.+?)\]'
+        marker = f"[GENERATED_{media_kind.upper()}:{persistent_path}]"
+        marker_pattern = r'\[GENERATED_(?:IMAGE|VIDEO|AUDIO):(.+?)\]'
         stream_promoted = False
         segment_promoted = False
 
@@ -3195,6 +3517,7 @@ class _InputOutputDialog(QDialog):
                 marker_pattern,
                 lambda _match: marker,
                 self._streamed_content,
+                count=1,
                 flags=re.IGNORECASE,
             )
             stream_promoted = True
@@ -3206,9 +3529,13 @@ class _InputOutputDialog(QDialog):
                     marker_pattern,
                     lambda _match: marker,
                     segment_content,
+                    count=1,
                     flags=re.IGNORECASE,
                 )
-                segment['image_path'] = persistent_path
+                segment['media_path'] = persistent_path
+                segment['media_kind'] = media_kind
+                if media_kind == 'image':
+                    segment['image_path'] = persistent_path
                 segment_promoted = True
 
         if self._active_request_segments and not segment_promoted:
@@ -3217,7 +3544,10 @@ class _InputOutputDialog(QDialog):
             segment['content'] = (
                 f"{segment_content}\n\n{marker}" if segment_content else marker
             )
-            segment['image_path'] = persistent_path
+            segment['media_path'] = persistent_path
+            segment['media_kind'] = media_kind
+            if media_kind == 'image':
+                segment['image_path'] = persistent_path
         if not stream_promoted:
             streamed = str(self._streamed_content or '').rstrip()
             self._streamed_content = f"{streamed}\n\n{marker}" if streamed else marker
@@ -3225,6 +3555,12 @@ class _InputOutputDialog(QDialog):
         self._expected_output = persistent_path
         self._rendered_message_cache.clear()
         return True
+
+    def _promote_generated_image_reference(self, persistent_path):
+        """Point the live response at its persistent Direct Text image artifact."""
+        return _InputOutputDialog._promote_generated_media_reference(
+            self, persistent_path
+        )
 
     def _response_generated_image_path(self, message_index):
         """Return one saved response's renderable generated-image path."""
@@ -3244,6 +3580,46 @@ class _InputOutputDialog(QDialog):
         """Copy a generated Direct Text image to a user-selected destination."""
         source_path = self._response_generated_image_path(message_index)
         return self._save_generated_image_path_as(source_path)
+
+    def _response_generated_media(self, message_index):
+        """Return one saved response's generated media kind and local path."""
+        try:
+            message_index = int(message_index)
+            message = self._chat_messages[message_index]
+            if message[0] != 'assistant':
+                return '', ''
+        except (IndexError, TypeError, ValueError):
+            return '', ''
+        content = self._assistant_message_text(
+            message, 'content', message_index
+        )
+        return self._assistant_generated_media(message, content)
+
+    def _save_response_media_as(self, message_index):
+        media_kind, source_path = self._response_generated_media(message_index)
+        return self._save_generated_media_path_as(source_path, media_kind)
+
+    def _open_generated_media_external(self, media_path):
+        """Open audio/video in the operating system's default media player."""
+        media_path = os.path.abspath(str(media_path or '')) if media_path else ''
+        media_kind = self._media_kind_for_path(media_path)
+        if (
+            not os.path.isfile(media_path)
+            or media_kind not in {'audio', 'video'}
+        ):
+            QMessageBox.information(
+                self,
+                "Open media",
+                "The generated audio/video file is unavailable.",
+            )
+            return False
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(media_path)))
+        except Exception:
+            return False
 
     def _open_generated_image_in_browser(self, image_path):
         """Open one generated image in the user's default web browser."""
@@ -3290,24 +3666,37 @@ class _InputOutputDialog(QDialog):
 
     def _save_generated_image_path_as(self, source_path):
         """Copy one resolved generated image to a user-selected destination."""
+        return _InputOutputDialog._save_generated_media_path_as(
+            self, source_path, 'image'
+        )
+
+    def _save_generated_media_path_as(self, source_path, media_kind=''):
+        """Copy one generated image/audio/video artifact to a chosen path."""
         source_path = os.path.abspath(str(source_path or '')) if source_path else ''
-        if not source_path:
+        media_kind = _InputOutputDialog._media_kind_for_path(
+            source_path, media_kind
+        )
+        if not source_path or not os.path.isfile(source_path) or not media_kind:
+            label = media_kind or 'media'
             QMessageBox.information(
                 self,
-                "Save image as",
-                "The generated image file is unavailable.",
+                f"Save {label} as",
+                f"The generated {label} file is unavailable.",
             )
             return ''
 
-        extension = os.path.splitext(source_path)[1].lower() or '.png'
+        extension = os.path.splitext(source_path)[1].lower()
+        default_extensions = {'image': '.png', 'video': '.mp4', 'audio': '.mp3'}
+        extension = extension or default_extensions[media_kind]
+        title_kind = media_kind.capitalize()
         suggested_path = os.path.join(
             os.path.dirname(source_path), os.path.basename(source_path)
         )
         selected_path, _selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Save image as",
+            f"Save {media_kind} as",
             suggested_path,
-            f"Image (*{extension});;All files (*)",
+            f"{title_kind} (*{extension});;All files (*)",
         )
         if not selected_path:
             return ''
@@ -3319,13 +3708,15 @@ class _InputOutputDialog(QDialog):
             target_abs = os.path.abspath(selected_path)
             if os.path.normcase(source_abs) != os.path.normcase(target_abs):
                 shutil.copy2(source_abs, target_abs)
-            self._set_status(f"Image saved: {os.path.basename(target_abs)}")
+            self._set_status(
+                f"{title_kind} saved: {os.path.basename(target_abs)}"
+            )
             return target_abs
         except Exception as exc:
             QMessageBox.critical(
                 self,
-                "Could not save image",
-                f"The generated image could not be saved.\n\n{exc}",
+                f"Could not save {media_kind}",
+                f"The generated {media_kind} could not be saved.\n\n{exc}",
             )
             return ''
 
@@ -3348,6 +3739,16 @@ class _InputOutputDialog(QDialog):
                 storage["image_path"] = self._history_file_reference(
                     image_paths[0]
                 )
+        if not storage.get("media_path"):
+            media_references = self._generated_media_references_from_text(
+                values[1]
+            )
+            if media_references and os.path.isfile(media_references[0][1]):
+                media_kind, media_path = media_references[0]
+                storage["media_path"] = self._history_file_reference(
+                    media_path
+                )
+                storage["media_kind"] = media_kind
         return tuple(values + [storage])
 
     def _assistant_timestamp_label(self, message):
@@ -4789,6 +5190,7 @@ class _InputOutputDialog(QDialog):
                 QTimer.singleShot(0, self._refresh_output_viewport_lock_anchor)
         if watched is output_viewport and event.type() == QEvent.Resize:
             QTimer.singleShot(0, self._position_inline_response_editor)
+            QTimer.singleShot(0, self._position_direct_media_overlays)
         if watched is input_box or watched is input_viewport:
             if (
                 watched is input_viewport
@@ -6249,6 +6651,7 @@ class _InputOutputDialog(QDialog):
                     "content_xhtml_path",
                     "thinking_path",
                     "image_path",
+                    "media_path",
                 ):
                     reference = str(storage.get(key, "") or "")
                     if not reference:
@@ -6715,6 +7118,26 @@ class _InputOutputDialog(QDialog):
                         )
                     )
                 image_action_added = True
+            media_kind, media_path = self._response_generated_media(
+                message_index
+            )
+            if media_kind in {'audio', 'video'} and media_path:
+                open_media_action = menu.addAction(
+                    f"↗ Open {media_kind} in default player"
+                )
+                open_media_action.triggered.connect(
+                    lambda _checked=False, path=media_path: (
+                        self._open_generated_media_external(path)
+                    )
+                )
+                save_media_action = menu.addAction(
+                    f"💾 Save {media_kind} as…"
+                )
+                save_media_action.triggered.connect(
+                    lambda _checked=False, path=media_path, kind=media_kind: (
+                        self._save_generated_media_path_as(path, kind)
+                    )
+                )
         if clicked_image_path and not image_action_added:
             menu.addSeparator()
             browser_action = menu.addAction("🌐 Open image in browser")
@@ -7004,6 +7427,7 @@ class _InputOutputDialog(QDialog):
 
     def closeEvent(self, event):
         """Flush Direct Text history before the dialog or application closes."""
+        self._destroy_direct_media_overlays()
         self._save_chat_history()
         super().closeEvent(event)
 
@@ -7353,6 +7777,89 @@ class _InputOutputDialog(QDialog):
         self._save_chat_history()
         self._render_output(preserve_viewport=True)
         return markdown_path, html_path
+
+    def _destroy_direct_media_overlays(self):
+        """Stop and remove every native media player owned by the transcript."""
+        overlays = getattr(self, '_direct_media_overlays', {})
+        self._direct_media_overlays = {}
+        for overlay in overlays.values():
+            try:
+                overlay.dispose()
+                overlay.hide()
+                overlay.deleteLater()
+            except (AttributeError, RuntimeError):
+                pass
+
+    def _sync_direct_media_overlays(self, visible_media):
+        """Reuse players whose cards remain visible and discard stale ones."""
+        visible_media = dict(visible_media or {})
+        overlays = getattr(self, '_direct_media_overlays', {})
+        for message_index, overlay in list(overlays.items()):
+            expected = visible_media.get(message_index)
+            current = (
+                str(getattr(overlay, 'media_kind', '') or ''),
+                os.path.abspath(str(getattr(overlay, 'media_path', '') or '')),
+            )
+            if expected == current:
+                continue
+            try:
+                overlay.dispose()
+                overlay.hide()
+                overlay.deleteLater()
+            except (AttributeError, RuntimeError):
+                pass
+            overlays.pop(message_index, None)
+
+        for message_index, (media_kind, media_path) in visible_media.items():
+            if message_index in overlays:
+                continue
+            overlay = _DirectTextMediaPlayerFrame(
+                media_path,
+                media_kind,
+                save_callback=self._save_generated_media_path_as,
+                parent=self.output_box.viewport(),
+            )
+            overlay.hide()
+            overlays[message_index] = overlay
+        self._direct_media_overlays = overlays
+        QTimer.singleShot(0, self._position_direct_media_overlays)
+
+    def _position_direct_media_overlays(self, *_args):
+        """Keep native audio/video players aligned with rich-text card slots."""
+        overlays = getattr(self, '_direct_media_overlays', {})
+        if not overlays:
+            return
+        try:
+            viewport = self.output_box.viewport()
+            document = self.output_box.document()
+            viewport_width = int(viewport.width())
+            viewport_height = int(viewport.height())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return
+
+        for message_index, overlay in list(overlays.items()):
+            try:
+                marker = self._direct_media_placeholder_marker(message_index)
+                cursor = document.find(marker)
+                if cursor.isNull():
+                    overlay.hide()
+                    continue
+                cursor.setPosition(cursor.selectionStart())
+                marker_rect = self.output_box.cursorRect(cursor)
+                media_kind = str(overlay.media_kind or '')
+                height = 414 if media_kind == 'video' else 82
+                x_pos = max(8, int(marker_rect.x()))
+                maximum_width = 920 if media_kind == 'video' else 760
+                width = min(maximum_width, max(300, viewport_width - x_pos - 18))
+                y_pos = int(marker_rect.y()) + 4
+                if y_pos >= viewport_height or y_pos + height <= 0:
+                    overlay.hide()
+                    continue
+                overlay.setGeometry(x_pos, y_pos, width, height)
+                overlay.raise_()
+                overlay.show()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
 
     @staticmethod
     def _inline_response_editor_marker(message_index):
@@ -7942,6 +8449,14 @@ class _InputOutputDialog(QDialog):
             except (TypeError, ValueError):
                 return
             self._save_response_image_as(message_index)
+            return
+        media_save_prefix = "direct-media-save:"
+        if target.startswith(media_save_prefix):
+            try:
+                message_index = int(target[len(media_save_prefix):])
+            except (TypeError, ValueError):
+                return
+            self._save_response_media_as(message_index)
             return
         output_prefix = "direct-output:"
         if target.startswith(output_prefix):
@@ -9013,6 +9528,18 @@ class _InputOutputDialog(QDialog):
             image_path = image_paths[0] if image_paths else ''
         if image_path and os.path.isfile(image_path):
             storage['image_path'] = self._history_file_reference(image_path)
+        media_path = str(segment.get('media_path', '') or '').strip()
+        media_kind = str(segment.get('media_kind', '') or '').strip().lower()
+        if not media_path:
+            media_references = self._generated_media_references_from_text(
+                segment.get('content', '')
+            )
+            if media_references:
+                media_kind, media_path = media_references[0]
+        media_kind = self._media_kind_for_path(media_path, media_kind)
+        if media_path and media_kind and os.path.isfile(media_path):
+            storage['media_path'] = self._history_file_reference(media_path)
+            storage['media_kind'] = media_kind
         return (
             "assistant",
             str(segment.get("content", "") or ""),
@@ -10082,6 +10609,7 @@ class _InputOutputDialog(QDialog):
             assistant_avatar = "G"
 
         message_html = []
+        visible_media_overlays = {}
         if not messages and not active_only:
             message_html.append(
                 "<div class='empty-state'>"
@@ -10190,11 +10718,36 @@ class _InputOutputDialog(QDialog):
                 content = self._assistant_message_text(
                     message, "content", message_index
                 )
-                generated_image_path = self._assistant_generated_image_path(
-                    message, content
+                generated_media_kind, generated_media_path = (
+                    self._assistant_generated_media(
+                        message, content
+                    )
                 )
+                generated_image_path = (
+                    generated_media_path
+                    if generated_media_kind == 'image'
+                    else ''
+                )
+                if generated_media_kind in {'video', 'audio'}:
+                    visible_media_overlays[message_index] = (
+                        generated_media_kind,
+                        os.path.abspath(generated_media_path),
+                    )
                 compact_image_bubble_width = 0
                 if (
+                    generated_media_path
+                    and self._is_generated_media_only_content(content)
+                    and generated_media_kind in {'video', 'audio'}
+                ):
+                    available_width = max(
+                        320,
+                        self.output_box.viewport().width() - 72,
+                    )
+                    compact_image_bubble_width = min(
+                        available_width,
+                        950 if generated_media_kind == 'video' else 790,
+                    )
+                elif (
                     generated_image_path
                     and self._is_generated_image_only_content(content)
                 ):
@@ -10235,12 +10788,16 @@ class _InputOutputDialog(QDialog):
                         current_session_id,
                         message_index,
                         str(content),
-                        generated_image_path,
+                        generated_media_kind,
+                        generated_media_path,
                     )
                     rendered = self._rendered_message_cache.get(cache_key)
                     if rendered is None:
-                        rendered_source = self._generated_image_render_source(
-                            content, generated_image_path
+                        rendered_source = self._generated_media_render_source(
+                            content,
+                            generated_media_kind,
+                            generated_media_path,
+                            message_index,
                         )
                         rendered = self._markup_to_html(rendered_source)
                         if message_index < len(self._chat_messages):
@@ -10400,12 +10957,17 @@ class _InputOutputDialog(QDialog):
                             "title='Edit this saved response'>"
                             "✏️&nbsp;&nbsp;Edit output</a>"
                         )
-                        if generated_image_path:
+                        if generated_media_path:
+                            save_label = {
+                                'image': 'image',
+                                'video': 'video',
+                                'audio': 'audio',
+                            }.get(generated_media_kind, 'media')
                             message_actions.append(
                                 f"<a class='message-action' "
-                                f"href='direct-image-save:{message_index}' "
-                                "title='Save this generated image to another location'>"
-                                "💾&nbsp;&nbsp;Save image as…</a>"
+                                f"href='direct-media-save:{message_index}' "
+                                f"title='Save this generated {save_label} to another location'>"
+                                f"💾&nbsp;&nbsp;Save {save_label} as…</a>"
                             )
                 if is_attachment_action_card and output_folder:
                     if self._is_managed_attachment_workspace(
@@ -10590,6 +11152,19 @@ class _InputOutputDialog(QDialog):
         if active_only:
             fragment = ''.join(message_html)
             if self._replace_active_stream_fragment(fragment):
+                retained_media = {
+                    index: (
+                        str(getattr(overlay, 'media_kind', '') or ''),
+                        os.path.abspath(
+                            str(getattr(overlay, 'media_path', '') or '')
+                        ),
+                    )
+                    for index, overlay in getattr(
+                        self, '_direct_media_overlays', {}
+                    ).items()
+                }
+                retained_media.update(visible_media_overlays)
+                self._sync_direct_media_overlays(retained_media)
                 return
             # The first active update can race the initial full render.  Fall
             # back once so the sentinels are installed, then later updates are
@@ -10699,6 +11274,11 @@ class _InputOutputDialog(QDialog):
             "line-height: 100%; }"
             ".generated-image-preview img { border: 1px solid #4a5568; "
             "vertical-align: top; }"
+            ".generated-media-preview, .generated-media-spacer, "
+            ".generated-media-spacer td { border: none; margin: 0; padding: 0; "
+            "background: transparent; }"
+            ".direct-media-marker { color:#242424; font-size:1px; "
+            "line-height:1px; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
@@ -10740,6 +11320,9 @@ class _InputOutputDialog(QDialog):
             "table { border-collapse: collapse; }"
             ".message-content table th, .message-content table td { "
             "border: 1px solid #596171; padding: 4px 7px; }"
+            ".message-content table.generated-media-spacer, "
+            ".message-content table.generated-media-spacer td { "
+            "border: none; padding: 0; }"
             "a { color: #65a9ff; }"
             "img { max-width: 100%; }"
         )
@@ -10827,6 +11410,7 @@ class _InputOutputDialog(QDialog):
                     and not self._output_auto_scroll_disabled
                 ),
             )
+        self._sync_direct_media_overlays(visible_media_overlays)
         if self._inline_response_editor_frame is not None:
             QTimer.singleShot(0, self._position_inline_response_editor)
         self._schedule_message_bookmark_controls_update()
@@ -11275,15 +11859,20 @@ class _InputOutputDialog(QDialog):
         )
         if existing_expected:
             expected_extension = os.path.splitext(existing_expected)[1].lower()
-            # Image-output runs can first expose a small translated .txt file
-            # containing only [GENERATED_IMAGE:...]. Do not let that adapter
-            # artifact hide the actual image saved elsewhere in the run tree.
+            expected_media_extensions = {
+                'image': _InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS,
+                'video': _InputOutputDialog._VIDEO_OUTPUT_EXTENSIONS,
+                'audio': _InputOutputDialog._AUDIO_OUTPUT_EXTENSIONS,
+            }.get(self._run_output_mode, set())
+            # Generated-media runs can first expose a small translated .txt
+            # adapter containing only a sentinel. Do not let that adapter hide
+            # the actual durable media file saved elsewhere in the run tree.
             if not (
-                self._run_output_mode == 'image'
-                and expected_extension not in self._IMAGE_ATTACHMENT_EXTENSIONS
+                expected_media_extensions
+                and expected_extension not in expected_media_extensions
             ):
                 return existing_expected
-        if self._run_output_mode == 'image':
+        if self._run_output_mode in {'image', 'video', 'audio'}:
             sentinel_sources = [str(getattr(self, '_streamed_content', '') or '')]
             sentinel_sources.extend(
                 str(segment.get('content', '') or '')
@@ -11291,22 +11880,34 @@ class _InputOutputDialog(QDialog):
                 if isinstance(segment, dict)
             )
             for sentinel_source in sentinel_sources:
-                for image_path in self._generated_image_paths_from_text(
-                    sentinel_source
+                for media_kind, media_path in (
+                    _InputOutputDialog._generated_media_references_from_text(
+                        sentinel_source
+                    )
                 ):
-                    if os.path.isfile(image_path):
-                        self._expected_output = image_path
-                        return image_path
+                    if (
+                        media_kind == self._run_output_mode
+                        and os.path.isfile(media_path)
+                    ):
+                        self._expected_output = media_path
+                        return media_path
         if not self._temp_root or not os.path.isdir(self._temp_root):
             return existing_expected
 
         source_ext = str(self._run_source_extension or ".txt").lower()
         generated_image_scores = {
-            extension: 125 for extension in self._IMAGE_ATTACHMENT_EXTENSIONS
+            extension: 125
+            for extension in _InputOutputDialog._IMAGE_ATTACHMENT_EXTENSIONS
         }
-        generated_media_scores = {
+        generated_video_scores = {
             '.mp4': 140, '.mov': 135, '.webm': 135, '.mkv': 130,
+            '.avi': 125, '.m4v': 125, '.mpeg': 120, '.mpg': 120,
+            '.ogv': 120, '.wmv': 115, '.3gp': 110,
+        }
+        generated_audio_scores = {
             '.wav': 140, '.mp3': 135, '.m4a': 130, '.flac': 130,
+            '.aac': 125, '.ogg': 125, '.opus': 125, '.wma': 120,
+            '.aiff': 120, '.aif': 120, '.oga': 120, '.pcm': 110,
         }
         preferred_by_source = {
             ".epub": {".epub": 140, ".pdf": 100, ".txt": 80, ".html": 60},
@@ -11320,10 +11921,10 @@ class _InputOutputDialog(QDialog):
             preferred = dict(generated_image_scores)
             preferred.update({'.txt': 60, '.html': 55})
         elif self._run_output_mode == 'video':
-            preferred = dict(generated_media_scores)
+            preferred = dict(generated_video_scores)
             preferred.update(generated_image_scores)
         elif self._run_output_mode == 'audio':
-            preferred = dict(generated_media_scores)
+            preferred = dict(generated_audio_scores)
             preferred.update({'.txt': 70})
         elif source_ext in self._IMAGE_ATTACHMENT_EXTENSIONS:
             preferred = {'.txt': 150, '.html': 135, '.xhtml': 130}
@@ -11824,12 +12425,8 @@ class _InputOutputDialog(QDialog):
 
         output_folder = self._persist_output_folder()
         persisted_output = str(self._persisted_output_path or '')
-        if (
-            persisted_output
-            and os.path.splitext(persisted_output)[1].lower()
-            in self._IMAGE_ATTACHMENT_EXTENSIONS
-        ):
-            self._promote_generated_image_reference(persisted_output)
+        if persisted_output and self._media_kind_for_path(persisted_output):
+            self._promote_generated_media_reference(persisted_output)
         self._remember_output_folder(
             output_folder,
             update_conversation_root=not self._run_source_is_attachment,

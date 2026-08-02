@@ -9911,6 +9911,12 @@ class UnifiedClient:
                                     ext = '.bin'
                                     clean_url = media_url.split('?')[0].lower()
                                     if clean_url.endswith('.mp4'): ext = '.mp4'
+                                    elif clean_url.endswith('.webm'): ext = '.webm'
+                                    elif clean_url.endswith('.mov'): ext = '.mov'
+                                    elif clean_url.endswith('.mkv'): ext = '.mkv'
+                                    elif clean_url.endswith('.avi'): ext = '.avi'
+                                    elif clean_url.endswith('.m4v'): ext = '.m4v'
+                                    elif clean_url.endswith(('.mpeg', '.mpg')): ext = os.path.splitext(clean_url)[1]
                                     elif clean_url.endswith('.png'): ext = '.png'
                                     elif clean_url.endswith(('.jpg', '.jpeg')): ext = '.jpg'
                                     elif clean_url.endswith('.webp'): ext = '.webp'
@@ -9944,8 +9950,13 @@ class UnifiedClient:
                                         
                                     self._resize_nanogpt_generated_output_if_needed(out_path)
 
-                                    # Return sentinel for GUI to intercept and prevent HTML creation
-                                    extracted_content = f'[GENERATED_IMAGE:{out_path}]'
+                                    # Return a typed sentinel so Direct Text can
+                                    # render native video controls instead of
+                                    # rejecting an .mp4 as a malformed image.
+                                    marker_type = 'VIDEO' if is_video_mode else 'IMAGE'
+                                    extracted_content = (
+                                        f'[GENERATED_{marker_type}:{out_path}]'
+                                    )
                                         
                                 elif is_base64:
                                     header, b64data = extracted_content_str.split(',', 1) if ',' in extracted_content_str else ('data:image/png;base64', extracted_content_str)
@@ -9964,8 +9975,14 @@ class UnifiedClient:
                                         
                                     self._resize_nanogpt_generated_output_if_needed(out_path)
 
-                                    # Return sentinel for GUI to intercept and prevent HTML creation
-                                    extracted_content = f'[GENERATED_IMAGE:{out_path}]'
+                                    marker_type = (
+                                        'VIDEO'
+                                        if is_video_mode or mime.startswith('video/')
+                                        else 'IMAGE'
+                                    )
+                                    extracted_content = (
+                                        f'[GENERATED_{marker_type}:{out_path}]'
+                                    )
                                 print(f"✅ Media successfully intercepted and saved.")
                             except Exception as e:
                                 print(f"⚠️ Failed to intercept/download media: {e}")

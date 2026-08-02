@@ -1740,6 +1740,102 @@ def test_direct_text_generated_image_is_promoted_to_persistent_path(tmp_path):
     assert dialog._rendered_message_cache == {}
 
 
+def test_direct_text_generated_media_classifies_legacy_video_and_audio(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    video_path = tmp_path / 'Direct Text 1.mp4'
+    audio_path = tmp_path / 'Direct Text 2.mp3'
+
+    references = dialog_class._generated_media_references_from_text(
+        f'[GENERATED_IMAGE:{video_path}]\n[GENERATED_AUDIO:{audio_path}]'
+    )
+
+    assert references == [
+        ('video', str(video_path)),
+        ('audio', str(audio_path)),
+    ]
+    assert dialog_class._generated_image_paths_from_text(
+        f'[GENERATED_IMAGE:{video_path}]'
+    ) == []
+
+
+def test_direct_text_generated_video_is_promoted_to_persistent_path(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    temporary_video = tmp_path / 'temporary.mp4'
+    persistent_video = tmp_path / 'Direct Text 1.mp4'
+    temporary_video.write_bytes(b'temporary video')
+    persistent_video.write_bytes(b'persistent video')
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        _VIDEO_OUTPUT_EXTENSIONS = dialog_class._VIDEO_OUTPUT_EXTENSIONS
+        _AUDIO_OUTPUT_EXTENSIONS = dialog_class._AUDIO_OUTPUT_EXTENSIONS
+        _streamed_content = f'[GENERATED_IMAGE:{temporary_video}]'
+        _active_request_segments = [{
+            'content': f'[GENERATED_IMAGE:{temporary_video}]',
+        }]
+        _expected_output = str(temporary_video)
+        _rendered_message_cache = {'stale': 'value'}
+
+        @classmethod
+        def _media_kind_for_path(cls, path, marker_kind=''):
+            return dialog_class._media_kind_for_path(path, marker_kind)
+
+    dialog = FakeDialog()
+    promoted = dialog_class._promote_generated_media_reference(
+        dialog, str(persistent_video)
+    )
+
+    expected_marker = f'[GENERATED_VIDEO:{persistent_video}]'
+    assert promoted is True
+    assert dialog._streamed_content == expected_marker
+    assert dialog._active_request_segments[0]['content'] == expected_marker
+    assert dialog._active_request_segments[0]['media_path'] == str(
+        persistent_video
+    )
+    assert dialog._active_request_segments[0]['media_kind'] == 'video'
+    assert dialog._expected_output == str(persistent_video)
+    assert dialog._rendered_message_cache == {}
+
+
+def test_direct_text_video_marker_reserves_native_player_slot(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    video_path = tmp_path / 'Direct Text 1.mp4'
+    video_path.write_bytes(b'video')
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        _VIDEO_OUTPUT_EXTENSIONS = dialog_class._VIDEO_OUTPUT_EXTENSIONS
+        _AUDIO_OUTPUT_EXTENSIONS = dialog_class._AUDIO_OUTPUT_EXTENSIONS
+
+        @staticmethod
+        def _direct_media_placeholder_marker(message_index):
+            return dialog_class._direct_media_placeholder_marker(message_index)
+
+        @staticmethod
+        def _response_layout_marker_html(marker):
+            return dialog_class._response_layout_marker_html(marker)
+
+        @classmethod
+        def _media_kind_for_path(cls, path, marker_kind=''):
+            return dialog_class._media_kind_for_path(path, marker_kind)
+
+    rendered = dialog_class._generated_media_render_source(
+        FakeDialog(),
+        f'[GENERATED_VIDEO:{video_path}]',
+        'video',
+        str(video_path),
+        6,
+    )
+
+    assert '[GENERATED_VIDEO:' not in rendered
+    assert 'DIRECT_TEXT_MEDIA_PLAYER_6_7F31' in rendered
+    assert "height='430'" in rendered
+    assert video_path.name not in rendered
+    sanitized = dialog_class._markup_to_html(rendered)
+    assert "class=\"direct-media-marker\"" in sanitized
+    assert 'DIRECT_TEXT_MEDIA_PLAYER_6_7F31' in sanitized
+
+
 def test_direct_text_indexed_image_copy_records_persistent_artifact(tmp_path):
     dialog_class = _direct_text_dialog_class()
     temporary_image = tmp_path / "temporary.png"
@@ -1804,6 +1900,44 @@ def test_direct_text_image_mode_prefers_generated_image_over_marker_text(tmp_pat
 
     assert discovered == str(generated_image)
     assert dialog._expected_output == str(generated_image)
+
+
+@pytest.mark.parametrize(
+    ('output_mode', 'extension', 'marker_kind'),
+    (('video', '.mp4', 'VIDEO'), ('audio', '.mp3', 'AUDIO')),
+)
+def test_direct_text_media_mode_prefers_generated_file_over_marker_text(
+    tmp_path, output_mode, extension, marker_kind
+):
+    dialog_class = _direct_text_dialog_class()
+    marker_text = tmp_path / 'direct_text_stream_translated.txt'
+    generated_media = tmp_path / f'response_1_generated{extension}'
+    marker_text.write_text(
+        f'[GENERATED_{marker_kind}:{generated_media}]', encoding='utf-8'
+    )
+    generated_media.write_bytes(b'generated media payload' * 100)
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        _VIDEO_OUTPUT_EXTENSIONS = dialog_class._VIDEO_OUTPUT_EXTENSIONS
+        _AUDIO_OUTPUT_EXTENSIONS = dialog_class._AUDIO_OUTPUT_EXTENSIONS
+        _expected_output = str(marker_text)
+        _temp_root = str(tmp_path)
+        _run_output_mode = output_mode
+        _run_source_extension = '.txt'
+        _run_started_at = 0.0
+        _streamed_content = marker_text.read_text(encoding='utf-8')
+        _active_request_segments = []
+
+        @classmethod
+        def _generated_media_references_from_text(cls, content):
+            return dialog_class._generated_media_references_from_text(content)
+
+    dialog = FakeDialog()
+    discovered = dialog_class._discover_generated_output(dialog)
+
+    assert discovered == str(generated_media)
+    assert dialog._expected_output == str(generated_media)
 
 
 def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
