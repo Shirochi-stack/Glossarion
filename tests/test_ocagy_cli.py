@@ -416,6 +416,7 @@ def test_google_api_key_fallback_error_is_rewritten_as_oauth_guidance():
 
 def test_live_event_state_collects_deltas_reasoning_usage_and_completion():
     state = ocagy_cli._OpenCodeStreamState("session-1")
+    assert state.finish_reason is None
     assert state.feed({
         "type": "message.updated",
         "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
@@ -484,7 +485,58 @@ def test_live_event_state_collects_deltas_reasoning_usage_and_completion():
     assert state.content() == "Hello"
     assert state.complete is True
     assert state.finish_reason == "stop"
+    assert state.raw_finish_reason == "stop"
+    assert state.finish_reason_source == "sse_step_finish"
     assert ocagy_cli._usage_from_value(state.step_events)["total_tokens"] == 10
+
+
+def test_live_event_state_captures_out_of_order_content_filter_finish():
+    state = ocagy_cli._OpenCodeStreamState("session-1")
+
+    # OpenCode can publish a part before its message.updated notification is
+    # observed by this client. Finish metadata must not depend on that ordering.
+    state.feed({
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "step-1",
+                "sessionID": "session-1",
+                "messageID": "assistant-1",
+                "type": "step-finish",
+                "reason": "content-filter",
+            }
+        },
+    })
+
+    assert state.finish_reason == "prohibited_content"
+    assert state.raw_finish_reason == "content-filter"
+    assert state.finish_reason_source == "sse_step_finish"
+
+
+def test_persisted_message_finish_prefers_step_finish_reason():
+    reason, source, evidence = ocagy_cli._finish_reason_from_message_records(
+        [{
+            "info": {
+                "id": "assistant-1",
+                "role": "assistant",
+                "finish": "stop",
+            },
+            "parts": [{
+                "id": "step-1",
+                "type": "step-finish",
+                "reason": "max_tokens",
+            }],
+        }],
+        ["assistant-1"],
+    )
+
+    assert reason == "max_tokens"
+    assert source == "server_message_step_finish"
+    assert evidence == {
+        "message_id": "assistant-1",
+        "part_id": "step-1",
+    }
+    assert ocagy_cli._normalize_opencode_finish_reason(reason) == "length"
 
 
 def test_live_event_state_handles_opencode_part_delta_events():
@@ -600,6 +652,19 @@ def test_ocagy_server_setup_uses_request_deadline_not_short_hardcoded_timeouts(t
             return {"healthy": True}
         if path == "/session":
             return {"id": "session-1"}
+        if path == "/session/session-1/message/assistant-1":
+            return {
+                "info": {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "finish": "stop",
+                },
+                "parts": [{
+                    "id": "step-1",
+                    "type": "step-finish",
+                    "reason": "max_tokens",
+                }],
+            }
         return {}
 
     def fake_read_events(_response, output):
@@ -655,6 +720,10 @@ def test_ocagy_server_setup_uses_request_deadline_not_short_hardcoded_timeouts(t
 
     timeout_by_path = {path: timeout for path, timeout in http_calls}
     assert result["content"] == "OK"
+    assert result["finish_reason"] == "length"
+    assert result["raw_finish_reason"] == "max_tokens"
+    assert result["finish_reason_source"] == "server_message_step_finish"
+    assert result["finish_reason_fallback"] is False
     assert timeout_by_path["/session"] > 100
     assert timeout_by_path["/session/session-1/prompt_async"] > 100
     assert stream_timeouts["default"] > 100

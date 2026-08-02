@@ -1808,7 +1808,7 @@ def test_direct_text_image_mode_prefers_generated_image_over_marker_text(tmp_pat
 
 def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
     dialog_class = _direct_text_dialog_class()
-    from PySide6.QtGui import QImage
+    from PySide6.QtGui import QImage, QTextDocument
     from PySide6.QtWidgets import QApplication
 
     QApplication.instance() or QApplication([])
@@ -1841,10 +1841,18 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
 
     assert marker not in rendered_source
     assert "<img src='file:///" in rendered_source
-    assert "Direct Text 1.png" in rendered_source
+    assert "<div class='generated-image-preview'>" in rendered_source
+    assert "<figure" not in rendered_source
+    assert "<figcaption" not in rendered_source
+    assert "alt='Generated image'" in rendered_source
+    assert " width='" in rendered_source
+    assert " height='" not in rendered_source
     rendered_html = dialog_class._markup_to_html(rendered_source)
     assert "<img" in rendered_html
     assert "file:///" in rendered_html
+    document = QTextDocument()
+    document.setHtml(rendered_html)
+    assert "Direct Text 1.png" not in document.toPlainText()
 
 
 def test_direct_text_save_image_as_copies_persistent_image(monkeypatch, tmp_path):
@@ -1874,6 +1882,34 @@ def test_direct_text_save_image_as_copies_persistent_image(monkeypatch, tmp_path
     assert saved == str(selected_image)
     assert selected_image.read_bytes() == b"persistent generated image"
     assert statuses == ["Image saved: Saved elsewhere.png"]
+
+
+def test_direct_text_open_image_in_browser_uses_local_file_url(
+    monkeypatch, tmp_path
+):
+    dialog_class = _direct_text_dialog_class()
+    import webbrowser
+
+    source_image = tmp_path / "Direct Text browser image.png"
+    source_image.write_bytes(b"persistent generated image")
+    opened_urls = []
+    monkeypatch.setattr(
+        webbrowser,
+        "open_new_tab",
+        lambda url: opened_urls.append(url) or True,
+    )
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+
+    opened = dialog_class._open_generated_image_in_browser(
+        FakeDialog(), str(source_image)
+    )
+
+    assert opened is True
+    assert len(opened_urls) == 1
+    assert opened_urls[0].startswith("file:///")
+    assert "Direct%20Text%20browser%20image.png" in opened_urls[0]
 
 
 def test_direct_text_right_click_resolves_rendered_image_path(tmp_path):

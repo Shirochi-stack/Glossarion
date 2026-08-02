@@ -11,6 +11,7 @@ import hashlib
 import warnings
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 # Lazy import for PatternManager to speed up ProcessPoolExecutor worker startup on Windows
 # The heavy TransateKRtoEN import is deferred until actually needed
@@ -378,7 +379,11 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
     disk_html_paths = []
     if os.path.isdir(output_dir):
         try:
-            for root, _dirs, files in os.walk(output_dir):
+            for root, directories, files in os.walk(output_dir):
+                directories[:] = [
+                    name for name in directories
+                    if name.casefold() != '.cache'
+                ]
                 for filename in files:
                     if not filename.lower().endswith(('.html', '.xhtml', '.htm')):
                         continue
@@ -401,8 +406,48 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         return chapters
 
     images_dir = os.path.join(output_dir, 'images')
-    os.makedirs(images_dir, exist_ok=True)
+    cache_dir = os.path.join(images_dir, '.cache')
+    progress_path = os.path.join(
+        cache_dir,
+        'remote_image_download_progress.json',
+    )
+    os.makedirs(cache_dir, exist_ok=True)
     replacements = {}
+
+    def _timestamp():
+        return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+    def _write_progress_manifest(manifest):
+        """Atomically persist progress so interrupted runs remain readable."""
+        manifest['updated_at'] = _timestamp()
+        temporary = (
+            f"{progress_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump(manifest, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, progress_path)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+
+    previous_items = {}
+    try:
+        with open(progress_path, 'r', encoding='utf-8') as handle:
+            previous_manifest = json.load(handle)
+        if isinstance(previous_manifest, dict):
+            previous_items = {
+                item.get('url'): item
+                for item in previous_manifest.get('items', [])
+                if isinstance(item, dict) and item.get('url')
+            }
+    except (OSError, ValueError, TypeError):
+        previous_items = {}
 
     try:
         configured_workers = int(os.getenv('REMOTE_IMAGE_DOWNLOAD_WORKERS', '4'))
@@ -412,6 +457,99 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
 
     total_remote_urls = len(remote_urls)
     download_started_at = time.monotonic()
+    started_at = _timestamp()
+    item_by_url = {}
+    pending_urls = []
+    completed = 0
+    successful = 0
+    failed = 0
+    resumed = 0
+    downloaded_bytes = 0
+
+    for remote_url in remote_urls:
+        download_filename = (
+            'remote_'
+            f"{hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]}"
+            '.png'
+        )
+        previous_item = previous_items.get(remote_url, {})
+        cached_filename = os.path.basename(str(
+            previous_item.get('filename') or download_filename
+        ))
+        cached_path = os.path.join(images_dir, cached_filename)
+        cached_is_png = False
+        if previous_item.get('status') == 'completed' and os.path.isfile(cached_path):
+            try:
+                with open(cached_path, 'rb') as handle:
+                    cached_is_png = handle.read(8) == b'\x89PNG\r\n\x1a\n'
+            except OSError:
+                cached_is_png = False
+
+        item = {
+            'url': remote_url,
+            'status': 'pending',
+            'download_filename': download_filename,
+            'filename': download_filename,
+            'local_reference': f'images/{download_filename}',
+            'bytes': 0,
+            'error': None,
+            'updated_at': started_at,
+        }
+        if cached_is_png:
+            cached_size = os.path.getsize(cached_path)
+            item.update({
+                'status': 'completed',
+                'download_filename': str(
+                    previous_item.get('download_filename') or download_filename
+                ),
+                'filename': cached_filename,
+                'local_reference': f'images/{cached_filename}',
+                'bytes': cached_size,
+                'completed_at': previous_item.get('completed_at'),
+                'updated_at': previous_item.get('updated_at') or started_at,
+            })
+            replacements[remote_url] = item['local_reference']
+            completed += 1
+            successful += 1
+            resumed += 1
+            downloaded_bytes += cached_size
+        else:
+            pending_urls.append(remote_url)
+        item_by_url[remote_url] = item
+
+    progress_manifest = {
+        'version': 1,
+        'status': 'downloading',
+        'output_format': 'png',
+        'total': total_remote_urls,
+        'completed': completed,
+        'successful': successful,
+        'failed': failed,
+        'resumed': resumed,
+        'downloaded_bytes': downloaded_bytes,
+        'progress_percent': int((completed * 100) / total_remote_urls),
+        'workers': worker_count,
+        'started_at': started_at,
+        'updated_at': started_at,
+        'items': [item_by_url[url] for url in remote_urls],
+    }
+
+    def _persist_progress(status=None, completed_at=False):
+        if status is not None:
+            progress_manifest['status'] = status
+        progress_manifest.update({
+            'completed': completed,
+            'successful': successful,
+            'failed': failed,
+            'resumed': resumed,
+            'downloaded_bytes': downloaded_bytes,
+            'progress_percent': int(
+                (completed * 100) / total_remote_urls
+            ),
+        })
+        if completed_at:
+            progress_manifest['completed_at'] = _timestamp()
+        _write_progress_manifest(progress_manifest)
 
     def _progress_message(completed_count, success_count, failure_count, byte_count):
         elapsed = max(0.001, time.monotonic() - download_started_at)
@@ -432,14 +570,25 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             f"{size_mib:.1f} MiB | {rate:.1f} images/s | ETA {eta_label}"
         )
 
-    initial_progress = _progress_message(0, 0, 0, 0)
+    _persist_progress()
+    initial_progress = _progress_message(
+        completed,
+        successful,
+        failed,
+        downloaded_bytes,
+    )
     if progress_callback:
         progress_callback(initial_progress)
     else:
         print(initial_progress)
+    cache_message = f"Remote image progress cache: {progress_path}"
+    if progress_callback:
+        progress_callback(cache_message)
+    else:
+        print(cache_message)
 
     def _download_and_store(remote_url):
-        filename = f"remote_{hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]}.png"
+        filename = item_by_url[remote_url]['download_filename']
         destination = os.path.join(images_dir, filename)
         png_bytes = _download_remote_image_as_png(remote_url)
         temporary = f"{destination}.{threading.get_ident()}.tmp"
@@ -455,15 +604,11 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
                     pass
         return remote_url, f"images/{filename}", len(png_bytes)
 
-    completed = 0
-    successful = 0
-    failed = 0
-    downloaded_bytes = 0
     failure_details = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_url = {
             executor.submit(_download_and_store, remote_url): remote_url
-            for remote_url in remote_urls
+            for remote_url in pending_urls
         }
         for future in as_completed(future_to_url):
             remote_url = future_to_url[future]
@@ -473,9 +618,26 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
                 replacements[downloaded_url] = local_reference
                 successful += 1
                 downloaded_bytes += image_size
+                item_by_url[remote_url].update({
+                    'status': 'completed',
+                    'filename': os.path.basename(local_reference),
+                    'local_reference': local_reference,
+                    'bytes': image_size,
+                    'error': None,
+                    'completed_at': _timestamp(),
+                    'updated_at': _timestamp(),
+                })
             except Exception as exc:
                 failed += 1
                 failure_details.append((remote_url, str(exc)))
+                item_by_url[remote_url].update({
+                    'status': 'failed',
+                    'bytes': 0,
+                    'error': str(exc),
+                    'updated_at': _timestamp(),
+                })
+
+            _persist_progress()
 
             progress_message = _progress_message(
                 completed, successful, failed, downloaded_bytes
@@ -515,6 +677,9 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             print(warning)
 
     if not replacements:
+        progress_manifest['chapters_updated'] = 0
+        progress_manifest['html_files_updated'] = 0
+        _persist_progress(status='failed', completed_at=True)
         message = (
             f"Remote image localization complete: 0/{total_remote_urls} saved, "
             f"{failed} failed; no HTML references changed"
@@ -556,15 +721,70 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             print(f"   Warning: could not rewrite remote images in {path}: {exc}")
 
     print(
-        f"Remote image download complete: {len(replacements)}/{len(remote_urls)} localized "
+        f"🖼️ Remote image download complete: {len(replacements)}/{len(remote_urls)} localized "
         f"as PNG ({updated_chapters} chapter(s), {disk_updated} saved HTML file(s) updated)"
     )
+    progress_manifest['chapters_updated'] = updated_chapters
+    progress_manifest['html_files_updated'] = disk_updated
+    final_status = 'completed' if failed == 0 else 'completed_with_errors'
+    _persist_progress(status=final_status, completed_at=True)
     if progress_callback:
         progress_callback(
             f"Remote image localization complete: {successful}/{total_remote_urls} "
             f"saved, {failed} failed; {updated_chapters} chapter(s) updated"
         )
     return chapters
+
+
+def _record_remote_image_renames(output_dir, successful_renames):
+    """Keep the persistent remote-download manifest aligned after renaming."""
+    if not successful_renames:
+        return
+    progress_path = os.path.join(
+        output_dir,
+        'images',
+        '.cache',
+        'remote_image_download_progress.json',
+    )
+    try:
+        with open(progress_path, 'r', encoding='utf-8') as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return
+    if not isinstance(manifest, dict):
+        return
+
+    changed = False
+    renamed_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    for item in manifest.get('items', []):
+        if not isinstance(item, dict) or item.get('status') != 'completed':
+            continue
+        current_name = os.path.basename(str(item.get('filename') or ''))
+        final_name = successful_renames.get(current_name)
+        if not final_name:
+            continue
+        item['filename'] = final_name
+        item['local_reference'] = f'images/{final_name}'
+        item['renamed_at'] = renamed_at
+        item['updated_at'] = renamed_at
+        changed = True
+
+    if not changed:
+        return
+    manifest['updated_at'] = renamed_at
+    temporary = f"{progress_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temporary, 'w', encoding='utf-8') as handle:
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, progress_path)
+    finally:
+        if os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
 
 def _update_image_refs_in_soup(soup, rename_map):
@@ -833,6 +1053,10 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
     except Exception as e:
         print(f"   ⚠️ Could not save rename map: {e}")
     
+    # Keep persistent remote-download records aligned with the chapter-based
+    # filenames produced by this pass.
+    _record_remote_image_renames(output_dir, successful_renames)
+
     # Phase 4: Update on-disk HTML files that were already saved during extraction
     # These files were written before the rename, so they still reference old image names
     print(f"   📄 Updating on-disk HTML files in output directory...")

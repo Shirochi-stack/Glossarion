@@ -1203,6 +1203,16 @@ def test_remote_images_are_localized_once_before_chapter_rename(monkeypatch, tmp
         (tmp_path / 'image_rename_map.json').read_text(encoding='utf-8')
     )
     assert rename_map == {temporary_name: final_name}
+    progress_manifest = json.loads((
+        tmp_path
+        / 'images'
+        / '.cache'
+        / 'remote_image_download_progress.json'
+    ).read_text(encoding='utf-8'))
+    assert progress_manifest['items'][0]['filename'] == final_name
+    assert progress_manifest['items'][0]['local_reference'] == (
+        f'images/{final_name}'
+    )
 
 
 def test_failed_remote_image_download_keeps_original_url(monkeypatch, tmp_path):
@@ -1277,6 +1287,82 @@ def test_remote_image_download_reports_counted_progress(monkeypatch, tmp_path):
     )
     assert progress_messages[-1].startswith(
         'Remote image localization complete: 1/2 saved, 1 failed'
+    )
+
+    progress_path = (
+        tmp_path
+        / 'images'
+        / '.cache'
+        / 'remote_image_download_progress.json'
+    )
+    manifest = json.loads(progress_path.read_text(encoding='utf-8'))
+    assert manifest['status'] == 'completed_with_errors'
+    assert manifest['output_format'] == 'png'
+    assert manifest['total'] == 2
+    assert manifest['completed'] == 2
+    assert manifest['successful'] == 1
+    assert manifest['failed'] == 1
+    assert manifest['progress_percent'] == 100
+    items = {item['url']: item for item in manifest['items']}
+    assert items[successful_url]['status'] == 'completed'
+    assert items[successful_url]['filename'].endswith('.png')
+    assert items[failed_url]['status'] == 'failed'
+    assert items[failed_url]['error'] == 'simulated failure'
+
+
+def test_remote_image_progress_cache_resumes_completed_png(monkeypatch, tmp_path):
+    remote_url = 'https://images.example.test/resumable.file'
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        lambda _url: _remote_test_png_bytes(),
+    )
+    chapter_extractor._localize_remote_images(
+        [{'num': 4, 'body': f'<img src="{remote_url}">'}],
+        str(tmp_path),
+    )
+
+    def unexpected_download(_url):
+        raise AssertionError('completed cached PNG should be reused')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        unexpected_download,
+    )
+    fresh_chapters = [{'num': 4, 'body': f'<img src="{remote_url}">'}]
+    localized = chapter_extractor._localize_remote_images(
+        fresh_chapters,
+        str(tmp_path),
+    )
+
+    manifest = json.loads((
+        tmp_path
+        / 'images'
+        / '.cache'
+        / 'remote_image_download_progress.json'
+    ).read_text(encoding='utf-8'))
+    assert manifest['status'] == 'completed'
+    assert manifest['completed'] == 1
+    assert manifest['successful'] == 1
+    assert manifest['resumed'] == 1
+    assert remote_url not in localized[0]['body']
+
+
+def test_remote_image_progress_cache_is_excluded_from_epub_sources(tmp_path):
+    cache_file = (
+        tmp_path
+        / 'images'
+        / '.cache'
+        / 'remote_image_download_progress.json'
+    )
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text('{}', encoding='utf-8')
+
+    assert epub_converter._is_forbidden_epub_source_path(
+        str(cache_file),
+        str(tmp_path),
     )
 
 

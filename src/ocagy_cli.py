@@ -1169,6 +1169,134 @@ def _event_error(events: List[Dict[str, Any]]) -> str:
     return "\n".join(messages)
 
 
+def _normalize_opencode_finish_reason(reason: Any) -> Optional[str]:
+    """Normalize an authoritative OpenCode reason for Glossarion routing."""
+    raw = str(reason or "").strip()
+    if not raw:
+        return None
+    normalized = raw.lower().replace(" ", "_")
+    if normalized in {
+        "end_turn",
+        "end-turn",
+        "completed",
+        "complete",
+    }:
+        return "stop"
+    if normalized in {
+        "length",
+        "max_tokens",
+        "max-tokens",
+        "max_output_tokens",
+        "max-output-tokens",
+        "truncated",
+    }:
+        return "length"
+    if normalized in {
+        "content-filter",
+        "content_filter",
+        "prohibited-content",
+        "prohibited_content",
+        "censorship-blocked",
+        "censorship_blocked",
+        "blocked",
+        "safety",
+        "recitation",
+        "blocklist",
+        "spii",
+    }:
+        return "prohibited_content"
+    return normalized
+
+
+def _finish_reason_from_info(info: Any) -> Optional[str]:
+    """Read a finish value from one persisted/streamed assistant message."""
+    if not isinstance(info, dict):
+        return None
+    for key in (
+        "finish",
+        "finish_reason",
+        "finishReason",
+        "stop_reason",
+        "stopReason",
+    ):
+        value = info.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _finish_reason_from_message_records(
+    records: Any,
+    assistant_message_ids: Optional[Iterable[str]] = None,
+) -> Tuple[Optional[str], str, Dict[str, Any]]:
+    """Extract the latest server-persisted assistant finish reason."""
+    if isinstance(records, dict):
+        message_records = [records]
+    elif isinstance(records, list):
+        message_records = records
+    else:
+        return None, "", {}
+
+    allowed_ids = {
+        str(message_id)
+        for message_id in (assistant_message_ids or [])
+        if str(message_id or "").strip()
+    }
+    for record in reversed(message_records):
+        if not isinstance(record, dict):
+            continue
+        info = record.get("info")
+        if not isinstance(info, dict):
+            info = {}
+        if str(info.get("role", "") or "").lower() not in ("", "assistant"):
+            continue
+        message_id = str(info.get("id", "") or "")
+        if allowed_ids and message_id not in allowed_ids:
+            continue
+
+        parts = record.get("parts")
+        if isinstance(parts, list):
+            for part in reversed(parts):
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type", "") or "").replace("_", "-").lower()
+                reason = str(part.get("reason", "") or "").strip()
+                if part_type == "step-finish" and reason:
+                    return reason, "server_message_step_finish", {
+                        "message_id": message_id,
+                        "part_id": str(part.get("id", "") or ""),
+                    }
+
+        reason = _finish_reason_from_info(info)
+        if reason:
+            return reason, "server_message_info", {
+                "message_id": message_id,
+            }
+    return None, "", {}
+
+
+def _finish_reason_from_cli_events(
+    events: Iterable[Dict[str, Any]],
+) -> Tuple[Optional[str], str]:
+    """Extract OpenCode's reason from buffered ``run --format json`` events."""
+    for event in reversed(list(events or [])):
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type", "") or "").replace("_", "-").lower()
+        part = event.get("part")
+        if event_type == "step-finish" and isinstance(part, dict):
+            reason = str(part.get("reason", "") or "").strip()
+            if reason:
+                return reason, "cli_step_finish"
+        if event_type == "message.updated":
+            properties = event.get("properties")
+            info = properties.get("info") if isinstance(properties, dict) else None
+            reason = _finish_reason_from_info(info)
+            if reason:
+                return reason, "cli_message_info"
+    return None, ""
+
+
 def _http_json(
     base_url: str,
     path: str,
@@ -1282,14 +1410,35 @@ class _OpenCodeStreamState:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.assistant_message_ids: set[str] = set()
+        self.assistant_message_order: List[str] = []
         self.text_order: List[str] = []
         self.text_by_part: Dict[str, str] = {}
         self.reasoning_by_part: Dict[str, str] = {}
         self.part_types: Dict[str, str] = {}
         self.step_events: List[Dict[str, Any]] = []
-        self.finish_reason = "stop"
+        self.finish_reason: Optional[str] = None
+        self.raw_finish_reason: Optional[str] = None
+        self.finish_reason_source = ""
+        self.finish_reason_evidence: Dict[str, Any] = {}
         self.error = ""
         self.complete = False
+
+    def record_finish_reason(
+        self,
+        reason: Any,
+        source: str,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Record a real OpenCode reason without inventing a default."""
+        raw_reason = str(reason or "").strip()
+        normalized = _normalize_opencode_finish_reason(raw_reason)
+        if not raw_reason or not normalized:
+            return False
+        self.raw_finish_reason = raw_reason
+        self.finish_reason = normalized
+        self.finish_reason_source = str(source or "")
+        self.finish_reason_evidence = dict(evidence or {})
+        return True
 
     @staticmethod
     def _merge_part(
@@ -1337,6 +1486,15 @@ class _OpenCodeStreamState:
                 message_id = str(info.get("id", "") or "")
                 if message_id:
                     self.assistant_message_ids.add(message_id)
+                    if message_id not in self.assistant_message_order:
+                        self.assistant_message_order.append(message_id)
+                reason = _finish_reason_from_info(info)
+                if reason:
+                    self.record_finish_reason(
+                        reason,
+                        "sse_message_info",
+                        {"message_id": message_id},
+                    )
             return emitted
 
         if event_type == "message.part.updated":
@@ -1344,9 +1502,22 @@ class _OpenCodeStreamState:
             if not isinstance(part, dict) or part.get("sessionID") != self.session_id:
                 return emitted
             message_id = str(part.get("messageID", "") or "")
+            part_type = str(part.get("type", "") or "")
+            if part_type == "step-finish":
+                self.step_events.append({"type": "step_finish", "part": part})
+                reason = str(part.get("reason", "") or "")
+                if reason:
+                    self.record_finish_reason(
+                        reason,
+                        "sse_step_finish",
+                        {
+                            "message_id": message_id,
+                            "part_id": str(part.get("id", "") or ""),
+                        },
+                    )
+                return emitted
             if message_id not in self.assistant_message_ids:
                 return emitted
-            part_type = str(part.get("type", "") or "")
             part_id = str(part.get("id", "") or "")
             if part_id and part_type:
                 self.part_types[part_id] = part_type
@@ -1360,11 +1531,6 @@ class _OpenCodeStreamState:
                 fragment = self._merge_part(part, properties.get("delta"), self.reasoning_by_part)
                 if fragment:
                     emitted.append(("reasoning", fragment))
-            elif part_type == "step-finish":
-                self.step_events.append({"type": "step_finish", "part": part})
-                reason = str(part.get("reason", "") or "")
-                if reason:
-                    self.finish_reason = reason
             return emitted
 
         # OpenCode 1.18+ publishes the actual live token fragments separately
@@ -1415,6 +1581,63 @@ class _OpenCodeStreamState:
 
     def content(self) -> str:
         return "".join(self.text_by_part.get(part_id, "") for part_id in self.text_order)
+
+
+def _retrieve_server_finish_reason(
+    base_url: str,
+    session_id: str,
+    assistant_message_ids: Iterable[str],
+    timeout: float,
+) -> Tuple[Optional[str], str, Dict[str, Any], str]:
+    """Query OpenCode's persisted message records for a missed finish event."""
+    deadline = time.monotonic() + max(0.1, float(timeout or 0.1))
+    ordered_ids = [
+        str(message_id)
+        for message_id in assistant_message_ids
+        if str(message_id or "").strip()
+    ]
+    errors: List[str] = []
+
+    def remaining() -> float:
+        return max(0.1, deadline - time.monotonic())
+
+    encoded_session = urllib.parse.quote(str(session_id), safe="")
+    for message_id in reversed(ordered_ids):
+        if time.monotonic() >= deadline:
+            break
+        encoded_message = urllib.parse.quote(message_id, safe="")
+        try:
+            record = _http_json(
+                base_url,
+                f"/session/{encoded_session}/message/{encoded_message}",
+                timeout=remaining(),
+            )
+            reason, source, evidence = _finish_reason_from_message_records(
+                record,
+                [message_id],
+            )
+            if reason:
+                return reason, source, evidence, ""
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if time.monotonic() < deadline:
+        try:
+            records = _http_json(
+                base_url,
+                f"/session/{encoded_session}/message?limit=20",
+                timeout=remaining(),
+            )
+            reason, source, evidence = _finish_reason_from_message_records(
+                records,
+                ordered_ids,
+            )
+            if reason:
+                return reason, source, evidence, ""
+        except Exception as exc:
+            errors.append(str(exc))
+
+    return None, "", {}, "; ".join(error for error in errors if error)
 
 
 def _send_via_server(
@@ -1647,6 +1870,59 @@ def _send_via_server(
         if state.error:
             raise _classify_error(state.error, 1)
 
+        finish_reason_lookup_error = ""
+        if not state.finish_reason:
+            remaining_after_stream = timeout_seconds - (time.time() - started)
+            if remaining_after_stream > 0.1:
+                lookup_timeout = min(3.0, remaining_after_stream)
+                (
+                    persisted_reason,
+                    persisted_source,
+                    persisted_evidence,
+                    finish_reason_lookup_error,
+                ) = _retrieve_server_finish_reason(
+                    base_url,
+                    session_id,
+                    state.assistant_message_order,
+                    lookup_timeout,
+                )
+                if persisted_reason:
+                    state.record_finish_reason(
+                        persisted_reason,
+                        persisted_source,
+                        persisted_evidence,
+                    )
+            else:
+                finish_reason_lookup_error = (
+                    "request deadline exhausted before server lookup"
+                )
+
+        finish_reason_fallback = not bool(state.finish_reason)
+        if finish_reason_fallback:
+            state.finish_reason = "stop"
+            state.raw_finish_reason = None
+            state.finish_reason_source = "fallback_stop"
+            state.finish_reason_evidence = {}
+            warning = (
+                "⚠️ OpenCode Antigravity: no finish reason was present in "
+                "the live events or persisted server message; falling back to 'stop'."
+            )
+            if finish_reason_lookup_error:
+                warning += f" Server lookup: {finish_reason_lookup_error}"
+            logger(warning)
+        else:
+            raw_suffix = (
+                f", raw: '{state.raw_finish_reason}'"
+                if state.raw_finish_reason
+                and state.raw_finish_reason != state.finish_reason
+                else ""
+            )
+            logger(
+                "🏁 OpenCode Antigravity: finish reason "
+                f"'{state.finish_reason}' (source: {state.finish_reason_source}"
+                f"{raw_suffix})"
+            )
+
         if log_stream and thinking_buffer:
             tail = "".join(thinking_buffer).strip()
             if tail:
@@ -1659,6 +1935,11 @@ def _send_via_server(
         return {
             "content": state.content(),
             "finish_reason": state.finish_reason,
+            "raw_finish_reason": state.raw_finish_reason,
+            "finish_reason_source": state.finish_reason_source,
+            "finish_reason_fallback": finish_reason_fallback,
+            "finish_reason_evidence": state.finish_reason_evidence,
+            "finish_reason_lookup_error": finish_reason_lookup_error,
             "usage": _usage_from_value(state.step_events),
             "raw_response": state.step_events,
         }
@@ -1846,10 +2127,35 @@ def _send_chat_completion_buffered(
         raise OcAgyError("OpenCode Antigravity returned an empty response." + (f" Details: {detail}" if detail else ""))
 
     usage = _usage_from_value(events)
+    raw_finish_reason, finish_reason_source = _finish_reason_from_cli_events(
+        events
+    )
+    finish_reason = _normalize_opencode_finish_reason(raw_finish_reason)
+    finish_reason_fallback = not bool(finish_reason)
+    if finish_reason_fallback:
+        finish_reason = "stop"
+        finish_reason_source = "fallback_stop"
+        logger(
+            "⚠️ OpenCode Antigravity: buffered events did not include a finish "
+            "reason; falling back to 'stop'."
+        )
+    else:
+        raw_suffix = (
+            f", raw: '{raw_finish_reason}'"
+            if raw_finish_reason != finish_reason
+            else ""
+        )
+        logger(
+            "🏁 OpenCode Antigravity: finish reason "
+            f"'{finish_reason}' (source: {finish_reason_source}{raw_suffix})"
+        )
     logger(f"✅ OpenCode Antigravity: completed in {elapsed:.1f}s")
     return {
         "content": content,
-        "finish_reason": "stop",
+        "finish_reason": finish_reason,
+        "raw_finish_reason": raw_finish_reason,
+        "finish_reason_source": finish_reason_source,
+        "finish_reason_fallback": finish_reason_fallback,
         "usage": usage,
         "model": model_id,
         "variant": variant,
@@ -1923,7 +2229,24 @@ def send_chat_completion(
     logger(f"✅ OpenCode Antigravity: stream finished in {elapsed:.1f}s")
     return {
         "content": content,
-        "finish_reason": str(result.get("finish_reason", "stop") or "stop"),
+        "finish_reason": str(result.get("finish_reason", "") or "stop"),
+        "raw_finish_reason": result.get("raw_finish_reason"),
+        "finish_reason_source": str(
+            result.get("finish_reason_source", "")
+            or (
+                "send_chat_completion_fallback_stop"
+                if not result.get("finish_reason")
+                else ""
+            )
+        ),
+        "finish_reason_fallback": bool(
+            result.get("finish_reason_fallback", False)
+            or not result.get("finish_reason")
+        ),
+        "finish_reason_evidence": result.get("finish_reason_evidence") or {},
+        "finish_reason_lookup_error": result.get(
+            "finish_reason_lookup_error", ""
+        ),
         "usage": result.get("usage"),
         "model": model_id,
         "variant": variant,

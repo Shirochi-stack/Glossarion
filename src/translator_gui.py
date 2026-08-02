@@ -3082,7 +3082,6 @@ class _InputOutputDialog(QDialog):
                 )
 
             width = 0
-            height = 0
             pixmap = QPixmap(candidate)
             if not pixmap.isNull():
                 viewport_width = max(320, self.output_box.viewport().width())
@@ -3093,19 +3092,19 @@ class _InputOutputDialog(QDialog):
                     Qt.KeepAspectRatio,
                 )
                 width = max(1, scaled.width())
-                height = max(1, scaled.height())
 
             image_url = QUrl.fromLocalFile(candidate).toString()
             safe_url = html_lib.escape(image_url, quote=True)
-            safe_name = html_lib.escape(os.path.basename(candidate))
-            dimensions = (
-                f" width='{width}' height='{height}'" if width and height else ''
-            )
+            # QTextDocument may shrink an image again to fit a nested response
+            # table or the active display scale. A paired HTML height remains
+            # reserved even when the painted bitmap becomes shorter, creating
+            # a large blank block above the actions. Constrain only the width;
+            # Qt can then derive the final height from the image aspect ratio.
+            dimensions = f" width='{width}'" if width else ''
             return (
-                "<figure class='generated-image-preview'>"
-                f"<img src='{safe_url}' alt='{safe_name}'{dimensions}>"
-                f"<figcaption>{safe_name}</figcaption>"
-                "</figure>"
+                "<div class='generated-image-preview'>"
+                f"<img src='{safe_url}' alt='Generated image'{dimensions}>"
+                "</div>"
             )
 
         return re.sub(
@@ -3184,6 +3183,49 @@ class _InputOutputDialog(QDialog):
         """Copy a generated Direct Text image to a user-selected destination."""
         source_path = self._response_generated_image_path(message_index)
         return self._save_generated_image_path_as(source_path)
+
+    def _open_generated_image_in_browser(self, image_path):
+        """Open one generated image in the user's default web browser."""
+        image_path = os.path.abspath(str(image_path or '')) if image_path else ''
+        if (
+            not os.path.isfile(image_path)
+            or os.path.splitext(image_path)[1].lower()
+            not in self._IMAGE_ATTACHMENT_EXTENSIONS
+        ):
+            QMessageBox.information(
+                self,
+                "Open image in browser",
+                "The generated image file is unavailable.",
+            )
+            return False
+
+        from PySide6.QtCore import QUrl
+
+        image_qurl = QUrl.fromLocalFile(image_path)
+        image_url = bytes(image_qurl.toEncoded()).decode('ascii')
+        try:
+            import webbrowser
+
+            if webbrowser.open_new_tab(image_url):
+                return True
+        except Exception:
+            pass
+
+        # Retain a platform fallback if Python cannot locate a browser.
+        try:
+            from PySide6.QtGui import QDesktopServices
+
+            if QDesktopServices.openUrl(image_qurl):
+                return True
+        except Exception:
+            pass
+
+        QMessageBox.warning(
+            self,
+            "Open image in browser",
+            f"Could not open the generated image:\n{image_path}",
+        )
+        return False
 
     def _save_generated_image_path_as(self, source_path):
         """Copy one resolved generated image to a user-selected destination."""
@@ -6580,6 +6622,15 @@ class _InputOutputDialog(QDialog):
                 or self._response_generated_image_path(message_index)
             )
             if image_path:
+                if clicked_image_path:
+                    browser_action = menu.addAction(
+                        "🌐 Open image in browser"
+                    )
+                    browser_action.triggered.connect(
+                        lambda _checked=False, path=clicked_image_path: (
+                            self._open_generated_image_in_browser(path)
+                        )
+                    )
                 save_image_action = menu.addAction("💾 Save image as…")
                 if clicked_image_path:
                     save_image_action.triggered.connect(
@@ -6596,6 +6647,12 @@ class _InputOutputDialog(QDialog):
                 image_action_added = True
         if clicked_image_path and not image_action_added:
             menu.addSeparator()
+            browser_action = menu.addAction("🌐 Open image in browser")
+            browser_action.triggered.connect(
+                lambda _checked=False, path=clicked_image_path: (
+                    self._open_generated_image_in_browser(path)
+                )
+            )
             save_image_action = menu.addAction("💾 Save image as…")
             save_image_action.triggered.connect(
                 lambda _checked=False, path=clicked_image_path: (
@@ -10536,10 +10593,9 @@ class _InputOutputDialog(QDialog):
             ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
             ".pending { color: #cbd5e1; font-style: italic; }"
             f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
-            ".generated-image-preview { margin: 8px 0 4px 0; padding: 0; }"
-            ".generated-image-preview img { border: 1px solid #4a5568; }"
-            ".generated-image-preview figcaption { color: #94a3b8; "
-            "font-size: 0.78em; margin-top: 5px; }"
+            ".generated-image-preview { margin: 8px 0 0 0; padding: 0; }"
+            ".generated-image-preview img { border: 1px solid #4a5568; "
+            "vertical-align: top; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "

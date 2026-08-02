@@ -67,7 +67,7 @@ _stop_flag = False
 # Historical refinement data is never a valid EPUB source.  Keep this rule at
 # the converter boundary as well as in the translation pipeline so a recursive
 # fallback cannot accidentally discover a chapter under the backup directory.
-_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup"})
+_EPUB_FORBIDDEN_SOURCE_DIRS = frozenset({"unrefined_backup", ".cache"})
 
 
 def _is_forbidden_epub_source_path(path: str, output_dir: str) -> bool:
@@ -4874,7 +4874,11 @@ img {
             for test_dir in possible_dirs:
                 self.log(f"[DEBUG] Checking for images in: {test_dir}")
                 if os.path.isdir(test_dir):
-                    files = os.listdir(test_dir)
+                    files = [
+                        name
+                        for name in os.listdir(test_dir)
+                        if os.path.isfile(os.path.join(test_dir, name))
+                    ]
                     if files:
                         self.log(f"[DEBUG] Found {len(files)} files in {test_dir}")
                         actual_images_dir = test_dir
@@ -4888,7 +4892,11 @@ img {
             self.log(f"[INFO] Using images directory: {self.images_dir}")
             
             # Get list of files to process
-            image_files = sorted(os.listdir(self.images_dir))
+            image_files = sorted(
+                name
+                for name in os.listdir(self.images_dir)
+                if os.path.isfile(os.path.join(self.images_dir, name))
+            )
             self.log(f"🖼️ Processing {len(image_files)} potential images with {self.max_workers} workers")
             
             def process_single_image(img):
