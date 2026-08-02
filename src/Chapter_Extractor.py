@@ -57,6 +57,101 @@ _DEFAULT_SPECIAL_KEYWORDS = [
 ]
 _DEFAULT_SPECIAL_EXACT = ['cover', 'index', 'glossary', 'glossary_extension']
 
+_REMOTE_CACHE_IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'
+}
+
+
+def _source_epub_image_count_from_zip(zf):
+    """Count image resources packaged in the currently open source EPUB."""
+    try:
+        return sum(
+            1
+            for info in zf.infolist()
+            if (
+                not info.is_dir()
+                and os.path.splitext(info.filename)[1].lower()
+                in _REMOTE_CACHE_IMAGE_EXTENSIONS
+            )
+        )
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _tracked_remote_cache_source_image_count(manifest, images_dir):
+    """Return the source-image count recorded by a remote download cache."""
+    if not isinstance(manifest, dict):
+        return None
+    try:
+        tracked_count = int(manifest.get('source_epub_image_count'))
+        if tracked_count >= 0:
+            return tracked_count
+    except (TypeError, ValueError):
+        pass
+
+    # Version-1 manifests did not store the source count. Infer it from the
+    # cached output total, excluding completed remote images that still exist.
+    try:
+        cached_total = int(manifest.get('cached_image_file_count'))
+    except (TypeError, ValueError):
+        cached_total = -1
+    if cached_total < 0 and os.path.isdir(images_dir):
+        try:
+            cached_total = sum(
+                1
+                for name in os.listdir(images_dir)
+                if (
+                    os.path.isfile(os.path.join(images_dir, name))
+                    and os.path.splitext(name)[1].lower()
+                    in _REMOTE_CACHE_IMAGE_EXTENSIONS
+                )
+            )
+        except OSError:
+            cached_total = -1
+    if cached_total < 0:
+        return None
+
+    localized_count = 0
+    for item in manifest.get('items', []):
+        if not isinstance(item, dict) or item.get('status') != 'completed':
+            continue
+        filename = os.path.basename(str(item.get('filename') or ''))
+        if filename and os.path.isfile(os.path.join(images_dir, filename)):
+            localized_count += 1
+    return max(0, cached_total - localized_count)
+
+
+def _remote_image_cache_matches_source(output_dir, source_epub_image_count):
+    """Validate the preserved cache against the current EPUB image count."""
+    if os.getenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0').strip().lower() not in {
+        '1', 'true', 'yes', 'on'
+    }:
+        return False
+    try:
+        source_epub_image_count = int(source_epub_image_count)
+    except (TypeError, ValueError):
+        return False
+    if source_epub_image_count < 0:
+        return False
+
+    images_dir = os.path.join(output_dir, 'images')
+    manifest_path = os.path.join(
+        images_dir, '.cache', 'remote_image_download_progress.json'
+    )
+    if not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, 'r', encoding='utf-8') as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return False
+
+    tracked_count = _tracked_remote_cache_source_image_count(
+        manifest,
+        images_dir,
+    )
+    return tracked_count == source_epub_image_count
+
 
 def _special_file_stem(filename):
     base = os.path.basename(str(filename or '')).lower()
@@ -373,7 +468,12 @@ def _replace_remote_image_refs_in_soup(soup, replacements):
     return modified
 
 
-def _localize_remote_images(chapters, output_dir, progress_callback=None):
+def _localize_remote_images(
+    chapters,
+    output_dir,
+    progress_callback=None,
+    source_epub_image_count=None,
+):
     """Download remote chapter image references and rewrite them to local PNGs.
 
     This deliberately runs before ``_rename_images_to_chapter_format`` so the
@@ -610,10 +710,16 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             pending_urls.append(remote_url)
         item_by_url[remote_url] = item
 
+    try:
+        source_epub_image_count = max(0, int(source_epub_image_count))
+    except (TypeError, ValueError):
+        source_epub_image_count = None
+
     progress_manifest = {
-        'version': 1,
+        'version': 2,
         'status': 'downloading',
         'output_format': 'png',
+        'source_epub_image_count': source_epub_image_count,
         'total': total_remote_urls,
         'completed': completed,
         'successful': successful,
@@ -832,6 +938,18 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
     )
     progress_manifest['chapters_updated'] = updated_chapters
     progress_manifest['html_files_updated'] = disk_updated
+    try:
+        progress_manifest['cached_image_file_count'] = sum(
+            1
+            for name in os.listdir(images_dir)
+            if (
+                os.path.isfile(os.path.join(images_dir, name))
+                and os.path.splitext(name)[1].lower()
+                in {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'}
+            )
+        )
+    except OSError:
+        pass
     final_status = 'completed' if failed == 0 else 'completed_with_errors'
     _persist_progress(status=final_status, completed_at=True)
     if progress_callback:
@@ -1532,6 +1650,16 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     
     # Get number of workers from environment or use default
     max_workers = int(os.getenv("EXTRACTION_WORKERS", "2"))
+    source_epub_image_count = _source_epub_image_count_from_zip(zf)
+    preserve_remote_images = _remote_image_cache_matches_source(
+        output_dir,
+        source_epub_image_count,
+    )
+    if preserve_remote_images:
+        print(
+            "♻️ Remote image cache matches the source EPUB image count; "
+            "preserving the images directory"
+        )
     print(f"🔧 Using {max_workers} workers for parallel processing")
     
     # Single-chapter mode (SINGLE_CHAPTER_FILTER): skip the heavy full
@@ -1543,7 +1671,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         extracted_resources = {'css': [], 'fonts': [], 'images': [],
                                'epub_structure': [], 'other': []}
     else:
-        extracted_resources = _extract_all_resources(zf, output_dir, progress_callback)
+        extracted_resources = _extract_all_resources(
+            zf,
+            output_dir,
+            progress_callback,
+            preserve_images=preserve_remote_images,
+        )
 
     # Check stop after resource extraction
     if is_stop_requested():
@@ -1592,7 +1725,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     if os.getenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0').strip().lower() in {
         '1', 'true', 'yes', 'on'
     }:
-        chapters = _localize_remote_images(chapters, output_dir, progress_callback)
+        chapters = _localize_remote_images(
+            chapters,
+            output_dir,
+            progress_callback,
+            source_epub_image_count=source_epub_image_count,
+        )
 
     # Rename images to chapter-based format (chapter001_img_1.jpg, etc.).
     # Image output mode also needs this map; its passthrough HTML copy applies
@@ -1755,7 +1893,12 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
     
     return chapters
 
-def _extract_all_resources(zf, output_dir, progress_callback=None):
+def _extract_all_resources(
+    zf,
+    output_dir,
+    progress_callback=None,
+    preserve_images=False,
+):
     """Extract all resources with parallel processing"""
     import time
     
@@ -1769,11 +1912,21 @@ def _extract_all_resources(zf, output_dir, progress_callback=None):
     
     # Check if already extracted
     extraction_marker = os.path.join(output_dir, '.resources_extracted')
-    if os.path.exists(extraction_marker):
+    remote_download_enabled = os.getenv(
+        'DOWNLOAD_REMOTE_IMAGE_URLS', '0'
+    ).strip().lower() in {'1', 'true', 'yes', 'on'}
+    if os.path.exists(extraction_marker) and (
+        not remote_download_enabled or preserve_images
+    ):
         print("📦 Resources already extracted, skipping...")
         return _count_existing_resources(output_dir, extracted_resources)
+    if os.path.exists(extraction_marker):
+        print(
+            "♻️ Remote image cache is missing or belongs to a different "
+            "source image count; refreshing EPUB image resources"
+        )
     
-    _cleanup_old_resources(output_dir)
+    _cleanup_old_resources(output_dir, preserve_images=preserve_images)
     
     # Create directories
     for resource_type in ['css', 'fonts', 'images']:
@@ -3122,14 +3275,21 @@ def _categorize_resource( file_path, file_name):
     
     return None
 
-def _cleanup_old_resources( output_dir):
+def _cleanup_old_resources(output_dir, preserve_images=False):
     """Clean up old resource directories and EPUB structure files"""
     print("🧹 Cleaning up any existing resource directories...")
     
     cleanup_success = True
+    preserve_remote_images = bool(preserve_images)
     
     for resource_type in ['css', 'fonts', 'images']:
         resource_dir = os.path.join(output_dir, resource_type)
+        if resource_type == 'images' and preserve_remote_images:
+            if os.path.isdir(resource_dir):
+                print(
+                    "   ♻️ Preserving images directory and remote download cache"
+                )
+            continue
         if os.path.exists(resource_dir):
             try:
                 shutil.rmtree(resource_dir)

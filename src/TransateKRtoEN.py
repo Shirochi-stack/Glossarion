@@ -15686,6 +15686,105 @@ def check_epub_readiness(output_dir):
             print(f"   • {issue}")
         return False
 
+_REMOTE_CACHE_IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp'
+}
+
+
+def _source_epub_image_count(input_path):
+    """Count packaged image resources without extracting the EPUB."""
+    input_path = os.path.abspath(str(input_path or ''))
+    if (
+        not os.path.isfile(input_path)
+        or not input_path.lower().endswith('.epub')
+        or not zipfile.is_zipfile(input_path)
+    ):
+        return None
+    try:
+        with zipfile.ZipFile(input_path, 'r') as source_epub:
+            return sum(
+                1
+                for info in source_epub.infolist()
+                if (
+                    not info.is_dir()
+                    and os.path.splitext(info.filename)[1].lower()
+                    in _REMOTE_CACHE_IMAGE_EXTENSIONS
+                )
+            )
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return None
+
+
+def _remote_cache_source_image_count(manifest, images_dir):
+    """Read the tracked source count, with a fallback for version-1 caches."""
+    if not isinstance(manifest, dict):
+        return None
+    try:
+        tracked = int(manifest.get('source_epub_image_count'))
+        if tracked >= 0:
+            return tracked
+    except (TypeError, ValueError):
+        pass
+
+    # Older manifests predate the explicit source count. Infer it once from the
+    # preserved output image total minus valid localized remote-image entries.
+    try:
+        cached_total = int(manifest.get('cached_image_file_count'))
+    except (TypeError, ValueError):
+        cached_total = -1
+    if cached_total < 0 and os.path.isdir(images_dir):
+        try:
+            cached_total = sum(
+                1
+                for name in os.listdir(images_dir)
+                if (
+                    os.path.isfile(os.path.join(images_dir, name))
+                    and os.path.splitext(name)[1].lower()
+                    in _REMOTE_CACHE_IMAGE_EXTENSIONS
+                )
+            )
+        except OSError:
+            cached_total = -1
+    if cached_total < 0:
+        return None
+
+    localized_count = 0
+    for item in manifest.get('items', []):
+        if not isinstance(item, dict) or item.get('status') != 'completed':
+            continue
+        filename = os.path.basename(str(item.get('filename') or ''))
+        if filename and os.path.isfile(os.path.join(images_dir, filename)):
+            localized_count += 1
+    return max(0, cached_total - localized_count)
+
+
+def _should_preserve_remote_image_cache(input_path, output_dir):
+    """Keep images/.cache only when it belongs to the unchanged source EPUB."""
+    if os.getenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0').strip().lower() not in {
+        '1', 'true', 'yes', 'on'
+    }:
+        return False
+    images_dir = os.path.join(output_dir, 'images')
+    manifest_path = os.path.join(
+        images_dir, '.cache', 'remote_image_download_progress.json'
+    )
+    if not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, 'r', encoding='utf-8') as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return False
+
+    current_count = _source_epub_image_count(input_path)
+    tracked_count = _remote_cache_source_image_count(manifest, images_dir)
+    return (
+        current_count is not None
+        and tracked_count is not None
+        and current_count == tracked_count
+    )
+
+
 def cleanup_previous_extraction(output_dir, preserve_images=False):
     """Clean up any files from previous extraction runs (preserves CSS files)"""
     # Remove 'css' from cleanup_items to preserve CSS files
@@ -15755,7 +15854,7 @@ def cleanup_previous_extraction(output_dir, preserve_images=False):
             try:
                 image_files = [f for f in os.listdir(images_path) if os.path.isfile(os.path.join(images_path, f))]
                 if image_files:
-                    print(f"📄 Preserving {len(image_files)} existing PDF image file(s)")
+                    print(f"📄 Preserving {len(image_files)} existing image file(s)")
             except Exception:
                 pass
 
@@ -20628,12 +20727,24 @@ def main(log_callback=None, stop_callback=None):
         is_pdf_file
         and config.OUTPUT_MODE == "vision"
     )
+    preserve_remote_image_cache = _should_preserve_remote_image_cache(
+        input_path,
+        out,
+    )
+    if preserve_remote_image_cache:
+        print(
+            "♻️ Remote image cache matches the source EPUB image count; "
+            "preserving the images directory"
+        )
     if metadata_only:
         print("⚡ Metadata-only fast path: preserving existing chapter resources")
     else:
         cleanup_previous_extraction(
             out,
-            preserve_images=preserve_pdf_ocr_images,
+            preserve_images=(
+                preserve_pdf_ocr_images
+                or preserve_remote_image_cache
+            ),
         )
 
     os.environ["EPUB_OUTPUT_DIR"] = out

@@ -1287,6 +1287,7 @@ def test_remote_image_download_reports_counted_progress(monkeypatch, tmp_path):
         chapters,
         str(tmp_path),
         progress_callback=progress_messages.append,
+        source_epub_image_count=7,
     )
 
     assert progress_messages[0].startswith(
@@ -1321,6 +1322,7 @@ def test_remote_image_download_reports_counted_progress(monkeypatch, tmp_path):
     manifest = json.loads(progress_path.read_text(encoding='utf-8'))
     assert manifest['status'] == 'completed_with_errors'
     assert manifest['output_format'] == 'png'
+    assert manifest['source_epub_image_count'] == 7
     assert manifest['total'] == 2
     assert manifest['completed'] == 2
     assert manifest['successful'] == 1
@@ -1424,6 +1426,121 @@ def test_remote_image_progress_cache_resolves_image_rename_map(
     assert manifest['items'][0]['local_reference'] == f'images/{final_name}'
     assert f'images/{final_name}' in localized[0]['body']
     assert remote_url not in localized[0]['body']
+
+
+def test_remote_image_cache_preservation_requires_matching_source_count(
+    monkeypatch, tmp_path
+):
+    from TransateKRtoEN import _should_preserve_remote_image_cache
+
+    source_epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(source_epub, 'w') as archive:
+        archive.writestr('OEBPS/Images/one.png', _remote_test_png_bytes())
+        archive.writestr('OEBPS/Images/two.jpg', b'jpeg placeholder')
+        archive.writestr('OEBPS/Text/chapter.xhtml', '<p>Chapter</p>')
+
+    output_dir = tmp_path / 'output'
+    cache_dir = output_dir / 'images' / '.cache'
+    cache_dir.mkdir(parents=True)
+    manifest_path = cache_dir / 'remote_image_download_progress.json'
+    manifest_path.write_text(
+        json.dumps({
+            'version': 2,
+            'source_epub_image_count': 2,
+            'items': [],
+        }),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '1')
+
+    assert _should_preserve_remote_image_cache(
+        str(source_epub), str(output_dir)
+    ) is True
+
+    with zipfile.ZipFile(source_epub, 'a') as archive:
+        archive.writestr('OEBPS/Images/three.webp', b'webp placeholder')
+
+    assert _should_preserve_remote_image_cache(
+        str(source_epub), str(output_dir)
+    ) is False
+
+
+def test_resource_cleanup_preserves_remote_image_cache(monkeypatch, tmp_path):
+    images_dir = tmp_path / 'images'
+    cache_dir = images_dir / '.cache'
+    cache_dir.mkdir(parents=True)
+    cached_png = images_dir / 'chapter0001_img_1.png'
+    cached_png.write_bytes(_remote_test_png_bytes())
+    cache_manifest = cache_dir / 'remote_image_download_progress.json'
+    cache_manifest.write_text('{}', encoding='utf-8')
+    (tmp_path / 'css').mkdir()
+    (tmp_path / 'css' / 'old.css').write_text('old', encoding='utf-8')
+    monkeypatch.delenv('PRESERVE_REMOTE_IMAGE_CACHE', raising=False)
+
+    chapter_extractor._cleanup_old_resources(
+        str(tmp_path),
+        preserve_images=True,
+    )
+
+    assert cached_png.is_file()
+    assert cache_manifest.is_file()
+    assert not (tmp_path / 'css').exists()
+
+
+def test_chapter_extractor_preserves_cache_only_for_matching_source_count(
+    monkeypatch, tmp_path
+):
+    images_dir = tmp_path / 'images'
+    cache_dir = images_dir / '.cache'
+    cache_dir.mkdir(parents=True)
+    (cache_dir / 'remote_image_download_progress.json').write_text(
+        json.dumps({
+            'version': 2,
+            'source_epub_image_count': 12,
+            'items': [],
+        }),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '1')
+
+    assert chapter_extractor._remote_image_cache_matches_source(
+        str(tmp_path), 12
+    ) is True
+    assert chapter_extractor._remote_image_cache_matches_source(
+        str(tmp_path), 11
+    ) is False
+
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '0')
+    assert chapter_extractor._remote_image_cache_matches_source(
+        str(tmp_path), 12
+    ) is False
+
+
+def test_resource_marker_does_not_suppress_mismatched_remote_cache_refresh(
+    monkeypatch, tmp_path
+):
+    output_dir = tmp_path / 'output'
+    images_dir = output_dir / 'images'
+    images_dir.mkdir(parents=True)
+    stale_image = images_dir / 'stale.png'
+    stale_image.write_bytes(_remote_test_png_bytes())
+    (output_dir / '.resources_extracted').write_text(
+        'previous extraction', encoding='utf-8'
+    )
+    source_epub = tmp_path / 'source.epub'
+    with zipfile.ZipFile(source_epub, 'w') as archive:
+        archive.writestr('OEBPS/Images/current.png', _remote_test_png_bytes())
+
+    monkeypatch.setenv('DOWNLOAD_REMOTE_IMAGE_URLS', '1')
+    with zipfile.ZipFile(source_epub, 'r') as archive:
+        chapter_extractor._extract_all_resources(
+            archive,
+            str(output_dir),
+            preserve_images=False,
+        )
+
+    assert not stale_image.exists()
+    assert (images_dir / 'current.png').is_file()
 
 
 def test_remote_image_progress_cache_is_excluded_from_epub_sources(tmp_path):
