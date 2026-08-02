@@ -1424,7 +1424,7 @@ def _send_via_server(
     prompt: str,
     model_id: str,
     variant: Optional[str],
-    timeout_seconds: int,
+    timeout_seconds: float,
     logger: Callable[[str], None],
     log_stream: bool,
     subprocess_env: Dict[str, str],
@@ -1463,8 +1463,18 @@ def _send_via_server(
     event_stream_context = None
     session_id = ""
     started = time.time()
+
+    def remaining_request_timeout() -> float:
+        remaining = float(timeout_seconds) - (time.time() - started)
+        if remaining <= 0:
+            raise OcAgyError(
+                f"OpenCode Antigravity timed out after {timeout_seconds}s. "
+                "Increase the API timeout or use a shorter chunk."
+            )
+        return max(0.1, remaining)
+
     try:
-        startup_deadline = min(started + timeout_seconds, started + 45)
+        startup_deadline = started + timeout_seconds
         while time.time() < startup_deadline:
             if is_cancelled():
                 raise OcAgyError("OpenCode Antigravity request cancelled by user")
@@ -1475,20 +1485,26 @@ def _send_via_server(
                     + (f" Details: {detail}" if detail else "")
                 )
             try:
-                health = _http_json(base_url, "/global/health", timeout=0.75)
+                health = _http_json(
+                    base_url,
+                    "/global/health",
+                    timeout=min(0.75, remaining_request_timeout()),
+                )
                 if isinstance(health, dict) and health.get("healthy"):
                     break
             except Exception:
                 time.sleep(0.1)
         else:
-            raise OcAgyError("OpenCode Antigravity server did not become ready within 45 seconds.")
+            raise OcAgyError(
+                f"OpenCode Antigravity server did not become ready within {timeout_seconds} seconds."
+            )
 
         session = _http_json(
             base_url,
             "/session",
             method="POST",
             payload={"title": "Glossarion translation"},
-            timeout=10,
+            timeout=remaining_request_timeout(),
         )
         if not isinstance(session, dict) or not session.get("id"):
             raise OcAgyError("OpenCode Antigravity could not create a streaming session.")
@@ -1499,9 +1515,9 @@ def _send_via_server(
                 "OcAgy real-time streaming requires httpx, but it is not installed."
             )
         event_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
-        connect_timeout = min(30.0, float(timeout_seconds))
+        connect_timeout = remaining_request_timeout()
         stream_timeout = httpx.Timeout(
-            float(timeout_seconds),
+            remaining_request_timeout(),
             connect=connect_timeout,
         )
         event_stream_context = httpx.stream(
@@ -1528,7 +1544,7 @@ def _send_via_server(
         ).start()
 
         connected = False
-        connect_deadline = min(started + timeout_seconds, time.time() + 10)
+        connect_deadline = started + timeout_seconds
         pending_events: List[Dict[str, Any]] = []
         while time.time() < connect_deadline:
             try:
@@ -1562,7 +1578,7 @@ def _send_via_server(
             f"/session/{session_id}/prompt_async",
             method="POST",
             payload=payload,
-            timeout=15,
+            timeout=remaining_request_timeout(),
         )
 
         state = _OpenCodeStreamState(session_id)
@@ -1654,6 +1670,11 @@ def _send_via_server(
         raise _classify_error(detail, int(getattr(exc, "code", 1) or 1))
     except urllib.error.URLError as exc:
         raise OcAgyError(f"OpenCode Antigravity local streaming connection failed: {exc}")
+    except TimeoutError as exc:
+        raise OcAgyError(
+            f"OpenCode Antigravity timed out after {timeout_seconds}s. "
+            "Increase the API timeout or use a shorter chunk."
+        ) from exc
     except Exception as exc:
         if httpx is not None and isinstance(exc, httpx.TimeoutException):
             raise OcAgyError(
@@ -1714,7 +1735,7 @@ def _send_chat_completion_buffered(
     model: str,
     temperature: float = 0.3,
     max_tokens: int = 65536,
-    timeout: int = 1800,
+    timeout: float = 1800,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Run one isolated ``opencode run --format json`` request via the plugin."""
@@ -1727,7 +1748,7 @@ def _send_chat_completion_buffered(
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
     logger = log_fn or (lambda _message: None)
-    timeout_seconds = max(30, int(timeout or 1800))
+    timeout_seconds = max(1.0, float(timeout or 1800))
 
     base = _workspace_dir()
     request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))
@@ -1845,7 +1866,7 @@ def send_chat_completion(
     model: str,
     temperature: float = 0.3,
     max_tokens: int = 65536,
-    timeout: int = 1800,
+    timeout: float = 1800,
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
 ) -> Dict[str, Any]:
@@ -1859,7 +1880,7 @@ def send_chat_completion(
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
     logger = log_fn or (lambda _message: None)
-    timeout_seconds = max(30, int(timeout or 1800))
+    timeout_seconds = max(1.0, float(timeout or 1800))
 
     base = _workspace_dir()
     request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))

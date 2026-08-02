@@ -562,6 +562,105 @@ def test_httpx_sse_reader_emits_event_before_stream_finishes():
         reader.join(timeout=2)
 
 
+def test_ocagy_server_setup_uses_request_deadline_not_short_hardcoded_timeouts(tmp_path, monkeypatch):
+    import io
+    from types import SimpleNamespace
+
+    http_calls = []
+    stream_timeouts = {}
+
+    class FakeProcess:
+        pid = 12345
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def poll(self):
+            return None
+
+    class FakeEventResponse:
+        status_code = 200
+
+        def close(self):
+            pass
+
+    class FakeStreamContext:
+        def __enter__(self):
+            return FakeEventResponse()
+
+        def __exit__(self, *args):
+            pass
+
+    class FakeTimeout:
+        def __init__(self, default, *, connect):
+            stream_timeouts.update(default=default, connect=connect)
+
+    def fake_http_json(base_url, path, **kwargs):
+        http_calls.append((path, kwargs["timeout"]))
+        if path == "/global/health":
+            return {"healthy": True}
+        if path == "/session":
+            return {"id": "session-1"}
+        return {}
+
+    def fake_read_events(_response, output):
+        output.put(("event", {
+            "type": "server.connected",
+        }))
+        output.put(("event", {
+            "type": "message.updated",
+            "properties": {"info": {"id": "assistant-1", "role": "assistant"}},
+        }))
+        output.put(("event", {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": "text-1",
+                    "sessionID": "session-1",
+                    "messageID": "assistant-1",
+                    "type": "text",
+                    "text": "OK",
+                },
+                "delta": "OK",
+            },
+        }))
+        output.put(("event", {
+            "type": "session.idle",
+            "properties": {"sessionID": "session-1"},
+        }))
+
+    fake_httpx = SimpleNamespace(
+        Timeout=FakeTimeout,
+        stream=lambda *args, **kwargs: FakeStreamContext(),
+        TimeoutException=type("FakeTimeoutException", (Exception,), {}),
+        RequestError=type("FakeRequestError", (Exception,), {}),
+    )
+
+    monkeypatch.setattr(ocagy_cli.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(ocagy_cli, "_http_json", fake_http_json)
+    monkeypatch.setattr(ocagy_cli, "_read_sse_events", fake_read_events)
+    monkeypatch.setattr(ocagy_cli, "_terminate_process_tree", lambda proc: None)
+    monkeypatch.setattr(ocagy_cli, "httpx", fake_httpx)
+
+    result = ocagy_cli._send_via_server(
+        exe="opencode",
+        request_dir=tmp_path,
+        prompt="test",
+        model_id="google/antigravity-gemini-3.1-pro",
+        variant="high",
+        timeout_seconds=120,
+        logger=lambda message: None,
+        log_stream=False,
+        subprocess_env={},
+    )
+
+    timeout_by_path = {path: timeout for path, timeout in http_calls}
+    assert result["content"] == "OK"
+    assert timeout_by_path["/session"] > 100
+    assert timeout_by_path["/session/session-1/prompt_async"] > 100
+    assert stream_timeouts["default"] > 100
+    assert stream_timeouts["connect"] > 100
+
+
 def test_ocagy_forced_stream_includes_thinking_when_thinking_toggle_is_off(monkeypatch):
     monkeypatch.setenv("STREAM_THINKING_LOGS", "0")
 
@@ -646,6 +745,171 @@ def test_unified_client_routes_ocagy_without_api_key(monkeypatch):
     assert response.usage["total_tokens"] == 3
     assert captured["log_stream"] is True
     assert captured["model"] == "ocagy/gemini-3.1-pro-high"
+
+
+def test_ocagy_uses_effectively_unlimited_timeout_when_overrides_are_off(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "OK", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert captured["timeout"] == 36000
+
+
+def test_ocagy_uses_read_timeout_only_when_http_overrides_are_on(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "OK", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("ENABLE_HTTP_TUNING", "1")
+    monkeypatch.setenv("READ_TIMEOUT", "12.5")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert captured["timeout"] == 12.5
+
+
+def test_ocagy_content_filter_raises_prohibited_content(monkeypatch):
+    import unified_api_client as unified
+
+    def fake_ocagy_send(**kwargs):
+        raise ocagy_cli.OcAgyError(
+            "OpenCode Antigravity failed (exit 1): "
+            "The response was blocked by the provider's content filter"
+        )
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        client._send_ocagy(
+            [{"role": "user", "content": "test"}],
+            0.2,
+            1024,
+            "test",
+        )
+
+    assert exc_info.value.error_type == "prohibited_content"
+    assert "blocked by the provider's content filter" in str(exc_info.value)
+
+
+def test_ocagy_content_filter_skips_generic_api_retries(monkeypatch):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_ocagy_send(**kwargs):
+        attempts.append(1)
+        raise ocagy_cli.OcAgyError(
+            "OpenCode Antigravity failed (exit 1): "
+            "The response was blocked by the provider's content filter"
+        )
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_track_stats", lambda *args, **kwargs: None)
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="ocagy-filter-test",
+    )
+
+    assert finish_reason == "prohibited_content"
+    assert len(attempts) == 1
+
+
+def test_disabled_timeout_retry_does_not_retry_provider_timeout(monkeypatch):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_response(*args, **kwargs):
+        attempts.append(1)
+        raise unified.UnifiedClientError("timed out", error_type="provider_error")
+
+    monkeypatch.setenv("RETRY_TIMEOUT", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    monkeypatch.setattr(client, "_get_response", fake_response)
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+
+    with pytest.raises(unified.UnifiedClientError, match="timed out"):
+        client._send_internal(
+            [{"role": "user", "content": "test"}],
+            temperature=0.2,
+            max_tokens=1024,
+            context="translation",
+            request_id="timeout-test",
+        )
+
+    assert len(attempts) == 1
 
 
 def test_unified_client_preserves_numbered_ocagy_route(monkeypatch):

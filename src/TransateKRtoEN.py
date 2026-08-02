@@ -7357,6 +7357,9 @@ class TranslationProcessor:
         else:
             retry_timeout_enabled = bool(getattr(self.config, "RETRY_TIMEOUT", False))
 
+        if not retry_timeout_enabled:
+            max_timeout_retries = 0
+
         chunk_timeout = None
         if retry_timeout_enabled:
             env_ct = os.getenv("CHUNK_TIMEOUT")
@@ -8612,6 +8615,8 @@ class BatchTranslationProcessor:
                     max_timeout_retries = int(os.getenv("TIMEOUT_RETRY_ATTEMPTS", "2"))
                 except Exception:
                     max_timeout_retries = 2
+                if not retry_timeout_enabled:
+                    max_timeout_retries = 0
                 timeout_retry_count = 0
                 
                 while True:

@@ -10242,6 +10242,12 @@ class UnifiedClient:
                     "read error",
                 ]
                 if any(err in error_str for err in timeout_errors):
+                    timeout_retry_enabled = os.getenv("RETRY_TIMEOUT", "0").strip().lower() not in (
+                        "", "0", "false", "off", "no",
+                    )
+                    if not timeout_retry_enabled:
+                        print("Network/timeout auto-retry is disabled - not retrying")
+                        raise
                     if attempt < internal_retries - 1:
                         delay = self._compute_backoff(attempt, base_delay/2, 30)  # Shorter delay for timeouts
                         
@@ -25603,6 +25609,14 @@ class UnifiedClient:
         if stale_cancel and not self._should_abort_retry() and _ocagy_reset_cancel is not None:
             _ocagy_reset_cancel()
 
+        ocagy_timeout = self.request_timeout
+        if os.getenv("ENABLE_HTTP_TUNING", "0") == "1":
+            try:
+                configured_read_timeout = float(os.getenv("READ_TIMEOUT", str(ocagy_timeout)))
+                ocagy_timeout = configured_read_timeout if configured_read_timeout > 0 else 36000
+            except (TypeError, ValueError):
+                pass
+
         try:
             # OcAgy is a forced-stream provider. Outside batch mode, the
             # general ENABLE_STREAMING toggle must not hide its live output;
@@ -25622,7 +25636,7 @@ class UnifiedClient:
                 model=actual_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                timeout=self.request_timeout,
+                timeout=ocagy_timeout,
                 # Force each httpx SSE-derived log line through stdout now;
                 # redirected GUI writers receive it synchronously as well.
                 log_fn=lambda message: print(message, flush=True),
@@ -25650,6 +25664,16 @@ class UnifiedClient:
                 raise UnifiedClientError(
                     "OpenCode Antigravity: Translation stopped by user",
                     error_type="cancelled",
+                )
+            if any(marker in lower for marker in (
+                "content filter", "content_filter", "prohibited content",
+                "prohibited_content", "censorship_blocked",
+                "blocked by the provider",
+            )):
+                raise UnifiedClientError(
+                    text,
+                    error_type="prohibited_content",
+                    details={"provider": "ocagy", "source": "opencode_error"},
                 )
             if any(marker in lower for marker in (
                 "quota", "rate limit", "rate-limited", "resource_exhausted",
