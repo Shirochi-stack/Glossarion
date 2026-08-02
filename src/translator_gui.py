@@ -3071,24 +3071,31 @@ class _InputOutputDialog(QDialog):
         )
         return not remainder.strip()
 
-    def _generated_image_preview_size(self, candidate):
-        """Return the intended logical preview size for one local image."""
+    def _generated_image_preview_pixmap(self, candidate):
+        """Return one pre-scaled pixmap whose intrinsic size matches the card."""
         pixmap = QPixmap(str(candidate or ''))
         if pixmap.isNull():
-            return 0, 0
+            return QPixmap()
         viewport_width = max(320, self.output_box.viewport().width())
         maximum_width = max(280, min(980, int(viewport_width * 0.76)))
         maximum_height = 760
-        scaled = pixmap.size().scaled(
+        return pixmap.scaled(
             QSize(maximum_width, maximum_height),
             Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
-        return max(1, scaled.width()), max(1, scaled.height())
+
+    def _generated_image_preview_size(self, candidate):
+        """Return the intended logical preview size for one local image."""
+        preview = self._generated_image_preview_pixmap(candidate)
+        if preview.isNull():
+            return 0, 0
+        return max(1, preview.width()), max(1, preview.height())
 
     def _generated_image_render_source(self, content, preferred_path=''):
         """Replace generated-image sentinels with scaled local image markup."""
         import html as html_lib
-        from PySide6.QtCore import QUrl
+        from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QUrl
 
         source = str(content or '')
         preferred_path = os.path.abspath(str(preferred_path or '')) if preferred_path else ''
@@ -3108,16 +3115,31 @@ class _InputOutputDialog(QDialog):
                     f"<code>{unavailable}</code></p>"
                 )
 
-            width, _height = self._generated_image_preview_size(candidate)
-
-            image_url = QUrl.fromLocalFile(candidate).toString()
+            preview = self._generated_image_preview_pixmap(candidate)
+            width = max(1, preview.width()) if not preview.isNull() else 0
+            image_url = ''
+            if not preview.isNull():
+                encoded_bytes = QByteArray()
+                buffer = QBuffer(encoded_bytes)
+                if buffer.open(QIODevice.WriteOnly):
+                    if preview.save(buffer, 'PNG'):
+                        image_url = (
+                            'data:image/png;base64,'
+                            + bytes(encoded_bytes.toBase64()).decode('ascii')
+                        )
+                    buffer.close()
+            if not image_url:
+                image_url = QUrl.fromLocalFile(candidate).toString()
             safe_url = html_lib.escape(image_url, quote=True)
-            # QTextDocument may shrink an image again to fit a nested response
-            # table or the active display scale. A paired HTML height remains
-            # reserved even when the painted bitmap becomes shorter, creating
-            # a large blank block above the actions. Constrain only the width;
-            # Qt can then derive the final height from the image aspect ratio.
-            dimensions = f" width='{width}'" if width else ''
+            # A data-backed preview has the final display dimensions baked
+            # into its intrinsic PNG size. This keeps QTextDocument's reserved
+            # layout box identical to the pixels it paints. The local-file
+            # fallback retains only a width constraint.
+            dimensions = (
+                ''
+                if image_url.startswith('data:image/')
+                else (f" width='{width}'" if width else '')
+            )
             return (
                 "<div class='generated-image-preview'>"
                 f"<img src='{safe_url}' alt='Generated image'{dimensions}>"
@@ -6791,6 +6813,7 @@ class _InputOutputDialog(QDialog):
 
         from PySide6.QtCore import QUrl
 
+        rendered_image_seen = False
         for candidate_position in (
             base_position,
             min(maximum_position, base_position + 1),
@@ -6805,6 +6828,7 @@ class _InputOutputDialog(QDialog):
                 image_name = str(char_format.toImageFormat().name() or "").strip()
                 if not image_name:
                     continue
+                rendered_image_seen = True
                 image_url = QUrl(image_name)
                 candidate = (
                     image_url.toLocalFile()
@@ -6820,6 +6844,9 @@ class _InputOutputDialog(QDialog):
                     return candidate
             except (AttributeError, RuntimeError, TypeError, ValueError):
                 continue
+        if rendered_image_seen:
+            message_index = self._message_index_at_output_position(position)
+            return self._response_generated_image_path(message_index)
         return ""
 
     def _show_inline_response_context_menu(self, position):
