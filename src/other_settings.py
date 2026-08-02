@@ -1735,6 +1735,26 @@ def open_other_settings(self, *args, show=True):
                     )
                 except Exception:
                     pass
+            if hasattr(self, 'remote_image_download_workers_var'):
+                try:
+                    workers = max(1, min(
+                        32, int(self.remote_image_download_workers_var)
+                    ))
+                    self.remote_image_download_workers_var = workers
+                    self.config['remote_image_download_workers'] = workers
+                    os.environ['REMOTE_IMAGE_DOWNLOAD_WORKERS'] = str(workers)
+                except Exception:
+                    pass
+            if hasattr(self, 'remote_image_download_interval_var'):
+                try:
+                    interval = max(0.0, min(
+                        60.0, float(self.remote_image_download_interval_var)
+                    ))
+                    self.remote_image_download_interval_var = interval
+                    self.config['remote_image_download_interval'] = interval
+                    os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{interval:g}"
+                except Exception:
+                    pass
             self.save_config(show_message=False)
             # CRITICAL: Reinitialize environment variables after saving
             # This ensures TRANSLATE_SPECIAL_FILES and other settings take effect immediately
@@ -7202,7 +7222,10 @@ def toggle_ai_hunter(self):
 
 def _create_prompt_management_section(self, parent):
     """Create meta data section (formerly prompt management) - PySide6"""
-    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton, QWidget, QLineEdit
+    from PySide6.QtWidgets import (
+        QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton,
+        QWidget, QLineEdit, QDoubleSpinBox,
+    )
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Meta Data")
@@ -8550,15 +8573,103 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
 
-    download_remote_images_cb.toggled.connect(
-        _on_download_remote_images_toggle
-    )
     download_remote_images_cb.setContentsMargins(0, 5, 0, 5)
     download_remote_images_cb.setToolTip(
         "Download HTTP/HTTPS image URLs referenced by EPUB chapters and "
         "convert them to local PNG resources before image rename/mapping."
     )
-    section_v.addWidget(download_remote_images_cb)
+
+    # Use the same native widget class as Interval so both controls inherit
+    # identical platform styling and arrow buttons. Zero decimals keeps the
+    # thread value strictly integer-valued.
+    remote_image_workers_spin = QDoubleSpinBox()
+    remote_image_workers_spin.setRange(1, 32)
+    remote_image_workers_spin.setDecimals(0)
+    remote_image_workers_spin.setSingleStep(1)
+    remote_image_workers_spin.setFixedWidth(86)
+    remote_image_workers_spin.setKeyboardTracking(False)
+    try:
+        remote_image_workers_spin.setValue(max(1, min(
+            32, int(self.remote_image_download_workers_var)
+        )))
+    except Exception:
+        remote_image_workers_spin.setValue(max(1, min(
+            32, int(self.config.get('remote_image_download_workers', 4))
+        )))
+    remote_image_workers_spin.setToolTip(
+        "Maximum number of remote image transfers that may be in flight."
+    )
+
+    remote_image_interval_spin = QDoubleSpinBox()
+    remote_image_interval_spin.setRange(0.0, 60.0)
+    remote_image_interval_spin.setDecimals(2)
+    remote_image_interval_spin.setSingleStep(0.10)
+    remote_image_interval_spin.setSuffix(" s")
+    remote_image_interval_spin.setFixedWidth(86)
+    remote_image_interval_spin.setKeyboardTracking(False)
+    try:
+        remote_image_interval_spin.setValue(max(0.0, min(
+            60.0, float(self.remote_image_download_interval_var)
+        )))
+    except Exception:
+        remote_image_interval_spin.setValue(max(0.0, min(
+            60.0, float(self.config.get('remote_image_download_interval', 0.0))
+        )))
+    remote_image_interval_spin.setToolTip(
+        "Minimum global delay between consecutive HTTP/HTTPS request starts. "
+        "Use 0 to disable pacing."
+    )
+
+    # Prevent accidental value changes while scrolling the settings page. An
+    # ignored wheel event continues to the surrounding scroll area.
+    remote_image_workers_spin.setFocusPolicy(Qt.StrongFocus)
+    remote_image_interval_spin.setFocusPolicy(Qt.StrongFocus)
+    remote_image_workers_spin.wheelEvent = lambda event: event.ignore()
+    remote_image_interval_spin.wheelEvent = lambda event: event.ignore()
+
+    def _on_remote_image_workers_changed(value):
+        workers = max(1, min(32, int(round(value))))
+        self.remote_image_download_workers_var = workers
+        self.config['remote_image_download_workers'] = workers
+        os.environ['REMOTE_IMAGE_DOWNLOAD_WORKERS'] = str(workers)
+
+    def _on_remote_image_interval_changed(value):
+        interval = max(0.0, min(60.0, float(value)))
+        self.remote_image_download_interval_var = interval
+        self.config['remote_image_download_interval'] = interval
+        os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{interval:g}"
+
+    remote_image_workers_spin.valueChanged.connect(
+        _on_remote_image_workers_changed
+    )
+    remote_image_interval_spin.valueChanged.connect(
+        _on_remote_image_interval_changed
+    )
+
+    def _sync_remote_image_controls(enabled):
+        _on_download_remote_images_toggle(enabled)
+        remote_image_workers_spin.setEnabled(bool(enabled))
+        remote_image_interval_spin.setEnabled(bool(enabled))
+
+    download_remote_images_cb.toggled.connect(
+        _sync_remote_image_controls
+    )
+    remote_image_workers_spin.setEnabled(download_remote_images_cb.isChecked())
+    remote_image_interval_spin.setEnabled(download_remote_images_cb.isChecked())
+
+    remote_images_row = QWidget()
+    remote_images_row_h = QHBoxLayout(remote_images_row)
+    remote_images_row_h.setContentsMargins(0, 5, 0, 5)
+    remote_images_row_h.setSpacing(8)
+    remote_images_row_h.addWidget(download_remote_images_cb)
+    remote_images_row_h.addSpacing(8)
+    remote_images_row_h.addWidget(QLabel("Threads:"))
+    remote_images_row_h.addWidget(remote_image_workers_spin)
+    remote_images_row_h.addSpacing(6)
+    remote_images_row_h.addWidget(QLabel("Interval:"))
+    remote_images_row_h.addWidget(remote_image_interval_spin)
+    remote_images_row_h.addStretch()
+    section_v.addWidget(remote_images_row)
     
     # Place the section at row 0, column 0 to match the original grid
     try:

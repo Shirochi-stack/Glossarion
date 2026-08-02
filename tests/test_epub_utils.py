@@ -1141,6 +1141,29 @@ def test_remote_raster_bytes_are_converted_to_real_png():
         assert image.size == (4, 3)
 
 
+def test_remote_image_start_throttle_spaces_request_starts():
+    clock = [100.0]
+    sleeps = []
+
+    def fake_monotonic():
+        return clock[0]
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    throttle = chapter_extractor._RemoteImageStartThrottle(
+        0.5,
+        monotonic=fake_monotonic,
+        sleeper=fake_sleep,
+    )
+
+    assert throttle.wait() == 0.0
+    assert throttle.wait() == pytest.approx(0.5)
+    assert throttle.wait() == pytest.approx(0.5)
+    assert sleeps == pytest.approx([0.5, 0.5])
+
+
 def test_remote_images_are_localized_once_before_chapter_rename(monkeypatch, tmp_path):
     remote_url = (
         'https://images.novelpia.com/imagebox/b1/'

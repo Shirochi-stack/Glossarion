@@ -301,6 +301,34 @@ def _download_remote_image_as_png(remote_url):
     return _convert_remote_image_to_png(image_bytes)
 
 
+class _RemoteImageStartThrottle:
+    """Serialize remote-image request starts with a configurable interval."""
+
+    def __init__(self, interval_seconds, monotonic=None, sleeper=None):
+        try:
+            interval_seconds = float(interval_seconds)
+        except (TypeError, ValueError):
+            interval_seconds = 0.0
+        self.interval_seconds = max(0.0, interval_seconds)
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleeper or time.sleep
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self):
+        """Wait until this request may start, then reserve the next slot."""
+        if self.interval_seconds <= 0:
+            return 0.0
+        with self._lock:
+            now = self._monotonic()
+            delay = max(0.0, self._next_start - now)
+            if delay > 0:
+                self._sleep(delay)
+                now = self._monotonic()
+            self._next_start = max(now, self._next_start) + self.interval_seconds
+            return delay
+
+
 def _replace_remote_image_refs_in_soup(soup, replacements):
     """Rewrite successfully downloaded remote image references in one document."""
     modified = False
@@ -454,6 +482,14 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
     except (TypeError, ValueError):
         configured_workers = 4
     worker_count = min(len(remote_urls), max(1, configured_workers))
+    try:
+        download_interval = float(os.getenv(
+            'REMOTE_IMAGE_DOWNLOAD_INTERVAL', '0'
+        ))
+    except (TypeError, ValueError):
+        download_interval = 0.0
+    download_interval = max(0.0, min(60.0, download_interval))
+    request_throttle = _RemoteImageStartThrottle(download_interval)
 
     total_remote_urls = len(remote_urls)
     download_started_at = time.monotonic()
@@ -529,6 +565,7 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         'downloaded_bytes': downloaded_bytes,
         'progress_percent': int((completed * 100) / total_remote_urls),
         'workers': worker_count,
+        'request_start_interval_seconds': download_interval,
         'started_at': started_at,
         'updated_at': started_at,
         'items': [item_by_url[url] for url in remote_urls],
@@ -586,10 +623,19 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         progress_callback(cache_message)
     else:
         print(cache_message)
+    pacing_message = (
+        f"Remote image download pacing: {worker_count} thread(s), "
+        f"{download_interval:g}s between request starts"
+    )
+    if progress_callback:
+        progress_callback(pacing_message)
+    else:
+        print(pacing_message)
 
     def _download_and_store(remote_url):
         filename = item_by_url[remote_url]['download_filename']
         destination = os.path.join(images_dir, filename)
+        request_throttle.wait()
         png_bytes = _download_remote_image_as_png(remote_url)
         temporary = f"{destination}.{threading.get_ident()}.tmp"
         try:

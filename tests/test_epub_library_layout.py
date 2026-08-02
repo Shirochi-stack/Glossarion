@@ -289,8 +289,19 @@ def test_other_settings_exposes_remote_image_download_toggle():
     assert '"Download remote image URLs"' in settings_source
     assert "self.config['download_remote_image_urls'] = enabled" in settings_source
     assert "os.environ['DOWNLOAD_REMOTE_IMAGE_URLS']" in settings_source
+    assert 'QLabel("Threads:")' in settings_source
+    assert 'QLabel("Interval:")' in settings_source
+    assert "remote_image_workers_spin = QDoubleSpinBox()" in settings_source
+    assert "remote_image_workers_spin.setDecimals(0)" in settings_source
+    assert "remote_image_spin_style" not in settings_source
+    assert "remote_image_workers_spin.wheelEvent" in settings_source
+    assert "remote_image_interval_spin.wheelEvent" in settings_source
+    assert "REMOTE_IMAGE_DOWNLOAD_WORKERS" in settings_source
+    assert "REMOTE_IMAGE_DOWNLOAD_INTERVAL" in settings_source
     assert "self.download_remote_image_urls_var = self.config.get(" in gui_source
     assert "('download_remote_image_urls', ['download_remote_image_urls_var']" in gui_source
+    assert "('remote_image_download_workers', ['remote_image_download_workers_var']" in gui_source
+    assert "('remote_image_download_interval', ['remote_image_download_interval_var']" in gui_source
 
 
 def test_details_tags_prefer_translated_metadata_subjects():

@@ -3058,6 +3058,33 @@ class _InputOutputDialog(QDialog):
                 return candidate
         return ''
 
+    @staticmethod
+    def _is_generated_image_only_content(content):
+        """Return whether a response consists solely of generated-image markers."""
+        source = str(content or '')
+        if not re.search(
+            r'\[GENERATED_IMAGE:(.+?)\]', source, flags=re.IGNORECASE
+        ):
+            return False
+        remainder = re.sub(
+            r'\[GENERATED_IMAGE:(.+?)\]', '', source, flags=re.IGNORECASE
+        )
+        return not remainder.strip()
+
+    def _generated_image_preview_size(self, candidate):
+        """Return the intended logical preview size for one local image."""
+        pixmap = QPixmap(str(candidate or ''))
+        if pixmap.isNull():
+            return 0, 0
+        viewport_width = max(320, self.output_box.viewport().width())
+        maximum_width = max(280, min(980, int(viewport_width * 0.76)))
+        maximum_height = 760
+        scaled = pixmap.size().scaled(
+            QSize(maximum_width, maximum_height),
+            Qt.KeepAspectRatio,
+        )
+        return max(1, scaled.width()), max(1, scaled.height())
+
     def _generated_image_render_source(self, content, preferred_path=''):
         """Replace generated-image sentinels with scaled local image markup."""
         import html as html_lib
@@ -3081,17 +3108,7 @@ class _InputOutputDialog(QDialog):
                     f"<code>{unavailable}</code></p>"
                 )
 
-            width = 0
-            pixmap = QPixmap(candidate)
-            if not pixmap.isNull():
-                viewport_width = max(320, self.output_box.viewport().width())
-                maximum_width = max(280, min(980, int(viewport_width * 0.76)))
-                maximum_height = 760
-                scaled = pixmap.size().scaled(
-                    QSize(maximum_width, maximum_height),
-                    Qt.KeepAspectRatio,
-                )
-                width = max(1, scaled.width())
+            width, _height = self._generated_image_preview_size(candidate)
 
             image_url = QUrl.fromLocalFile(candidate).toString()
             safe_url = html_lib.escape(image_url, quote=True)
@@ -4148,11 +4165,20 @@ class _InputOutputDialog(QDialog):
             "</tr></table></td>"
         )
 
-    def _rounded_assistant_bubble_html(self, rendered):
+    def _rounded_assistant_bubble_html(self, rendered, bubble_width=0):
         """Wrap an assistant response in one rounded, bordered card."""
+        try:
+            bubble_width = max(0, int(bubble_width or 0))
+        except (TypeError, ValueError):
+            bubble_width = 0
+        shell_width = f" width='{bubble_width}'" if bubble_width else ""
+        table_width = str(bubble_width) if bubble_width else "100%"
         corners = self._assistant_bubble_corner_data
         if not all(corners.get(name) for name in ("tl", "tr", "bl", "br")):
-            return f"<td class='assistant-bubble'>{rendered}</td>"
+            return (
+                f"<td class='assistant-bubble'{shell_width}>"
+                f"{rendered}</td>"
+            )
 
         import html as html_lib
 
@@ -4166,8 +4192,8 @@ class _InputOutputDialog(QDialog):
             )
 
         return (
-            "<td class='assistant-bubble-shell'>"
-            "<table class='rounded-assistant-bubble' width='100%' cellspacing='0' "
+            f"<td class='assistant-bubble-shell'{shell_width}>"
+            f"<table class='rounded-assistant-bubble' width='{table_width}' cellspacing='0' "
             "cellpadding='0'>"
             "<tr class='assistant-bubble-cap'>"
             f"<td class='assistant-bubble-corner' width='{radius}' "
@@ -10118,11 +10144,32 @@ class _InputOutputDialog(QDialog):
                 generated_image_path = self._assistant_generated_image_path(
                     message, content
                 )
+                compact_image_bubble_width = 0
+                if (
+                    generated_image_path
+                    and self._is_generated_image_only_content(content)
+                ):
+                    preview_width, _preview_height = (
+                        self._generated_image_preview_size(
+                            generated_image_path
+                        )
+                    )
+                    if preview_width:
+                        available_width = max(
+                            320,
+                            self.output_box.viewport().width() - 72,
+                        )
+                        compact_image_bubble_width = min(
+                            available_width,
+                            max(620, preview_width + 30),
+                        )
                 inline_editing = bool(
                     self._inline_response_editor_frame is not None
                     and message_index == self._inline_response_edit_index
                     and message_index < len(self._chat_messages)
                 )
+                if inline_editing:
+                    compact_image_bubble_width = 0
                 if inline_editing:
                     editor_height = self._inline_response_editor_height()
                     rendered = self._response_layout_marker_html(
@@ -10371,7 +10418,13 @@ class _InputOutputDialog(QDialog):
                     + message_actions_html
                 )
                 assistant_bubble_html = self._rounded_assistant_bubble_html(
-                    assistant_inner_html
+                    assistant_inner_html,
+                    bubble_width=compact_image_bubble_width,
+                )
+                trailing_cell = (
+                    "<td></td>"
+                    if compact_image_bubble_width
+                    else "<td width='3%'></td>"
                 )
                 message_html.append(
                     row_anchor
@@ -10384,7 +10437,7 @@ class _InputOutputDialog(QDialog):
                     "cellpadding='0'><tr><td class='assistant-avatar' align='center' "
                     f"valign='middle'>{assistant_avatar}</td></tr></table></td>"
                     f"{assistant_bubble_html}"
-                    "<td width='3%'></td></tr></table>"
+                    f"{trailing_cell}</tr></table>"
                     + row_end_html
                     + "<div class='message-gap'>&nbsp;</div>"
                 )
@@ -12545,6 +12598,16 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         try:
             os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if self.config.get('retain_source_extension', False) else '0'
             os.environ['DOWNLOAD_REMOTE_IMAGE_URLS'] = '1' if self.config.get('download_remote_image_urls', False) else '0'
+            os.environ['REMOTE_IMAGE_DOWNLOAD_WORKERS'] = str(max(
+                1, min(32, int(float(
+                    self.config.get('remote_image_download_workers', 4)
+                )))
+            ))
+            os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{max(
+                0.0, min(60.0, float(
+                    self.config.get('remote_image_download_interval', 0.0)
+                ))
+            ):g}"
         except Exception:
             pass
         
@@ -13004,6 +13067,22 @@ Text to analyze:
         self.download_remote_image_urls_var = self.config.get(
             'download_remote_image_urls', False
         )
+        try:
+            self.remote_image_download_workers_var = max(
+                1, min(32, int(float(
+                    self.config.get('remote_image_download_workers', 4)
+                )))
+            )
+        except (TypeError, ValueError):
+            self.remote_image_download_workers_var = 4
+        try:
+            self.remote_image_download_interval_var = max(
+                0.0, min(60.0, float(
+                    self.config.get('remote_image_download_interval', 0.0)
+                ))
+            )
+        except (TypeError, ValueError):
+            self.remote_image_download_interval_var = 0.0
         
         # Initialize extraction settings (from Other Settings)
         self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
@@ -42085,6 +42164,8 @@ Important rules:
                 # Environment-backed settings
                 ('retain_source_extension', ['retain_source_extension_var'], False, bool),
                 ('download_remote_image_urls', ['download_remote_image_urls_var'], False, bool),
+                ('remote_image_download_workers', ['remote_image_download_workers_var'], 4, lambda v: max(1, min(32, safe_int(v, 4)))),
+                ('remote_image_download_interval', ['remote_image_download_interval_var'], 0.0, lambda v: max(0.0, min(60.0, safe_float(v, 0.0)))),
                 ('enable_gui_yield', ['enable_gui_yield_var'], True, bool),
                 ('use_thread_pool_extraction', ['use_thread_pool_extraction_var'], False, bool),
                 
@@ -42319,6 +42400,8 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('DOWNLOAD_REMOTE_IMAGE_URLS', self.config.get('download_remote_image_urls'), is_bool=True))
+            env_vars_set.append(_update_env('REMOTE_IMAGE_DOWNLOAD_WORKERS', _config_int('remote_image_download_workers', 4, 1, 32)))
+            env_vars_set.append(_update_env('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _config_float('remote_image_download_interval', 0.0, 0.0, 60.0)))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
             env_vars_set.append(_update_env('PARTIAL_B2_ENTRIES_PER_REQUEST', self.config.get('partial_b2_entries_per_request', -1)))
             authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
@@ -42470,6 +42553,8 @@ Important rules:
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
                     ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls') else '0'),
+                    ('REMOTE_IMAGE_DOWNLOAD_WORKERS', str(max(1, min(32, safe_int(self.config.get('remote_image_download_workers', 4), 4))))),
+                    ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', f"{max(0.0, min(60.0, safe_float(self.config.get('remote_image_download_interval', 0.0), 0.0))):g}"),
                 ]
                 total_issues = 0
                 for env_key, expected_str in critical_vars_to_check:
@@ -42884,6 +42969,8 @@ Important rules:
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
                 ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls', False) else '0'),
+                ('REMOTE_IMAGE_DOWNLOAD_WORKERS', str(_int_config('remote_image_download_workers', 4, 1, 32))),
+                ('REMOTE_IMAGE_DOWNLOAD_INTERVAL', _float_config('remote_image_download_interval', 0.0, 0.0, 60.0)),
                 ('AUTHND_TOKEN_CONCURRENCY_AUTO', '1' if authnd_auto_enabled else '0'),
                 ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
                 ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),

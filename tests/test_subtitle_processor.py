@@ -1834,6 +1834,9 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
         def _generated_image_paths_from_text(content):
             return dialog_class._generated_image_paths_from_text(content)
 
+        def _generated_image_preview_size(self, candidate):
+            return dialog_class._generated_image_preview_size(self, candidate)
+
     marker = f"[GENERATED_IMAGE:{image_path}]"
     rendered_source = dialog_class._generated_image_render_source(
         FakeDialog(), marker, str(image_path)
@@ -1853,6 +1856,90 @@ def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
     document = QTextDocument()
     document.setHtml(rendered_html)
     assert "Direct Text 1.png" not in document.toPlainText()
+
+
+def test_direct_text_image_only_response_uses_compact_bubble_width():
+    dialog_class = _direct_text_dialog_class()
+    import inspect
+
+    class FakeDialog:
+        _assistant_bubble_corner_data = {
+            name: "data:image/png;base64,AA=="
+            for name in ("tl", "tr", "bl", "br")
+        }
+
+    marker = "[GENERATED_IMAGE:C:/Direct Text/Direct Text 1.png]"
+    assert dialog_class._is_generated_image_only_content(marker) is True
+    assert dialog_class._is_generated_image_only_content(
+        marker + "\nA caption"
+    ) is False
+
+    bubble = dialog_class._rounded_assistant_bubble_html(
+        FakeDialog(),
+        "IMAGE",
+        bubble_width=640,
+    )
+
+    assert "class='assistant-bubble-shell' width='640'" in bubble
+    assert "class='rounded-assistant-bubble' width='640'" in bubble
+    assert "max-width: none" not in inspect.getsource(
+        dialog_class._render_output
+    )
+
+
+def test_direct_text_compact_card_does_not_collapse_generated_image(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    from PySide6.QtGui import QImage, QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    image_path = tmp_path / "Large generated preview.png"
+    image = QImage(800, 450, QImage.Format_RGB32)
+    image.fill(0xFF336699)
+    assert image.save(str(image_path), "PNG")
+
+    class Viewport:
+        @staticmethod
+        def width():
+            return 800
+
+    class OutputBox:
+        @staticmethod
+        def viewport():
+            return Viewport()
+
+    class FakeDialog:
+        output_box = OutputBox()
+
+        @staticmethod
+        def _generated_image_paths_from_text(content):
+            return dialog_class._generated_image_paths_from_text(content)
+
+        def _generated_image_preview_size(self, candidate):
+            return dialog_class._generated_image_preview_size(self, candidate)
+
+    marker = f"[GENERATED_IMAGE:{image_path}]"
+    rendered = dialog_class._generated_image_render_source(
+        FakeDialog(), marker, str(image_path)
+    )
+    document = QTextDocument()
+    document.setTextWidth(800)
+    document.setHtml(
+        "<style>img { max-width: 100%; }</style>"
+        "<table width='700'><tr><td>"
+        "<div>IMAGE_START</div>"
+        + rendered
+        + "<div>IMAGE_END</div>"
+        "</td></tr></table>"
+    )
+    start = document.find("IMAGE_START")
+    end = document.find("IMAGE_END")
+    start.setPosition(start.selectionStart())
+    end.setPosition(end.selectionStart())
+    start_y = document.documentLayout().blockBoundingRect(start.block()).y()
+    end_y = document.documentLayout().blockBoundingRect(end.block()).y()
+
+    assert end_y - start_y > 250
 
 
 def test_direct_text_save_image_as_copies_persistent_image(monkeypatch, tmp_path):
