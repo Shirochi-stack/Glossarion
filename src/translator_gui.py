@@ -3446,6 +3446,8 @@ class _InputOutputDialog(QDialog):
     ):
         """Render images normally and reserve native audio/video player space."""
         import html as html_lib
+        from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+        from PySide6.QtGui import QImage
 
         media_kind = str(media_kind or '').strip().lower()
         preferred_path = (
@@ -3459,7 +3461,9 @@ class _InputOutputDialog(QDialog):
         source = str(content or '')
         marker_pattern = r'\[GENERATED_(?:IMAGE|VIDEO|AUDIO):(.+?)\]'
         placeholder_marker = self._direct_media_placeholder_marker(message_index)
-        placeholder_height = 430 if media_kind == 'video' else 96
+        # The document slot and the native overlay must be identical.  Any
+        # difference becomes visible space between the player and card actions.
+        placeholder_height = 414 if media_kind == 'video' else 82
         default_placeholder_width = 920 if media_kind == 'video' else 760
         try:
             placeholder_width = int(placeholder_width or 0)
@@ -3468,15 +3472,32 @@ class _InputOutputDialog(QDialog):
         if placeholder_width <= 0:
             placeholder_width = default_placeholder_width
         placeholder_width = min(default_placeholder_width, max(260, placeholder_width))
-        # QTextDocument collapses a fixed-height table when it is nested inside
-        # the rounded response card's own tables.  The native player overlay
-        # then extends past the document and cannot be reached by scrolling.
-        # A transparent one-pixel PNG retains its requested height even through
-        # those nested tables, so it provides a real scrollable media slot.
-        transparent_pixel = (
-            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
-            'AAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='
+        # Match generated-image cards: the embedded PNG's intrinsic dimensions
+        # equal its declared logical dimensions.  Stretching a 1x1 transparent
+        # pixel lets QTextDocument reapply the source aspect ratio while laying
+        # out nested card tables, which creates a large phantom bottom gap.
+        spacer_image = QImage(
+            placeholder_width,
+            placeholder_height,
+            QImage.Format_ARGB32_Premultiplied,
         )
+        spacer_image.fill(Qt.transparent)
+        spacer_bytes = QByteArray()
+        spacer_buffer = QBuffer(spacer_bytes)
+        spacer_url = ''
+        if spacer_buffer.open(QIODevice.WriteOnly):
+            if spacer_image.save(spacer_buffer, 'PNG'):
+                spacer_url = (
+                    'data:image/png;base64,'
+                    + bytes(spacer_bytes.toBase64()).decode('ascii')
+                )
+            spacer_buffer.close()
+        if not spacer_url:
+            spacer_url = (
+                'data:image/png;base64,'
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+                'AAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='
+            )
         marker_html = (
             "<span class='direct-media-marker'>"
             f"{placeholder_marker}</span>"
@@ -3485,7 +3506,7 @@ class _InputOutputDialog(QDialog):
             "<div class='generated-media-preview'>"
             f"{marker_html}"
             "<img class='generated-media-spacer-image' "
-            f"src='data:image/png;base64,{transparent_pixel}' "
+            f"src='{spacer_url}' "
             f"width='{placeholder_width}' height='{placeholder_height}' alt=''>"
             "</div>"
         )
@@ -7868,7 +7889,12 @@ class _InputOutputDialog(QDialog):
                     cursor.block()
                 )
                 media_kind = str(overlay.media_kind or '')
-                height = 414 if media_kind == 'video' else 82
+                reserved_height = max(1, int(round(block_rect.height())))
+                minimum_height = 414 if media_kind == 'video' else 82
+                # The player must occupy the QTextDocument slot itself.  Using
+                # a separate fixed height leaves a visible tail when Qt adds
+                # line/table metrics around the custom media object.
+                height = max(minimum_height, reserved_height)
                 x_pos = max(8, int(marker_rect.x()))
                 maximum_width = 920 if media_kind == 'video' else 760
                 card_slot_width = max(1, int(block_rect.width()))
@@ -7877,7 +7903,7 @@ class _InputOutputDialog(QDialog):
                     card_slot_width,
                     max(260, viewport_width - x_pos - 18),
                 )
-                y_pos = int(marker_rect.y()) + 4
+                y_pos = int(marker_rect.y())
                 if y_pos >= viewport_height or y_pos + height <= 0:
                     overlay.hide()
                     continue
@@ -11306,8 +11332,10 @@ class _InputOutputDialog(QDialog):
             "line-height: 100%; }"
             ".generated-image-preview img { border: 1px solid #4a5568; "
             "vertical-align: top; }"
-            ".generated-media-preview, .generated-media-spacer-image { "
-            "border: none; margin: 0; padding: 0; background: transparent; }"
+            ".generated-media-preview { border: none; margin: 0; padding: 0; "
+            "background: transparent; line-height: 100%; }"
+            ".generated-media-spacer-image { border: none; margin: 0; "
+            "padding: 0; background: transparent; }"
             ".direct-media-marker { color:#242424; font-size:1px; "
             "line-height:1px; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "

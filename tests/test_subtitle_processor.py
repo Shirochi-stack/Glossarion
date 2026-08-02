@@ -1904,7 +1904,7 @@ def test_direct_text_video_marker_reserves_native_player_slot(tmp_path):
 
     assert '[GENERATED_VIDEO:' not in rendered
     assert 'DIRECT_TEXT_MEDIA_PLAYER_6_7F31' in rendered
-    assert "height='430'" in rendered
+    assert "height='414'" in rendered
     assert "width='920'" in rendered
     assert "class='generated-media-spacer-image'" in rendered
     assert 'data:image/png;base64,' in rendered
@@ -1924,17 +1924,33 @@ def test_direct_text_video_marker_reserves_native_player_slot(tmp_path):
     document = QTextDocument()
     document.setTextWidth(1000)
     document.setHtml(
+        "<style>.generated-media-preview { line-height: 100%; }</style>"
         "<table width='100%'><tr><td width='38'>A</td><td>"
         "<table width='900'><tr><td>"
         + sanitized
+        + "<div>DIRECT_TEXT_MEDIA_SLOT_END</div>"
         + "</td></tr></table></td></tr></table>"
     )
-    assert document.size().height() >= 430
+    assert 414 <= document.size().height() < 500
     marker_cursor = document.find('DIRECT_TEXT_MEDIA_PLAYER_6_7F31')
     marker_block_rect = document.documentLayout().blockBoundingRect(
         marker_cursor.block()
     )
     assert marker_block_rect.width() >= 900
+
+    exact_cursor = document.find('DIRECT_TEXT_MEDIA_PLAYER_6_7F31')
+    exact_rect = document.documentLayout().blockBoundingRect(
+        exact_cursor.block()
+    )
+    slot_end_cursor = document.find('DIRECT_TEXT_MEDIA_SLOT_END')
+    slot_end_rect = document.documentLayout().blockBoundingRect(
+        slot_end_cursor.block()
+    )
+    # The player consumes the complete measured block, and the block following
+    # the media begins at its bottom.  The transcript's normal 148% line height
+    # must never be allowed to add a phantom tail beneath native media.
+    assert 414 <= exact_rect.height() < 440
+    assert slot_end_rect.y() == pytest.approx(exact_rect.bottom(), abs=1)
 
 
 def test_direct_text_indexed_image_copy_records_persistent_artifact(tmp_path):
