@@ -25575,9 +25575,8 @@ class UnifiedClient:
     def _send_ocagy(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send one request through OpenCode + opencode-antigravity-auth.
 
-        Friendly model names use the ``ocagy/`` prefix, for example
-        ``ocagy/gemini-3.1-pro-high``. OpenCode and the plugin own OAuth,
-        token refresh, quota fallback, and multi-account rotation.
+        ``ocagy0/`` uses the plugin-managed account pool. ``ocagy/`` pins
+        account 1, while ``ocagy1/`` pins account 2, and so on.
         """
         if not OCAGY_AVAILABLE or _ocagy_send is None:
             raise UnifiedClientError(
@@ -25593,12 +25592,9 @@ class UnifiedClient:
             )
 
         request_model = self._get_active_request_model()
-        actual_model = str(request_model or "")
-        if actual_model.lower().startswith("ocagy/"):
-            actual_model = actual_model.split("/", 1)[1]
-        elif actual_model.lower().startswith("ocagy"):
-            actual_model = actual_model[len("ocagy"):].lstrip("/")
-        actual_model = actual_model.strip() or "gemini-3.1-pro-high"
+        # Keep the complete route so ocagy_cli can select a deterministic
+        # account before OpenCode starts.
+        actual_model = str(request_model or "").strip() or "ocagy/gemini-3.1-pro-high"
 
         try:
             stale_cancel = bool(_ocagy_is_cancelled is not None and _ocagy_is_cancelled())

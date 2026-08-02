@@ -667,6 +667,8 @@ def _catalog_provider_for_model(model: str) -> Optional[str]:
     authenticated_target = _authenticated_catalog_target(value)
     if authenticated_target is not None:
         return authenticated_target[0]
+    if re.match(r"^ocagy\d{0,4}(?:/|$)", value):
+        return "ocagy"
     authgrok_match = re.match(r"^authgrok(\d{1,4})/", value)
     if authgrok_match:
         return f"authgrok:{int(authgrok_match.group(1))}"

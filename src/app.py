@@ -3421,7 +3421,7 @@ class GlossarionWeb:
                             )
                             
                             # OpenCode Antigravity login button (for ocagy/* models)
-                            _show_ocagy = _initial_model.startswith('ocagy/')
+                            _show_ocagy = _initial_model.startswith('ocagy')
                             ocagy_login_btn = gr.Button(
                                 "🪐 OCAGY Login",
                                 variant="secondary",
@@ -4050,7 +4050,7 @@ class GlossarionWeb:
                         """Return visibility updates for API key and provider login controls."""
                         hide_key = _model_needs_no_api_key(model or '')
                         is_authgpt = (model or '').lower().startswith('authgpt/')
-                        is_ocagy = (model or '').lower().startswith('ocagy/')
+                        is_ocagy = (model or '').lower().startswith('ocagy')
                         is_antigravity = (model or '').lower().startswith('antigravity/')
                         _hf = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
                         return (

@@ -104,7 +104,7 @@
 * **Config Backup System** — automatic JSON config backups with atomic writes
 * **AuthGPT OAuth** — use your ChatGPT subscription directly via OAuth token flow
 * **AuthGrok Browser Login** — use the `authgrok/` model prefix to sign in to an xAI/Grok account through your browser, including Google sign-in
-* **OpenCode Antigravity OAuth** — use the `ocagy/` prefix with OpenCode and `opencode-antigravity-auth`, including Gemini 3.1 Pro High
+* **OpenCode Antigravity OAuth** — use `ocagy0/` for the plugin-managed account pool or numbered OcAgy routes for deterministic batch-account selection, including Gemini 3.1 Pro High
 
 ---
 
@@ -131,7 +131,7 @@
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking-high, antigravity/gemini-3.1-pro-low |
-| **OcAgy (OpenCode Antigravity)** | `ocagy/*` | ocagy/gemini-3.1-pro-high, ocagy/gemini-3-flash-high, ocagy/claude-sonnet-4-6 |
+| **OcAgy (OpenCode Antigravity)** | `ocagy0/*`, `ocagy/*`, `ocagy1/*`, ... | ocagy0/gemini-3.1-pro-high, ocagy/gemini-3.1-pro-high, ocagy1/gemini-3.1-pro-high |
 | **AuthND** | `authnd/*` | authnd/z-ai/glm-5.1 |
 | **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
@@ -150,7 +150,7 @@
 
 > **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
 
-> **OcAgy login:** The `ocagy/` prefix is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, select a model such as `ocagy/gemini-3.1-pro-high`, click **OCAGY Login**, then choose **Google → OAuth with Google (Antigravity)** in the terminal. No API key is required; OpenCode loads `opencode-antigravity-auth` and the plugin manages OAuth, quota fallback, and account rotation.
+> **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, click **OCAGY Login**, then choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
 
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
@@ -163,7 +163,7 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
-5. **OcAgy** — install OpenCode, type `ocagy/gemini-3.1-pro-high`, and use **OCAGY Login** (no API key needed)
+5. **OcAgy** — install OpenCode, use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login** (no API key needed)
 6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
 7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 

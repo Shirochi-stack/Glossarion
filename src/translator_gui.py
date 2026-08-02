@@ -27811,7 +27811,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     else:
                         self.append_log(f"📑 Glossary already loaded, skipping auto-extraction")
                 # ===== END PRE-TRANSLATION GLOSSARY EXTRACTION =====
-                
+
+                # Auto-mapping keeps its authoritative glossary in the shared
+                # Glossary/<book>/ folder. Mirror that latest resolved file into
+                # the translation output now so an older output-side glossary
+                # never remains visible after the user starts a run.
+                self._sync_automapped_glossaries_to_output()
+
                 # Call the direct function
                 if getattr(self, '_translation_run_is_multipass_qa_refinement', False):
                     mode_label = str(getattr(self, '_translation_run_qa_refinement_mode', '') or 'multipass').title()
@@ -40888,7 +40894,7 @@ Important rules:
         except Exception as _e:
             self.append_log(f"⚠️ Could not copy glossary to output folder(s): {_e}")
 
-    def _copy_glossary_to_output_folders(self, glossary_path):
+    def _copy_glossary_to_output_folders(self, glossary_path, input_files=None):
         """Copy a loaded glossary into the output folder of every currently
         selected input file, using the same target naming convention as the
         translator (glossary.csv / glossary.md / glossary.json).
@@ -40900,7 +40906,7 @@ Important rules:
         import shutil
         import json as _json
         if not glossary_path or not os.path.isfile(glossary_path):
-            return
+            return 0
         
         # Determine target filename based on extension (mirrors TransateKRtoEN.py logic)
         ext = os.path.splitext(glossary_path)[1].lower()
@@ -40915,7 +40921,10 @@ Important rules:
         
         # Resolve input files. Prefer selected_files; otherwise fall back to the
         # path shown in entry_epub (same fallback Retranslation_GUI uses).
-        input_files = [p for p in (getattr(self, 'selected_files', []) or []) if p]
+        if input_files is None:
+            input_files = [p for p in (getattr(self, 'selected_files', []) or []) if p]
+        else:
+            input_files = [p for p in (input_files or []) if p]
         if not input_files:
             try:
                 fallback = self.entry_epub.text().strip() if hasattr(self, 'entry_epub') else ''
@@ -40927,7 +40936,7 @@ Important rules:
         
         if not input_files:
             self.append_log("ℹ️ No input file detected — cannot determine output folder for glossary.")
-            return
+            return 0
         
         copied = 0
         seen_dirs = set()
@@ -40983,6 +40992,77 @@ Important rules:
         
         if copied:
             self.append_log(f"✅ Glossary loaded into {copied} output folder(s)")
+
+        return copied
+
+    def _sync_automapped_glossaries_to_output(self):
+        """Overwrite output-side glossaries with the current auto-mapped files.
+
+        Auto-mapping's source of truth remains the shared per-book Glossary
+        folder. This mirror runs after any Balanced/Full extraction and before
+        translation, so an existing output-side ``glossary.csv`` cannot remain
+        stale after the user clicks Run Translation.
+        """
+        auto_mapping_modes = {
+            'off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass'
+        }
+        try:
+            if self._current_auto_glossary_mode() not in auto_mapping_modes:
+                return 0
+        except Exception:
+            return 0
+
+        # An explicitly loaded glossary is manual, even if the Auto-Mapping
+        # checkbox is still visible in the current mode. Do not replace it.
+        if getattr(self, 'manual_glossary_manually_loaded', False):
+            return 0
+
+        try:
+            self._autofill_glossary_for_current_selection()
+            sources = self._glossary_editor_input_sources()
+        except Exception as exc:
+            self.append_log(f"⚠️ Could not refresh auto-mapped glossaries: {exc}")
+            return 0
+
+        mapping = getattr(self, 'manual_glossary_map', {}) or {}
+        global_glossary = getattr(self, 'manual_glossary_path', None)
+        copied = 0
+        synced_destinations = set()
+
+        for source_path in sources:
+            try:
+                source_key = os.path.normpath(os.path.abspath(source_path))
+                glossary_path = (
+                    mapping.get(source_path)
+                    or mapping.get(source_key)
+                    or mapping.get(os.path.normpath(source_path))
+                    or (global_glossary if len(sources) == 1 else None)
+                )
+                if not glossary_path or not os.path.isfile(glossary_path):
+                    continue
+
+                output_dir = os.path.normcase(os.path.abspath(
+                    self._resolve_translation_output_dir(source_path)
+                ))
+                if output_dir in synced_destinations:
+                    continue
+                synced_destinations.add(output_dir)
+                copied += self._copy_glossary_to_output_folders(
+                    glossary_path,
+                    input_files=[source_path],
+                )
+            except Exception as exc:
+                self.append_log(
+                    f"⚠️ Could not sync auto-mapped glossary for "
+                    f"'{os.path.basename(source_path)}': {exc}"
+                )
+
+        if copied:
+            self.append_log(
+                f"✅ Synced latest auto-mapped glossary to "
+                f"{copied} output folder(s)"
+            )
+        return copied
 
     def _comprehensive_json_fix(self, content):
         """Apply comprehensive JSON fixes."""

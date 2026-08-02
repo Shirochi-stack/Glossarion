@@ -6,8 +6,11 @@ protocol.  Glossarion launches ``opencode run`` in an isolated, tool-disabled
 workspace; OpenCode loads ``opencode-antigravity-auth`` and the plugin owns OAuth,
 token refresh, quota handling, and multi-account rotation.
 
-Glossarion model prefix:
-    ocagy/<friendly-model>
+Glossarion model prefixes:
+    ocagy0/<friendly-model>  # plugin-managed shared account pool
+    ocagy/<friendly-model>   # account 1
+    ocagy1/<friendly-model>  # account 2
+    ocagy2/<friendly-model>  # account 3, and so on
 
 Examples:
     ocagy/gemini-3.1-pro-high
@@ -318,11 +321,55 @@ def get_account_summary() -> Dict[str, Any]:
     return _account_summary()
 
 
-def _require_oauth_account() -> None:
-    """Fail before launching OpenCode when the plugin has no usable OAuth account."""
+def _load_account_store() -> Tuple[Path, Dict[str, Any]]:
+    """Read the plugin account store used by the normal OpenCode profile."""
+    path = _config_dir() / "antigravity-accounts.json"
+    if not path.is_file():
+        return path, {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise OcAgyError(f"The OpenCode Antigravity OAuth account store could not be read: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise OcAgyError("The OpenCode Antigravity OAuth account store has an invalid format.")
+    return path, payload
+
+
+def _select_account_slot(account_number: int) -> Tuple[Dict[str, Any], str]:
+    """Return a specific saved account using Antigravity's one-based slot order."""
+    _path, payload = _load_account_store()
+    accounts = payload.get("accounts", [])
+    if not isinstance(accounts, list):
+        accounts = []
+    index = account_number - 1
+    if index < 0 or index >= len(accounts):
+        raise OcAgyError(
+            f"OcAgy account #{account_number} is not linked. Click OCAGY Login, add that "
+            "Google account, then retry. Use ocagy0/ if you want the plugin-managed shared pool."
+        )
+    account = accounts[index]
+    if not isinstance(account, dict) or not account.get("refreshToken"):
+        raise OcAgyError(
+            f"OcAgy account #{account_number} is not usable because its OAuth credential is missing. "
+            "Sign in again with OCAGY Login."
+        )
+    if not account.get("enabled", True):
+        raise OcAgyError(
+            f"OcAgy account #{account_number} is disabled in the OpenCode Antigravity account store. "
+            "Enable it or use another numbered OcAgy prefix."
+        )
+    email = str(account.get("email", "") or "").strip()
+    return account, email
+
+
+def _require_oauth_account(account_number: int = 0) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Fail before launching OpenCode when the requested OAuth account is unavailable."""
+    if account_number > 0:
+        return _select_account_slot(account_number)
+
     account = _account_summary()
     if account.get("account_count"):
-        return
+        return None
 
     detail = ""
     if account.get("accounts_error"):
@@ -335,6 +382,79 @@ def _require_oauth_account() -> None:
     )
 
 
+def _write_private_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _prepare_isolated_account_config(
+    request_dir: Path,
+    account_number: int,
+    selected_account: Dict[str, Any],
+) -> Path:
+    """Create a request-local config containing only the explicitly selected account."""
+    config_dir = request_dir / f".ocagy-account-{account_number}"
+    config_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        config_dir.chmod(0o700)
+    except OSError:
+        pass
+
+    # Deep-copy through JSON so the shared account object is never mutated
+    # while forming the isolated plugin store.
+    account_copy = json.loads(json.dumps(selected_account))
+    _source_path, source_store = _load_account_store()
+    account_store = {
+        "version": source_store.get("version", 1),
+        "accounts": [account_copy],
+        "activeIndex": 0,
+        "activeIndexByFamily": {"gemini": 0, "claude": 0},
+    }
+    _write_private_json(config_dir / "antigravity-accounts.json", account_store)
+
+    plugin_settings: Dict[str, Any] = {}
+    shared_settings = _config_dir() / "antigravity.json"
+    try:
+        if shared_settings.is_file():
+            loaded = json.loads(shared_settings.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                plugin_settings = loaded
+    except Exception:
+        # The shared file may be JSONC. The isolated request only needs the
+        # deterministic account-selection overrides below.
+        plugin_settings = {}
+    plugin_settings["pid_offset_enabled"] = False
+    plugin_settings["account_selection_strategy"] = "sticky"
+    _write_private_json(config_dir / "antigravity.json", plugin_settings)
+    return config_dir
+
+
+def _request_subprocess_env(
+    request_dir: Path,
+    account_number: int,
+    selected: Optional[Tuple[Dict[str, Any], str]],
+    logger: Callable[[str], None],
+) -> Dict[str, str]:
+    if selected is None:
+        logger("🧭 OcAgy: using shared plugin account pool (ocagy0/)")
+        return _subprocess_env()
+
+    selected_account, email = selected
+    isolated_config = _prepare_isolated_account_config(
+        request_dir,
+        account_number,
+        selected_account,
+    )
+    logger(
+        f"🧭 OcAgy: using account slot #{account_number}"
+        + (f" ({email})" if email else "")
+    )
+    return _subprocess_env(isolated_config)
+
+
 def _creation_flags(*, visible: bool = False) -> int:
     if os.name != "nt":
         return 0
@@ -343,11 +463,13 @@ def _creation_flags(*, visible: bool = False) -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
-def _subprocess_env() -> Dict[str, str]:
+def _subprocess_env(config_dir: Optional[Path] = None) -> Dict[str, str]:
     env = dict(os.environ)
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("PYTHONUTF8", "1")
+    if config_dir is not None:
+        env["OPENCODE_CONFIG_DIR"] = str(config_dir)
     return env
 
 
@@ -916,13 +1038,26 @@ def build_prompt(messages: List[Dict[str, Any]]) -> str:
     )
 
 
+def parse_account_route(model: str) -> Tuple[int, str]:
+    """Return ``(account_number, model_suffix)`` for an OcAgy route.
+
+    Account number 0 means the plugin-managed shared pool. Unprefixed model
+    suffixes are also treated as pooled for backwards compatibility with
+    callers that invoke this module directly.
+    """
+    value = str(model or "").strip()
+    match = re.fullmatch(r"ocagy(?P<number>\d{1,4})?(?:/(?P<suffix>.*))?", value, re.IGNORECASE)
+    if not match:
+        return 0, value
+    number = match.group("number")
+    account_number = 1 if number is None else (0 if int(number) == 0 else int(number) + 1)
+    return account_number, str(match.group("suffix") or "").strip()
+
+
 def resolve_model(model: str) -> Tuple[str, Optional[str]]:
-    """Map a friendly Glossarion suffix to OpenCode's provider/model + variant."""
-    value = str(model or "").strip().lower()
-    if value.startswith("ocagy/"):
-        value = value.split("/", 1)[1]
-    elif value.startswith("ocagy"):
-        value = value[len("ocagy"):].lstrip("/")
+    """Map a friendly Glossarion route/suffix to OpenCode's model + variant."""
+    _account_number, suffix = parse_account_route(model)
+    value = suffix.lower()
 
     direct = re.match(r"^google/(.+)$", value)
     if direct:
@@ -950,7 +1085,7 @@ def resolve_model(model: str) -> Tuple[str, Optional[str]]:
         return "google/antigravity-gemini-3.1-pro", "high"
     raise OcAgyError(
         f"Unknown ocagy model '{model}'. Use ocagy/gemini-3.1-pro-high, "
-        "ocagy/gemini-3.1-pro-low, or another listed ocagy model."
+        "ocagy1/gemini-3.1-pro-high, ocagy0/gemini-3.1-pro-high, or another listed model."
     )
 
 
@@ -1292,6 +1427,7 @@ def _send_via_server(
     timeout_seconds: int,
     logger: Callable[[str], None],
     log_stream: bool,
+    subprocess_env: Dict[str, str],
 ) -> Dict[str, Any]:
     """Run an isolated OpenCode server and consume true token deltas over SSE."""
     port = _loopback_port()
@@ -1308,7 +1444,7 @@ def _send_via_server(
         errors="replace",
         creationflags=_creation_flags(),
         start_new_session=(os.name != "nt"),
-        env=_subprocess_env(),
+        env=subprocess_env,
     )
     with _ACTIVE_LOCK:
         _ACTIVE_PROCESSES.add(proc)
@@ -1586,7 +1722,8 @@ def _send_chat_completion_buffered(
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
     exe = find_executable()
-    _require_oauth_account()
+    account_number, _model_suffix = parse_account_route(model)
+    selected = _require_oauth_account(account_number)
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
     logger = log_fn or (lambda _message: None)
@@ -1594,7 +1731,12 @@ def _send_chat_completion_buffered(
 
     base = _workspace_dir()
     request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))
-    _write_workspace_config(request_dir)
+    try:
+        process_env = _request_subprocess_env(request_dir, account_number, selected, logger)
+        _write_workspace_config(request_dir)
+    except Exception:
+        shutil.rmtree(request_dir, ignore_errors=True)
+        raise
     command = [
         exe,
         "run",
@@ -1619,19 +1761,23 @@ def _send_chat_completion_buffered(
     )
 
     start = time.time()
-    proc = subprocess.Popen(
-        command,
-        cwd=str(request_dir),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_creation_flags(),
-        start_new_session=(os.name != "nt"),
-        env=_subprocess_env(),
-    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(request_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_creation_flags(),
+            start_new_session=(os.name != "nt"),
+            env=process_env,
+        )
+    except Exception:
+        shutil.rmtree(request_dir, ignore_errors=True)
+        raise
     with _ACTIVE_LOCK:
         _ACTIVE_PROCESSES.add(proc)
 
@@ -1708,7 +1854,8 @@ def send_chat_completion(
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
     exe = find_executable()
-    _require_oauth_account()
+    account_number, _model_suffix = parse_account_route(model)
+    selected = _require_oauth_account(account_number)
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
     logger = log_fn or (lambda _message: None)
@@ -1716,18 +1863,23 @@ def send_chat_completion(
 
     base = _workspace_dir()
     request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))
-    _write_workspace_config(request_dir)
-    logger(
-        f"🪐 OpenCode Antigravity: {Path(exe).name} live stream --model {model_id}"
-        + (f" --variant {variant}" if variant else "")
-    )
-    logger(
-        "🎛️ OpenCode/plugin manages temperature and output limits internally "
-        f"(Glossarion requested temperature={temperature}, max_tokens={max_tokens:,})."
-    )
-
     start = time.time()
     try:
+        process_env = _request_subprocess_env(
+            request_dir,
+            account_number,
+            selected,
+            logger,
+        )
+        _write_workspace_config(request_dir)
+        logger(
+            f"🪐 OpenCode Antigravity: {Path(exe).name} live stream --model {model_id}"
+            + (f" --variant {variant}" if variant else "")
+        )
+        logger(
+            "🎛️ OpenCode/plugin manages temperature and output limits internally "
+            f"(Glossarion requested temperature={temperature}, max_tokens={max_tokens:,})."
+        )
         result = _send_via_server(
             exe=exe,
             request_dir=request_dir,
@@ -1737,6 +1889,7 @@ def send_chat_completion(
             timeout_seconds=timeout_seconds,
             logger=logger,
             log_stream=bool(log_stream),
+            subprocess_env=process_env,
         )
     finally:
         shutil.rmtree(request_dir, ignore_errors=True)

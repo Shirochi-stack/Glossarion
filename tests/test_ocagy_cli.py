@@ -6,6 +6,8 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
@@ -63,6 +65,103 @@ def _write_enabled_account(config_dir: Path) -> None:
     )
 
 
+def _write_accounts(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "antigravity-accounts.json").write_text(
+        json.dumps({
+            "version": 1,
+            "accounts": [
+                {"email": "one@example.com", "refreshToken": "token-one", "enabled": True},
+                {"email": "two@example.com", "refreshToken": "token-two", "enabled": True},
+                {"email": "three@example.com", "refreshToken": "token-three", "enabled": False},
+            ],
+            "activeIndex": 1,
+            "activeIndexByFamily": {"gemini": 1, "claude": 0},
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_numbered_prefix_account_mapping():
+    expected_model = "gemini-3.1-pro-high"
+    assert ocagy_cli.parse_account_route(f"ocagy0/{expected_model}") == (0, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy/{expected_model}") == (1, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy1/{expected_model}") == (2, expected_model)
+    assert ocagy_cli.parse_account_route(f"ocagy2/{expected_model}") == (3, expected_model)
+    assert ocagy_cli.parse_account_route(expected_model) == (0, expected_model)
+    assert ocagy_cli.resolve_model(f"ocagy1/{expected_model}") == (
+        "google/antigravity-gemini-3.1-pro",
+        "high",
+    )
+
+
+def test_numbered_prefix_isolates_selected_account(tmp_path, monkeypatch):
+    exe = _fake_opencode(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_accounts(config_dir)
+    (config_dir / "antigravity.json").write_text(
+        json.dumps({
+            "pid_offset_enabled": True,
+            "account_selection_strategy": "round-robin",
+            "quota_fallback": True,
+        }),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_server_send(**kwargs):
+        isolated_dir = Path(kwargs["subprocess_env"]["OPENCODE_CONFIG_DIR"])
+        account_store = json.loads(
+            (isolated_dir / "antigravity-accounts.json").read_text(encoding="utf-8")
+        )
+        plugin_settings = json.loads(
+            (isolated_dir / "antigravity.json").read_text(encoding="utf-8")
+        )
+        captured.update({
+            "isolated_dir": isolated_dir,
+            "account_store": account_store,
+            "plugin_settings": plugin_settings,
+        })
+        return {
+            "content": "PINNED",
+            "finish_reason": "stop",
+            "usage": None,
+            "raw_response": [],
+        }
+
+    monkeypatch.setenv("OCAGY_CLI_PATH", str(exe))
+    monkeypatch.setenv("OCAGY_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(ocagy_cli, "_send_via_server", fake_server_send)
+    ocagy_cli.reset_cancel()
+
+    result = ocagy_cli.send_chat_completion(
+        messages=[{"role": "user", "content": "test"}],
+        model="ocagy1/gemini-3.1-pro-high",
+        timeout=30,
+    )
+
+    assert result["content"] == "PINNED"
+    assert captured["isolated_dir"] != config_dir
+    assert not captured["isolated_dir"].exists()
+    assert [item["email"] for item in captured["account_store"]["accounts"]] == ["two@example.com"]
+    assert captured["account_store"]["activeIndex"] == 0
+    assert captured["plugin_settings"]["pid_offset_enabled"] is False
+    assert captured["plugin_settings"]["account_selection_strategy"] == "sticky"
+    assert captured["plugin_settings"]["quota_fallback"] is True
+
+
+def test_numbered_prefix_rejects_missing_and_disabled_slots(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    _write_accounts(config_dir)
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config_dir))
+
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"account #4 is not linked"):
+        ocagy_cli._require_oauth_account(4)
+    with pytest.raises(ocagy_cli.OcAgyError, match=r"account #3 is disabled"):
+        ocagy_cli._require_oauth_account(3)
+
+
 def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
     exe = _fake_opencode(tmp_path)
     config_dir = tmp_path / "config"
@@ -97,7 +196,7 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
             {"role": "system", "content": "Translate faithfully."},
             {"role": "user", "content": "한글 test " * 10000},
         ],
-        model="gemini-3.1-pro-high",
+        model="ocagy0/gemini-3.1-pro-high",
         timeout=30,
     )
 
@@ -106,6 +205,7 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
     assert result["usage"]["total_tokens"] == 14
     assert captured["log_stream"] is True
     assert captured["model_id"] == "google/antigravity-gemini-3.1-pro"
+    assert Path(captured["subprocess_env"]["OPENCODE_CONFIG_DIR"]) == config_dir
     config = json.loads((tmp_path / "workspace" / "opencode.json").read_text(encoding="utf-8"))
     assert config["plugin"] == ["opencode-antigravity-auth@latest"]
     assert config["permission"]["*"] == "deny"
@@ -545,6 +645,38 @@ def test_unified_client_routes_ocagy_without_api_key(monkeypatch):
     assert response.content == "ROUTED"
     assert response.usage["total_tokens"] == 3
     assert captured["log_stream"] is True
+    assert captured["model"] == "ocagy/gemini-3.1-pro-high"
+
+
+def test_unified_client_preserves_numbered_ocagy_route(monkeypatch):
+    import unified_api_client as unified
+
+    captured = {}
+
+    def fake_ocagy_send(**kwargs):
+        captured.update(kwargs)
+        return {"content": "PINNED", "finish_reason": "stop", "usage": None}
+
+    monkeypatch.setattr(unified, "_ocagy_send", fake_ocagy_send)
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+
+    client = unified.UnifiedClient(
+        "",
+        "ocagy2/gemini-3.1-pro-high",
+        _skip_cancel_reset=True,
+    )
+    response = client._send_ocagy(
+        [{"role": "user", "content": "test"}],
+        0.2,
+        1024,
+        "test",
+    )
+
+    assert client.client_type == "ocagy"
+    assert response.content == "PINNED"
+    assert captured["model"] == "ocagy2/gemini-3.1-pro-high"
 
 
 def test_ocagy_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):

@@ -266,8 +266,11 @@ def test_logged_in_ocagy_is_eligible_for_automatic_polling(tmp_path, monkeypatch
     assert model_options.catalog_provider_for_model(
         "ocagy/gemini-3.1-pro-high"
     ) == "ocagy"
+    assert model_options.catalog_provider_for_model(
+        "ocagy2/gemini-3.1-pro-high"
+    ) == "ocagy"
     assert model_options.due_provider_catalog_for_model(
-        "ocagy/gemini-3.1-pro-high"
+        "ocagy2/gemini-3.1-pro-high"
     ) == "ocagy"
 
 

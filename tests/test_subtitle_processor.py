@@ -506,6 +506,80 @@ def test_manual_glossary_copy_keeps_subtitle_zip_members_in_one_folder(
     assert sum("Copied glossary to output" in log for log in gui.logs) == 1
 
 
+def test_run_automapping_overwrites_each_output_glossary(tmp_path):
+    from translator_gui import TranslatorGUI
+
+    inputs = [tmp_path / "Book One.epub", tmp_path / "Book Two.epub"]
+    glossaries = [
+        tmp_path / "Glossary" / "Book One" / "Book One_glossary.csv",
+        tmp_path / "Glossary" / "Book Two" / "Book Two_glossary.csv",
+    ]
+    output_root = tmp_path / "outputs"
+    for index, (source, glossary) in enumerate(zip(inputs, glossaries), start=1):
+        source.write_bytes(b"epub")
+        glossary.parent.mkdir(parents=True)
+        glossary.write_text(f"latest glossary {index}\n", encoding="utf-8")
+        output_dir = output_root / source.stem
+        output_dir.mkdir(parents=True)
+        (output_dir / "glossary.csv").write_text(
+            f"stale glossary {index}\n",
+            encoding="utf-8",
+        )
+
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.selected_files = [str(path) for path in inputs]
+    gui.config = {
+        "auto_glossary_mode": "off",
+        "append_glossary_auto_load": True,
+        "output_directory": str(output_root),
+    }
+    gui.auto_glossary_mode_var = "off"
+    gui.manual_glossary_path = None
+    gui.manual_glossary_map = {}
+    gui.manual_glossary_manually_loaded = False
+    gui.logs = []
+    gui.append_log = gui.logs.append
+    glossary_by_source = {
+        os.path.normpath(os.path.abspath(source)): str(glossary)
+        for source, glossary in zip(inputs, glossaries)
+    }
+    gui._guess_glossary_for_input_file = lambda source: glossary_by_source[
+        os.path.normpath(os.path.abspath(source))
+    ]
+
+    copied = gui._sync_automapped_glossaries_to_output()
+
+    assert copied == 2
+    for index, source in enumerate(inputs, start=1):
+        assert (output_root / source.stem / "glossary.csv").read_text(
+            encoding="utf-8"
+        ) == f"latest glossary {index}\n"
+
+
+def test_run_automapping_does_not_replace_explicit_manual_glossary(tmp_path):
+    from translator_gui import TranslatorGUI
+
+    source = tmp_path / "Book.epub"
+    output_dir = tmp_path / "outputs" / "Book"
+    source.write_bytes(b"epub")
+    output_dir.mkdir(parents=True)
+    existing = output_dir / "glossary.csv"
+    existing.write_text("keep me\n", encoding="utf-8")
+
+    gui = TranslatorGUI.__new__(TranslatorGUI)
+    gui.selected_files = [str(source)]
+    gui.config = {
+        "auto_glossary_mode": "off",
+        "append_glossary_auto_load": True,
+        "output_directory": str(tmp_path / "outputs"),
+    }
+    gui.auto_glossary_mode_var = "off"
+    gui.manual_glossary_manually_loaded = True
+
+    assert gui._sync_automapped_glossaries_to_output() == 0
+    assert existing.read_text(encoding="utf-8") == "keep me\n"
+
+
 def test_grouped_subtitle_output_rejects_file_outside_archive_folder(tmp_path):
     with pytest.raises(ValueError, match="must stay inside"):
         grouped_subtitle_output_layout(
