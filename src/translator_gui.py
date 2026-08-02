@@ -13306,11 +13306,12 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     self.config.get('remote_image_download_workers', 4)
                 )))
             ))
-            os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{max(
+            remote_image_download_interval = max(
                 0.0, min(60.0, float(
                     self.config.get('remote_image_download_interval', 0.0)
                 ))
-            ):g}"
+            )
+            os.environ['REMOTE_IMAGE_DOWNLOAD_INTERVAL'] = f"{remote_image_download_interval:g}"
         except Exception:
             pass
         
