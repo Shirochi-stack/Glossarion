@@ -393,7 +393,11 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             print(f"   Warning: could not scan output HTML files for remote images: {exc}")
 
     if not remote_urls:
-        print("Remote image download enabled: no HTTP/HTTPS image URLs found")
+        message = "Remote image download enabled: no HTTP/HTTPS image URLs found"
+        if progress_callback:
+            progress_callback(message)
+        else:
+            print(message)
         return chapters
 
     images_dir = os.path.join(output_dir, 'images')
@@ -406,9 +410,33 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         configured_workers = 4
     worker_count = min(len(remote_urls), max(1, configured_workers))
 
-    print(f"Downloading {len(remote_urls)} remote image URL(s) as PNG...")
+    total_remote_urls = len(remote_urls)
+    download_started_at = time.monotonic()
+
+    def _progress_message(completed_count, success_count, failure_count, byte_count):
+        elapsed = max(0.001, time.monotonic() - download_started_at)
+        percent = int((completed_count * 100) / total_remote_urls)
+        rate = completed_count / elapsed if completed_count else 0.0
+        remaining = total_remote_urls - completed_count
+        eta_seconds = int(remaining / rate) if rate > 0 else 0
+        if completed_count == 0:
+            eta_label = "calculating"
+        elif eta_seconds >= 60:
+            eta_label = f"{eta_seconds // 60}m {eta_seconds % 60}s"
+        else:
+            eta_label = f"{eta_seconds}s"
+        size_mib = byte_count / (1024 * 1024)
+        return (
+            f"Downloading remote images: {completed_count}/{total_remote_urls} "
+            f"({percent}%) | {success_count} saved, {failure_count} failed | "
+            f"{size_mib:.1f} MiB | {rate:.1f} images/s | ETA {eta_label}"
+        )
+
+    initial_progress = _progress_message(0, 0, 0, 0)
     if progress_callback:
-        progress_callback(f"Downloading {len(remote_urls)} remote image URL(s)...")
+        progress_callback(initial_progress)
+    else:
+        print(initial_progress)
 
     def _download_and_store(remote_url):
         filename = f"remote_{hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]}.png"
@@ -425,9 +453,13 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
                     os.remove(temporary)
                 except OSError:
                     pass
-        return remote_url, f"images/{filename}"
+        return remote_url, f"images/{filename}", len(png_bytes)
 
     completed = 0
+    successful = 0
+    failed = 0
+    downloaded_bytes = 0
+    failure_details = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_url = {
             executor.submit(_download_and_store, remote_url): remote_url
@@ -437,14 +469,60 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             remote_url = future_to_url[future]
             completed += 1
             try:
-                downloaded_url, local_reference = future.result()
+                downloaded_url, local_reference, image_size = future.result()
                 replacements[downloaded_url] = local_reference
-                print(f"   Downloaded remote image {completed}/{len(remote_urls)}")
+                successful += 1
+                downloaded_bytes += image_size
             except Exception as exc:
-                print(f"   Warning: remote image download failed; keeping URL {remote_url}: {exc}")
+                failed += 1
+                failure_details.append((remote_url, str(exc)))
+
+            progress_message = _progress_message(
+                completed, successful, failed, downloaded_bytes
+            )
+            if progress_callback:
+                progress_callback(progress_message)
+            else:
+                ProgressBar.update(
+                    completed,
+                    total_remote_urls,
+                    prefix=(
+                        f"Remote PNGs | {successful} saved, {failed} failed | "
+                        f"{downloaded_bytes / (1024 * 1024):.1f} MiB"
+                    ),
+                )
+
+    if not progress_callback:
+        ProgressBar.finish()
+
+    for remote_url, error in failure_details[:10]:
+        warning = (
+            "Warning: remote image download failed; keeping original URL "
+            f"{remote_url}: {error}"
+        )
+        if progress_callback:
+            progress_callback(warning)
+        else:
+            print(warning)
+    if len(failure_details) > 10:
+        warning = (
+            f"Warning: {len(failure_details) - 10} additional remote image "
+            "download failure(s) omitted from the log"
+        )
+        if progress_callback:
+            progress_callback(warning)
+        else:
+            print(warning)
 
     if not replacements:
-        print("Remote image download finished: no images could be localized")
+        message = (
+            f"Remote image localization complete: 0/{total_remote_urls} saved, "
+            f"{failed} failed; no HTML references changed"
+        )
+        if progress_callback:
+            progress_callback(message)
+        else:
+            print(message)
         return chapters
 
     updated_chapters = 0
@@ -481,6 +559,11 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         f"Remote image download complete: {len(replacements)}/{len(remote_urls)} localized "
         f"as PNG ({updated_chapters} chapter(s), {disk_updated} saved HTML file(s) updated)"
     )
+    if progress_callback:
+        progress_callback(
+            f"Remote image localization complete: {successful}/{total_remote_urls} "
+            f"saved, {failed} failed; {updated_chapters} chapter(s) updated"
+        )
     return chapters
 
 

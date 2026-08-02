@@ -20693,7 +20693,7 @@ def main(log_callback=None, stop_callback=None):
         progress_manager.save()
     
     # Prepare progress callback for chapter extraction
-    # Filter to show only every 10% progress update
+    # Normal extraction phases log every 10%; remote image URLs log every 1%.
     chapter_progress_callback = None
     _progress_state = {}  # Track last shown percentage for each progress type
     
@@ -20704,6 +20704,13 @@ def main(log_callback=None, stop_callback=None):
             
             # Try to extract percentage from formatted progress bars
             percent_match = re.search(r'\((\d+)%\)', msg)
+            if percent_match and 'remote image' in msg.lower():
+                percent = int(percent_match.group(1))
+                last_percent = _progress_state.get('remote_images', -1)
+                if percent > last_percent:
+                    _progress_state['remote_images'] = percent
+                    log_callback(msg)
+                return
             if percent_match:
                 percent = int(percent_match.group(1))
                 

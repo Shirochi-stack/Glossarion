@@ -1553,6 +1553,7 @@ class _InputOutputDialog(QDialog):
         self._temp_root = ""
         self._temp_input = ""
         self._expected_output = ""
+        self._persisted_output_path = ""
         self._saved_selected_files = []
         self._saved_force_stream_all = False
         self._saved_env = {}
@@ -2976,6 +2977,7 @@ class _InputOutputDialog(QDialog):
             "content_html_path",
             "content_xhtml_path",
             "thinking_path",
+            "image_path",
         ):
             value = str(storage.get(key, "") or "").strip()
             if value:
@@ -3021,6 +3023,209 @@ class _InputOutputDialog(QDialog):
             return message[6]
         return {}
 
+    @classmethod
+    def _generated_image_paths_from_text(cls, content):
+        """Extract generated-image sentinel paths without treating normal text as a path."""
+        paths = []
+        for match in re.finditer(
+            r'\[GENERATED_IMAGE:(.+?)\]',
+            str(content or ''),
+            flags=re.IGNORECASE,
+        ):
+            value = str(match.group(1) or '').strip().strip('"\'')
+            if not value:
+                continue
+            path = os.path.abspath(os.path.expanduser(value))
+            if os.path.splitext(path)[1].lower() in cls._IMAGE_ATTACHMENT_EXTENSIONS:
+                paths.append(path)
+        return paths
+
+    def _assistant_generated_image_path(self, message, content=''):
+        """Resolve the durable image associated with one assistant response."""
+        storage = self._assistant_storage_for(message)
+        reference = str(storage.get('image_path', '') or '').strip()
+        if reference:
+            candidate = self._resolve_history_file_reference(reference)
+            if (
+                os.path.isfile(candidate)
+                and os.path.splitext(candidate)[1].lower()
+                in self._IMAGE_ATTACHMENT_EXTENSIONS
+            ):
+                return candidate
+
+        for candidate in self._generated_image_paths_from_text(content):
+            if os.path.isfile(candidate):
+                return candidate
+        return ''
+
+    def _generated_image_render_source(self, content, preferred_path=''):
+        """Replace generated-image sentinels with scaled local image markup."""
+        import html as html_lib
+        from PySide6.QtCore import QUrl
+
+        source = str(content or '')
+        preferred_path = os.path.abspath(str(preferred_path or '')) if preferred_path else ''
+        replacement_index = 0
+
+        def _render_marker(match):
+            nonlocal replacement_index
+            marker_paths = self._generated_image_paths_from_text(match.group(0))
+            candidate = marker_paths[0] if marker_paths else ''
+            if replacement_index == 0 and preferred_path:
+                candidate = preferred_path
+            replacement_index += 1
+            if not candidate or not os.path.isfile(candidate):
+                unavailable = html_lib.escape(candidate or 'unknown image')
+                return (
+                    "<p><b>Generated image unavailable.</b><br>"
+                    f"<code>{unavailable}</code></p>"
+                )
+
+            width = 0
+            height = 0
+            pixmap = QPixmap(candidate)
+            if not pixmap.isNull():
+                viewport_width = max(320, self.output_box.viewport().width())
+                maximum_width = max(280, min(980, int(viewport_width * 0.76)))
+                maximum_height = 760
+                scaled = pixmap.size().scaled(
+                    QSize(maximum_width, maximum_height),
+                    Qt.KeepAspectRatio,
+                )
+                width = max(1, scaled.width())
+                height = max(1, scaled.height())
+
+            image_url = QUrl.fromLocalFile(candidate).toString()
+            safe_url = html_lib.escape(image_url, quote=True)
+            safe_name = html_lib.escape(os.path.basename(candidate))
+            dimensions = (
+                f" width='{width}' height='{height}'" if width and height else ''
+            )
+            return (
+                "<figure class='generated-image-preview'>"
+                f"<img src='{safe_url}' alt='{safe_name}'{dimensions}>"
+                f"<figcaption>{safe_name}</figcaption>"
+                "</figure>"
+            )
+
+        return re.sub(
+            r'\[GENERATED_IMAGE:(.+?)\]',
+            _render_marker,
+            source,
+            flags=re.IGNORECASE,
+        )
+
+    def _promote_generated_image_reference(self, persistent_path):
+        """Point the live response at its persistent Direct Text image artifact."""
+        persistent_path = os.path.abspath(str(persistent_path or ''))
+        if (
+            not os.path.isfile(persistent_path)
+            or os.path.splitext(persistent_path)[1].lower()
+            not in self._IMAGE_ATTACHMENT_EXTENSIONS
+        ):
+            return False
+
+        marker = f"[GENERATED_IMAGE:{persistent_path}]"
+        marker_pattern = r'\[GENERATED_IMAGE:(.+?)\]'
+        stream_promoted = False
+        segment_promoted = False
+
+        if re.search(marker_pattern, self._streamed_content, flags=re.IGNORECASE):
+            self._streamed_content = re.sub(
+                marker_pattern,
+                lambda _match: marker,
+                self._streamed_content,
+                flags=re.IGNORECASE,
+            )
+            stream_promoted = True
+
+        for segment in self._active_request_segments:
+            segment_content = str(segment.get('content', '') or '')
+            if re.search(marker_pattern, segment_content, flags=re.IGNORECASE):
+                segment['content'] = re.sub(
+                    marker_pattern,
+                    lambda _match: marker,
+                    segment_content,
+                    flags=re.IGNORECASE,
+                )
+                segment['image_path'] = persistent_path
+                segment_promoted = True
+
+        if self._active_request_segments and not segment_promoted:
+            segment = self._active_request_segments[-1]
+            segment_content = str(segment.get('content', '') or '').rstrip()
+            segment['content'] = (
+                f"{segment_content}\n\n{marker}" if segment_content else marker
+            )
+            segment['image_path'] = persistent_path
+        if not stream_promoted:
+            streamed = str(self._streamed_content or '').rstrip()
+            self._streamed_content = f"{streamed}\n\n{marker}" if streamed else marker
+
+        self._expected_output = persistent_path
+        self._rendered_message_cache.clear()
+        return True
+
+    def _response_generated_image_path(self, message_index):
+        """Return one saved response's renderable generated-image path."""
+        try:
+            message_index = int(message_index)
+            message = self._chat_messages[message_index]
+            if message[0] != 'assistant':
+                return ''
+        except (IndexError, TypeError, ValueError):
+            return ''
+        content = self._assistant_message_text(
+            message, 'content', message_index
+        )
+        return self._assistant_generated_image_path(message, content)
+
+    def _save_response_image_as(self, message_index):
+        """Copy a generated Direct Text image to a user-selected destination."""
+        source_path = self._response_generated_image_path(message_index)
+        return self._save_generated_image_path_as(source_path)
+
+    def _save_generated_image_path_as(self, source_path):
+        """Copy one resolved generated image to a user-selected destination."""
+        source_path = os.path.abspath(str(source_path or '')) if source_path else ''
+        if not source_path:
+            QMessageBox.information(
+                self,
+                "Save image as",
+                "The generated image file is unavailable.",
+            )
+            return ''
+
+        extension = os.path.splitext(source_path)[1].lower() or '.png'
+        suggested_path = os.path.join(
+            os.path.dirname(source_path), os.path.basename(source_path)
+        )
+        selected_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save image as",
+            suggested_path,
+            f"Image (*{extension});;All files (*)",
+        )
+        if not selected_path:
+            return ''
+        if not os.path.splitext(selected_path)[1]:
+            selected_path += extension
+
+        try:
+            source_abs = os.path.abspath(source_path)
+            target_abs = os.path.abspath(selected_path)
+            if os.path.normcase(source_abs) != os.path.normcase(target_abs):
+                shutil.copy2(source_abs, target_abs)
+            self._set_status(f"Image saved: {os.path.basename(target_abs)}")
+            return target_abs
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Could not save image",
+                f"The generated image could not be saved.\n\n{exc}",
+            )
+            return ''
+
     def _assistant_message_with_timestamp(self, message, created_at=""):
         """Return an assistant tuple with durable creation metadata."""
         values = list(message[:6])
@@ -3034,6 +3239,12 @@ class _InputOutputDialog(QDialog):
                 str(created_at or "").strip()
                 or self._direct_response_timestamp()
             )
+        if not storage.get("image_path"):
+            image_paths = self._generated_image_paths_from_text(values[1])
+            if image_paths and os.path.isfile(image_paths[0]):
+                storage["image_path"] = self._history_file_reference(
+                    image_paths[0]
+                )
         return tuple(values + [storage])
 
     def _assistant_timestamp_label(self, message):
@@ -5925,6 +6136,7 @@ class _InputOutputDialog(QDialog):
                     "content_html_path",
                     "content_xhtml_path",
                     "thinking_path",
+                    "image_path",
                 ):
                     reference = str(storage.get(key, "") or "")
                     if not reference:
@@ -6331,6 +6543,10 @@ class _InputOutputDialog(QDialog):
         """Offer response actions plus the main log's auto-scroll control."""
         menu = self.output_box.createStandardContextMenu()
         message_index = self._message_index_at_output_position(position)
+        clicked_image_path = self._generated_image_path_at_output_position(
+            position
+        )
+        image_action_added = False
         if self._is_saved_assistant_message(message_index):
             menu.addSeparator()
             can_edit, can_open, can_copy = (
@@ -6357,6 +6573,33 @@ class _InputOutputDialog(QDialog):
             copy_action.triggered.connect(
                 lambda _checked=False, index=message_index: (
                     self._handle_output_anchor(f"direct-copy:{index}")
+                )
+            )
+            image_path = (
+                clicked_image_path
+                or self._response_generated_image_path(message_index)
+            )
+            if image_path:
+                save_image_action = menu.addAction("💾 Save image as…")
+                if clicked_image_path:
+                    save_image_action.triggered.connect(
+                        lambda _checked=False, path=image_path: (
+                            self._save_generated_image_path_as(path)
+                        )
+                    )
+                else:
+                    save_image_action.triggered.connect(
+                        lambda _checked=False, index=message_index: (
+                            self._handle_output_anchor(f"direct-image-save:{index}")
+                        )
+                    )
+                image_action_added = True
+        if clicked_image_path and not image_action_added:
+            menu.addSeparator()
+            save_image_action = menu.addAction("💾 Save image as…")
+            save_image_action.triggered.connect(
+                lambda _checked=False, path=clicked_image_path: (
+                    self._save_generated_image_path_as(path)
                 )
             )
         menu.addSeparator()
@@ -6453,6 +6696,49 @@ class _InputOutputDialog(QDialog):
                 return message_index
         return -1
 
+    def _generated_image_path_at_output_position(self, position):
+        """Resolve a rendered local image directly beneath a context-menu click."""
+        try:
+            base_cursor = self.output_box.cursorForPosition(position)
+            document = self.output_box.document()
+            base_position = base_cursor.position()
+            maximum_position = max(0, document.characterCount() - 1)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return ""
+
+        from PySide6.QtCore import QUrl
+
+        for candidate_position in (
+            base_position,
+            min(maximum_position, base_position + 1),
+            max(0, base_position - 1),
+        ):
+            try:
+                cursor = QTextCursor(document)
+                cursor.setPosition(candidate_position)
+                char_format = cursor.charFormat()
+                if not char_format.isImageFormat():
+                    continue
+                image_name = str(char_format.toImageFormat().name() or "").strip()
+                if not image_name:
+                    continue
+                image_url = QUrl(image_name)
+                candidate = (
+                    image_url.toLocalFile()
+                    if image_url.isLocalFile()
+                    else image_name
+                )
+                candidate = os.path.abspath(os.path.expanduser(candidate))
+                if (
+                    os.path.isfile(candidate)
+                    and os.path.splitext(candidate)[1].lower()
+                    in self._IMAGE_ATTACHMENT_EXTENSIONS
+                ):
+                    return candidate
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
+        return ""
+
     def _show_inline_response_context_menu(self, position):
         """Extend the active response editor menu with whole-output actions."""
         editor = getattr(self, "_inline_response_editor_box", None)
@@ -6483,6 +6769,14 @@ class _InputOutputDialog(QDialog):
                 QApplication.clipboard().setText(text_editor.toPlainText())
             )
         )
+        image_path = self._response_generated_image_path(message_index)
+        if image_path:
+            save_image_action = menu.addAction("💾 Save image as…")
+            save_image_action.triggered.connect(
+                lambda _checked=False, index=message_index: (
+                    self._handle_output_anchor(f"direct-image-save:{index}")
+                )
+            )
         menu.exec(editor.viewport().mapToGlobal(position))
 
     def _show_input_context_menu(self, position):
@@ -7509,6 +7803,14 @@ class _InputOutputDialog(QDialog):
                 return
             self._open_response_editor(message_index)
             return
+        image_save_prefix = "direct-image-save:"
+        if target.startswith(image_save_prefix):
+            try:
+                message_index = int(target[len(image_save_prefix):])
+            except (TypeError, ValueError):
+                return
+            self._save_response_image_as(message_index)
+            return
         output_prefix = "direct-output:"
         if target.startswith(output_prefix):
             try:
@@ -7844,6 +8146,7 @@ class _InputOutputDialog(QDialog):
         self._token_encoder_initialized = False
         self._streaming_text = False
         self._streamed_content = ""
+        self._persisted_output_path = ""
         self._active_request_segments = []
         self._request_segment_by_thread = {}
         self._stream_phase_by_thread = {}
@@ -8531,8 +8834,7 @@ class _InputOutputDialog(QDialog):
             return None
         return self._begin_request_segment("", source_thread)
 
-    @staticmethod
-    def _request_segment_message(segment, output_folder=""):
+    def _request_segment_message(self, segment, output_folder=""):
         thinking_tokens = int(segment.get("thinking_tokens", 0) or 0)
         text_tokens = int(segment.get("text_tokens", 0) or 0)
         phase = str(segment.get("phase", "processing") or "processing")
@@ -8571,6 +8873,14 @@ class _InputOutputDialog(QDialog):
             response_label = f"Request {request_number}"
         created_at = str(segment.get("created_at", "") or "").strip()
         storage = {"created_at": created_at} if created_at else {}
+        image_path = str(segment.get('image_path', '') or '').strip()
+        if not image_path:
+            image_paths = self._generated_image_paths_from_text(
+                segment.get('content', '')
+            )
+            image_path = image_paths[0] if image_paths else ''
+        if image_path and os.path.isfile(image_path):
+            storage['image_path'] = self._history_file_reference(image_path)
         return (
             "assistant",
             str(segment.get("content", "") or ""),
@@ -9748,6 +10058,9 @@ class _InputOutputDialog(QDialog):
                 content = self._assistant_message_text(
                     message, "content", message_index
                 )
+                generated_image_path = self._assistant_generated_image_path(
+                    message, content
+                )
                 inline_editing = bool(
                     self._inline_response_editor_frame is not None
                     and message_index == self._inline_response_edit_index
@@ -9769,10 +10082,14 @@ class _InputOutputDialog(QDialog):
                         current_session_id,
                         message_index,
                         str(content),
+                        generated_image_path,
                     )
                     rendered = self._rendered_message_cache.get(cache_key)
                     if rendered is None:
-                        rendered = self._markup_to_html(content)
+                        rendered_source = self._generated_image_render_source(
+                            content, generated_image_path
+                        )
+                        rendered = self._markup_to_html(rendered_source)
                         if message_index < len(self._chat_messages):
                             if len(self._rendered_message_cache) >= 384:
                                 self._rendered_message_cache.clear()
@@ -9930,6 +10247,13 @@ class _InputOutputDialog(QDialog):
                             "title='Edit this saved response'>"
                             "✏️&nbsp;&nbsp;Edit output</a>"
                         )
+                        if generated_image_path:
+                            message_actions.append(
+                                f"<a class='message-action' "
+                                f"href='direct-image-save:{message_index}' "
+                                "title='Save this generated image to another location'>"
+                                "💾&nbsp;&nbsp;Save image as…</a>"
+                            )
                 if is_attachment_action_card and output_folder:
                     if self._is_managed_attachment_workspace(
                         session, output_folder
@@ -10212,6 +10536,10 @@ class _InputOutputDialog(QDialog):
             ".message-gap { height: 28px; font-size: 1px; line-height: 28px; }"
             ".pending { color: #cbd5e1; font-style: italic; }"
             f".message-content {{ color: white; font-size: {body_font_point_size:.2f}pt; }}"
+            ".generated-image-preview { margin: 8px 0 4px 0; padding: 0; }"
+            ".generated-image-preview img { border: 1px solid #4a5568; }"
+            ".generated-image-preview figcaption { color: #94a3b8; "
+            "font-size: 0.78em; margin-top: 5px; }"
             ".message-actions { margin: 12px 0 2px 0; padding-top: 8px; "
             "border-top: 1px solid #3f4856; }"
             ".message-action { color: #aeb8c8; padding: 2px; font-size: 0.81em; "
@@ -10618,6 +10946,7 @@ class _InputOutputDialog(QDialog):
             target_folder, output_extension
         )
         shutil.copy2(self._expected_output, target_path)
+        self._persisted_output_path = os.path.abspath(target_path)
         session = self._current_chat_session()
         if session is not None:
             session["next_output_index"] = output_index + 1
@@ -10653,6 +10982,7 @@ class _InputOutputDialog(QDialog):
         )[0]
         generated_folder = os.path.join(self._temp_root, source_stem)
         copied_any = False
+        persisted_candidate = ""
         if os.path.isdir(generated_folder):
             shutil.copytree(
                 generated_folder,
@@ -10679,7 +11009,17 @@ class _InputOutputDialog(QDialog):
                     expected_abs,
                     os.path.join(target_folder, os.path.basename(expected_abs)),
                 )
+                persisted_candidate = os.path.join(
+                    target_folder, os.path.basename(expected_abs)
+                )
                 copied_any = True
+            elif already_in_tree:
+                persisted_candidate = os.path.join(
+                    target_folder,
+                    os.path.relpath(expected_abs, generated_abs),
+                )
+        if persisted_candidate and os.path.isfile(persisted_candidate):
+            self._persisted_output_path = os.path.abspath(persisted_candidate)
         if copied_any:
             self._sync_attachment_glossary(target_folder)
         return target_folder if copied_any else ""
@@ -10769,10 +11109,37 @@ class _InputOutputDialog(QDialog):
 
     def _discover_generated_output(self):
         """Find the final translated artifact created inside the scoped temp root."""
-        if self._expected_output and os.path.isfile(self._expected_output):
-            return self._expected_output
+        existing_expected = (
+            self._expected_output
+            if self._expected_output and os.path.isfile(self._expected_output)
+            else ""
+        )
+        if existing_expected:
+            expected_extension = os.path.splitext(existing_expected)[1].lower()
+            # Image-output runs can first expose a small translated .txt file
+            # containing only [GENERATED_IMAGE:...]. Do not let that adapter
+            # artifact hide the actual image saved elsewhere in the run tree.
+            if not (
+                self._run_output_mode == 'image'
+                and expected_extension not in self._IMAGE_ATTACHMENT_EXTENSIONS
+            ):
+                return existing_expected
+        if self._run_output_mode == 'image':
+            sentinel_sources = [str(getattr(self, '_streamed_content', '') or '')]
+            sentinel_sources.extend(
+                str(segment.get('content', '') or '')
+                for segment in getattr(self, '_active_request_segments', [])
+                if isinstance(segment, dict)
+            )
+            for sentinel_source in sentinel_sources:
+                for image_path in self._generated_image_paths_from_text(
+                    sentinel_source
+                ):
+                    if os.path.isfile(image_path):
+                        self._expected_output = image_path
+                        return image_path
         if not self._temp_root or not os.path.isdir(self._temp_root):
-            return ""
+            return existing_expected
 
         source_ext = str(self._run_source_extension or ".txt").lower()
         generated_image_scores = {
@@ -10841,13 +11208,14 @@ class _InputOutputDialog(QDialog):
                     score += min(20, int(size).bit_length())
                 candidates.append((score, modified, size, path))
         if not candidates:
-            return ""
+            return existing_expected
         candidates.sort(reverse=True)
         self._expected_output = candidates[0][3]
         return self._expected_output
 
     def _persist_output_folder(self):
         """Save a completed run as an indexed artifact in the chat folder."""
+        self._persisted_output_path = ""
         self._discover_generated_output()
         if (
             (not self._expected_output or not os.path.isfile(self._expected_output))
@@ -10896,6 +11264,9 @@ class _InputOutputDialog(QDialog):
             except Exception as fallback_exc:
                 # Last resort: preserve this run so its response link remains valid.
                 self._preserve_temp_root = True
+                self._persisted_output_path = os.path.abspath(
+                    self._expected_output
+                )
                 self._append_thinking(
                     f"⚠️ Could not create shared fallback output folder: "
                     f"{fallback_exc}\n"
@@ -11293,6 +11664,13 @@ class _InputOutputDialog(QDialog):
             self._append_thinking(f"⚠️ Could not read translated output: {exc}\n")
 
         output_folder = self._persist_output_folder()
+        persisted_output = str(self._persisted_output_path or '')
+        if (
+            persisted_output
+            and os.path.splitext(persisted_output)[1].lower()
+            in self._IMAGE_ATTACHMENT_EXTENSIONS
+        ):
+            self._promote_generated_image_reference(persisted_output)
         self._remember_output_folder(
             output_folder,
             update_conversation_root=not self._run_source_is_attachment,
@@ -11433,6 +11811,7 @@ class _InputOutputDialog(QDialog):
         self._temp_root = ""
         self._temp_input = ""
         self._expected_output = ""
+        self._persisted_output_path = ""
         self._run_source_path = ""
         self._run_source_extension = ".txt"
         self._run_source_is_attachment = False

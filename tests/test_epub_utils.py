@@ -1225,3 +1225,69 @@ def test_failed_remote_image_download_keeps_original_url(monkeypatch, tmp_path):
 
     assert remote_url in localized[0]['body']
     assert not list((tmp_path / 'images').glob('*.png'))
+
+
+def test_remote_image_download_reports_counted_progress(monkeypatch, tmp_path):
+    successful_url = 'https://images.example.test/success.file'
+    failed_url = 'https://images.example.test/failure.file'
+    chapters = [{
+        'num': 3,
+        'body': (
+            f'<img src="{successful_url}">'
+            f'<img src="{failed_url}">'
+        ),
+    }]
+    progress_messages = []
+
+    def fake_download(url):
+        if url == failed_url:
+            raise OSError('simulated failure')
+        return _remote_test_png_bytes()
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        fake_download,
+    )
+
+    chapter_extractor._localize_remote_images(
+        chapters,
+        str(tmp_path),
+        progress_callback=progress_messages.append,
+    )
+
+    assert progress_messages[0].startswith(
+        'Downloading remote images: 0/2 (0%) | 0 saved, 0 failed'
+    )
+    assert any(
+        'Downloading remote images: 1/2 (50%)' in message
+        for message in progress_messages
+    )
+    assert any(
+        'Downloading remote images: 2/2 (100%) | 1 saved, 1 failed'
+        in message
+        for message in progress_messages
+    )
+    assert any('images/s' in message and 'ETA ' in message
+               for message in progress_messages)
+    assert any(
+        'Warning: remote image download failed; keeping original URL'
+        in message
+        for message in progress_messages
+    )
+    assert progress_messages[-1].startswith(
+        'Remote image localization complete: 1/2 saved, 1 failed'
+    )
+
+
+def test_async_remote_image_progress_keeps_label_and_one_percent_cadence():
+    manager_source = (
+        Path(__file__).resolve().parents[1]
+        / 'src'
+        / 'chapter_extraction_manager.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'prefix = "🌐 Remote image URL progress"' in manager_source
+    assert 'if prog_type == "remote_images":' in manager_source
+    assert 'should_show = percent > last_percent' in manager_source
+    assert 'formatted_message += f" {detail}"' in manager_source

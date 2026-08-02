@@ -1708,6 +1708,221 @@ def test_direct_text_card_limit_is_clamped():
     assert dialog_class._normalize_rendered_card_limit(999) == 200
 
 
+def test_direct_text_generated_image_is_promoted_to_persistent_path(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    temporary_image = tmp_path / "temporary.png"
+    persistent_image = tmp_path / "Direct Text 1.png"
+    temporary_image.write_bytes(b"temporary image")
+    persistent_image.write_bytes(b"persistent image")
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        _streamed_content = f"[GENERATED_IMAGE:{temporary_image}]"
+        _active_request_segments = [{
+            "content": f"[GENERATED_IMAGE:{temporary_image}]",
+        }]
+        _expected_output = str(temporary_image)
+        _rendered_message_cache = {"stale": "value"}
+
+    dialog = FakeDialog()
+    promoted = dialog_class._promote_generated_image_reference(
+        dialog, str(persistent_image)
+    )
+
+    expected_marker = f"[GENERATED_IMAGE:{persistent_image}]"
+    assert promoted is True
+    assert dialog._streamed_content == expected_marker
+    assert dialog._active_request_segments[0]["content"] == expected_marker
+    assert dialog._active_request_segments[0]["image_path"] == str(
+        persistent_image
+    )
+    assert dialog._expected_output == str(persistent_image)
+    assert dialog._rendered_message_cache == {}
+
+
+def test_direct_text_indexed_image_copy_records_persistent_artifact(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    temporary_image = tmp_path / "temporary.png"
+    temporary_image.write_bytes(b"generated image")
+    conversation_folder = tmp_path / "Direct Text" / "Chat 001"
+    conversation_folder.mkdir(parents=True)
+    target_image = conversation_folder / "Direct Text 1.png"
+    session = {"next_output_index": 1}
+
+    class FakeDialog:
+        _expected_output = str(temporary_image)
+        _persisted_output_path = ""
+
+        @staticmethod
+        def _next_indexed_output_path(_target_folder, _extension):
+            return 1, str(target_image)
+
+        @staticmethod
+        def _current_chat_session():
+            return session
+
+        @staticmethod
+        def _schedule_chat_history_save():
+            return None
+
+    dialog = FakeDialog()
+    copied = dialog_class._copy_indexed_output_file(
+        dialog, str(conversation_folder)
+    )
+
+    assert copied == str(target_image)
+    assert target_image.read_bytes() == b"generated image"
+    assert dialog._persisted_output_path == str(target_image)
+    assert session["next_output_index"] == 2
+
+
+def test_direct_text_image_mode_prefers_generated_image_over_marker_text(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    marker_text = tmp_path / "direct_text_stream_translated.txt"
+    generated_image = tmp_path / "response_1_generated.png"
+    marker_text.write_text(
+        f"[GENERATED_IMAGE:{generated_image}]", encoding="utf-8"
+    )
+    generated_image.write_bytes(b"generated image payload" * 100)
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        _expected_output = str(marker_text)
+        _temp_root = str(tmp_path)
+        _run_output_mode = "image"
+        _run_source_extension = ".txt"
+        _run_started_at = 0.0
+        _streamed_content = marker_text.read_text(encoding="utf-8")
+        _active_request_segments = []
+
+        @staticmethod
+        def _generated_image_paths_from_text(content):
+            return dialog_class._generated_image_paths_from_text(content)
+
+    dialog = FakeDialog()
+    discovered = dialog_class._discover_generated_output(dialog)
+
+    assert discovered == str(generated_image)
+    assert dialog._expected_output == str(generated_image)
+
+
+def test_direct_text_generated_image_marker_becomes_inline_image(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    image_path = tmp_path / "Direct Text 1.png"
+    image = QImage(8, 6, QImage.Format_RGB32)
+    image.fill(0xFF336699)
+    assert image.save(str(image_path), "PNG")
+
+    class Viewport:
+        @staticmethod
+        def width():
+            return 900
+
+    class OutputBox:
+        @staticmethod
+        def viewport():
+            return Viewport()
+
+    class FakeDialog:
+        output_box = OutputBox()
+
+        @staticmethod
+        def _generated_image_paths_from_text(content):
+            return dialog_class._generated_image_paths_from_text(content)
+
+    marker = f"[GENERATED_IMAGE:{image_path}]"
+    rendered_source = dialog_class._generated_image_render_source(
+        FakeDialog(), marker, str(image_path)
+    )
+
+    assert marker not in rendered_source
+    assert "<img src='file:///" in rendered_source
+    assert "Direct Text 1.png" in rendered_source
+    rendered_html = dialog_class._markup_to_html(rendered_source)
+    assert "<img" in rendered_html
+    assert "file:///" in rendered_html
+
+
+def test_direct_text_save_image_as_copies_persistent_image(monkeypatch, tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    import translator_gui
+
+    source_image = tmp_path / "Direct Text 1.png"
+    source_image.write_bytes(b"persistent generated image")
+    selected_image = tmp_path / "Saved elsewhere.png"
+    statuses = []
+
+    class FakeDialog:
+        @staticmethod
+        def _set_status(value):
+            statuses.append(value)
+
+    monkeypatch.setattr(
+        translator_gui.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (str(selected_image), ""),
+    )
+
+    saved = dialog_class._save_generated_image_path_as(
+        FakeDialog(), str(source_image)
+    )
+
+    assert saved == str(selected_image)
+    assert selected_image.read_bytes() == b"persistent generated image"
+    assert statuses == ["Image saved: Saved elsewhere.png"]
+
+
+def test_direct_text_right_click_resolves_rendered_image_path(tmp_path):
+    dialog_class = _direct_text_dialog_class()
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QImage, QTextCursor, QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    image_path = tmp_path / "Direct Text 2.png"
+    image = QImage(8, 6, QImage.Format_RGB32)
+    image.fill(0xFF663399)
+    assert image.save(str(image_path), "PNG")
+
+    document = QTextDocument()
+    document.setHtml(
+        f'<p>before</p><img src="{QUrl.fromLocalFile(str(image_path)).toString()}">'
+    )
+    image_position = None
+    for position in range(document.characterCount()):
+        cursor = QTextCursor(document)
+        cursor.setPosition(position)
+        if cursor.charFormat().isImageFormat():
+            image_position = position
+            break
+    assert image_position is not None
+
+    class OutputBox:
+        @staticmethod
+        def document():
+            return document
+
+        @staticmethod
+        def cursorForPosition(_position):
+            cursor = QTextCursor(document)
+            cursor.setPosition(image_position)
+            return cursor
+
+    class FakeDialog:
+        _IMAGE_ATTACHMENT_EXTENSIONS = dialog_class._IMAGE_ATTACHMENT_EXTENSIONS
+        output_box = OutputBox()
+
+    resolved = dialog_class._generated_image_path_at_output_position(
+        FakeDialog(), None
+    )
+
+    assert resolved == str(image_path)
+
+
 def test_direct_text_history_window_tracks_focus_and_tail():
     dialog_class = _direct_text_dialog_class()
     bounds = dialog_class._history_window_bounds

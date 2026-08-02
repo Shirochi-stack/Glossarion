@@ -266,7 +266,10 @@ class ChapterExtractionManager:
                         percent = int(100 * current / total)
                         
                         # Determine prefix and track last percent for this type
-                        if "Scanning files" in message:
+                        if "Downloading remote images" in message:
+                            prefix = "🌐 Remote image URL progress"
+                            prog_type = "remote_images"
+                        elif "Scanning files" in message:
                             prefix = "📂 Scanning files"
                             prog_type = "scan"
                         elif "Extracting resources" in message:
@@ -288,8 +291,15 @@ class ChapterExtractionManager:
                         
                         last_percent = self._last_percent.get(prog_type, -1)
                         
-                        # Show if: crossed a 10% threshold, or reached 100%
-                        should_show = (percent // 10 > last_percent // 10) or (percent == 100)
+                        # Remote URL downloads report every integer-percent
+                        # advance. Other extraction phases retain their
+                        # existing 10% log throttle.
+                        if prog_type == "remote_images":
+                            should_show = percent > last_percent
+                        else:
+                            should_show = (
+                                percent // 10 > last_percent // 10
+                            ) or percent == 100
                         
                         if should_show:
                             self._last_percent[prog_type] = percent
@@ -300,6 +310,12 @@ class ChapterExtractionManager:
                             bar = '█' * filled + '░' * (bar_length - filled)
                             
                             formatted_message = f"{prefix}: [{bar}] {current}/{total} ({percent}%)"
+                            if prog_type == "remote_images":
+                                progress_suffix = message.split(')', 1)
+                                if len(progress_suffix) > 1:
+                                    detail = progress_suffix[1].strip()
+                                    if detail:
+                                        formatted_message += f" {detail}"
                             
                             # Only log once - _log will call log_callback if it exists
                             self._log(formatted_message)
