@@ -31,6 +31,7 @@ Active refinement entry types:
 
 Critical refinement rules:
 - Keep the existing glossary schema and fields. Return refined glossary CSV data rows only, using the columns and delimiter shown in the glossary schema above. Do not include a header row.
+- Keep the exact same column order, do not rearrange it.
 - Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
 - Remove generic or unnecessary entries that are not useful for translation consistency.
 - For character entries, ensure there are no full-name character entries. If a character appears as a full name, split it into separate entries for the given name/first name and surname/family name. Do not combine first names, surnames, titles, nicknames, or aliases into one entry. Keep raw_name focused on the exact source form and translated_name focused on the target form.
