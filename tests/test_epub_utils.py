@@ -1373,6 +1373,59 @@ def test_remote_image_progress_cache_resumes_completed_png(monkeypatch, tmp_path
     assert remote_url not in localized[0]['body']
 
 
+def test_remote_image_progress_cache_resolves_image_rename_map(
+    monkeypatch, tmp_path
+):
+    remote_url = 'https://images.example.test/renamed-resumable.file'
+    digest = hashlib.sha256(remote_url.encode('utf-8')).hexdigest()[:20]
+    download_name = f'remote_{digest}.png'
+    final_name = 'chapter0004_img_1.png'
+    images_dir = tmp_path / 'images'
+    cache_dir = images_dir / '.cache'
+    cache_dir.mkdir(parents=True)
+    (images_dir / final_name).write_bytes(_remote_test_png_bytes())
+    (tmp_path / 'image_rename_map.json').write_text(
+        json.dumps({download_name: final_name}),
+        encoding='utf-8',
+    )
+    # Simulate an interrupted subsequent run that already reset the item to
+    # pending even though the prior renamed PNG remains valid on disk.
+    (cache_dir / 'remote_image_download_progress.json').write_text(
+        json.dumps({
+            'items': [{
+                'url': remote_url,
+                'status': 'pending',
+                'filename': download_name,
+                'download_filename': download_name,
+            }],
+        }),
+        encoding='utf-8',
+    )
+
+    def unexpected_download(_url):
+        raise AssertionError('rename-mapped cached PNG should be reused')
+
+    monkeypatch.setattr(
+        chapter_extractor,
+        '_download_remote_image_as_png',
+        unexpected_download,
+    )
+    localized = chapter_extractor._localize_remote_images(
+        [{'num': 4, 'body': f'<img src="{remote_url}">'}],
+        str(tmp_path),
+    )
+
+    manifest = json.loads((
+        cache_dir / 'remote_image_download_progress.json'
+    ).read_text(encoding='utf-8'))
+    assert manifest['status'] == 'completed'
+    assert manifest['resumed'] == 1
+    assert manifest['items'][0]['filename'] == final_name
+    assert manifest['items'][0]['local_reference'] == f'images/{final_name}'
+    assert f'images/{final_name}' in localized[0]['body']
+    assert remote_url not in localized[0]['body']
+
+
 def test_remote_image_progress_cache_is_excluded_from_epub_sources(tmp_path):
     cache_file = (
         tmp_path

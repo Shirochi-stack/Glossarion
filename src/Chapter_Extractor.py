@@ -477,6 +477,53 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
     except (OSError, ValueError, TypeError):
         previous_items = {}
 
+    # The normal chapter-image pass renames ``remote_<url hash>.png`` to a
+    # chapter-owned filename. A run interrupted after its progress manifest is
+    # reset to ``pending`` can therefore have a perfectly valid cached PNG that
+    # is only discoverable through the previous image rename map. Treat the map
+    # as the authoritative filename bridge instead of redownloading the URL.
+    rename_map = {}
+    rename_map_path = os.path.join(output_dir, 'image_rename_map.json')
+    try:
+        with open(rename_map_path, 'r', encoding='utf-8') as handle:
+            loaded_rename_map = json.load(handle)
+        if isinstance(loaded_rename_map, dict):
+            rename_map = {
+                os.path.basename(str(old_name).replace('\\', '/')):
+                os.path.basename(str(new_name).replace('\\', '/'))
+                for old_name, new_name in loaded_rename_map.items()
+                if old_name and new_name
+            }
+    except (OSError, ValueError, TypeError):
+        rename_map = {}
+    rename_map_casefold = {
+        old_name.casefold(): new_name
+        for old_name, new_name in rename_map.items()
+    }
+
+    def _cache_filename_candidates(*recorded_names):
+        """Yield mapped cache names, preferring the terminal rename target."""
+        emitted = set()
+        for recorded_name in recorded_names:
+            current = os.path.basename(str(recorded_name or '').replace('\\', '/'))
+            if not current:
+                continue
+            chain = []
+            seen = set()
+            while current and current.casefold() not in seen:
+                seen.add(current.casefold())
+                chain.append(current)
+                current = (
+                    rename_map.get(current)
+                    or rename_map_casefold.get(current.casefold())
+                    or ''
+                )
+            for candidate in reversed(chain):
+                key = candidate.casefold()
+                if key not in emitted:
+                    emitted.add(key)
+                    yield candidate
+
     try:
         configured_workers = int(os.getenv('REMOTE_IMAGE_DOWNLOAD_WORKERS', '4'))
     except (TypeError, ValueError):
@@ -509,17 +556,27 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
             '.png'
         )
         previous_item = previous_items.get(remote_url, {})
-        cached_filename = os.path.basename(str(
-            previous_item.get('filename') or download_filename
-        ))
+        cached_filename = download_filename
         cached_path = os.path.join(images_dir, cached_filename)
         cached_is_png = False
-        if previous_item.get('status') == 'completed' and os.path.isfile(cached_path):
+        for candidate_filename in _cache_filename_candidates(
+            previous_item.get('filename'),
+            previous_item.get('download_filename'),
+            download_filename,
+        ):
+            candidate_path = os.path.join(images_dir, candidate_filename)
+            if not os.path.isfile(candidate_path):
+                continue
             try:
-                with open(cached_path, 'rb') as handle:
-                    cached_is_png = handle.read(8) == b'\x89PNG\r\n\x1a\n'
+                with open(candidate_path, 'rb') as handle:
+                    candidate_is_png = handle.read(8) == b'\x89PNG\r\n\x1a\n'
             except OSError:
-                cached_is_png = False
+                candidate_is_png = False
+            if candidate_is_png:
+                cached_filename = candidate_filename
+                cached_path = candidate_path
+                cached_is_png = True
+                break
 
         item = {
             'url': remote_url,
@@ -618,13 +675,16 @@ def _localize_remote_images(chapters, output_dir, progress_callback=None):
         progress_callback(initial_progress)
     else:
         print(initial_progress)
-    cache_message = f"Remote image progress cache: {progress_path}"
+    cache_message = (
+        f"Remote image progress cache: {progress_path} | "
+        f"{resumed} cached PNG(s) restored out of {total_remote_urls}"
+    )
     if progress_callback:
         progress_callback(cache_message)
     else:
         print(cache_message)
     pacing_message = (
-        f"Remote image download pacing: {worker_count} thread(s), "
+        f"⏱️ Remote image download pacing: {worker_count} thread(s), "
         f"{download_interval:g}s between request starts"
     )
     if progress_callback:
