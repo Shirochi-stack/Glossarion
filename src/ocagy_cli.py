@@ -178,10 +178,10 @@ def _workspace_dir() -> Path:
     return path
 
 
-def _workspace_config() -> Dict[str, Any]:
+def _workspace_config(*, temperature: Optional[float] = None) -> Dict[str, Any]:
     # Project-local config keeps this integration independent from the user's
     # normal OpenCode projects while still reusing the plugin's account store.
-    return {
+    config: Dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "plugin": [_PLUGIN_PACKAGE],
         "share": "disabled",
@@ -200,9 +200,12 @@ def _workspace_config() -> Dict[str, Any]:
         },
         "provider": {
             "google": {
+                # OpenCode only forwards the agent's numeric temperature when
+                # the selected custom model advertises temperature support.
                 "models": {
                     "antigravity-gemini-3.1-pro": {
                         "name": "Gemini 3.1 Pro (Antigravity OAuth)",
+                        "temperature": True,
                         "limit": {"context": 1048576, "output": 65535},
                         "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
                         "variants": {
@@ -212,6 +215,7 @@ def _workspace_config() -> Dict[str, Any]:
                     },
                     "antigravity-gemini-3-pro": {
                         "name": "Gemini 3 Pro (Antigravity OAuth)",
+                        "temperature": True,
                         "limit": {"context": 1048576, "output": 65535},
                         "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
                         "variants": {
@@ -221,6 +225,7 @@ def _workspace_config() -> Dict[str, Any]:
                     },
                     "antigravity-gemini-3-flash": {
                         "name": "Gemini 3 Flash (Antigravity OAuth)",
+                        "temperature": True,
                         "limit": {"context": 1048576, "output": 65536},
                         "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
                         "variants": {
@@ -232,11 +237,13 @@ def _workspace_config() -> Dict[str, Any]:
                     },
                     "antigravity-claude-sonnet-4-6": {
                         "name": "Claude Sonnet 4.6 (Antigravity OAuth)",
+                        "temperature": True,
                         "limit": {"context": 200000, "output": 64000},
                         "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
                     },
                     "antigravity-claude-opus-4-6-thinking": {
                         "name": "Claude Opus 4.6 Thinking (Antigravity OAuth)",
+                        "temperature": True,
                         "limit": {"context": 200000, "output": 64000},
                         "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
                         "variants": {
@@ -248,11 +255,14 @@ def _workspace_config() -> Dict[str, Any]:
             }
         },
     }
+    if temperature is not None:
+        config["agent"]["glossarion"]["temperature"] = float(temperature)
+    return config
 
 
-def _write_workspace_config(path: Path) -> Path:
+def _write_workspace_config(path: Path, *, temperature: Optional[float] = None) -> Path:
     target = path / "opencode.json"
-    desired = _workspace_config()
+    desired = _workspace_config(temperature=temperature)
     current: Any = None
     if target.is_file():
         try:
@@ -262,6 +272,44 @@ def _write_workspace_config(path: Path) -> Path:
     if current != desired:
         target.write_text(json.dumps(desired, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target
+
+
+def _model_output_limit(model_id: str) -> Optional[int]:
+    """Return the configured hard output ceiling for one OpenCode model."""
+    try:
+        provider_id, provider_model = str(model_id).split("/", 1)
+        value = _workspace_config()["provider"][provider_id]["models"][provider_model]["limit"]["output"]
+        return int(value) if int(value) > 0 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _effective_output_limit(model_id: str, requested_max_tokens: int) -> int:
+    requested = max(1, int(requested_max_tokens))
+    model_limit = _model_output_limit(model_id)
+    return min(requested, model_limit) if model_limit is not None else requested
+
+
+def _log_generation_controls(
+    logger: Callable[[str], None],
+    *,
+    model_id: str,
+    temperature: float,
+    max_tokens: int,
+) -> None:
+    requested = max(1, int(max_tokens))
+    effective = _effective_output_limit(model_id, requested)
+    if effective < requested:
+        logger(
+            "🎛️ Glossarion controls OpenCode generation: "
+            f"temperature={temperature}, max_tokens={effective:,} "
+            f"(requested {requested:,}; model cap {effective:,})."
+        )
+        return
+    logger(
+        "🎛️ Glossarion controls OpenCode generation: "
+        f"temperature={temperature}, max_tokens={effective:,}."
+    )
 
 
 def _config_dir() -> Path:
@@ -437,10 +485,15 @@ def _request_subprocess_env(
     account_number: int,
     selected: Optional[Tuple[Dict[str, Any], str]],
     logger: Callable[[str], None],
+    max_tokens: int,
 ) -> Dict[str, str]:
     if selected is None:
         logger("🧭 OcAgy: using shared plugin account pool (ocagy0/)")
-        return _subprocess_env()
+        env = _subprocess_env()
+        # OpenCode otherwise applies its own global output ceiling before the
+        # model-specific limit in opencode.json.
+        env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
+        return env
 
     selected_account, email = selected
     isolated_config = _prepare_isolated_account_config(
@@ -452,7 +505,9 @@ def _request_subprocess_env(
         f"🧭 OcAgy: using account slot #{account_number}"
         + (f" ({email})" if email else "")
     )
-    return _subprocess_env(isolated_config)
+    env = _subprocess_env(isolated_config)
+    env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max(1, int(max_tokens)))
+    return env
 
 
 def _creation_flags(*, visible: bool = False) -> int:
@@ -2034,8 +2089,14 @@ def _send_chat_completion_buffered(
     base = _workspace_dir()
     request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=str(base)))
     try:
-        process_env = _request_subprocess_env(request_dir, account_number, selected, logger)
-        _write_workspace_config(request_dir)
+        process_env = _request_subprocess_env(
+            request_dir,
+            account_number,
+            selected,
+            logger,
+            max_tokens,
+        )
+        _write_workspace_config(request_dir, temperature=temperature)
     except Exception:
         shutil.rmtree(request_dir, ignore_errors=True)
         raise
@@ -2057,9 +2118,11 @@ def _send_chat_completion_buffered(
         command.extend(["--variant", variant])
 
     logger(f"🪐 OpenCode Antigravity: {Path(exe).name} run --model {model_id}" + (f" --variant {variant}" if variant else ""))
-    logger(
-        "🎛️ OpenCode/plugin manages temperature and output limits internally "
-        f"(Glossarion requested temperature={temperature}, max_tokens={max_tokens:,})."
+    _log_generation_controls(
+        logger,
+        model_id=model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
     start = time.time()
@@ -2197,15 +2260,18 @@ def send_chat_completion(
             account_number,
             selected,
             logger,
+            max_tokens,
         )
-        _write_workspace_config(request_dir)
+        _write_workspace_config(request_dir, temperature=temperature)
         logger(
             f"🪐 OpenCode Antigravity: {Path(exe).name} live stream --model {model_id}"
             + (f" --variant {variant}" if variant else "")
         )
-        logger(
-            "🎛️ OpenCode/plugin manages temperature and output limits internally "
-            f"(Glossarion requested temperature={temperature}, max_tokens={max_tokens:,})."
+        _log_generation_controls(
+            logger,
+            model_id=model_id,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         result = _send_via_server(
             exe=exe,

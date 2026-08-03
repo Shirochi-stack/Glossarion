@@ -95,6 +95,24 @@ def test_numbered_prefix_account_mapping():
     )
 
 
+def test_generation_controls_are_encoded_for_opencode():
+    config = ocagy_cli._workspace_config(temperature=0.3)
+
+    assert config["agent"]["glossarion"]["temperature"] == 0.3
+    assert all(
+        model["temperature"] is True
+        for model in config["provider"]["google"]["models"].values()
+    )
+    assert ocagy_cli._effective_output_limit(
+        "google/antigravity-gemini-3.1-pro",
+        128000,
+    ) == 65535
+    assert ocagy_cli._effective_output_limit(
+        "google/antigravity-claude-sonnet-4-6",
+        4096,
+    ) == 4096
+
+
 def test_numbered_prefix_isolates_selected_account(tmp_path, monkeypatch):
     exe = _fake_opencode(tmp_path)
     config_dir = tmp_path / "config"
@@ -170,6 +188,9 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
 
     def fake_server_send(**kwargs):
         captured.update(kwargs)
+        captured["request_config"] = json.loads(
+            (Path(kwargs["request_dir"]) / "opencode.json").read_text(encoding="utf-8")
+        )
         return {
             "content": (
                 "OK:"
@@ -190,6 +211,7 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
     monkeypatch.setattr(ocagy_cli, "_send_via_server", fake_server_send)
     monkeypatch.delenv("TRANSLATION_CANCELLED", raising=False)
     ocagy_cli.reset_cancel()
+    logs = []
 
     result = ocagy_cli.send_chat_completion(
         messages=[
@@ -197,7 +219,10 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
             {"role": "user", "content": "한글 test " * 10000},
         ],
         model="ocagy0/gemini-3.1-pro-high",
+        temperature=0.25,
+        max_tokens=128000,
         timeout=30,
+        log_fn=logs.append,
     )
 
     assert result["content"].startswith("OK:google/antigravity-gemini-3.1-pro:high:")
@@ -206,6 +231,14 @@ def test_send_uses_live_server_and_variant(tmp_path, monkeypatch):
     assert captured["log_stream"] is True
     assert captured["model_id"] == "google/antigravity-gemini-3.1-pro"
     assert Path(captured["subprocess_env"]["OPENCODE_CONFIG_DIR"]) == config_dir
+    assert captured["subprocess_env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "128000"
+    assert captured["request_config"]["agent"]["glossarion"]["temperature"] == 0.25
+    assert any(
+        "Glossarion controls OpenCode generation" in message
+        and "max_tokens=65,535" in message
+        and "requested 128,000" in message
+        for message in logs
+    )
     config = json.loads((tmp_path / "workspace" / "opencode.json").read_text(encoding="utf-8"))
     assert config["plugin"] == ["opencode-antigravity-auth@latest"]
     assert config["permission"]["*"] == "deny"
