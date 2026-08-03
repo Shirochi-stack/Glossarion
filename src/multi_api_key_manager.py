@@ -146,6 +146,17 @@ def _model_needs_api_key(model: str) -> bool:
     except Exception:
         return True
 
+
+_DEFAULT_KEY_TEST_TIMEOUT_SECONDS = 30
+_OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS = 60
+
+
+def _api_key_test_timeout_seconds(model: str) -> int:
+    """Give models with optional API keys more time to finish their test request."""
+    if not _model_needs_api_key(model):
+        return _OPTIONAL_API_KEY_TEST_TIMEOUT_SECONDS
+    return _DEFAULT_KEY_TEST_TIMEOUT_SECONDS
+
 class RateLimitCache:
     """Thread-safe rate limit cache"""
     def __init__(self):
@@ -3588,6 +3599,7 @@ class MultiAPIKeyDialog(QDialog):
         """Test a single fallback key - REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
+        timeout_seconds = _api_key_test_timeout_seconds(model)
 
         print(f"[DEBUG] Starting REAL fallback key test for {model}")
 
@@ -3684,16 +3696,16 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         self._update_fallback_test_result(index, False)
 
-        # Submit to shared executor with 30-second timeout
+        # Submit to the shared executor with a model-aware per-key timeout.
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
                 future = timeout_pool.submit(run_api_test)
                 try:
-                    future.result(timeout=30)
+                    future.result(timeout=timeout_seconds)
                 except FuturesTimeout:
                     timed_out[0] = True  # suppress stale results from run_api_test
-                    print(f"[DEBUG] Fallback key test TIMED OUT for {model} (30s)")
+                    print(f"[DEBUG] Fallback key test TIMED OUT for {model} ({timeout_seconds}s)")
                     _client = client_ref[0]
                     if _client:
                         try:
@@ -6215,6 +6227,7 @@ class MultiAPIKeyDialog(QDialog):
         model = key_data.get('model', '')
 
         print(f"[DEBUG] Starting REAL glossary key test for {model}")
+        timeout_seconds = _api_key_test_timeout_seconds(model)
 
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
@@ -6297,10 +6310,10 @@ class MultiAPIKeyDialog(QDialog):
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
                 future = timeout_pool.submit(run_api_test)
                 try:
-                    future.result(timeout=30)
+                    future.result(timeout=timeout_seconds)
                 except FuturesTimeout:
                     timed_out[0] = True
-                    print(f"[DEBUG] Glossary key test TIMED OUT for {model} (30s)")
+                    print(f"[DEBUG] Glossary key test TIMED OUT for {model} ({timeout_seconds}s)")
                     _client = client_ref[0]
                     if _client:
                         try:
@@ -7504,6 +7517,7 @@ class MultiAPIKeyDialog(QDialog):
             return
 
         key = self.key_pool.keys[index]
+        timeout_seconds = _api_key_test_timeout_seconds(key.model)
         print(f"[DEBUG] Submitting test for key {index}: {key.model}")
 
         # Run REAL API test using executor like translation does
@@ -7593,18 +7607,18 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         self._handle_test_result(index, False, f"Error: {error_msg}")
 
-        # Submit to shared executor with 30-second timeout
+        # Submit to the shared executor with a model-aware per-key timeout.
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
             # Use a separate single-thread pool so we can enforce the timeout
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
                 future = timeout_pool.submit(run_api_test)
                 try:
-                    future.result(timeout=30)
+                    future.result(timeout=timeout_seconds)
                 except FuturesTimeout:
-                    # 30 seconds elapsed — hard-cancel the HTTP session and mark as timeout
+                    # The model-aware deadline elapsed; cancel the HTTP session and mark a timeout.
                     timed_out[0] = True  # suppress stale results from run_api_test
-                    print(f"[DEBUG] Key test TIMED OUT for {key.model} (30s)")
+                    print(f"[DEBUG] Key test TIMED OUT for {key.model} ({timeout_seconds}s)")
                     _client = client_ref[0]
                     if _client:
                         try:
@@ -7624,9 +7638,9 @@ class MultiAPIKeyDialog(QDialog):
                     except Exception:
                         pass
                     if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Timed out (30s)"))
+                        QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Timed out ({timeout_seconds}s)"))
                     else:
-                        self._handle_test_result(index, False, "Timed out (30s)")
+                        self._handle_test_result(index, False, f"Timed out ({timeout_seconds}s)")
                 except Exception:
                     pass  # Already handled inside run_api_test
 
@@ -9104,6 +9118,7 @@ class MultiAPIKeyDialog(QDialog):
         spec = self._dedicated_pool_spec(pool_name)
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
+        timeout_seconds = _api_key_test_timeout_seconds(model)
 
         def finish(success=None, timeout=False):
             if timeout:
@@ -9153,7 +9168,7 @@ class MultiAPIKeyDialog(QDialog):
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
                 future = timeout_pool.submit(run_api_test)
                 try:
-                    future.result(timeout=30)
+                    future.result(timeout=timeout_seconds)
                 except FuturesTimeout:
                     finish(timeout=True)
                     try:
