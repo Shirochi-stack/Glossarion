@@ -1810,16 +1810,38 @@ class EPUBCompiler:
                         try:
                             # Import the functions from standalone module
                             from translate_headers_standalone import (
-                                load_translations_from_file, 
                                 apply_existing_translations,
                                 extract_source_chapters_with_opf_mapping,
-                                match_output_to_source_chapters
+                                retry_failed_header_translations,
                             )
                             self.log("✅ Successfully imported standalone module functions")
                             
-                            # Load existing translations
-                            self.log("🔍 Loading translations from file...")
-                            chapters_info, translated_headers, _ = load_translations_from_file(translations_file, self.log)
+                            # Retry status-marked failures before applying the
+                            # usable cache. Merely excluding those fallbacks is
+                            # not enough: existing source records are not "new"
+                            # chapters, so the old reconciliation skipped them.
+                            retry_translator = getattr(self, 'header_translator', None)
+                            if not getattr(retry_translator, 'client', None):
+                                retry_translator = None
+                            if retry_translator is None and getattr(self, 'api_client', None):
+                                from metadata_batch_translator import BatchHeaderTranslator
+                                retry_config = {
+                                    'batch_header_system_prompt': os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'),
+                                    'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
+                                    'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+                                }
+                                retry_translator = BatchHeaderTranslator(
+                                    self.api_client, retry_config
+                                )
+
+                            self.log("🔍 Loading translations and retrying failed cache entries...")
+                            chapters_info, translated_headers, _ = retry_failed_header_translations(
+                                translations_file,
+                                translator=retry_translator,
+                                batch_size=getattr(self, 'headers_per_batch', -1),
+                                other_file_path=os.path.join(self.output_dir, 'TOC.txt'),
+                                log_callback=self.log,
+                            )
                             
                             if translated_headers:
                                 self.log(f"📋 Loaded {len(translated_headers)} existing translations:")
@@ -2190,10 +2212,17 @@ class EPUBCompiler:
                     
                     try:
                         # Import the functions from standalone module
-                        from translate_headers_standalone import load_translations_from_file
+                        from translate_headers_standalone import retry_failed_header_translations
                         
-                        # Load existing translations
-                        _, translated_headers, _ = load_translations_from_file(translations_file, self.log)
+                        # Load existing translations and retry status-marked
+                        # failures before calculating genuinely new chapters.
+                        _, translated_headers, _ = retry_failed_header_translations(
+                            translations_file,
+                            translator=self.header_translator,
+                            batch_size=getattr(self, 'headers_per_batch', -1),
+                            other_file_path=os.path.join(self.output_dir, 'TOC.txt'),
+                            log_callback=self.log,
+                        )
                         
                         if translated_headers:
                             self.log(f"📋 Loaded {len(translated_headers)} existing translations")
@@ -2609,12 +2638,17 @@ class EPUBCompiler:
             toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
             if os.path.exists(toc_txt_path):
                 try:
-                    _, _toc_trans, _toc_files = self._load_toc_translations_file(toc_txt_path)
-                    if _toc_trans:
+                    _toc_source, _toc_trans, _toc_files = self._load_toc_translations_file(toc_txt_path)
+                    if _toc_source:
                         # Build output-filename -> translated title lookup
                         # TOC.txt stores extensionless names, so strip extensions when matching
                         _file_to_title = {}
-                        for _idx, _ttitle in _toc_trans.items():
+                        for _idx, _raw_title in _toc_source.items():
+                            # Failed cache entries are intentionally absent from
+                            # _toc_trans. Keep them in the PDF TOC using their raw
+                            # label; filtering failed entries must not remove the
+                            # TOC entry itself.
+                            _ttitle = _toc_trans.get(_idx) or _raw_title
                             _out = _toc_files.get(_idx, '')
                             if _out:
                                 _file_to_title[os.path.basename(_out)] = _ttitle
@@ -6177,7 +6211,11 @@ img {
 
             # ── Rewrite TOC entries whose translation disagrees with the header ──
             updates = 0
-            for tidx in list(toc_trans.keys()):
+            # Iterate every TOC record, including records whose failed fallback
+            # was excluded from toc_trans. A successful chapter-header cache can
+            # therefore repair a failed TOC cache entry, while a failed header
+            # can never become canonical because it is absent from hdr_trans.
+            for tidx in toc_orig:
                 toc_core = self._normalize_core_name(toc_out.get(tidx, ''))
                 toc_version = (toc_trans.get(tidx) or '').strip()
                 canonical = hdr_by_core.get(toc_core)

@@ -344,7 +344,9 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
     Returns:
         Tuple of (source_headers, translated_headers, output_files) where:
         - source_headers: Maps chapter number to original title
-        - translated_headers: Maps chapter number to translated title
+        - translated_headers: Maps chapter number to successful translated title.
+          Entries explicitly marked ``translation failed`` are excluded so a
+          cached source-language fallback cannot overwrite a later correction.
         - output_files: Maps chapter number to output filename (basename/clean name)
     """
     def log(message):
@@ -373,6 +375,8 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
         # Split by chapter blocks
         chapter_blocks = re.split(r'-{3,}', content)
         
+        failed_translation_count = 0
+
         for block in chapter_blocks:
             if not block.strip():
                 continue
@@ -389,17 +393,42 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
             if original_match:
                 source_headers[chapter_num] = original_match.group(1).strip()
             
-            # Parse translated title
+            # A failed translation is saved with the original title in the
+            # ``Translated`` field for reporting.  That fallback is not a
+            # reusable translation: applying it later would overwrite a
+            # corrected/refined heading with the source-language heading.
+            status_match = re.search(
+                r'^\s*Status:\s*(.*?)\s*$',
+                block,
+                flags=re.MULTILINE | re.IGNORECASE,
+            )
+            translation_failed = bool(
+                status_match
+                and re.search(
+                    r'\btranslation\s+failed\b',
+                    status_match.group(1),
+                    flags=re.IGNORECASE,
+                )
+            )
+
+            # Parse translated title only when the cache entry succeeded.
             translated_match = re.search(r'Translated:\s*(.+?)(?:\n|$)', block)
-            if translated_match:
+            if translated_match and not translation_failed:
                 translated_headers[chapter_num] = translated_match.group(1).strip()
+            elif translated_match and translation_failed:
+                failed_translation_count += 1
             
             # Parse output file or target URI (TOC uses Target URI, Headers use Output File)
             output_match = re.search(r'(?:Output File|Target URI):\s*(.+?)(?:\n|$)', block)
             if output_match:
                 output_files[chapter_num] = output_match.group(1).strip()
         
-        log(f"📋 Loaded {len(translated_headers)} translations from file")
+        log(f"📋 Loaded {len(translated_headers)} usable translations from file")
+        if failed_translation_count:
+            log(
+                f"⚠️ Ignored {failed_translation_count} failed translation "
+                f"cache entr{'y' if failed_translation_count == 1 else 'ies'}"
+            )
         
         # Log first few for debugging
         if translated_headers:
@@ -828,6 +857,129 @@ def _cross_reference_from_file(
         reused = {}
 
     return reused, remaining
+
+
+def _write_header_translation_cache(
+    translations_file: str,
+    source_headers: Dict[int, str],
+    translated_headers: Dict[int, str],
+    output_files: Dict[int, str],
+) -> None:
+    """Rewrite a header cache once, preserving unresolved failure records."""
+    chapter_numbers = sorted(source_headers)
+    with open(translations_file, 'w', encoding='utf-8') as f:
+        f.write("Chapter Header Translations\n")
+        f.write("=" * 50 + "\n\n")
+
+        if 0 in chapter_numbers:
+            f.write("Note: This novel uses 0-based chapter numbering (starts with Chapter 0)\n")
+            f.write("-" * 50 + "\n\n")
+
+        for num in chapter_numbers:
+            original = source_headers.get(num, "Unknown")
+            translated = translated_headers.get(num, original)
+            f.write(f"Chapter {num}:\n")
+            f.write(f"  Original:   {original}\n")
+            f.write(f"  Translated: {translated}\n")
+            if output_files.get(num):
+                f.write(f"  Output File: {output_files[num]}\n")
+            if num not in translated_headers:
+                f.write("  Status:     ⚠️ Using original (translation failed)\n")
+            f.write("-" * 40 + "\n")
+
+        f.write("\nSummary:\n")
+        f.write(f"Total chapters: {len(chapter_numbers)}\n")
+        if chapter_numbers:
+            f.write(
+                f"Chapter range: {min(chapter_numbers)} to {max(chapter_numbers)}\n"
+            )
+        f.write(f"Successfully translated: {len(translated_headers)}\n")
+        failed = [num for num in chapter_numbers if num not in translated_headers]
+        if failed:
+            f.write(f"Failed chapters: {', '.join(map(str, failed))}\n")
+
+
+def retry_failed_header_translations(
+    translations_file: str,
+    translator=None,
+    batch_size: int = None,
+    other_file_path: str = None,
+    log_callback=None,
+) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
+    """Retry failed records in an existing ``translated_headers.txt`` cache.
+
+    Failed records are identified by ``load_translations_from_file`` excluding
+    their status-marked fallback from ``translated_headers``. Successful
+    translations from TOC.txt may be reused first; every remaining failed
+    record is sent to the supplied translator. Resolved records replace their
+    old failed blocks when the cache is rewritten, so duplicates cannot form.
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+
+    source_headers, translated_headers, output_files = load_translations_from_file(
+        translations_file, log_callback
+    )
+    failed_numbers = [
+        num for num in source_headers
+        if num not in translated_headers
+    ]
+    if not failed_numbers:
+        return source_headers, translated_headers, output_files
+
+    failed_headers = {
+        num: source_headers[num]
+        for num in failed_numbers
+    }
+    log(f"🔁 Retrying {len(failed_headers)} failed chapter header translation(s)...")
+
+    reused, remaining = _cross_reference_from_file(
+        failed_headers, other_file_path, log_callback
+    )
+    recovered: Dict[int, str] = dict(reused)
+
+    if remaining and translator is not None:
+        log(f"🌐 Sending {len(remaining)} failed chapter header(s) for retranslation...")
+        try:
+            api_translations = translator.translate_headers_batch(
+                remaining,
+                batch_size=batch_size,
+                translation_type='header',
+            ) or {}
+            recovered.update({
+                num: title
+                for num, title in api_translations.items()
+                if num in remaining and title
+            })
+        except Exception as exc:
+            log(f"⚠️ Failed header retranslation attempt: {exc}")
+    elif remaining:
+        log(
+            f"⚠️ {len(remaining)} failed chapter header(s) could not be retried "
+            "because no API translator is available"
+        )
+
+    if recovered:
+        translated_headers.update(recovered)
+        _write_header_translation_cache(
+            translations_file,
+            source_headers,
+            translated_headers,
+            output_files,
+        )
+
+    unresolved_count = sum(
+        1 for num in failed_numbers
+        if num not in translated_headers
+    )
+    log(
+        f"✅ Recovered {len(recovered)}/{len(failed_numbers)} failed chapter "
+        f"header translation(s); {unresolved_count} remain failed"
+    )
+    return source_headers, translated_headers, output_files
 
 
 def translate_headers_standalone(
@@ -1301,8 +1453,19 @@ def run_translate_headers_gui(gui_instance):
                 
                 # --- Reconcile: check if the source EPUB has new chapters ---
                 try:
-                    existing_source, existing_trans, existing_out = load_translations_from_file(
-                        translations_file, gui_instance.append_log
+                    from metadata_batch_translator import BatchHeaderTranslator
+                    retry_translator = BatchHeaderTranslator(
+                        gui_instance.api_client, config or {}
+                    )
+                    if hasattr(gui_instance, '_batch_header_translator'):
+                        gui_instance._batch_header_translator = retry_translator
+
+                    existing_source, existing_trans, existing_out = retry_failed_header_translations(
+                        translations_file,
+                        translator=retry_translator,
+                        batch_size=config.get('headers_per_batch', -1) if config else None,
+                        other_file_path=os.path.join(output_dir, 'TOC.txt'),
+                        log_callback=gui_instance.append_log,
                     )
                     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
                         current_epub, gui_instance.append_log
@@ -1343,13 +1506,7 @@ def run_translate_headers_gui(gui_instance):
                                     gui_instance.append_log(
                                         f"🌐 Translating {len(_hdr_api_remaining)} new chapter header(s)..."
                                     )
-                                    from metadata_batch_translator import BatchHeaderTranslator
-                                    tr = BatchHeaderTranslator(gui_instance.api_client, config or {})
-
-                                    if hasattr(gui_instance, '_batch_header_translator'):
-                                        gui_instance._batch_header_translator = tr
-
-                                    _api_trans = tr.translate_headers_batch(
+                                    _api_trans = retry_translator.translate_headers_batch(
                                         _hdr_api_remaining,
                                         batch_size=config.get('headers_per_batch', -1) if config else None,
                                         translation_type='header'

@@ -1124,6 +1124,207 @@ def test_apply_existing_translations_does_not_promote_working_html_header(
     assert result[filename] == "Authoritative cached heading"
 
 
+def test_load_translations_excludes_entries_marked_translation_failed(tmp_path):
+    translations_path = tmp_path / "translated_headers.txt"
+    translations_path.write_text(
+        """Chapter 1:
+  Original:   第14章 苍山庶家
+  Translated: 第14章 苍山庶家
+  Output File: chapter0389
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+Chapter 2:
+  Original:   第15章 烧，烧，烧
+  Translated: Chapter 15: Burn, Burn, Burn
+  Output File: chapter0390
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+
+    source_headers, translated_headers, output_files = (
+        translate_headers_standalone.load_translations_from_file(
+            str(translations_path), log_callback=lambda _message: None
+        )
+    )
+
+    assert source_headers == {
+        1: "第14章 苍山庶家",
+        2: "第15章 烧，烧，烧",
+    }
+    assert translated_headers == {2: "Chapter 15: Burn, Burn, Burn"}
+    assert output_files == {1: "chapter0389", 2: "chapter0390"}
+
+
+def test_failed_cached_header_cannot_overwrite_corrected_html(tmp_path, monkeypatch):
+    monkeypatch.delenv("BATCH_HEADER_PREPEND_NUMBER_PATTERN", raising=False)
+    filename = "response_chapter0389.html"
+    html_path = tmp_path / filename
+    corrected_html = (
+        "<html><body><h1>Chapter 14: Cangshan Gu Tomb</h1>"
+        "<p>REFINED BODY</p></body></html>"
+    )
+    html_path.write_text(corrected_html, encoding="utf-8")
+
+    translations_path = tmp_path / "translated_headers.txt"
+    translations_path.write_text(
+        """Chapter 1:
+  Original:   第14章 苍山庶家
+  Translated: 第14章 苍山庶家
+  Output File: chapter0389
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+
+    def unexpected_epub_read(*_args, **_kwargs):
+        raise AssertionError("An all-failed cache should not reach EPUB matching")
+
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "extract_source_chapters_with_opf_mapping",
+        unexpected_epub_read,
+    )
+
+    result = translate_headers_standalone.apply_existing_translations(
+        "source.epub",
+        str(tmp_path),
+        str(translations_path),
+        update_html=True,
+        log_callback=lambda _message: None,
+    )
+
+    assert result == {}
+    assert html_path.read_text(encoding="utf-8") == corrected_html
+
+
+def test_failed_header_cache_entries_are_retranslated_and_replaced(tmp_path):
+    translations_path = tmp_path / "translated_headers.txt"
+    translations_path.write_text(
+        """Chapter Header Translations
+==================================================
+
+Chapter 1:
+  Original:   第1章 雪夜
+  Translated: Chapter 1: Snowy Night
+  Output File: chapter0001
+----------------------------------------
+Chapter 2:
+  Original:   第2章 龙战于野
+  Translated: 第2章 龙战于野
+  Output File: chapter0002
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+
+Summary:
+Total chapters: 2
+Successfully translated: 1
+Failed chapters: 2
+""",
+        encoding="utf-8",
+    )
+
+    class RecordingTranslator:
+        def __init__(self):
+            self.calls = []
+
+        def translate_headers_batch(
+            self, headers_dict, batch_size=None, translation_type="header"
+        ):
+            self.calls.append((dict(headers_dict), batch_size, translation_type))
+            return {2: "Chapter 2: Dragons Fight in the Wild"}
+
+    translator = RecordingTranslator()
+    source, translated, outputs = (
+        translate_headers_standalone.retry_failed_header_translations(
+            str(translations_path),
+            translator=translator,
+            batch_size=25,
+            log_callback=lambda _message: None,
+        )
+    )
+
+    assert translator.calls == [
+        ({2: "第2章 龙战于野"}, 25, "header")
+    ]
+    assert source == {1: "第1章 雪夜", 2: "第2章 龙战于野"}
+    assert translated == {
+        1: "Chapter 1: Snowy Night",
+        2: "Chapter 2: Dragons Fight in the Wild",
+    }
+    assert outputs == {1: "chapter0001", 2: "chapter0002"}
+
+    rewritten = translations_path.read_text(encoding="utf-8")
+    assert "translation failed" not in rewritten
+    assert "Failed chapters:" not in rewritten
+    assert rewritten.count("Chapter 2:\n") == 1
+    assert "Successfully translated: 2" in rewritten
+
+
+def test_failed_header_cache_is_not_reused_for_toc_translation(tmp_path):
+    headers_path = tmp_path / "translated_headers.txt"
+    headers_path.write_text(
+        """Chapter 1:
+  Original:   第14章 苍山庶家
+  Translated: 第14章 苍山庶家
+  Output File: chapter0389
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+
+    reused, remaining = compiler._cross_reference_from_other_file(
+        {8: "第14章 苍山庶家"}, str(headers_path), "toc"
+    )
+
+    assert reused == {}
+    assert remaining == {8: "第14章 苍山庶家"}
+
+
+def test_successful_header_translation_repairs_matching_failed_toc_entry(tmp_path):
+    headers_path = tmp_path / "translated_headers.txt"
+    headers_path.write_text(
+        """Chapter 14:
+  Original:   第14章 苍山庶家
+  Translated: Chapter 14: Cangshan Gu Tomb
+  Output File: chapter0389
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    toc_path = tmp_path / "TOC.txt"
+    toc_path.write_text(
+        """TOC Translations
+==================================================
+
+Chapter 1:
+  Original:   第14章 苍山庶家
+  Translated: 第14章 苍山庶家
+  Target URI: response_chapter0389.html
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    compiler.epub_path = str(tmp_path / "source.epub")
+
+    compiler._reconcile_toc_and_headers()
+
+    toc_source, toc_translated, toc_outputs = (
+        translate_headers_standalone.load_translations_from_file(
+            str(toc_path), log_callback=lambda _message: None
+        )
+    )
+    assert toc_source == {1: "第14章 苍山庶家"}
+    assert toc_translated == {1: "Chapter 14: Cangshan Gu Tomb"}
+    assert toc_outputs == {1: "response_chapter0389.html"}
+    assert "translation failed" not in toc_path.read_text(encoding="utf-8")
+
+
 def test_xml_validator_valid_codepoints():
     # Basic BMP and some punctuation
     assert XMLValidator.is_valid_char_code(ord('A')) is True
