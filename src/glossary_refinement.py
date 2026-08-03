@@ -156,18 +156,44 @@ def _entry_columns(entries: List[Dict]) -> List[str]:
     columns = ["type", "raw_name", "translated_name"]
     custom_fields = _active_custom_fields()
     description_active = _description_active(custom_fields)
+    discovered = []
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
         for key in entry.keys():
-            if str(key).strip().lower() == "description" and not description_active:
-                continue
-            if key not in columns:
-                columns.append(key)
+            key = str(key or "").strip()
+            if key and key not in discovered:
+                discovered.append(key)
+
+    def _find_column(name: str) -> Optional[str]:
+        target = str(name or "").strip().lower()
+        for key in discovered + custom_fields:
+            if str(key or "").strip().lower() == target:
+                return str(key).strip()
+        return None
+
+    # Core glossary fields always use the canonical schema order, regardless
+    # of the insertion order of keys in individual entry dictionaries.
+    gender_column = _find_column("gender")
+    if gender_column:
+        columns.append(gender_column)
+    description_column = _find_column("description")
+    if description_active and description_column:
+        columns.append(description_column)
+
+    standard_fields = {"type", "raw_name", "translated_name", "gender", "description"}
+    # Configured custom fields define their own order after the core schema.
     for field in custom_fields:
         field = str(field or "").strip()
-        if field and field not in columns:
+        if field and field.lower() not in standard_fields and field not in columns:
             columns.append(field)
+    # Preserve any unexpected entry fields after the configured schema.
+    for key in discovered:
+        key_lower = key.lower()
+        if key_lower == "description" and not description_active:
+            continue
+        if key_lower not in standard_fields and key not in columns:
+            columns.append(key)
     return columns
 
 
