@@ -666,6 +666,16 @@ def _reasoning_effort() -> str:
     return "medium" if explicit is not None or shared_toggle is not None else "none"
 
 
+def _deepseek_v4_reasoning_effort(effort: str) -> str:
+    """Map shared reasoning choices to DeepSeek V4's none/low/high/max values."""
+    normalized = str(effort or "high").strip().lower()
+    if normalized in ("none", "low"):
+        return normalized
+    if normalized in ("xhigh", "max", "heavy"):
+        return "max"
+    return "high"
+
+
 def _reasoning_control_configured() -> bool:
     return any(
         os.getenv(name) is not None
@@ -719,14 +729,17 @@ def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
     NVIDIA NIM uses model-specific reasoning controls:
     - GPT-OSS supports top-level reasoning_effort: low/medium/high.
     - Nemotron 3 Nano supports chat_template_kwargs.parallel_reasoning_mode.
+    - DeepSeek V4 supports top-level reasoning_effort: none/low/high/max.
     - Other thinking models generally use chat_template_kwargs.enable_thinking.
     """
     if not _reasoning_control_configured():
         return
 
-    effort = _reasoning_effort()
-    reasoning_disabled = not _reasoning_toggle_enabled() or effort == "none"
     model_lower = (model_path or "").lower()
+    effort = _reasoning_effort()
+    reasoning_disabled = not _reasoning_toggle_enabled() or (
+        effort == "none" and "deepseek-v4" not in model_lower
+    )
     if _model_requires_no_chat_template_kwargs(model_lower):
         return
 
@@ -754,7 +767,7 @@ def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
         return
 
     if "deepseek-v4" in model_lower:
-        payload["reasoning_effort"] = "max" if effort in ("xhigh", "max", "heavy") else "high"
+        payload["reasoning_effort"] = _deepseek_v4_reasoning_effort(effort)
 
     kwargs = _kwargs()
     kwargs.setdefault("enable_thinking", True)

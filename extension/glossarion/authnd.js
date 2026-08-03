@@ -310,11 +310,11 @@ function applyReasoningPayload(payload, modelPath, settings) {
 
   const modelLower = String(modelPath || "").toLowerCase();
   const enabled = Boolean(settings.thinkingEnabled);
-  const effort = ["low", "medium", "high", "xhigh"].includes(settings.thinkingEffort)
+  const effort = ["none", "low", "medium", "high", "xhigh"].includes(settings.thinkingEffort)
     ? settings.thinkingEffort
     : "medium";
 
-  if (!enabled) {
+  if (!enabled || (effort === "none" && !modelLower.includes("deepseek-v4"))) {
     payload.chat_template_kwargs = {
       ...(payload.chat_template_kwargs || {}),
       enable_thinking: false
@@ -340,7 +340,9 @@ function applyReasoningPayload(payload, modelPath, settings) {
   }
 
   if (modelLower.includes("deepseek-v4")) {
-    payload.reasoning_effort = effort === "xhigh" ? "max" : "high";
+    payload.reasoning_effort = ["none", "low"].includes(effort)
+      ? effort
+      : effort === "xhigh" ? "max" : "high";
     return;
   }
 

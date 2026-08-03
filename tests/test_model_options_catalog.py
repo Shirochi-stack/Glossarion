@@ -25,6 +25,29 @@ def _isolated_cache(tmp_path, monkeypatch):
     return cache_path
 
 
+@pytest.mark.parametrize(
+    ("needs_api_key", "expected_timeout"),
+    [
+        (False, 60),
+        (True, 30),
+    ],
+)
+def test_multi_key_test_timeout_uses_optional_api_key_classification(
+    monkeypatch,
+    needs_api_key,
+    expected_timeout,
+):
+    import multi_api_key_manager
+
+    monkeypatch.setattr(
+        multi_api_key_manager,
+        "_model_needs_api_key",
+        lambda _model: needs_api_key,
+    )
+
+    assert multi_api_key_manager._api_key_test_timeout_seconds("example/model") == expected_timeout
+
+
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):
     cache_path = _isolated_cache(tmp_path, monkeypatch)
 

@@ -325,7 +325,23 @@ export function buildThinkingRequestFields(route, settings = {}) {
     ? settings.thinkingEffort
     : "medium";
 
-  if (!thinkingEnabled || effort === "none") {
+  if (!thinkingEnabled) {
+    if (
+      route.provider === "opencode"
+      && ["deepseek-v4-flash", "deepseek-v4-pro"].includes(String(route.model || "").toLowerCase())
+    ) {
+      return { thinking: { type: "disabled" } };
+    }
+    return {};
+  }
+
+  if (effort === "none") {
+    if (["deepseek", "chutes"].includes(route.provider)) {
+      return {
+        thinking: { type: "enabled" },
+        reasoning_effort: "none"
+      };
+    }
     if (
       route.provider === "opencode"
       && ["deepseek-v4-flash", "deepseek-v4-pro"].includes(String(route.model || "").toLowerCase())

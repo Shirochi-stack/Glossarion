@@ -14,6 +14,33 @@ if str(SRC) not in sys.path:
 import authnd_auth as authnd
 
 
+@pytest.mark.parametrize(
+    ("selected", "expected"),
+    [
+        ("none", "none"),
+        ("low", "low"),
+        ("medium", "high"),
+        ("high", "high"),
+        ("xhigh", "max"),
+    ],
+)
+def test_deepseek_v4_reasoning_effort_mapping(selected, expected):
+    assert authnd._deepseek_v4_reasoning_effort(selected) == expected
+
+
+def test_deepseek_v4_none_is_sent_as_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("ENABLE_GPT_THINKING", "1")
+    monkeypatch.setenv("GPT_EFFORT", "none")
+    monkeypatch.delenv("AUTHND_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("AUTHND_REASONING_EFFORT", raising=False)
+    payload = {}
+
+    authnd._apply_reasoning_payload(payload, "deepseek-ai/deepseek-v4-flash")
+
+    assert payload["reasoning_effort"] == "none"
+    assert payload["chat_template_kwargs"]["enable_thinking"] is True
+
+
 class _Signal:
     def __init__(self):
         self._callbacks = []

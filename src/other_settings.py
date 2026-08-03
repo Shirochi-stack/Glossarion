@@ -37,6 +37,9 @@ from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics
 from PySide6.QtCore import QObject, Signal
 
 
+DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
+
+
 def _get_app_dir() -> str:
     """Return the application's base directory (Windows-safe)."""
     if platform.system() == 'Windows':
@@ -3449,7 +3452,7 @@ def _create_response_handling_section(self, parent):
     self.deepseek_effort_label = QLabel("Effort (V4):")
     deepseek_h.addWidget(self.deepseek_effort_label)
     self.deepseek_effort_combo = QComboBox()
-    self.deepseek_effort_combo.addItems(["high", "max"])
+    self.deepseek_effort_combo.addItems(list(DEEPSEEK_V4_EFFORT_OPTIONS))
     self.deepseek_effort_combo.setFixedWidth(80)
     self.deepseek_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.deepseek_effort_combo)
@@ -3493,7 +3496,7 @@ def _create_response_handling_section(self, parent):
     self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
     _set_thinking_widget_enabled(self.deepseek_effort_combo, _ds_initially_enabled)
 
-    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models (deepseek-v4-flash/pro) also send reasoning_effort (high/max).")
+    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models (deepseek-v4-flash/pro) also send reasoning_effort (none/low/high/max).")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)

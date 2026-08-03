@@ -15571,6 +15571,8 @@ class UnifiedClient:
             if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                 effort = 'medium'
             if effort == 'none':
+                if 'deepseek-v4' in authnd_model:
+                    return " (reasoning_effort: none)"
                 return " (thinking disabled)"
             if 'gpt-oss' in authnd_model:
                 return f" (reasoning_effort: {'high' if effort == 'xhigh' else effort})"
@@ -15578,7 +15580,7 @@ class UnifiedClient:
                 mode = 'heavy' if effort in ('high', 'xhigh') else effort
                 return f" (parallel reasoning: {mode})"
             if 'deepseek-v4' in authnd_model:
-                return f" (reasoning_effort: {'max' if effort == 'xhigh' else 'high'})"
+                return f" (reasoning_effort: {self._normalize_deepseek_v4_effort(effort)})"
             return f" (thinking enabled, effort: {effort})"
 
         if model_lower.startswith('authgrok'):
@@ -17097,6 +17099,16 @@ class UnifiedClient:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _normalize_deepseek_v4_effort(effort: str = "high") -> str:
+        """Map shared reasoning choices to DeepSeek V4's none/low/high/max values."""
+        normalized = str(effort or 'high').strip().lower()
+        if normalized in ('none', 'low'):
+            return normalized
+        if normalized in ('xhigh', 'max', 'heavy'):
+            return 'max'
+        return 'high'
 
     @staticmethod
     def _is_opencode_deepseek_v4_model(effective_model: str = "") -> bool:
@@ -22702,14 +22714,17 @@ class UnifiedClient:
 
                     # DeepSeek thinking / reasoning_effort
                     # - deepseek-v4-flash / deepseek-v4-pro: BOTH top-level params (per official docs):
-                    #     "thinking": {"type": "enabled"}  AND  "reasoning_effort": "high"|"max"
-                    #   Controlled by DEEPSEEK_EFFORT env var (high/max, default high)
+                    #     "thinking": {"type": "enabled"}  AND  "reasoning_effort": "none"|"low"|"high"|"max"
+                    #   Controlled by DEEPSEEK_EFFORT env var (none/low/high/max, default high)
                     # - Older DeepSeek models: only extra_body={"thinking":{"type":"enabled"}}
                     if provider == 'deepseek' or is_chutes_thinking_endpoint:
                         try:
                             enable_ds = enable_ds_env
                             _em_lower = (effective_model or '').lower()
                             _is_ds_v4 = _em_lower in ('deepseek-v4-flash', 'deepseek-v4-pro')
+                            _ds_effort = self._normalize_deepseek_v4_effort(
+                                os.getenv('DEEPSEEK_EFFORT', 'high')
+                            )
 
                             # Log once per-thread per (model,state) so users can tell if it is applied,
                             # without spamming the console for every chunk.
@@ -22726,9 +22741,6 @@ class UnifiedClient:
                                         tname = "unknown-thread"
                                     label = "Chutes" if is_chutes_thinking_endpoint else "DeepSeek"
                                     if _is_ds_v4 and enable_ds:
-                                        _ds_effort = (os.getenv('DEEPSEEK_EFFORT', 'high') or 'high').lower()
-                                        if _ds_effort not in ('high', 'max'):
-                                            _ds_effort = 'high'
                                         self._debug_log(
                                             f"🧠 [{label}:{tname}] thinking=ENABLED + reasoning_effort={_ds_effort} (model={effective_model})"
                                         )
@@ -22742,9 +22754,6 @@ class UnifiedClient:
                             if enable_ds:
                                 if _is_ds_v4:
                                     # V4: both thinking toggle AND reasoning_effort as top-level params
-                                    _ds_effort = (os.getenv('DEEPSEEK_EFFORT', 'high') or 'high').lower()
-                                    if _ds_effort not in ('high', 'max'):
-                                        _ds_effort = 'high'
                                     extra_body["thinking"] = {"type": "enabled"}
                                     extra_body["reasoning_effort"] = _ds_effort
                                 else:
