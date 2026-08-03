@@ -18264,6 +18264,13 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread: _EpubCacheLoaderThread | None = None
         self._loader_thread: _EpubLoaderThread | None = None
         self._overlay_thread: _OverlayMergeThread | None = None
+        # QWebEngineView starts a Chromium renderer the first time it is
+        # constructed. On packaged builds that can take several seconds, so
+        # keep it out of __init__: callers can show the lightweight loading
+        # shell immediately and the web views are attached after its first
+        # native paint.
+        self._reader_views_ready = False
+        self._reader_init_queued = False
 
         # ── Live single-chapter translation state ──────────────────────
         # The toolbar Translate button streams the chapter's translation
@@ -18336,7 +18343,13 @@ class EpubReaderDialog(QDialog):
         else:
             self._font_combo.setCurrentText(self._font_family)
         self._font_combo.blockSignals(False)
-        self._start_loading()
+        # The EPUB loader starts together with the deferred reader views from
+        # showEvent. Starting the spinner here gives the lightweight shell
+        # useful feedback during a Chromium cold start.
+        self._toolbar_widget.hide()
+        self._loading_widget.show()
+        self._content_widget.hide()
+        self._spin_timer.start()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -18688,40 +18701,20 @@ class EpubReaderDialog(QDialog):
         self._toc_list.currentRowChanged.connect(self._on_chapter_selected)
         splitter.addWidget(self._toc_list)
 
-        # Reader area — single browser for scroll/single, an HBox for double-page
+        # Reader area — single browser for scroll/single, an HBox for
+        # double-page. The actual browser widgets are installed after the
+        # dialog is visible; placeholders keep the final layout and stack
+        # indexes stable meanwhile.
         self._reader_stack = QStackedWidget()
 
-        def _make_reader_widget():
-            if _HAS_WEBENGINE:
-                # Use the wheel-capturing subclass so mouse wheel events
-                # can drive page navigation / font zoom instead of being
-                # silently swallowed by the internal Chromium scroller.
-                w = _WheelCapturingView()
-                _configure_epub_reader_web_settings(w)
-                w.setUrl(QUrl("about:blank"))
-                # Set page background to match theme (prevents white flash)
-                from PySide6.QtGui import QColor
-                t = self._get_theme()
-                w.page().setBackgroundColor(QColor(t['bg']))
-                w.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
-            else:
-                w = QTextBrowser()
-                w.setOpenExternalLinks(False)
-                w.setOpenLinks(False)
-            # Right-click menu: Google Translate + Web Search for the
-            # current selection. Applies to every reader pane so the
-            # double-page mode works the same way the single pane does.
-            w.setContextMenuPolicy(Qt.CustomContextMenu)
-            w.customContextMenuRequested.connect(
-                lambda pos, browser=w:
-                    self._show_reader_context_menu(browser, pos))
-            return w
-
         # Page 0: single reader (for scroll, single page, all-scroll)
-        self._reader = _make_reader_widget()
-        if _HAS_WEBENGINE:
-            self._reader.loadFinished.connect(self._on_reader_load_finished)
-        self._reader_stack.addWidget(self._reader)
+        self._single_reader_container = QWidget()
+        self._single_reader_layout = QVBoxLayout(self._single_reader_container)
+        self._single_reader_layout.setContentsMargins(0, 0, 0, 0)
+        self._single_reader_placeholder = QWidget()
+        self._single_reader_layout.addWidget(self._single_reader_placeholder)
+        self._reader = None
+        self._reader_stack.addWidget(self._single_reader_container)
 
         # Page 1: double-page layout (two browsers side by side)
         double_widget = QWidget()
@@ -18729,16 +18722,13 @@ class EpubReaderDialog(QDialog):
         double_layout = QHBoxLayout(double_widget)
         double_layout.setContentsMargins(0, 0, 0, 0)
         double_layout.setSpacing(2)
-        self._reader_left = _make_reader_widget()
-        self._reader_right = _make_reader_widget()
-        # Hook loadFinished on both panes so _finalize_double_page actually runs.
-        # Without this, the panes never get scrolled to their target pages and
-        # stay frozen at the start of the chapter.
-        if _HAS_WEBENGINE:
-            self._reader_left.loadFinished.connect(self._on_reader_load_finished)
-            self._reader_right.loadFinished.connect(self._on_reader_load_finished)
-        double_layout.addWidget(self._reader_left)
-        double_layout.addWidget(self._reader_right)
+        self._double_layout = double_layout
+        self._reader_left_placeholder = QWidget()
+        self._reader_right_placeholder = QWidget()
+        self._reader_left = None
+        self._reader_right = None
+        double_layout.addWidget(self._reader_left_placeholder)
+        double_layout.addWidget(self._reader_right_placeholder)
         self._reader_stack.addWidget(double_widget)
 
         splitter.addWidget(self._reader_stack)
@@ -18829,6 +18819,55 @@ class EpubReaderDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+-"), self, lambda: self._change_font_size(-1))
         QShortcut(QKeySequence("Ctrl+F"), self, self._toggle_search)
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._close_search)
+
+    def _make_reader_widget(self):
+        """Create one reader pane after the loading shell is visible."""
+        if _HAS_WEBENGINE:
+            # Use the wheel-capturing subclass so mouse wheel events can drive
+            # page navigation / font zoom instead of being swallowed by the
+            # internal Chromium scroller.
+            widget = _WheelCapturingView()
+            _configure_epub_reader_web_settings(widget)
+            widget.setUrl(QUrl("about:blank"))
+            widget.page().setBackgroundColor(QColor(self._get_theme()['bg']))
+            widget.wheel_scrolled.connect(self._on_reader_wheel_scrolled)
+        else:
+            widget = QTextBrowser()
+            widget.setOpenExternalLinks(False)
+            widget.setOpenLinks(False)
+        # Right-click menu: Google Translate + Web Search for the current
+        # selection. Applies to every reader pane so double-page mode matches.
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, browser=widget:
+                self._show_reader_context_menu(browser, pos))
+        return widget
+
+    @Slot()
+    def _initialize_reader_views(self):
+        """Attach expensive browser panes, then begin the threaded EPUB load."""
+        self._reader_init_queued = False
+        if self._closing or self._reader_views_ready:
+            return
+
+        self._reader = self._make_reader_widget()
+        if _HAS_WEBENGINE:
+            # The current double-page layout uses two CSS columns in this one
+            # view, so only the primary pane needs to exist or receive load
+            # callbacks. The legacy left/right stack page remains a cheap
+            # placeholder for index compatibility.
+            self._reader.loadFinished.connect(self._on_reader_load_finished)
+
+        self._single_reader_layout.replaceWidget(
+            self._single_reader_placeholder,
+            self._reader,
+        )
+        self._single_reader_placeholder.hide()
+        self._single_reader_placeholder.deleteLater()
+
+        self._reader_views_ready = True
+        self._apply_reader_style()
+        self._start_loading()
 
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
@@ -19510,9 +19549,12 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             # For QWebEngineView, styling is done via CSS in _wrap_html.
             # We style surrounding containers only.
-            self._reader.setStyleSheet(f"background: {bg}; border: none;")
-            self._reader_left.setStyleSheet(f"background: {bg}; border: none; border-right: 1px solid {border};")
-            self._reader_right.setStyleSheet(f"background: {bg}; border: none;")
+            if self._reader is not None:
+                self._reader.setStyleSheet(f"background: {bg}; border: none;")
+            if self._reader_left is not None:
+                self._reader_left.setStyleSheet(f"background: {bg}; border: none; border-right: 1px solid {border};")
+            if self._reader_right is not None:
+                self._reader_right.setStyleSheet(f"background: {bg}; border: none;")
         else:
             css = f"""
                 QTextBrowser {{
@@ -19524,9 +19566,13 @@ class EpubReaderDialog(QDialog):
                 QScrollBar::handle:vertical {{ background: {border}; border-radius: 4px; min-height: 20px; }}
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
             """
-            self._reader.setStyleSheet(css)
-            self._reader_left.setStyleSheet(css + f"QTextBrowser {{ border-right: 1px solid {border}; }}")
-            self._reader_right.setStyleSheet(css)
+            if self._reader is not None:
+                self._reader.setStyleSheet(css)
+            if self._reader_left is not None:
+                self._reader_left.setStyleSheet(
+                    css + f"QTextBrowser {{ border-right: 1px solid {border}; }}")
+            if self._reader_right is not None:
+                self._reader_right.setStyleSheet(css)
         # Theme all surrounding containers
         self.setStyleSheet(f"QDialog {{ background: {bg}; }}")
         self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
@@ -22070,6 +22116,19 @@ class EpubReaderDialog(QDialog):
                 pass
         self._live_listener = None
         self._live_gui_ref = None
+
+    def showEvent(self, event):
+        """Paint the loading shell before starting Chromium-backed panes."""
+        super().showEvent(event)
+        if (self._closing or self._reader_views_ready
+                or self._reader_init_queued):
+            return
+        self._reader_init_queued = True
+        # A short delay lets Windows map and paint the native dialog. A zero-
+        # timeout can run before the first paint and recreate the original
+        # symptom: the context menu disappears but no reader window is visible
+        # while Chromium performs its cold start.
+        QTimer.singleShot(40, self._initialize_reader_views)
 
     def closeEvent(self, event):
         """Persist reader settings back into config and flush to disk.

@@ -64,6 +64,7 @@ _MACHINE_TRANSLATION_DIR = "Machine_Translation"
 # lock-free sys.modules/getattr lookup on the GUI thread and, if the module
 # isn't ready yet, warm it once in a background thread instead of blocking.
 _TRANSLATE_MODULE_WARMUP_STARTED = threading.Event()
+_EPUB_LIBRARY_WARMUP_STARTED = threading.Event()
 
 
 def _warm_translate_module_in_background():
@@ -96,6 +97,31 @@ def _get_progress_manager_nonblocking():
             return pm
     _warm_translate_module_in_background()
     return None
+
+
+def _warm_epub_library_in_background():
+    """Warm the reader's lazy module before a Progress Manager menu click.
+
+    Frozen builds can spend seconds unpacking/importing QtWebEngine on the
+    first ``epub_library`` import. Progress Manager already exists by the time
+    this helper runs, so importing on a daemon thread hides that one-time cost
+    behind the user's normal interaction with the dialog.
+    """
+    if 'epub_library' in sys.modules or _EPUB_LIBRARY_WARMUP_STARTED.is_set():
+        return
+    _EPUB_LIBRARY_WARMUP_STARTED.set()
+
+    def _warm():
+        try:
+            import epub_library  # noqa: F401
+        except Exception:
+            pass
+
+    threading.Thread(
+        target=_warm,
+        name="epub-reader-module-warmup",
+        daemon=True,
+    ).start()
 # -----------------------------------------------------------------------------
 
 
@@ -129,8 +155,8 @@ def _progress_item_is_html(display_info) -> bool:
     return str(output_file).lower().endswith(_PROGRESS_READER_HTML_EXTENSIONS)
 
 
-def _match_epub_html_member_basename(member_names, candidates):
-    """Match progress filenames to an EPUB HTML member and return its basename."""
+def _index_epub_html_members(member_names):
+    """Build the reusable lookup used to match progress rows to EPUB members."""
     html_members = [
         str(name).replace("\\", "/")
         for name in (member_names or [])
@@ -147,6 +173,23 @@ def _match_epub_html_member_basename(member_names, candidates):
         by_basename.setdefault(basename, member)
         if stem:
             by_stem.setdefault(stem, member)
+    return by_path, by_basename, by_stem
+
+
+def _match_epub_html_member_basename(
+    member_names,
+    candidates,
+    member_index=None,
+):
+    """Match progress filenames to an EPUB HTML member and return its basename.
+
+    ``member_index`` lets callers matching many rows reuse the same lookup.
+    Building it for every chapter made the Progress Manager launch path scale
+    quadratically with the EPUB chapter count.
+    """
+    if member_index is None:
+        member_index = _index_epub_html_members(member_names)
+    by_path, by_basename, by_stem = member_index
 
     candidate_values = [str(value).replace("\\", "/") for value in (candidates or []) if value]
     for candidate in candidate_values:
@@ -16684,6 +16727,11 @@ class RetranslationMixin:
 
     def _add_retranslation_buttons_opf(self, data, button_frame=None):
         """Add the standard button set for retranslation dialogs with OPF support"""
+        if any(
+            _progress_item_is_html(info)
+            for info in (data.get('chapter_display_info', []) or [])
+        ):
+            _warm_epub_library_in_background()
         
         if not button_frame:
             button_frame = QWidget()
@@ -18007,6 +18055,8 @@ class RetranslationMixin:
                 )
                 return
 
+            member_index = _index_epub_html_members(member_names)
+
             def _reader_member_for_item(item_info):
                 progress_entry = item_info.get('info', {}) or {}
                 candidates = _source_candidates_for_item(item_info)
@@ -18019,6 +18069,7 @@ class RetranslationMixin:
                 return _match_epub_html_member_basename(
                     member_names,
                     candidates,
+                    member_index=member_index,
                 )
 
             initial_filename = _reader_member_for_item(display_info)

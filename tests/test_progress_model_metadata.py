@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from Retranslation_GUI import (
     RetranslationMixin,
     _glossary_progress_filename_keys,
+    _index_epub_html_members,
     _match_epub_html_member_basename,
     _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
@@ -885,6 +886,34 @@ def test_progress_epub_reader_matches_response_name_to_source_member():
     )
 
     assert matched == "chapter0002.xhtml"
+
+
+def test_progress_epub_reader_reuses_member_index_for_multiple_rows(monkeypatch):
+    members = [
+        "META-INF/container.xml",
+        "OEBPS/Text/chapter0001.xhtml",
+        "OEBPS/Text/chapter0002.xhtml",
+    ]
+    member_index = _index_epub_html_members(members)
+
+    def unexpected_reindex(_members):
+        raise AssertionError("prebuilt EPUB member index was not reused")
+
+    monkeypatch.setattr(
+        "Retranslation_GUI._index_epub_html_members",
+        unexpected_reindex,
+    )
+
+    assert _match_epub_html_member_basename(
+        members,
+        ["response_chapter0001.html"],
+        member_index=member_index,
+    ) == "chapter0001.xhtml"
+    assert _match_epub_html_member_basename(
+        members,
+        ["response_chapter0002.html"],
+        member_index=member_index,
+    ) == "chapter0002.xhtml"
 
 
 def test_snapshot_progress_output_dir_scans_large_directory_once(tmp_path, monkeypatch):

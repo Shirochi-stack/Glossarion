@@ -425,6 +425,43 @@ def test_overlay_worker_extracts_translated_title_from_path_only_entry(tmp_path)
     ]
 
 
+def test_reader_paints_shell_before_creating_browser_views(
+    qapp, monkeypatch,
+):
+    load_starts = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_start_loading",
+        lambda self: load_starts.append(True),
+    )
+
+    dialog = EpubReaderDialog("C:/layout-test/deferred-reader.epub", config={})
+    try:
+        # Construction remains lightweight; showing the native shell does not
+        # synchronously create the expensive reader panes.
+        assert dialog._reader is None
+        assert not dialog._reader_views_ready
+        assert load_starts == []
+
+        dialog.show()
+        assert dialog.isVisible()
+        assert dialog._reader is None
+        assert load_starts == []
+
+        _pump_events(qapp, timeout=0.2)
+        assert dialog._reader_views_ready
+        assert dialog._reader is not None
+        # Double-page mode is a two-column layout in the primary browser; the
+        # old auxiliary panes stay unconstructed.
+        assert dialog._reader_left is None
+        assert dialog._reader_right is None
+        assert load_starts == [True]
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
 def test_remote_image_url_survives_local_image_processing(tmp_path):
     remote_url = (
         "https://images.novelpia.com/imagebox/b1/"
