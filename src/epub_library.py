@@ -18866,8 +18866,12 @@ class EpubReaderDialog(QDialog):
         self._single_reader_placeholder.deleteLater()
 
         self._reader_views_ready = True
-        self._apply_reader_style()
-        self._start_loading()
+        # The shell was fully themed and put into its loading state before it
+        # was shown. Reapplying the top-level stylesheet or hide/showing these
+        # widgets here forces a second native repaint that looks like the
+        # reader closed and reopened. The reader content is styled when the
+        # first chapter is rendered.
+        self._start_loading(preserve_shell=True)
 
     # ── Event filter (block wheel scroll in paginated modes) ──────────────
 
@@ -18936,14 +18940,15 @@ class EpubReaderDialog(QDialog):
 
     # ── Loading ───────────────────────────────────────────────────
 
-    def _start_loading(self):
+    def _start_loading(self, preserve_shell=False):
         if getattr(self, "_closing", False):
             return
-        self._toolbar_widget.hide()
-        self._loading_widget.show()
-        self._content_widget.hide()
-        self._spin_angle = 0
-        self._spin_timer.start()
+        if not preserve_shell:
+            self._toolbar_widget.hide()
+            self._loading_widget.show()
+            self._content_widget.hide()
+            self._spin_angle = 0
+            self._spin_timer.start()
         # Probe the cache in a worker thread so the pickle.load doesn't
         # freeze the spinner. The worker emits ``hit`` with the cached
         # data on success, or ``miss`` to fall through to the full

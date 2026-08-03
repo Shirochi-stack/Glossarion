@@ -433,7 +433,7 @@ def test_reader_paints_shell_before_creating_browser_views(
     monkeypatch.setattr(
         EpubReaderDialog,
         "_start_loading",
-        lambda self: load_starts.append(True),
+        lambda self, preserve_shell=False: load_starts.append(preserve_shell),
     )
 
     dialog = EpubReaderDialog("C:/layout-test/deferred-reader.epub", config={})
@@ -448,6 +448,9 @@ def test_reader_paints_shell_before_creating_browser_views(
         assert dialog.isVisible()
         assert dialog._reader is None
         assert load_starts == []
+        assert dialog._loading_widget.isVisible()
+        assert not dialog._toolbar_widget.isVisible()
+        assert not dialog._content_widget.isVisible()
 
         _pump_events(qapp, timeout=0.2)
         assert dialog._reader_views_ready
@@ -457,6 +460,9 @@ def test_reader_paints_shell_before_creating_browser_views(
         assert dialog._reader_left is None
         assert dialog._reader_right is None
         assert load_starts == [True]
+        assert dialog._loading_widget.isVisible()
+        assert not dialog._toolbar_widget.isVisible()
+        assert not dialog._content_widget.isVisible()
     finally:
         dialog.close()
         qapp.processEvents()
