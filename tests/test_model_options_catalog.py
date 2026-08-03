@@ -56,13 +56,19 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     assert dialog._bounded_api_key_tree_font_size(1) == 8
     assert dialog._bounded_api_key_tree_font_size(18) == 18
     assert dialog._bounded_api_key_tree_font_size(99) == 32
+    assert dialog._bounded_api_key_tree_height(20) == 150
+    assert dialog._bounded_api_key_tree_height(500) == 500
+    assert dialog._bounded_api_key_tree_height(5000) == 1200
 
     source = inspect.getsource(dialog)
     assert source.count("self._enable_api_key_tree_font_zoom(") == 4
+    assert source.count("self._add_api_key_tree_height_resizer(") == 4
     assert 'QKeySequence("Ctrl++")' in source
     assert 'QKeySequence("Ctrl+-")' in source
     assert "event.modifiers() & Qt.ControlModifier" in source
     assert "multi_api_key_tree_font_size" in source
+    assert "multi_api_key_tree_heights" in source
+    assert "Qt.SizeVerCursor" in source
 
 
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):

@@ -1535,6 +1535,9 @@ class MultiAPIKeyDialog(QDialog):
     API_KEY_TREE_FONT_SIZE_CONFIG = 'multi_api_key_tree_font_size'
     API_KEY_TREE_MIN_FONT_SIZE = 8
     API_KEY_TREE_MAX_FONT_SIZE = 32
+    API_KEY_TREE_HEIGHTS_CONFIG = 'multi_api_key_tree_heights'
+    API_KEY_TREE_MIN_HEIGHT = 150
+    API_KEY_TREE_MAX_HEIGHT = 1200
 
     @staticmethod
     def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
@@ -1598,6 +1601,7 @@ class MultiAPIKeyDialog(QDialog):
         self.test_results = queue.Queue()
         self._api_key_trees = []
         self._api_key_tree_zoom_shortcuts = []
+        self._api_key_tree_height_handles = []
         configured_tree_font_size = (
             getattr(self.translator_gui, 'config', {}) or {}
         ).get(self.API_KEY_TREE_FONT_SIZE_CONFIG, 0)
@@ -1610,6 +1614,16 @@ class MultiAPIKeyDialog(QDialog):
             if configured_tree_font_size > 0
             else 0
         )
+        configured_tree_heights = (
+            getattr(self.translator_gui, 'config', {}) or {}
+        ).get(self.API_KEY_TREE_HEIGHTS_CONFIG, {})
+        self._api_key_tree_heights = {}
+        if isinstance(configured_tree_heights, dict):
+            for tree_id, height in configured_tree_heights.items():
+                try:
+                    self._api_key_tree_heights[str(tree_id)] = self._bounded_api_key_tree_height(height)
+                except Exception:
+                    continue
 
         self.key_pool = APIKeyPool("Multi-key manager pool")
 
@@ -1651,6 +1665,122 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             point_size = 10
         return max(cls.API_KEY_TREE_MIN_FONT_SIZE, min(cls.API_KEY_TREE_MAX_FONT_SIZE, point_size))
+
+    @classmethod
+    def _bounded_api_key_tree_height(cls, height):
+        """Return a safe persisted height for an API-key tree."""
+        try:
+            height = int(height)
+        except Exception:
+            height = cls.API_KEY_TREE_MIN_HEIGHT
+        return max(cls.API_KEY_TREE_MIN_HEIGHT, min(cls.API_KEY_TREE_MAX_HEIGHT, height))
+
+    def _set_api_key_tree_height(self, tree, tree_id, height, persist=True):
+        """Resize one key tree independently and optionally persist its height."""
+        height = self._bounded_api_key_tree_height(height)
+        tree_id = str(tree_id)
+        self._api_key_tree_heights[tree_id] = height
+        try:
+            tree.setFixedHeight(height)
+            tree.updateGeometry()
+            parent = tree.parentWidget()
+            if parent is not None:
+                parent.updateGeometry()
+        except RuntimeError:
+            return
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _api_key_tree_resize_event_y(event):
+        """Read a mouse event's global Y coordinate across PySide6 versions."""
+        global_position = getattr(event, 'globalPosition', None)
+        if callable(global_position):
+            return int(global_position().y())
+        global_pos = getattr(event, 'globalPos', None)
+        if callable(global_pos):
+            return int(global_pos().y())
+        return 0
+
+    def _add_api_key_tree_height_resizer(self, tree, parent_layout, tree_id):
+        """Add a draggable horizontal handle beneath one API-key tree row."""
+        tree_id = str(tree_id)
+        tree.setMinimumHeight(self.API_KEY_TREE_MIN_HEIGHT)
+        saved_height = self._api_key_tree_heights.get(tree_id)
+        if saved_height is not None:
+            self._set_api_key_tree_height(tree, tree_id, saved_height, persist=False)
+
+        handle = QFrame()
+        handle.setObjectName('apiKeyTreeHeightResizeHandle')
+        handle.setFixedHeight(9)
+        handle.setCursor(Qt.SizeVerCursor)
+        handle.setToolTip("Drag up or down to resize this API-key tree")
+        handle.setAccessibleName(f"Resize {tree_id} API-key tree height")
+        handle.setStyleSheet("""
+            QFrame#apiKeyTreeHeightResizeHandle {
+                background-color: #3f4c5a;
+                border: 1px solid #5f6f82;
+                border-radius: 2px;
+                margin: 1px 36px;
+            }
+            QFrame#apiKeyTreeHeightResizeHandle:hover {
+                background-color: #5a9fd4;
+                border-color: #8bc4f5;
+            }
+        """)
+
+        drag_state = {'active': False, 'start_y': 0, 'start_height': 0}
+        original_mouse_press = handle.mousePressEvent
+        original_mouse_move = handle.mouseMoveEvent
+        original_mouse_release = handle.mouseReleaseEvent
+
+        def mouse_press_event(event):
+            if event.button() == Qt.LeftButton:
+                drag_state['active'] = True
+                drag_state['start_y'] = self._api_key_tree_resize_event_y(event)
+                drag_state['start_height'] = tree.height()
+                handle.grabMouse()
+                event.accept()
+                return
+            original_mouse_press(event)
+
+        def mouse_move_event(event):
+            if drag_state['active'] and event.buttons() & Qt.LeftButton:
+                delta = self._api_key_tree_resize_event_y(event) - drag_state['start_y']
+                self._set_api_key_tree_height(
+                    tree,
+                    tree_id,
+                    drag_state['start_height'] + delta,
+                    persist=False,
+                )
+                event.accept()
+                return
+            original_mouse_move(event)
+
+        def mouse_release_event(event):
+            if drag_state['active']:
+                drag_state['active'] = False
+                handle.releaseMouse()
+                self._set_api_key_tree_height(tree, tree_id, tree.height(), persist=True)
+                event.accept()
+                return
+            original_mouse_release(event)
+
+        handle.mousePressEvent = mouse_press_event
+        handle.mouseMoveEvent = mouse_move_event
+        handle.mouseReleaseEvent = mouse_release_event
+        parent_layout.addWidget(handle)
+        self._api_key_tree_height_handles.append(handle)
+        return handle
 
     def _set_api_key_tree_font_size(self, point_size, persist=True):
         """Apply one zoom level to all key trees in this manager window."""
@@ -3251,6 +3381,11 @@ class MultiAPIKeyDialog(QDialog):
         container_layout.addWidget(self.fallback_tree)
 
         parent_layout.addWidget(self.fallback_tree_container)
+        self.fallback_tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.fallback_tree,
+            parent_layout,
+            'fallback',
+        )
 
         # Action buttons - store reference for toggling
         self.fallback_action_frame = QWidget()
@@ -3973,6 +4108,8 @@ class MultiAPIKeyDialog(QDialog):
         # Show/hide the tree container (includes move buttons and tree)
         if hasattr(self, 'fallback_tree_container'):
             self.fallback_tree_container.setVisible(enabled)
+        if hasattr(self, 'fallback_tree_height_handle'):
+            self.fallback_tree_height_handle.setVisible(enabled)
 
         # Show/hide action buttons
         if hasattr(self, 'fallback_action_frame'):
@@ -4526,6 +4663,11 @@ class MultiAPIKeyDialog(QDialog):
 
         main_container_layout.addWidget(self.tree)
         list_frame_layout.addWidget(main_container)
+        self.tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.tree,
+            list_frame_layout,
+            'translation',
+        )
 
         # Action buttons
         action_frame = QWidget()
@@ -5994,6 +6136,11 @@ class MultiAPIKeyDialog(QDialog):
 
         container_layout.addWidget(self.glossary_tree)
         parent_layout.addWidget(self.glossary_tree_container)
+        self.glossary_tree_height_handle = self._add_api_key_tree_height_resizer(
+            self.glossary_tree,
+            parent_layout,
+            'glossary',
+        )
 
         # Action buttons
         self.glossary_action_frame = QWidget()
@@ -6561,6 +6708,8 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_list_label.setVisible(enabled)
         if hasattr(self, 'glossary_tree_container'):
             self.glossary_tree_container.setVisible(enabled)
+        if hasattr(self, 'glossary_tree_height_handle'):
+            self.glossary_tree_height_handle.setVisible(enabled)
         if hasattr(self, 'glossary_action_frame'):
             self.glossary_action_frame.setVisible(enabled)
         if hasattr(self, 'glossary_tree') and not enabled:
@@ -9068,6 +9217,12 @@ class MultiAPIKeyDialog(QDialog):
         setattr(self, f"{pool_name}_tree", tree)
         layout.addWidget(tree)
         parent_layout.addWidget(tree_container)
+        tree_height_handle = self._add_api_key_tree_height_resizer(
+            tree,
+            parent_layout,
+            f'dedicated:{pool_name}',
+        )
+        setattr(self, self._dedicated_attr(pool_name, 'tree_height_handle'), tree_height_handle)
 
         action_frame = QWidget()
         setattr(self, self._dedicated_attr(pool_name, 'action_frame'), action_frame)
@@ -9412,7 +9567,7 @@ class MultiAPIKeyDialog(QDialog):
         spec = self._dedicated_pool_spec(pool_name)
         checkbox = self._dedicated_widget(pool_name, 'keys_checkbox')
         enabled = checkbox.isChecked() if checkbox is not None else False
-        for suffix in ('add_frame', 'list_label', 'tree_container', 'action_frame'):
+        for suffix in ('add_frame', 'list_label', 'tree_container', 'tree_height_handle', 'action_frame'):
             widget = self._dedicated_widget(pool_name, suffix)
             if widget is not None:
                 widget.setVisible(enabled)
