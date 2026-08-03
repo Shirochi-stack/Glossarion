@@ -253,6 +253,8 @@ def test_reader_html_reserves_extra_space_below_page_content():
 
     assert "padding: 10px 0 26px 0" in paginated
     assert "window.innerHeight - 36" in paginated
+    assert "function _pageCountFor(c)" in paginated
+    assert "Math.ceil((c.scrollWidth + gap) / span)" in paginated
     assert "padding: 10px 20px 28px 20px" in scrolling
 
 
@@ -339,6 +341,49 @@ def test_reader_resync_ignores_transitional_page_count(monkeypatch):
     assert delays == [60, 80, 80]
     assert reader.nav_updated is True
     assert reader.search_realigned is True
+
+
+def test_reader_next_rechecks_live_count_before_leaving_chapter(monkeypatch):
+    class TocStub:
+        def blockSignals(self, blocked):
+            pass
+
+        def setCurrentRow(self, row):
+            raise AssertionError("The live final page must be shown first")
+
+    class ReaderStub:
+        _layout_mode = epub_library.LAYOUT_SINGLE
+        _current_row = 0
+        _current_page = 6
+        _chapters = [("Current", ""), ("Next", "")]
+        _chapter_page_cache = {0: 7}
+        _reader = object()
+        _toc_list = TocStub()
+
+        def _js_page_count(self, browser, callback):
+            callback(8)
+
+        def _advance_paginated_next(self, count):
+            EpubReaderDialog._advance_paginated_next(self, count)
+
+        def _scroll_to_page_single(self):
+            self.scrolled_to = self._current_page
+
+        def _scroll_to_page_double(self):
+            raise AssertionError("Single-page mode should use the single scroller")
+
+        def _render_current(self):
+            raise AssertionError("The reader must not skip to the next chapter")
+
+    reader = ReaderStub()
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", True)
+
+    EpubReaderDialog._next_chapter(reader)
+
+    assert reader._chapter_page_cache[0] == 8
+    assert reader._current_row == 0
+    assert reader._current_page == 7
+    assert reader.scrolled_to == 7
 
 
 def test_remote_image_url_survives_local_image_processing(tmp_path):

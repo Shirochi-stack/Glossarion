@@ -18293,10 +18293,10 @@ class EpubReaderDialog(QDialog):
         screen = self.screen()
         if screen:
             avail = screen.availableGeometry()
-            self.resize(int(avail.width() * 0.55), int(avail.height() * 0.76))
+            self.resize(int(avail.width() * 0.60), int(avail.height() * 0.76))
             self.setMinimumSize(int(avail.width() * 0.4), int(avail.height() * 0.4))
         else:
-            self.resize(950, 760)
+            self.resize(1020, 760)
             self.setMinimumSize(600, 400)
 
         self._setup_ui()
@@ -20485,7 +20485,9 @@ class EpubReaderDialog(QDialog):
             ? _pageWidthFor(columns)
             : Math.max(1, Math.floor((columns.clientWidth || window.innerWidth || 1) / Math.max(1, visiblePages)));
           var span = Math.max(1, w + gap);
-          var pageCount = Math.max(1, Math.floor((columns.scrollWidth + gap + 1) / span));
+          var pageCount = (typeof _pageCountFor === 'function')
+            ? _pageCountFor(columns)
+            : Math.max(1, Math.ceil((columns.scrollWidth + gap) / span));
           var rawPage = scrollColumnsToRange(range, columns, span, pageCount);
           var targetPage = rawPage;
           if (visiblePages > 1) {{
@@ -21178,12 +21180,17 @@ class EpubReaderDialog(QDialog):
             js = (
                 "var c = document.getElementById('columns');"
                 "if (typeof _setupColumns==='function') _setupColumns();"
-                "var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
-                "var w = (typeof _pageWidthFor==='function')"
-                "  ? _pageWidthFor(c)"
-                "  : Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));"
-                "var span = Math.max(1, w + gap);"
-                "c ? Math.max(1, Math.floor((c.scrollWidth + gap + 1) / span)) : 1;"
+                "if (!c) 1;"
+                "else if (typeof _pageCountFor==='function') _pageCountFor(c);"
+                "else {"
+                "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                "  var w = Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));"
+                "  var span = Math.max(1, w + gap);"
+                # ``scrollWidth`` is integer-rounded by Chromium.  Ceiling
+                # preserves a partially measured final column; floor could
+                # make its content unreachable at fractional Windows DPI.
+                "  Math.max(1, Math.ceil((c.scrollWidth + gap) / span));"
+                "}"
             )
             browser.page().runJavaScript(js, callback)
         else:
@@ -21411,28 +21418,51 @@ class EpubReaderDialog(QDialog):
 
     def _next_chapter(self):
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
-            ch_pages = self._get_chapter_pages(self._current_row)
-            if self._current_page + step < ch_pages:
-                # Same chapter, just scroll
-                self._current_page += step
-                if self._layout_mode == LAYOUT_SINGLE:
-                    self._scroll_to_page_single()
-                else:
-                    self._scroll_to_page_double()
-            elif self._current_row < len(self._chapters) - 1:
-                # Next chapter, first page
-                self._current_row += 1
-                self._current_page = 0
-                self._toc_list.blockSignals(True)
-                self._toc_list.setCurrentRow(self._current_row)
-                self._toc_list.blockSignals(False)
-                self._render_current()
+            if _HAS_WEBENGINE:
+                # Recheck the live column layout before deciding that this is
+                # the chapter's last page.  This prevents a stale or rounded
+                # cache entry from skipping a final column and jumping
+                # directly to the next chapter.
+                expected_row = self._current_row
+                expected_page = self._current_page
+                expected_layout = self._layout_mode
+
+                def _on_count(count):
+                    if (self._current_row != expected_row
+                            or self._current_page != expected_page
+                            or self._layout_mode != expected_layout):
+                        return
+                    count = max(1, int(count))
+                    self._chapter_page_cache[expected_row] = count
+                    self._advance_paginated_next(count)
+
+                self._js_page_count(self._reader, _on_count)
+            else:
+                self._advance_paginated_next(
+                    self._get_chapter_pages(self._current_row))
         else:
             new_row = min(len(self._chapters) - 1, self._current_row + 1)
             self._current_row = new_row
             self._toc_list.blockSignals(True)
             self._toc_list.setCurrentRow(new_row)
+            self._toc_list.blockSignals(False)
+            self._render_current()
+
+    def _advance_paginated_next(self, ch_pages):
+        """Advance one page/spread using a freshly resolved chapter count."""
+        step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
+        ch_pages = max(1, int(ch_pages))
+        if self._current_page + step < ch_pages:
+            self._current_page += step
+            if self._layout_mode == LAYOUT_SINGLE:
+                self._scroll_to_page_single()
+            else:
+                self._scroll_to_page_double()
+        elif self._current_row < len(self._chapters) - 1:
+            self._current_row += 1
+            self._current_page = 0
+            self._toc_list.blockSignals(True)
+            self._toc_list.setCurrentRow(self._current_row)
             self._toc_list.blockSignals(False)
             self._render_current()
 
@@ -22788,6 +22818,16 @@ class EpubReaderDialog(QDialog):
                 f"  _PAGE_W = Math.max(1, Math.floor((viewportW - "
                 f"    ((visible - 1) * _PAGE_GAP)) / visible));"
                 f"  return _PAGE_W;"
+                f"}}"
+                f"function _pageCountFor(c) {{"
+                f"  if (!c) return 1;"
+                f"  var gap = Math.max(0, _PAGE_GAP || 0);"
+                f"  var span = Math.max(1, _pageWidthFor(c) + gap);"
+                # Chromium exposes scrollWidth as an integer even when page
+                # geometry crosses fractional device pixels.  A final column
+                # can therefore measure a fraction below the ideal multiple;
+                # ceil keeps that real column navigable while floor drops it.
+                f"  return Math.max(1, Math.ceil((c.scrollWidth + gap) / span));"
                 f"}}"
                 # _CURRENT_PAGE is maintained by _js_scroll_to so that
                 # _setupColumns() can re-anchor the transform whenever the
