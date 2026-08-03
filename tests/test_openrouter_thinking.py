@@ -118,3 +118,68 @@ def test_deepseek_responses_toggle_routes_and_passes_none(monkeypatch, tmp_path)
     assert captured["instructions"] == "Translate."
     assert "messages" not in captured
     assert "thinking" not in captured.get("extra_body", {})
+
+
+def test_deepseek_responses_streaming_collects_semantic_events(monkeypatch, tmp_path, caplog):
+    captured = {}
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([
+                SimpleNamespace(type="response.created"),
+                SimpleNamespace(type="response.reasoning_text.delta", delta="Checking..."),
+                SimpleNamespace(type="response.output_text.delta", delta="Translated "),
+                SimpleNamespace(type="response.output_text.delta", delta="text"),
+                SimpleNamespace(type="response.completed"),
+            ])
+
+        def close(self):
+            pass
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return FakeStream()
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):
+            raise AssertionError("DeepSeek should use Responses streaming")
+
+    class FakeOpenAIClient:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+            self.chat = SimpleNamespace(completions=FakeChatCompletions())
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("DEEPSEEK_USE_RESPONSES_API", "1")
+    monkeypatch.setenv("DEEPSEEK_EFFORT", "low")
+    monkeypatch.setenv("ENABLE_STREAMING", "1")
+    monkeypatch.setenv("LOG_STREAM_CHUNKS", "1")
+    monkeypatch.setenv("STREAM_THINKING_LOGS", "1")
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setattr(api_module, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+    monkeypatch.setattr(api_module, "httpx", None)
+
+    client = UnifiedClient("test-key", "deepseek-v4-flash", str(tmp_path))
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_should_show_api_lifecycle_logs", lambda: False)
+
+    response = client._send_openai_compatible(
+        messages=[{"role": "user", "content": "Text"}],
+        temperature=0.3,
+        max_tokens=500,
+        base_url="https://api.deepseek.com/v1",
+        response_name="responses-stream-test",
+        provider="deepseek",
+    )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert captured["stream"] is True
+    assert captured["reasoning"] == {"effort": "low"}
+    assert response.content == "Translated text"
+    assert response.finish_reason == "stop"
+    assert "Thinking..." in logs
+    assert "Text streaming..." in logs
+    assert "Translated text" in logs

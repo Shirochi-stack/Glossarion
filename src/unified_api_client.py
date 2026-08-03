@@ -22958,9 +22958,6 @@ class UnifiedClient:
                     use_streaming = self._streaming_enabled()
                     # Streaming log toggle (must be defined before streaming extraction)
                     log_stream = self._stream_logging_enabled(use_streaming)
-                    # Responses API streaming is not currently handled by this SDK path; disable to avoid breakage.
-                    if use_responses_api and use_streaming:
-                        use_streaming = False
                     if use_streaming:
                         call_kwargs["stream"] = True
 
@@ -23447,12 +23444,113 @@ class UnifiedClient:
                                 stream_read_error = stream_exc
                                 return
 
+                        def _append_responses_reasoning(reasoning_frag):
+                            nonlocal oai_thinking_started, oai_thinking_chunks
+                            nonlocal oai_thinking_start_ts, oai_thinking_log_buf
+                            if not isinstance(reasoning_frag, str) or not reasoning_frag:
+                                return
+                            reasoning_frag = reasoning_frag.replace("\\n", "\n")
+                            oai_thinking_chunks += 1
+                            oai_thinking_text_parts.append(reasoning_frag)
+                            if oai_thinking_start_ts is None:
+                                oai_thinking_start_ts = _t.time()
+                            if not oai_thinking_started:
+                                oai_thinking_started = True
+                                if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                    print(f"🧠 [{provider}] Thinking...", flush=True)
+                            if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                oai_thinking_log_buf.append(reasoning_frag)
+                                combined = "".join(oai_thinking_log_buf)
+                                if "\n" in combined:
+                                    parts = combined.split("\n")
+                                    for part in parts[:-1]:
+                                        print(f"    {part}", flush=True)
+                                    oai_thinking_log_buf = [parts[-1]]
+
+                        def _append_responses_output(text_frag):
+                            nonlocal log_buf, oai_thinking_started, oai_thinking_log_buf
+                            if not isinstance(text_frag, str) or not text_frag:
+                                return
+                            if oai_thinking_started:
+                                if oai_stream_thinking and log_stream and not self._is_stop_requested():
+                                    remainder = "".join(oai_thinking_log_buf).rstrip("\n")
+                                    if remainder:
+                                        for part in remainder.split("\n"):
+                                            print(f"    {part}", flush=True)
+                                    thinking_dur = _t.time() - oai_thinking_start_ts if oai_thinking_start_ts else 0
+                                    print(
+                                        f"🧠 [{provider}] Thinking complete "
+                                        f"({oai_thinking_chunks} chunks, {thinking_dur:.1f}s)",
+                                        flush=True,
+                                    )
+                                    print("─" * 50, flush=True)
+                                    print(f"📡 [{provider}] Text streaming...", flush=True)
+                                oai_thinking_log_buf = []
+                                oai_thinking_started = False
+
+                            text_parts.append(text_frag)
+                            if log_stream and not self._is_stop_requested():
+                                combined = "".join(log_buf) + text_frag
+                                for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
+                                    combined = combined.replace(tag, tag + "\n")
+                                if "\n" in combined:
+                                    parts = combined.split("\n")
+                                    for part in parts[:-1]:
+                                        print(part.replace('\x1f', '\\x1F'))
+                                    log_buf = [parts[-1]]
+                                else:
+                                    log_buf.append(text_frag)
+                                    if len("".join(log_buf)) > 150:
+                                        print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                        log_buf = []
+
                         _check_cancel_during_stream()
                         
                         for event in _iter_stream_events():
                             _check_cancel_during_stream()
                             try:
                                 frag_collected = False
+                                # Responses API streams semantic events rather than Chat Completion chunks.
+                                if use_responses_api:
+                                    event_type = getattr(event, "type", None)
+                                    if event_type is None and isinstance(event, dict):
+                                        event_type = event.get("type") or event.get("event")
+                                    event_type = str(event_type or "")
+
+                                    if event_type == "response.reasoning_text.delta":
+                                        event_delta = getattr(event, "delta", None)
+                                        if event_delta is None and isinstance(event, dict):
+                                            event_delta = event.get("delta")
+                                        _append_responses_reasoning(event_delta)
+                                        continue
+
+                                    if event_type == "response.output_text.delta":
+                                        event_delta = getattr(event, "delta", None)
+                                        if event_delta is None and isinstance(event, dict):
+                                            event_delta = event.get("delta")
+                                        _append_responses_output(event_delta)
+                                        continue
+
+                                    if event_type == "response.output_text.done":
+                                        if not text_parts:
+                                            full_text = getattr(event, "text", None)
+                                            if full_text is None and isinstance(event, dict):
+                                                full_text = event.get("text")
+                                            _append_responses_output(full_text)
+                                        continue
+
+                                    if event_type == "response.completed":
+                                        finish_reason = "stop"
+                                        continue
+                                    if event_type == "response.incomplete":
+                                        finish_reason = "length"
+                                        continue
+                                    if event_type == "response.failed":
+                                        finish_reason = "error"
+                                        continue
+                                    if event_type.startswith("response."):
+                                        continue
+
                                 # 1) Standard OpenAI stream chunk
                                 ch = (getattr(event, "choices", None) or [None])[0]
                                 if not ch and isinstance(event, dict):

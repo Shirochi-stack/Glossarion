@@ -3522,7 +3522,7 @@ def _create_response_handling_section(self, parent):
     self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
     _set_thinking_widget_enabled(self.deepseek_effort_combo, _ds_initially_enabled)
 
-    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models also send the selected effort; Responses API format uses reasoning:{effort:...}.")
+    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nEffort 'none' is only supported by Responses API format and is equivalent to disabling thinking.")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)
