@@ -47,15 +47,16 @@ class _AITruncationYesClient:
         return "YES"
 
 
-def test_ai_truncation_issue_previews_source_and_output_last_html_p():
+def test_ai_truncation_issue_previews_source_and_output_last_nonempty_html_p():
     ai_result = run_ai_truncation_check(
-        "<html><body><p>Earlier source.</p><p>Source <em>final</em> paragraph.</p></body></html>",
-        "<html><body><p>Earlier output.</p><p>Output <strong>cut off</strong></p></body></html>",
+        "<html><body><p>Earlier source.</p><p>Source <em>final</em> paragraph.</p><p></p></body></html>",
+        "<html><body><p>Earlier output.</p><p>Output <strong>cut off</strong></p><p>&nbsp;</p></body></html>",
         client=_AITruncationYesClient(),
         log=lambda _message: None,
     )
 
     assert ai_result["flagged"] is True
+    assert ai_result["details"] == "ai_verdict=YES"
     assert ai_result["source_last_p"] == "Source final paragraph."
     assert ai_result["output_last_p"] == "Output cut off"
 
@@ -79,7 +80,7 @@ def test_ai_truncation_last_p_preview_distinguishes_empty_and_missing_tags():
 def test_progress_display_keeps_both_ai_truncation_paragraph_previews():
     from Retranslation_GUI import _format_qa_issue_for_progress_display
 
-    issue_code = "ai_truncation_detected (ai_verdict=YES (raw: YES))"
+    issue_code = "ai_truncation_detected (ai_verdict=YES)"
     preview = _format_ai_truncation_last_p_preview(
         "source ending " * 20,
         "output ending " * 20,

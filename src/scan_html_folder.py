@@ -5689,16 +5689,22 @@ _AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
 
 
 def _extract_paragraphs(html, *, return_last_html_p=False):
-    """Extract paragraph texts and optionally the exact final ``<p>`` text."""
+    """Extract paragraph texts and optionally the final non-empty ``<p>`` text."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "head", "title", "meta", "link"]):
         tag.decompose()
     paragraph_tags = soup.find_all("p")
-    last_html_p = (
-        paragraph_tags[-1].get_text(" ", strip=True)
-        if paragraph_tags
-        else None
-    )
+    last_html_p = None
+    if paragraph_tags:
+        # Preserve the distinction between a document containing only empty
+        # paragraphs and one containing no paragraph tags at all, while
+        # skipping empty trailing markup in otherwise populated documents.
+        last_html_p = ""
+        for paragraph_tag in reversed(paragraph_tags):
+            paragraph_text = paragraph_tag.get_text(" ", strip=True)
+            if paragraph_text:
+                last_html_p = paragraph_text
+                break
     paragraphs = []
     for p in paragraph_tags:
         text = p.get_text(strip=True)
@@ -6297,19 +6303,19 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         answer_upper = answer_text.upper().strip().rstrip('.')
         if answer_upper == 'YES' or answer_upper.startswith('YES'):
             result['flagged'] = True
-            result['details'] = f'ai_verdict=YES (raw: {answer_text[:50]})'
+            result['details'] = 'ai_verdict=YES'
         elif answer_upper == 'NO' or answer_upper.startswith('NO'):
-            result['details'] = f'ai_verdict=NO (raw: {answer_text[:50]})'
+            result['details'] = 'ai_verdict=NO'
         else:
             # Ambiguous answer — check for YES/NO keywords
             if 'YES' in answer_upper and 'NO' not in answer_upper:
                 result['flagged'] = True
-                result['details'] = f'ai_verdict=YES_inferred (raw: {answer_text[:80]})'
+                result['details'] = 'ai_verdict=YES_inferred'
             elif 'NO' in answer_upper:
-                result['details'] = f'ai_verdict=NO_inferred (raw: {answer_text[:80]})'
+                result['details'] = 'ai_verdict=NO_inferred'
             else:
                 # Unable to parse — treat as uncertain, don't flag
-                result['details'] = f'ai_verdict=UNCLEAR (raw: {answer_text[:80]})'
+                result['details'] = 'ai_verdict=UNCLEAR'
 
     except Exception as e:
         error_text = str(e)
