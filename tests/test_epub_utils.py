@@ -1325,6 +1325,149 @@ Chapter 1:
     assert "translation failed" not in toc_path.read_text(encoding="utf-8")
 
 
+def test_source_toc_falls_back_to_epub3_nav_and_uses_toc_txt(tmp_path, monkeypatch):
+    source_epub = tmp_path / "nav-only.epub"
+    container_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+    content_opf = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="navigation" href="Text/navigation.xhtml"
+          media-type="application/xhtml+xml" properties="nav"/>
+    <item id="part" href="Text/Section0001.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chapter" href="Text/Chapter0001.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="part"/>
+    <itemref idref="chapter"/>
+  </spine>
+</package>
+"""
+    nav_xhtml = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:epub="http://www.idpf.org/2007/ops">
+  <body>
+    <nav epub:type="toc" id="toc" role="doc-toc">
+      <ol>
+        <li><a href="Section0001.xhtml">Night Snow Chapter</a>
+          <ol><li><a href="Chapter0001.xhtml">Chapter One</a></li></ol>
+        </li>
+      </ol>
+    </nav>
+    <nav epub:type="landmarks">
+      <ol><li><a href="cover.xhtml">Cover</a></li></ol>
+    </nav>
+  </body>
+</html>
+"""
+    with zipfile.ZipFile(source_epub, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", container_xml)
+        archive.writestr("OEBPS/content.opf", content_opf)
+        archive.writestr("OEBPS/Text/navigation.xhtml", nav_xhtml)
+
+    toc_txt = tmp_path / "TOC.txt"
+    toc_txt.write_text(
+        """TOC Translations
+==================================================
+
+Chapter 1:
+  Original:   Night Snow Chapter
+  Translated: Night Snow Arc
+  Target URI: Section0001.xhtml
+----------------------------------------
+Chapter 2:
+  Original:   Chapter One
+  Translated: Chapter 1: Into the Jianghu
+  Target URI: Chapter0001.xhtml
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "Section0001.xhtml").write_text(
+        "<html><body><h1>Section</h1></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "Chapter0001.xhtml").write_text(
+        "<html><body><h1>Chapter</h1></body></html>", encoding="utf-8"
+    )
+
+    logs = []
+    compiler = EPUBCompiler(str(tmp_path), log_callback=logs.append)
+    compiler.translate_toc_ncx = True
+    compiler.api_client = None
+    monkeypatch.setenv("EPUB_PATH", str(source_epub))
+    spine = [
+        epub_converter.epub.EpubHtml(
+            title="Section", file_name="Section0001.xhtml"
+        ),
+        epub_converter.epub.EpubHtml(
+            title="Chapter", file_name="Chapter0001.xhtml"
+        ),
+    ]
+
+    entries = compiler._extract_source_toc_ncx_entries(str(source_epub))
+    toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
+
+    assert entries == [
+        {"label": "Night Snow Chapter", "src": "Section0001.xhtml"},
+        {"label": "Chapter One", "src": "Chapter0001.xhtml"},
+    ]
+    assert [(item.href, item.title) for item in toc] == [
+        ("Section0001.xhtml", "Night Snow Arc"),
+        ("Chapter0001.xhtml", "Chapter 1: Into the Jianghu"),
+    ]
+    assert any("using EPUB 3 navigation document" in message for message in logs)
+    assert all("Cover" not in item.title for item in toc)
+
+
+def test_source_toc_prefers_ncx_when_ncx_and_epub3_nav_both_exist(tmp_path):
+    source_epub = tmp_path / "dual-navigation.epub"
+    container_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles><rootfile full-path="OPS/package.opf"/></rootfiles>
+</container>
+"""
+    content_opf = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine toc="ncx"/>
+</package>
+"""
+    ncx = """<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap><navPoint id="one"><navLabel><text>NCX title</text></navLabel>
+    <content src="chapter.xhtml"/></navPoint></navMap>
+</ncx>
+"""
+    nav = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:epub="http://www.idpf.org/2007/ops">
+  <body><nav epub:type="toc"><ol>
+    <li><a href="chapter.xhtml">NAV title</a></li>
+  </ol></nav></body>
+</html>
+"""
+    with zipfile.ZipFile(source_epub, "w") as archive:
+        archive.writestr("META-INF/container.xml", container_xml)
+        archive.writestr("OPS/package.opf", content_opf)
+        archive.writestr("OPS/toc.ncx", ncx)
+        archive.writestr("OPS/nav.xhtml", nav)
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+
+    assert compiler._extract_source_toc_ncx_entries(str(source_epub)) == [
+        {"label": "NCX title", "src": "chapter.xhtml"}
+    ]
+
+
 def test_xml_validator_valid_codepoints():
     # Basic BMP and some punctuation
     assert XMLValidator.is_valid_char_code(ord('A')) is True

@@ -8,6 +8,7 @@ import sys
 import io
 import json
 import mimetypes
+import posixpath
 import re
 import zipfile
 import unicodedata
@@ -1641,9 +1642,15 @@ class EPUBCompiler:
         _layout_label = _layout_mode if _layout_mode else ('legacy' if self.legacy_epub_structure else 'epub3')
         self.log(f"[INFO] EPUB layout mode: {_layout_label} → {'EPUB2 (OEBPS/Text)' if self.legacy_epub_structure else 'EPUB3 (flat OEBPS)'}")
         if self.use_toc_ncx:
-            self.log("[INFO] Use toc.ncx enabled: TOC will be built from the source EPUB's toc.ncx")
+            self.log(
+                "[INFO] Use source TOC enabled: navigation will come from toc.ncx "
+                "or EPUB 3 nav.xhtml fallback"
+            )
         if self.translate_toc_ncx:
-            self.log("[INFO] Translate toc.ncx enabled: TOC entries will be translated in one API call and cached to TOC.txt")
+            self.log(
+                "[INFO] Translate source TOC enabled: navigation entries will be "
+                "translated and cached to TOC.txt"
+            )
         
         # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
         self.auxiliary_html_files: set[str] = set()
@@ -2611,7 +2618,7 @@ class EPUBCompiler:
                 self.log("🛑 EPUB converter stopped by user")
                 return
 
-            # Optional: Build TOC from the source EPUB's toc.ncx (and optionally translate it)
+            # Optional: Build TOC from source NCX or EPUB 3 nav.xhtml.
             if getattr(self, 'use_toc_ncx', False):
                 try:
                     toc = self._build_toc_from_source_toc_ncx(
@@ -2620,7 +2627,7 @@ class EPUBCompiler:
                         metadata=metadata
                     )
                 except Exception as e:
-                    self.log(f"⚠️ Failed to build TOC from source toc.ncx: {e}")
+                    self.log(f"⚠️ Failed to build TOC from source navigation: {e}")
 
             # Finalize book
             self._finalize_book(book, spine, toc, cover_file)
@@ -5808,7 +5815,7 @@ img {
         book.add_item(gallery_page)
         return gallery_page
 
-    # --- toc.ncx support (source TOC) ---
+    # --- Source TOC support (toc.ncx with EPUB 3 nav.xhtml fallback) ---
     def _strip_all_ext(self, name: str) -> str:
         core = name
         while True:
@@ -5882,71 +5889,224 @@ img {
         return base.lower().strip()
 
     def _extract_source_toc_ncx_entries(self, source_epub_path: str) -> List[Dict[str, str]]:
-        """Extract ordered navPoint entries from the source EPUB's toc.ncx.
+        """Extract source TOC entries, preferring NCX then EPUB 3 nav XHTML.
 
-        Returns list of dicts: {'label': str, 'src': str}
+        ``USE_TOC_NCX`` keeps its historical name, but EPUB 3 books are only
+        required to expose their table of contents through a manifest item with
+        ``properties="nav"``. If no NCX exists, parse that item's
+        ``<nav epub:type="toc">`` links in document order.
+
+        Returns list of dicts: ``{'label': str, 'src': str}``.
         """
         entries: List[Dict[str, str]] = []
         if not source_epub_path or not os.path.exists(source_epub_path):
             return entries
 
         try:
-            import zipfile
             with zipfile.ZipFile(source_epub_path, 'r') as zf:
+                names = zf.namelist()
+                names_by_key = {name.casefold(): name for name in names}
                 ncx_path = None
+                nav_path = None
 
-                # 1) Try container.xml -> OPF -> manifest item media-type application/x-dtbncx+xml
+                def resolve_member(base_path: str, href: str) -> Optional[str]:
+                    from urllib.parse import unquote
+
+                    href_path = unquote((href or '').split('#', 1)[0]).replace('\\', '/')
+                    candidate = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(base_path), href_path)
+                    ).lstrip('/')
+                    if candidate == '..' or candidate.startswith('../'):
+                        return None
+                    return names_by_key.get(candidate.casefold())
+
+                # 1) container.xml -> OPF -> manifest NCX and EPUB 3 nav items.
                 opf_path = None
                 try:
                     container = zf.read('META-INF/container.xml')
                     tree = ET.fromstring(container)
-                    rootfile = tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    rootfile = tree.find(
+                        './/{urn:oasis:names:tc:opendocument:xmlns:container}rootfile'
+                    )
                     if rootfile is not None:
-                        opf_path = rootfile.get('full-path')
+                        opf_path = names_by_key.get(
+                            (rootfile.get('full-path') or '').casefold()
+                        )
                 except Exception:
                     opf_path = None
 
                 if not opf_path:
-                    for name in zf.namelist():
-                        if name.lower().endswith('.opf'):
-                            opf_path = name
-                            break
+                    opf_path = next(
+                        (name for name in names if name.lower().endswith('.opf')),
+                        None,
+                    )
 
                 if opf_path:
                     try:
-                        opf_bytes = zf.read(opf_path)
-                        root = ET.fromstring(opf_bytes)
-                        ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                        root = ET.fromstring(zf.read(opf_path))
+                        ns_uri = ''
                         if root.tag.startswith('{'):
-                            default_ns = root.tag[1:root.tag.index('}')]
-                            ns = {'opf': default_ns}
+                            ns_uri = root.tag[1:root.tag.index('}')]
+                        item_path = (
+                            f'.//{{{ns_uri}}}manifest/{{{ns_uri}}}item'
+                            if ns_uri else './/manifest/item'
+                        )
+                        manifest_items = root.findall(item_path)
 
-                        for item in root.findall('.//opf:manifest/opf:item', ns):
-                            mt = (item.get('media-type') or '').strip().lower()
-                            item_id = (item.get('id') or '').strip().lower()
-                            href = item.get('href')
-                            if not href:
+                        # Follow the spine's NCX id when present, then fall
+                        # back to the NCX media type / conventional id.
+                        spine_path = (
+                            f'.//{{{ns_uri}}}spine' if ns_uri else './/spine'
+                        )
+                        spine_el = root.find(spine_path)
+                        spine_toc_id = (
+                            (spine_el.get('toc') or '').strip()
+                            if spine_el is not None else ''
+                        )
+
+                        for item in manifest_items:
+                            item_id = (item.get('id') or '').strip()
+                            href = item.get('href') or ''
+                            media_type = (item.get('media-type') or '').strip().lower()
+                            properties = {
+                                token.casefold()
+                                for token in (item.get('properties') or '').split()
+                            }
+                            candidate = resolve_member(opf_path, href) if href else None
+                            if not candidate:
                                 continue
-                            if mt == 'application/x-dtbncx+xml' or item_id == 'ncx':
-                                base_dir = os.path.dirname(opf_path)
-                                candidate = os.path.join(base_dir, href).replace('\\', '/') if base_dir else href
-                                if candidate in zf.namelist():
-                                    ncx_path = candidate
-                                    break
+                            if (
+                                item_id == spine_toc_id
+                                or media_type == 'application/x-dtbncx+xml'
+                                or item_id.casefold() == 'ncx'
+                            ):
+                                ncx_path = candidate
+                            if 'nav' in properties:
+                                nav_path = candidate
+                    except Exception as opf_error:
+                        self.log(f"⚠️ Could not inspect source OPF navigation manifest: {opf_error}")
+
+                # 2) Legacy filename fallback for EPUBs with incomplete OPFs.
+                if not ncx_path:
+                    ncx_path = next(
+                        (name for name in names if name.lower().endswith('toc.ncx')),
+                        None,
+                    )
+
+                # NCX remains authoritative when both navigation formats exist.
+                if ncx_path:
+                    ncx_bytes = zf.read(ncx_path)
+                    nav_bytes = None
+                else:
+                    if not nav_path:
+                        nav_path = next(
+                            (
+                                name for name in names
+                                if posixpath.basename(name).casefold() == 'nav.xhtml'
+                            ),
+                            None,
+                        )
+                    if not nav_path:
+                        return entries
+                    nav_bytes = zf.read(nav_path)
+                    ncx_bytes = None
+
+            if nav_bytes is not None:
+                self.log(
+                    f"📖 No toc.ncx found; using EPUB 3 navigation document: {nav_path}"
+                )
+
+                def is_toc_nav_et(element) -> bool:
+                    epub_type = (
+                        element.get('{http://www.idpf.org/2007/ops}type')
+                        or element.get('epub:type')
+                        or element.get('type')
+                        or ''
+                    )
+                    return (
+                        'toc' in epub_type.casefold().split()
+                        or (element.get('role') or '').casefold() == 'doc-toc'
+                        or (element.get('id') or '').casefold() == 'toc'
+                    )
+
+                def extract_nav_et(xhtml_data) -> List[Dict[str, str]]:
+                    root_el = ET.fromstring(xhtml_data)
+                    toc_nav = next(
+                        (
+                            element for element in root_el.iter()
+                            if element.tag.rsplit('}', 1)[-1].casefold() == 'nav'
+                            and is_toc_nav_et(element)
+                        ),
+                        None,
+                    )
+                    if toc_nav is None:
+                        return []
+                    out = []
+                    for element in toc_nav.iter():
+                        if element.tag.rsplit('}', 1)[-1].casefold() != 'a':
+                            continue
+                        href = (element.get('href') or '').strip()
+                        label = re.sub(
+                            r'\s+', ' ', ''.join(element.itertext())
+                        ).strip()
+                        if label or href:
+                            out.append({'label': label, 'src': href})
+                    return out
+
+                try:
+                    nav_entries = extract_nav_et(nav_bytes)
+                    if nav_entries:
+                        self.log(
+                            f"✅ Loaded {len(nav_entries)} entries from EPUB 3 nav.xhtml"
+                        )
+                        return nav_entries
+                except ET.ParseError as parse_error:
+                    self.log(
+                        f"⚠️ EPUB 3 navigation document is not well-formed "
+                        f"({parse_error}); attempting recovery"
+                    )
+
+                # Tolerate malformed XHTML and named HTML entities while still
+                # selecting only the TOC nav, never landmarks or page-list.
+                for parser_name in ('xml', 'html.parser'):
+                    try:
+                        soup = BeautifulSoup(nav_bytes, parser_name)
+                        toc_nav = None
+                        for nav in soup.find_all('nav'):
+                            nav_type = (
+                                nav.get('epub:type')
+                                or nav.get('type')
+                                or ''
+                            )
+                            if (
+                                'toc' in str(nav_type).casefold().split()
+                                or str(nav.get('role') or '').casefold() == 'doc-toc'
+                                or str(nav.get('id') or '').casefold() == 'toc'
+                            ):
+                                toc_nav = nav
+                                break
+                        if toc_nav is None:
+                            continue
+                        recovered = []
+                        for anchor in toc_nav.find_all('a'):
+                            href = (anchor.get('href') or '').strip()
+                            label = re.sub(r'\s+', ' ', anchor.get_text(' ', strip=True)).strip()
+                            if label or href:
+                                recovered.append({'label': label, 'src': href})
+                        if recovered:
+                            self.log(
+                                f"✅ Recovered {len(recovered)} EPUB 3 nav.xhtml "
+                                f"entries via tolerant '{parser_name}' parser"
+                            )
+                            return recovered
                     except Exception:
-                        ncx_path = None
+                        continue
 
-                # 2) Fallback: find toc.ncx by name
-                if not ncx_path:
-                    for name in zf.namelist():
-                        if name.lower().endswith('toc.ncx'):
-                            ncx_path = name
-                            break
-
-                if not ncx_path:
-                    return entries
-
-                ncx_bytes = zf.read(ncx_path)
+                self.log(
+                    "⚠️ EPUB 3 navigation document contained no usable TOC links; "
+                    "using generated TOC"
+                )
+                return entries
 
             # Parse outside the zip context. Source NCX files are frequently
             # malformed (unescaped '&', stray control characters, bad entities),
@@ -6236,7 +6396,7 @@ img {
             self.log(f"⚠️ Post-reconciliation failed: {e}")
 
     def _build_toc_from_source_toc_ncx(self, spine: List, existing_toc: List, metadata: dict) -> List:
-        """Build TOC from source toc.ncx, optionally translating navLabels and caching to TOC.txt."""
+        """Build TOC from source NCX/nav.xhtml and optionally cache translations."""
         source_epub_path = os.getenv('EPUB_PATH')
         if not source_epub_path or not os.path.exists(source_epub_path):
             self.log("⚠️ USE_TOC_NCX enabled but EPUB_PATH is missing or invalid; using generated TOC")
@@ -6244,7 +6404,10 @@ img {
 
         entries = self._extract_source_toc_ncx_entries(source_epub_path)
         if not entries:
-            self.log("⚠️ USE_TOC_NCX enabled but no toc.ncx entries were found; using generated TOC")
+            self.log(
+                "⚠️ USE_TOC_NCX enabled but no toc.ncx or EPUB 3 nav.xhtml "
+                "TOC entries were found; using generated TOC"
+            )
             return existing_toc
 
         # Build mapping from normalized core name -> actual spine href
@@ -6309,7 +6472,7 @@ img {
         if getattr(self, 'translate_toc_ncx', False):
             toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
             if os.path.exists(toc_txt_path):
-                self.log("📁 Found existing TOC.txt - using cached toc.ncx translations")
+                self.log("📁 Found existing TOC.txt - using cached source TOC translations")
                 toc_source_headers, translations, toc_output_files = self._load_toc_translations_file(toc_txt_path)
                 # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
                 if toc_source_headers:
@@ -6482,7 +6645,7 @@ img {
                         self.log(f"📐 Auto toc.ncx batch size: {toc_ncx_per_batch} entries "
                                  f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
                                  f"{available_tokens:,} available tokens, ~50 tok/entry)")
-                    self.log(f"🌐 Translating {len(original)} toc.ncx entries in chunks of {toc_ncx_per_batch}...")
+                    self.log(f"🌐 Translating {len(original)} source TOC entries in chunks of {toc_ncx_per_batch}...")
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator
                         # Build config from env vars set by GUI so user's custom prompts are used
