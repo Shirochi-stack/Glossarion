@@ -55,7 +55,10 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     dialog = multi_api_key_manager.MultiAPIKeyDialog
     qt = multi_api_key_manager.Qt
     window_flags = dialog._standard_manager_window_flags(
-        qt.Dialog | qt.WindowCloseButtonHint | qt.WindowContextHelpButtonHint
+        qt.Dialog
+        | qt.WindowCloseButtonHint
+        | qt.WindowContextHelpButtonHint
+        | qt.WindowStaysOnTopHint
     )
     assert not window_flags & qt.WindowMinimizeButtonHint
     assert window_flags & qt.WindowMaximizeButtonHint
@@ -63,6 +66,7 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     assert window_flags & qt.WindowSystemMenuHint
     assert (window_flags & qt.WindowType_Mask) == qt.Window
     assert not window_flags & qt.WindowContextHelpButtonHint
+    assert not window_flags & qt.WindowStaysOnTopHint
 
     assert dialog._bounded_api_key_tree_font_size(1) == 8
     assert dialog._bounded_api_key_tree_font_size(18) == 18
@@ -98,6 +102,8 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     assert "header.setStretchLastSection(False)" in source
     assert "font-size: {point_size}pt" in source
     assert "header.style().polish(header)" in source
+    assert "manager_handle.setTransientParent(owner_handle)" in source
+    assert "GWLP_HWNDPARENT" in source
 
 
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):

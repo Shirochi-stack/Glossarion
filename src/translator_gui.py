@@ -37328,30 +37328,11 @@ Important rules:
                    print(message)
                    return
                
-               msg_text = str(message)
-               msg_low = msg_text.lower()
-               is_memory = (
-                   '[memory]' in msg_low
-                   or '[rollingsummary]' in msg_low
-                   or 'rolling summary' in msg_low
-               )
-               
-               if is_memory:
-                   # Apply green color formatting for memory messages
-                   cursor = self.log_text.textCursor()
-                   cursor.movePosition(QTextCursor.End)
-                   
-                   # Set format for memory text
-                   format = QTextCharFormat()
-                   format.setForeground(QColor("#4CAF50"))
-                   font = QFont()
-                   font.setItalic(True)
-                   format.setFont(font)
-                   
-                   cursor.insertText(message + "\n", format)
-               else:
-                   # Regular text append
-                   self.log_text.append(message)
+               # Keep every status line in the log widget's normal font and
+               # foreground color.  A previous special case rendered memory
+               # and rolling-summary messages as green italics, which also
+               # caught ordinary key-pool status messages.
+               self.log_text.append(str(message))
                
                # Coalesce auto-scroll work so a log burst does not create one
                # Qt timer per line.

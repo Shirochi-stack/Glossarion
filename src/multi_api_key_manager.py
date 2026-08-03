@@ -1559,8 +1559,6 @@ class MultiAPIKeyDialog(QDialog):
             # Create and show dialog non-modally
             dialog = MultiAPIKeyDialog(parent, translator_gui, preview_pool=preview_pool)
             dialog.setWindowModality(Qt.NonModal)
-            # Make dialog stay on top of other windows
-            dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
             setattr(translator_gui, dialog_attr, dialog)
         else:
             dialog = getattr(translator_gui, dialog_attr)
@@ -1568,6 +1566,11 @@ class MultiAPIKeyDialog(QDialog):
                 dialog._refresh_visible_key_pool_views()
             except Exception:
                 pass
+
+        # Keep the manager owned by Glossarion without making it globally topmost.
+        # Reapply this for reused dialogs as well, so stale topmost state is cleared.
+        dialog.setWindowFlags(dialog._standard_manager_window_flags(dialog.windowFlags()))
+        dialog._set_manager_transient_owner(parent)
 
         # Show and raise the dialog
         dialog.show()
@@ -1579,6 +1582,12 @@ class MultiAPIKeyDialog(QDialog):
     def __init__(self, parent, translator_gui, preview_pool: Optional[str] = None):
         # PySide6 dialogs need QWidget parents or None
         style_parent = parent if HAS_GUI and isinstance(parent, QWidget) else None
+        requested_owner = None
+        if HAS_GUI and isinstance(parent, QWidget):
+            try:
+                requested_owner = parent.window()
+            except Exception:
+                requested_owner = parent
 
         # IMPORTANT (spinbox rendering): Qt style sheets cascade into child windows.
         # The "Other Settings" dialog styles ``QSpinBox`` (other_settings.py) but
@@ -1597,6 +1606,7 @@ class MultiAPIKeyDialog(QDialog):
         super().__init__(style_parent)
 
         self.translator_gui = translator_gui
+        self._manager_owner_window = requested_owner
         self.preview_pool = (str(preview_pool or '').strip() or None)
         self.tree = None
         self.test_results = queue.Queue()
@@ -1644,10 +1654,55 @@ class MultiAPIKeyDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._start_deferred_key_pool_render()
+        QTimer.singleShot(0, self._apply_manager_transient_owner)
+
+    def _set_manager_transient_owner(self, owner):
+        """Keep the manager above its launcher without making it globally topmost."""
+        if HAS_GUI and isinstance(owner, QWidget):
+            try:
+                owner = owner.window()
+            except Exception:
+                pass
+        if owner is self:
+            return
+        self._manager_owner_window = owner
+        self._apply_manager_transient_owner()
+
+    def _apply_manager_transient_owner(self):
+        """Apply native ownership separately from QWidget stylesheet parenting."""
+        owner = getattr(self, '_manager_owner_window', None)
+        if owner is None or owner is self:
+            return
+        try:
+            # Force both native handles to exist before assigning the transient
+            # relationship. This keeps the manager above Other Settings only.
+            owner.winId()
+            self.winId()
+            owner_handle = owner.windowHandle()
+            manager_handle = self.windowHandle()
+            if owner_handle is not None and manager_handle is not None:
+                manager_handle.setTransientParent(owner_handle)
+            if sys.platform == 'win32':
+                # QWidget parenting remains on TranslatorGUI for stylesheet
+                # isolation, so explicitly set the native owner HWND to the
+                # launching Other Settings dialog for correct Windows z-order.
+                import ctypes
+                from ctypes import wintypes
+
+                set_window_owner = getattr(
+                    ctypes.windll.user32,
+                    'SetWindowLongPtrW',
+                    ctypes.windll.user32.SetWindowLongW,
+                )
+                set_window_owner.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HWND]
+                set_window_owner.restype = wintypes.HWND
+                set_window_owner(int(self.winId()), -8, int(owner.winId()))  # GWLP_HWNDPARENT
+        except (AttributeError, RuntimeError):
+            pass
 
     @staticmethod
     def _standard_manager_window_flags(flags):
-        """Return native window flags with maximize and close controls."""
+        """Return normal owned-window flags with maximize and close controls."""
         flag_value = (int(flags) & ~int(Qt.WindowType_Mask)) | int(Qt.Window)
         flag_value |= int(
             Qt.WindowTitleHint
@@ -1658,6 +1713,7 @@ class MultiAPIKeyDialog(QDialog):
         flag_value &= ~int(
             Qt.WindowContextHelpButtonHint
             | Qt.WindowMinimizeButtonHint
+            | Qt.WindowStaysOnTopHint
         )
         return Qt.WindowType(flag_value)
 
