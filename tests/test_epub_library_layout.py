@@ -18,6 +18,7 @@ from epub_library import (
     EpubReaderDialog,
     SIZE_NORMAL,
     _FlowLayout,
+    _OverlayMergeThread,
     _configure_epub_reader_web_settings,
     _merge_manual_metadata_edits,
 )
@@ -384,6 +385,44 @@ def test_reader_next_rechecks_live_count_before_leaving_chapter(monkeypatch):
     assert reader._current_row == 0
     assert reader._current_page == 7
     assert reader.scrolled_to == 7
+
+
+def test_overlay_worker_extracts_translated_title_from_path_only_entry(tmp_path):
+    translated = tmp_path / "response_chapter0039.html"
+    translated.write_text(
+        "<html><head><meta charset='utf-8'></head>"
+        "<body><h1>Episode 38. God Killer (3)</h1>"
+        "<p>Translated chapter text.</p></body></html>",
+        encoding="utf-8",
+    )
+    result = {}
+    worker = _OverlayMergeThread(
+        raw_chapters=[("38화. 신살자 (3)", "<p>Source chapter text.</p>")],
+        images={},
+        filenames=["chapter0039.xhtml"],
+        overlay_map={"chapter0039.xhtml": {"path": os.fspath(translated)}},
+        extra_image_dirs=[],
+        config={},
+    )
+    worker.done.connect(
+        lambda chapters, images, applied: result.update(
+            chapters=chapters,
+            images=images,
+            applied=applied,
+        )
+    )
+
+    # Call run directly so the test remains deterministic; production starts
+    # the same method on the worker thread.
+    worker.run()
+
+    assert result["applied"] is True
+    assert result["chapters"] == [
+        (
+            "Episode 38. God Killer (3)",
+            translated.read_text(encoding="utf-8"),
+        )
+    ]
 
 
 def test_remote_image_url_survives_local_image_processing(tmp_path):

@@ -17230,6 +17230,15 @@ class _OverlayMergeThread(QThread):
                 new_title = title
                 if ov.get("title"):
                     new_title = str(ov["title"])
+                else:
+                    # Progress Manager intentionally supplies path-only
+                    # overlays so its context-menu action can open the reader
+                    # immediately.  We already have the translated bytes in
+                    # this worker, so derive the translated TOC title here
+                    # without adding any GUI-thread file I/O.
+                    extracted_title = _extract_html_title_fast(data)
+                    if extracted_title:
+                        new_title = extracted_title
                 return (idx, new_title, translated_html, True)
 
             try:

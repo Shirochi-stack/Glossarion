@@ -129,31 +129,6 @@ def _progress_item_is_html(display_info) -> bool:
     return str(output_file).lower().endswith(_PROGRESS_READER_HTML_EXTENSIONS)
 
 
-def _progress_epub_overlay_entry(translated_path) -> dict:
-    """Build a reader overlay entry with its translated chapter title.
-
-    Progress Manager used to pass only ``path`` to ``EpubReaderDialog``.
-    The overlay merger therefore retained the source EPUB's TOC title even
-    while displaying translated HTML.  Reuse the EPUB Library's lightweight
-    title reader so both launch paths construct identical overlay metadata.
-    """
-    path = os.fspath(translated_path) if translated_path else ""
-    entry = {"path": path}
-    if not path:
-        return entry
-    try:
-        from epub_library import _read_translated_chapter_title
-
-        title = _read_translated_chapter_title(path)
-    except Exception:
-        # Missing/malformed headings are non-fatal: the reader intentionally
-        # falls back to the source TOC title when no translated title exists.
-        title = ""
-    if title:
-        entry["title"] = title
-    return entry
-
-
 def _match_epub_html_member_basename(member_names, candidates):
     """Match progress filenames to an EPUB HTML member and return its basename."""
     html_members = [
@@ -18068,12 +18043,10 @@ class RetranslationMixin:
                     continue
                 source_filename = _reader_member_for_item(chapter_info)
                 if source_filename:
-                    overlay[source_filename.lower()] = (
-                        _progress_epub_overlay_entry(translated_path)
-                    )
-            overlay[initial_filename.lower()] = (
-                _progress_epub_overlay_entry(output_path)
-            )
+                    overlay[source_filename.lower()] = {
+                        "path": translated_path,
+                    }
+            overlay[initial_filename.lower()] = {"path": output_path}
 
             extra_image_dirs = [
                 path for path in (
