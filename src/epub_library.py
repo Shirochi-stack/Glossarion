@@ -14173,6 +14173,7 @@ class BookDetailsDialog(QDialog):
         self._chapter_page = 0
         self._chapter_list_defer_clear = False
         self._chapter_list_transition_pending = False
+        self._show_qa_failures_only = False
         self._details_config_persist_timer: QTimer | None = None
         # Single-selected chapter row (by spine index). ``None`` means no
         # row currently has focus.
@@ -14207,10 +14208,10 @@ class BookDetailsDialog(QDialog):
         screen = self.screen()
         if screen:
             avail = screen.availableGeometry()
-            self.resize(int(avail.width() * 0.62), int(avail.height() * 0.8))
+            self.resize(int(avail.width() * 0.62), int(avail.height() * 0.84))
             self.setMinimumSize(int(avail.width() * 0.42), int(avail.height() * 0.5))
         else:
-            self.resize(1100, 780)
+            self.resize(1100, 830)
             self.setMinimumSize(700, 500)
 
         icon_path = _find_halgakos_icon()
@@ -14268,10 +14269,17 @@ class BookDetailsDialog(QDialog):
                 text-align: left;
             }
             QPushButton#toc-toggle:hover { color: #e0e0e0; border-color: #6c63ff; }
-            QLabel#toc-title {
+            QPushButton#toc-title {
                 color: #e0e0e0; background: #17172a;
                 border: 1px solid #3a3a5e; border-radius: 6px;
                 padding: 6px 12px; font-size: 10pt; font-weight: bold;
+                text-align: left;
+            }
+            QPushButton#toc-title:hover {
+                background: #20203a; border-color: #6c63ff;
+            }
+            QPushButton#toc-title:checked {
+                background: #2a2d5a; border-color: #a097ff;
             }
             QLabel#toc-page-label { color: #9aa2b8; font-size: 9pt; }
             QPushButton#toc-page-first, QPushButton#toc-page-prev,
@@ -14356,7 +14364,7 @@ class BookDetailsDialog(QDialog):
         body = QWidget()
         self._scroll.setWidget(body)
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(32, 14, 32, 32)
+        body_layout.setContentsMargins(32, 14, 48, 32)
         body_layout.setSpacing(18)
 
         # ── Hero row: cover + title + actions + metadata ──
@@ -14589,8 +14597,13 @@ class BookDetailsDialog(QDialog):
         # ── Chapters section ──
         chap_header = QHBoxLayout()
         chap_header.setSpacing(10)
-        self._toc_title = QLabel("Chapters")
+        self._toc_title = QPushButton("Chapters")
         self._toc_title.setObjectName("toc-title")
+        self._toc_title.setCursor(Qt.PointingHandCursor)
+        self._toc_title.setCheckable(True)
+        self._toc_title.setChecked(False)
+        self._toc_title.setToolTip("Show QA failures only")
+        self._toc_title.toggled.connect(self._on_qa_failures_only_toggled)
         # Keep the old attribute name for helpers that only need setText().
         self._toc_toggle = self._toc_title
         chap_header.addWidget(self._toc_title)
@@ -16164,6 +16177,18 @@ class BookDetailsDialog(QDialog):
             lambda *_a, i=idx: self._on_chapter_activated(i))
         menu.exec(global_pos)
 
+    def _on_qa_failures_only_toggled(self, checked: bool):
+        """Switch the Chapters button between all rows and QA failures."""
+        checked = bool(checked)
+        if checked == self._show_qa_failures_only:
+            return
+        self._show_qa_failures_only = checked
+        self._chapter_page = 0
+        if self._chapters_info:
+            self._populate_chapters(silent=True)
+        else:
+            self._update_toc_toggle_label()
+
     def _translate_single_chapter(self, idx: int):
         """Translate exactly one chapter entry via the main translator GUI.
 
@@ -16274,6 +16299,16 @@ class BookDetailsDialog(QDialog):
         return any((c.get("status") or "") for c in self._chapters_info)
 
     def _update_toc_toggle_label(self):
+        if self._show_qa_failures_only:
+            failure_count = sum(
+                1 for chapter in self._chapter_base_infos()
+                if str(chapter.get("status") or "").strip().lower() == "qa_failed"
+            )
+            self._toc_toggle.setText(f"Failures  ({failure_count})")
+            self._toc_toggle.setToolTip("Show all chapters")
+            self._update_chapter_pagination_controls()
+            return
+
         done, total = self._visible_counts()
         prefix = "Chapters"
         if not total:
@@ -16285,6 +16320,7 @@ class BookDetailsDialog(QDialog):
             # misleading completed/total fraction.
             suffix = f"  ({total})"
         self._toc_toggle.setText(prefix + suffix)
+        self._toc_toggle.setToolTip("Show QA failures only")
         self._update_chapter_pagination_controls()
 
     def _chapter_base_infos(self) -> list[dict]:
@@ -16300,6 +16336,11 @@ class BookDetailsDialog(QDialog):
 
     def _filtered_chapter_infos(self) -> list[dict]:
         items = self._chapter_base_infos()
+        if self._show_qa_failures_only:
+            items = [
+                info for info in items
+                if str(info.get("status") or "").strip().lower() == "qa_failed"
+            ]
         search = getattr(self, "_toc_search", None)
         needle = (search.text() if search is not None else "")
         needle = (needle or "").strip().lower()
@@ -18252,10 +18293,10 @@ class EpubReaderDialog(QDialog):
         screen = self.screen()
         if screen:
             avail = screen.availableGeometry()
-            self.resize(int(avail.width() * 0.55), int(avail.height() * 0.7))
+            self.resize(int(avail.width() * 0.55), int(avail.height() * 0.76))
             self.setMinimumSize(int(avail.width() * 0.4), int(avail.height() * 0.4))
         else:
-            self.resize(950, 700)
+            self.resize(950, 760)
             self.setMinimumSize(600, 400)
 
         self._setup_ui()
@@ -19467,7 +19508,7 @@ class EpubReaderDialog(QDialog):
             css = f"""
                 QTextBrowser {{
                     background: {bg}; color: {fg}; border: none;
-                    padding: 20px 30px; font-size: {self._font_size}pt;
+                    padding: 20px 30px 32px 30px; font-size: {self._font_size}pt;
                 }}
                 QTextBrowser a {{ color: {t['link']}; }}
                 QScrollBar:vertical {{ width: 8px; background: {bg}; }}
@@ -22646,7 +22687,7 @@ class EpubReaderDialog(QDialog):
                 # fringing ("red shift") that appears on text inside a
                 # GPU-composited transformed layer. This trade-off is
                 # intentional for paginated modes; see _js_scroll_to.
-                f"html, body {{ margin: 0; padding: 10px 0; overflow: hidden; "
+                f"html, body {{ margin: 0; padding: 10px 0 26px 0; overflow: hidden; "
                 f"background: {t['bg']}; color: {t['fg']}; "
                 f"-webkit-font-smoothing: antialiased; "
                 f"-moz-osx-font-smoothing: grayscale; "
@@ -22715,7 +22756,7 @@ class EpubReaderDialog(QDialog):
                 f"  _PAGE_W = _pageWidthFor(c);"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.columnGap = _PAGE_GAP + 'px';"
-                f"  c.style.height = (window.innerHeight - 20) + 'px';"
+                f"  c.style.height = (window.innerHeight - 36) + 'px';"
                 # Re-apply the current page offset to the new column width in
                 # the browser's native inline scroll coordinates. Calibre's
                 # paged mode does the same kind of native column scrolling;
@@ -22774,7 +22815,7 @@ class EpubReaderDialog(QDialog):
                 f"-moz-osx-font-smoothing: auto; "
                 f"text-rendering: optimizeLegibility; "
                 f"-webkit-text-size-adjust: 100%; "
-                f"padding: 10px 20px; margin: 0 auto; }}"
+                f"padding: 10px 20px 28px 20px; margin: 0 auto; }}"
                 f"{_scroll_heading_css}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
                 f"border-radius: 4px; margin: 12px auto; }}"

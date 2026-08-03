@@ -114,6 +114,55 @@ def _normalize_progress_match_name(name):
     return base
 
 
+_PROGRESS_READER_HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
+
+
+def _progress_item_is_html(display_info) -> bool:
+    """Return whether a Progress Manager row points to an HTML document."""
+    display_info = display_info if isinstance(display_info, dict) else {}
+    progress_entry = display_info.get("info", {}) or {}
+    output_file = (
+        display_info.get("output_file")
+        or progress_entry.get("output_file")
+        or ""
+    )
+    return str(output_file).lower().endswith(_PROGRESS_READER_HTML_EXTENSIONS)
+
+
+def _match_epub_html_member_basename(member_names, candidates):
+    """Match progress filenames to an EPUB HTML member and return its basename."""
+    html_members = [
+        str(name).replace("\\", "/")
+        for name in (member_names or [])
+        if str(name).lower().endswith(_PROGRESS_READER_HTML_EXTENSIONS)
+    ]
+    by_path = {}
+    by_basename = {}
+    by_stem = {}
+    for member in html_members:
+        normalized = member.lower().strip("/")
+        basename = os.path.basename(normalized)
+        stem = _normalize_progress_match_name(basename).lower()
+        by_path.setdefault(normalized, member)
+        by_basename.setdefault(basename, member)
+        if stem:
+            by_stem.setdefault(stem, member)
+
+    candidate_values = [str(value).replace("\\", "/") for value in (candidates or []) if value]
+    for candidate in candidate_values:
+        normalized = candidate.lower().strip("/")
+        basename = os.path.basename(normalized)
+        match = by_path.get(normalized) or by_basename.get(basename)
+        if match:
+            return os.path.basename(match)
+    for candidate in candidate_values:
+        stem = _normalize_progress_match_name(candidate).lower()
+        match = by_stem.get(stem)
+        if match:
+            return os.path.basename(match)
+    return None
+
+
 def _glossary_progress_filename_keys(name):
     """Return filename keys shared by glossary progress/index matching."""
     base = os.path.basename(str(name or ""))
@@ -17921,6 +17970,147 @@ class RetranslationMixin:
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 
+        def _open_epub_reader_for_item(display_info):
+            """Open an HTML progress entry as an overlay in the EPUB reader."""
+            output_path, missing_path = _exact_output_path_for_item(display_info)
+            if not output_path:
+                self._show_message(
+                    'error',
+                    "File Missing",
+                    f"File not found:\n{missing_path}",
+                    parent=data.get('dialog', self),
+                )
+                return
+            if not _progress_item_is_html(display_info):
+                return
+
+            source_epubs = _source_epub_candidates()
+            if not source_epubs:
+                self._show_message(
+                    'error',
+                    "Source EPUB Missing",
+                    "Could not resolve the source EPUB for this HTML entry.",
+                    parent=data.get('dialog', self),
+                )
+                return
+            epub_path = source_epubs[0]
+
+            try:
+                with zipfile.ZipFile(epub_path, 'r') as source_zip:
+                    member_names = source_zip.namelist()
+            except Exception as exc:
+                self._show_message(
+                    'error',
+                    "Open Failed",
+                    f"Could not read the source EPUB:\n{exc}",
+                    parent=data.get('dialog', self),
+                )
+                return
+
+            def _reader_member_for_item(item_info):
+                progress_entry = item_info.get('info', {}) or {}
+                candidates = _source_candidates_for_item(item_info)
+                output_name = (
+                    item_info.get('output_file')
+                    or progress_entry.get('output_file')
+                )
+                if output_name:
+                    candidates.append(output_name)
+                return _match_epub_html_member_basename(
+                    member_names,
+                    candidates,
+                )
+
+            initial_filename = _reader_member_for_item(display_info)
+            if not initial_filename:
+                self._show_message(
+                    'error',
+                    "Chapter Not Found",
+                    "Could not match this HTML entry to a chapter in the source EPUB.",
+                    parent=data.get('dialog', self),
+                )
+                return
+
+            overlay = {}
+            chapter_infos = list(data.get('chapter_display_info', []) or [])
+            if display_info not in chapter_infos:
+                chapter_infos.append(display_info)
+            for chapter_info in chapter_infos:
+                if not isinstance(chapter_info, dict) or not _progress_item_is_html(chapter_info):
+                    continue
+                translated_path, _ = _exact_output_path_for_item(chapter_info)
+                if not translated_path:
+                    continue
+                source_filename = _reader_member_for_item(chapter_info)
+                if source_filename:
+                    overlay[source_filename.lower()] = {"path": translated_path}
+            overlay[initial_filename.lower()] = {"path": output_path}
+
+            extra_image_dirs = [
+                path for path in (
+                    os.path.join(data['output_dir'], 'images'),
+                    os.path.join(data['output_dir'], 'translated_images'),
+                )
+                if os.path.isdir(path)
+            ]
+            translated_css_dirs = []
+            css_dir = os.path.join(data['output_dir'], 'css')
+            if os.path.isdir(css_dir):
+                translated_css_dirs.append(css_dir)
+            try:
+                if any(
+                    entry.is_file() and entry.name.lower().endswith('.css')
+                    for entry in os.scandir(data['output_dir'])
+                ):
+                    translated_css_dirs.append(data['output_dir'])
+            except OSError:
+                pass
+
+            parent_dialog = data.get('dialog') or self
+            try:
+                from epub_library import EpubReaderDialog
+
+                reader = EpubReaderDialog(
+                    epub_path,
+                    config=getattr(self, 'config', {}) or {},
+                    parent=parent_dialog,
+                    initial_chapter_filename=initial_filename,
+                    translated_overlay=overlay,
+                    extra_image_dirs=extra_image_dirs or None,
+                    translated_css_dirs=translated_css_dirs or None,
+                    window_title=(
+                        f"{os.path.splitext(os.path.basename(epub_path))[0]} "
+                        "(Translated)"
+                    ),
+                )
+                reader.setModal(False)
+                reader.setAttribute(Qt.WA_DeleteOnClose)
+                active_readers = getattr(
+                    parent_dialog,
+                    '_progress_epub_readers',
+                    None,
+                )
+                if not isinstance(active_readers, list):
+                    active_readers = []
+                    parent_dialog._progress_epub_readers = active_readers
+                active_readers.append(reader)
+
+                def _forget_reader(*_args, _reader=reader, _readers=active_readers):
+                    try:
+                        _readers.remove(_reader)
+                    except ValueError:
+                        pass
+
+                reader.destroyed.connect(_forget_reader)
+                reader.show()
+            except Exception as exc:
+                self._show_message(
+                    'error',
+                    "Open Failed",
+                    str(exc),
+                    parent=parent_dialog,
+                )
+
         def _find_audio_file_for_item(display_info):
             """Return the generated TTS file path associated with an HTML row, if one exists."""
             progress_entry = display_info.get('info', {}) or {}
@@ -18095,7 +18285,7 @@ class RetranslationMixin:
             act_open = act_review_sdlxliff = act_open_audio = None
             act_delete_audio = act_notepad_qa = act_retranslate = None
             act_insert_img = act_remove_qa = act_restore_in_progress = None
-            act_copy_qa = None
+            act_copy_qa = act_open_epub_reader = None
             selected_infos = []
 
             if _skip_keyword:
@@ -18113,6 +18303,10 @@ class RetranslationMixin:
                     act_notepad_qa = menu.addAction(_label)
                 if qa_issues:
                     act_copy_qa = menu.addAction("📋 Copy QA issue")
+                if _progress_item_is_html(display_info):
+                    act_open_epub_reader = menu.addAction(
+                        "📖 Open in EPUB reader"
+                    )
                 act_retranslate = menu.addAction("🔁 Retranslate Selected")
 
                 if has_missing_images:
@@ -18170,6 +18364,8 @@ class RetranslationMixin:
                     QApplication.clipboard().setText("\n".join(lines))
                 except Exception as ex:
                     print(f"Copy QA issue failed: {ex}")
+            elif act_open_epub_reader and chosen == act_open_epub_reader:
+                _open_epub_reader_for_item(display_info)
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:

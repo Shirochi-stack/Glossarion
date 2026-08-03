@@ -9,8 +9,8 @@ import pytest
 pytest.importorskip("PySide6")
 
 import epub_library
-from PySide6.QtCore import QEventLoop, QRect
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QEventLoop, QRect, Qt
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from epub_library import (
     BookDetailsDialog,
@@ -220,6 +220,42 @@ def test_reader_enables_remote_images_for_local_chapter_pages():
     ] is True
 
 
+def test_reader_html_reserves_extra_space_below_page_content():
+    class ReaderStub:
+        _font_family = "Georgia"
+        _font_size = 14
+        _line_spacing = 1.8
+        _translated_overlay = {}
+        _raw_epub_alt_path = ""
+        _translated_css_dirs = []
+
+        @staticmethod
+        def _get_theme():
+            return {
+                "bg": "#111111",
+                "fg": "#eeeeee",
+                "heading": "#ffffff",
+                "link": "#88aaff",
+                "code_bg": "#222222",
+                "border": "#333333",
+            }
+
+        @staticmethod
+        def _get_embedded_css():
+            return ""
+
+    paginated = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<p>Page text</p>", paginated=True
+    )
+    scrolling = EpubReaderDialog._wrap_html(
+        ReaderStub(), "<p>Page text</p>", paginated=False
+    )
+
+    assert "padding: 10px 0 26px 0" in paginated
+    assert "window.innerHeight - 36" in paginated
+    assert "padding: 10px 20px 28px 20px" in scrolling
+
+
 def test_remote_image_url_survives_local_image_processing(tmp_path):
     remote_url = (
         "https://images.novelpia.com/imagebox/b1/"
@@ -389,3 +425,49 @@ def test_manual_metadata_edits_preserve_originals_and_unknown_fields():
     assert updated["original_subject"] == ["판타지", "빙의"]
     assert updated["subject_translated"] is True
     assert updated["identifier"] == "book-123"
+
+
+def test_details_chapter_filter_shows_only_qa_failures():
+    class DetailsStub:
+        _show_special_files = False
+        _show_qa_failures_only = True
+        _toc_search = None
+        _chapters_info = [
+            {"index": 0, "status": "completed"},
+            {"index": 1, "status": "qa_failed"},
+            {"index": 2, "status": "failed"},
+            {"index": 3, "status": "qa_failed", "is_special": True},
+        ]
+        _chapter_base_infos = BookDetailsDialog._chapter_base_infos
+
+    filtered = BookDetailsDialog._filtered_chapter_infos(DetailsStub())
+
+    assert [chapter["index"] for chapter in filtered] == [1]
+
+
+def test_details_chapters_button_switches_to_failures_view(qapp, monkeypatch):
+    monkeypatch.setattr(BookDetailsDialog, "_start_loading", lambda self: None)
+    dialog = BookDetailsDialog(
+        {"path": "C:/layout-test/book.epub", "name": "Book"},
+        config={},
+    )
+    dialog._auto_refresh_timer.stop()
+    dialog._chapters_info = [
+        {"index": 0, "status": "completed"},
+        {"index": 1, "status": "qa_failed"},
+    ]
+    dialog._populate_chapters = (
+        lambda silent=False: dialog._update_toc_toggle_label()
+    )
+
+    assert isinstance(dialog._toc_title, QPushButton)
+    assert dialog._toc_title.contextMenuPolicy() == Qt.DefaultContextMenu
+
+    dialog._toc_title.click()
+    assert dialog._toc_title.isChecked() is True
+    assert dialog._toc_title.text() == "Failures  (1)"
+
+    dialog._toc_title.click()
+    assert dialog._toc_title.isChecked() is False
+    assert dialog._toc_title.text() == "Chapters  (1/2)"
+    dialog.close()

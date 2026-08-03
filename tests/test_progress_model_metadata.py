@@ -13,12 +13,14 @@ from bs4 import BeautifulSoup
 from Retranslation_GUI import (
     RetranslationMixin,
     _glossary_progress_filename_keys,
+    _match_epub_html_member_basename,
     _map_zero_based_glossary_progress_index,
     _normalize_progress_match_name,
     _persist_progress_manager_source_link,
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
+    _progress_item_is_html,
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
 )
@@ -851,6 +853,38 @@ def test_normalize_progress_match_name_strips_response_prefix_and_all_extensions
     expected,
 ):
     assert _normalize_progress_match_name(raw_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("display_info", "expected"),
+    [
+        ({"output_file": "response_chapter.html"}, True),
+        ({"info": {"output_file": "Text/chapter.xhtml"}}, True),
+        ({"output_file": "chapter.htm"}, True),
+        ({"output_file": "chapter.txt"}, False),
+        ({"info": {"output_file": "metadata.json"}}, False),
+    ],
+)
+def test_progress_epub_reader_action_is_limited_to_html_entries(
+    display_info,
+    expected,
+):
+    assert _progress_item_is_html(display_info) is expected
+
+
+def test_progress_epub_reader_matches_response_name_to_source_member():
+    members = [
+        "META-INF/container.xml",
+        "OEBPS/Text/chapter0001.xhtml",
+        "OEBPS/Text/chapter0002.xhtml",
+    ]
+
+    matched = _match_epub_html_member_basename(
+        members,
+        ["response_chapter0002.htm.html", "chapter0002"],
+    )
+
+    assert matched == "chapter0002.xhtml"
 
 
 def test_snapshot_progress_output_dir_scans_large_directory_once(tmp_path, monkeypatch):
