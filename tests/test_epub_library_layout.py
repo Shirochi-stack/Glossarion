@@ -256,6 +256,91 @@ def test_reader_html_reserves_extra_space_below_page_content():
     assert "padding: 10px 20px 28px 20px" in scrolling
 
 
+def test_reader_recounts_pages_after_hidden_prime_is_revealed(monkeypatch):
+    scheduled = []
+
+    class StackStub:
+        shown = False
+
+        def show(self):
+            self.shown = True
+
+    class ReaderStub:
+        _priming_initial_render = True
+        _prime_toc_sizes = [240, 960]
+        _reader_stack = StackStub()
+
+        def _end_toc_width_lock(self, sizes):
+            self.restored_sizes = sizes
+
+        def _resync_page_count(self):
+            self.recounted = True
+
+    reader = ReaderStub()
+    monkeypatch.setattr(
+        epub_library.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+
+    EpubReaderDialog._reveal_reader_stack_after_prime(reader)
+
+    assert reader._reader_stack.shown is True
+    assert reader._priming_initial_render is False
+    assert reader.restored_sizes == [240, 960]
+    assert reader._prime_toc_sizes is None
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 0
+
+    scheduled[0][1]()
+    assert reader.recounted is True
+
+
+def test_reader_resync_ignores_transitional_page_count(monkeypatch):
+    counts = iter([198, 8, 8])
+
+    class ReaderStub:
+        _closing = False
+        _layout_mode = epub_library.LAYOUT_SINGLE
+        _chapters = [("Chapter", "<p>Text</p>")]
+        _current_row = 0
+        _current_page = 0
+        _chapter_page_cache = {0: 7}
+        _reader = object()
+        _pagination_resync_token = 0
+
+        def _js_page_count(self, browser, callback):
+            callback(next(counts))
+
+        def _clamp_page_for_layout(self, page, count):
+            return max(0, min(page, count - 1))
+
+        def _js_scroll_to(self, browser, page, animate=True):
+            raise AssertionError("Page zero should not need clamping")
+
+        def _update_nav_buttons(self):
+            self.nav_updated = True
+
+        def _schedule_search_realign(self):
+            self.search_realigned = True
+
+    reader = ReaderStub()
+    delays = []
+
+    def run_timer(delay, callback):
+        delays.append(delay)
+        callback()
+
+    monkeypatch.setattr(epub_library.QTimer, "singleShot", run_timer)
+
+    EpubReaderDialog._resync_page_count(reader)
+
+    assert reader._chapter_page_cache == {0: 8}
+    assert delays == [60, 80, 80]
+    assert reader.nav_updated is True
+    assert reader.search_realigned is True
+
+
 def test_remote_image_url_survives_local_image_processing(tmp_path):
     remote_url = (
         "https://images.novelpia.com/imagebox/b1/"

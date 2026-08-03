@@ -20663,7 +20663,14 @@ class EpubReaderDialog(QDialog):
         self._resync_page_count()
 
     def _resync_page_count(self):
-        """Requery page count after a viewport width change (no flash)."""
+        """Requery page count after the paginated viewport changes.
+
+        Qt can report one or more transitional WebEngine geometries while a
+        hidden reader stack is being shown or a splitter is moving.  Require
+        two matching measurements before committing the count so those
+        short-lived layouts cannot strand a real final column outside the
+        Python navigation bounds.
+        """
         if not hasattr(self, '_chapter_page_cache'):
             return
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
@@ -20671,31 +20678,63 @@ class EpubReaderDialog(QDialog):
         if not self._chapters:
             return
         self._chapter_page_cache.clear()
+        token = int(getattr(self, '_pagination_resync_token', 0) or 0) + 1
+        self._pagination_resync_token = token
+        expected_row = self._current_row
+        expected_layout = self._layout_mode
+        state = {"last": None, "matches": 0, "attempts": 0}
 
-        def on_count(count):
-            count = int(count)
-            self._chapter_page_cache[self._current_row] = count
+        def _still_current():
+            return (
+                not getattr(self, '_closing', False)
+                and getattr(self, '_pagination_resync_token', 0) == token
+                and self._current_row == expected_row
+                and self._layout_mode == expected_layout
+            )
+
+        def _commit(count):
+            if not _still_current():
+                return
+            count = max(1, int(count))
+            self._chapter_page_cache[expected_row] = count
             # Clamp if the current page is now past the end (e.g. column
             # count shrank) and silently jump to the clamped position.
             clamped_page = self._clamp_page_for_layout(
                 self._current_page, count)
             if self._current_page != clamped_page:
                 self._current_page = clamped_page
-                if self._layout_mode == LAYOUT_SINGLE:
-                    self._js_scroll_to(self._reader, self._current_page, animate=False)
-                else:
-                    self._js_scroll_to(self._reader, self._current_page, animate=False)
+                self._js_scroll_to(
+                    self._reader, self._current_page, animate=False)
             self._update_nav_buttons()
             self._schedule_search_realign()
 
-        # Give the browser a tick to process the splitter-driven resize
-        # before we query the new scrollWidth-based page count.
-        def _do():
-            if self._layout_mode == LAYOUT_SINGLE:
-                self._js_page_count(self._reader, on_count)
-            else:
-                self._js_page_count(self._reader, on_count)
-        QTimer.singleShot(60, _do)
+        def _measure():
+            if not _still_current():
+                return
+
+            def _on_count(count):
+                if not _still_current():
+                    return
+                count = max(1, int(count))
+                state["attempts"] += 1
+                if count == state["last"]:
+                    state["matches"] += 1
+                else:
+                    state["last"] = count
+                    state["matches"] = 1
+                # Two consecutive equal counts indicate that Chromium has
+                # finished applying the visible viewport.  The retry cap is
+                # a safety valve for pages with continuously resizing media.
+                if state["matches"] >= 2 or state["attempts"] >= 8:
+                    _commit(count)
+                    return
+                QTimer.singleShot(80, _measure)
+
+            self._js_page_count(self._reader, _on_count)
+
+        # Give the browser a tick to process the splitter/visibility change
+        # before beginning the stability measurements.
+        QTimer.singleShot(60, _measure)
 
     def _change_font_size(self, delta):
         self._font_size = max(8, min(32, self._font_size + delta))
@@ -21245,6 +21284,15 @@ class EpubReaderDialog(QDialog):
         sizes = getattr(self, '_prime_toc_sizes', None)
         self._prime_toc_sizes = None
         self._end_toc_width_lock(sizes)
+        # The first paginated page count is measured while ``_reader_stack``
+        # is hidden.  Showing it gives QWebEngine its real viewport height and
+        # can reflow the chapter into a different number of CSS columns.  The
+        # browser-side resize handler updates the columns themselves, but the
+        # Python cache that drives Next/Previous used to retain the hidden
+        # geometry's count.  When that count was one page short, the final
+        # column existed in the DOM but could never be reached.  Requery on
+        # the next event-loop turn, after Qt has laid out the visible stack.
+        QTimer.singleShot(0, self._resync_page_count)
 
     def _scroll_to_page_single(self):
         """Navigate single-page reader to current page."""
