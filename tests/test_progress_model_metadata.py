@@ -20,6 +20,7 @@ from Retranslation_GUI import (
     _progress_path_signature,
     _progress_entry_model_for_display,
     _progress_entry_refined_for_display,
+    _progress_epub_overlay_entry,
     _progress_item_is_html,
     _snapshot_progress_output_dir,
     _select_progress_entry_for_display,
@@ -870,6 +871,20 @@ def test_progress_epub_reader_action_is_limited_to_html_entries(
     expected,
 ):
     assert _progress_item_is_html(display_info) is expected
+
+
+def test_progress_epub_reader_overlay_uses_translated_html_title(tmp_path):
+    translated = tmp_path / "response_chapter0039.html"
+    translated.write_text(
+        "<html><head><meta charset='utf-8'></head>"
+        "<body><h1>Episode 38. God Killer (3)</h1><p>Translated.</p></body></html>",
+        encoding="utf-8",
+    )
+
+    assert _progress_epub_overlay_entry(translated) == {
+        "path": os.fspath(translated),
+        "title": "Episode 38. God Killer (3)",
+    }
 
 
 def test_progress_epub_reader_matches_response_name_to_source_member():
