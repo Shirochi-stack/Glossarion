@@ -362,8 +362,11 @@ class _TranslatorDirectLogSignal:
 
 
 def _translator_log_queue_harness():
+    import translator_gui
+
     return types.SimpleNamespace(
-        _pending_gui_logs=deque(),
+        _pending_gui_logs=deque(
+            maxlen=translator_gui._GUI_LOG_PENDING_MAX_MESSAGES),
         _pending_gui_log_lock=threading.Lock(),
         _pending_gui_direct_logs=0,
         _gui_log_flood_mode=False,
@@ -379,6 +382,12 @@ def test_translator_gui_init_uses_the_module_qtimer():
     # A function-local QTimer import anywhere in __init__ shadows the module
     # import and makes early timer construction raise UnboundLocalError.
     assert "QTimer" not in translator_gui.TranslatorGUI.__init__.__code__.co_varnames
+
+
+def test_translator_gui_retains_800000_live_log_lines():
+    import translator_gui
+
+    assert translator_gui._GUI_LOG_DOCUMENT_MAX_BLOCKS == 800_000
 
 
 def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
@@ -502,6 +511,45 @@ def test_translator_gui_log_batch_takes_an_oversized_first_message():
 
     assert batch == [oversized]
     assert has_more is True
+
+
+def test_translator_gui_flood_queue_keeps_the_newest_messages():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+    gui._pending_gui_logs = deque(maxlen=5)
+    gui._pending_gui_direct_logs = translator_gui._GUI_LOG_DIRECT_EVENT_LIMIT
+
+    for index in range(12):
+        translator_gui.TranslatorGUI._queue_gui_log_message(
+            gui, f"line {index}")
+
+    assert list(gui._pending_gui_logs) == [
+        "line 7",
+        "line 8",
+        "line 9",
+        "line 10",
+        "line 11",
+    ]
+    assert gui.log_queue_ready_signal.calls == 1
+
+
+def test_translator_gui_direct_messages_are_persisted_once(monkeypatch):
+    import translator_gui
+
+    persisted = []
+    monkeypatch.setattr(
+        translator_gui,
+        "_persist_gui_log_message",
+        lambda message: persisted.append(message),
+    )
+    gui = types.SimpleNamespace(_extra_log_listeners=[])
+
+    translator_gui.TranslatorGUI.append_log(gui, "direct status")
+    translator_gui.TranslatorGUI.append_log(
+        gui, "backend status", _from_logging=True)
+
+    assert persisted == ["direct status"]
 
 
 def test_google_free_translate_keeps_ajax_endpoint_last(monkeypatch):

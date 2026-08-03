@@ -455,16 +455,24 @@ def _log_mei_cleanup_on_exit():
 # Standard Library
 import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
 from collections import deque
-from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
 import platform
 
 _GUI_LOG_BATCH_MAX_MESSAGES = 250
 _GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
+# Keep the live widget and flood backlog bounded. Full diagnostic history is
+# retained in logs/run.log; the GUI should always favor recent output.
+_GUI_LOG_DOCUMENT_MAX_BLOCKS = 800_000
+_GUI_LOG_PENDING_MAX_MESSAGES = 50_000
 # Ordinary status bursts should remain live.  Only switch to the coalesced
 # flood queue after this many direct GUI log events are already outstanding.
 _GUI_LOG_DIRECT_EVENT_LIMIT = 100
+
+
+def _persist_gui_log_message(message):
+    """Write a direct GUI message through the full run.log handler."""
+    logging.getLogger("glossarion.gui").info(str(message))
 
 # macOS GPU rendering safety — must be set BEFORE any Qt/PySide6 import.
 # On Hackintosh (AMD CPU) systems, Qt6's default Metal backend can segfault
@@ -967,7 +975,7 @@ def _get_app_dir() -> str:
 _FAULT_LOG_FH = None
 
 def _setup_file_logging():
-    """Initialize rotating file logging and crash tracing (faulthandler).
+    """Initialize complete file logging and crash tracing (faulthandler).
     Ensures logs directory is writable in both source and PyInstaller one-file builds.
     """
     global _FAULT_LOG_FH
@@ -1027,72 +1035,12 @@ def _setup_file_logging():
         # Export for helper modules (e.g., memory_usage_reporter)
         os.environ["GLOSSARION_LOG_DIR"] = logs_dir
 
-        # Rotating log handler - use custom Windows-safe version
+        # Keep the complete application log. The GUI has its own live-display
+        # retention policy, but the on-disk log must never discard older lines.
         log_file = os.path.join(logs_dir, "run.log")
-        
-        # On Windows, use a safer handler that doesn't fail on rotation errors
-        if platform.system() == 'Windows':
-            import glob
-            
-            class WindowsSafeRotatingFileHandler(RotatingFileHandler):
-                """Windows-safe rotating file handler that gracefully handles file locking."""
-                
-                def doRollover(self):
-                    """Override doRollover to handle Windows permission errors gracefully."""
-                    if self.stream:
-                        self.stream.close()
-                        self.stream = None
-                    
-                    try:
-                        # Try standard rotation
-                        # Rotate existing backup files
-                        for i in range(self.backupCount - 1, 0, -1):
-                            sfn = self.rotation_filename("%s.%d" % (self.baseFilename, i))
-                            dfn = self.rotation_filename("%s.%d" % (self.baseFilename, i + 1))
-                            if os.path.exists(sfn):
-                                if os.path.exists(dfn):
-                                    try:
-                                        os.remove(dfn)
-                                    except (OSError, PermissionError):
-                                        pass  # Ignore if locked
-                                try:
-                                    os.rename(sfn, dfn)
-                                except (OSError, PermissionError):
-                                    pass  # Ignore if locked
-                        
-                        # Rotate current file
-                        dfn = self.rotation_filename(self.baseFilename + ".1")
-                        if os.path.exists(dfn):
-                            try:
-                                os.remove(dfn)
-                            except (OSError, PermissionError):
-                                pass  # Ignore if locked
-                        
-                        try:
-                            if os.path.exists(self.baseFilename):
-                                os.rename(self.baseFilename, dfn)
-                        except (OSError, PermissionError):
-                            # If we can't rotate, just truncate the current file
-                            try:
-                                with open(self.baseFilename, 'w') as f:
-                                    f.write('')
-                            except Exception:
-                                pass
-                    except Exception:
-                        # If anything fails, continue logging to the current file
-                        pass
-                    
-                    # Open new log file
-                    if not self.stream:
-                        self.stream = self._open()
-            
-            handler = WindowsSafeRotatingFileHandler(
-                log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8", delay=False
-            )
-        else:
-            handler = RotatingFileHandler(
-                log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
-            )
+        handler = logging.FileHandler(
+            log_file, mode="a", encoding="utf-8", delay=False)
+        handler._glossarion_full_run_log = True
         formatter = logging.Formatter(
             fmt="%(asctime)s %(levelname)s [%(process)d:%(threadName)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -1101,10 +1049,20 @@ def _setup_file_logging():
 
         root_logger = logging.getLogger()
         
-        # Close and remove any existing RotatingFileHandler to avoid file locks
+        # Close and replace only this application's run.log handler. This is
+        # safe to call repeatedly without duplicating each line.
         handlers_to_remove = []
         for h in root_logger.handlers:
-            if isinstance(h, RotatingFileHandler):
+            same_run_log = False
+            try:
+                same_run_log = (
+                    isinstance(h, logging.FileHandler)
+                    and os.path.normcase(os.path.abspath(h.baseFilename))
+                    == os.path.normcase(os.path.abspath(log_file))
+                )
+            except Exception:
+                same_run_log = False
+            if getattr(h, '_glossarion_full_run_log', False) or same_run_log:
                 handlers_to_remove.append(h)
         
         for h in handlers_to_remove:
@@ -12987,7 +12945,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Initialize QMainWindow
         super().__init__(parent)
 
-        self._pending_gui_logs = deque()
+        self._pending_gui_logs = deque(maxlen=_GUI_LOG_PENDING_MAX_MESSAGES)
         self._pending_gui_log_lock = threading.Lock()
         self._pending_gui_direct_logs = 0
         self._gui_log_flood_mode = False
@@ -14928,7 +14886,9 @@ Text to analyze:
             try:
                 # Use the raw message without logger name/level prefixes
                 msg = record.getMessage()
-                self.outer.append_log(msg)
+                # The originating logging record already propagated to the
+                # full run.log handler, so do not persist it a second time.
+                self.outer.append_log(msg, _from_logging=True)
             except Exception:
                 # Never raise from logging path
                 pass
@@ -25583,6 +25543,11 @@ Recent translations to summarize:
         # Log Text Edit (row 11, spans all 5 columns)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)  # Make it read-only
+        # QTextEdit otherwise retains every block forever. Very verbose model
+        # streams can produce over a million lines and make the widget appear
+        # frozen even though translation workers are still running.
+        self.log_text.document().setMaximumBlockCount(
+            _GUI_LOG_DOCUMENT_MAX_BLOCKS)
         # IMPORTANT: keep the log flexible so the bottom toolbar never overlaps it on small/HiDPI displays.
         # A large minimum height here can force Qt layouts to place toolbar children outside their parent.
         # Keep this low so the prompt can steal vertical space when the user drags the resize handle.
@@ -37288,10 +37253,18 @@ Important rules:
         except Exception:
             pass
 
-    def append_log(self, message, source_thread=None):
+    def append_log(self, message, source_thread=None, _from_logging=False):
        """Append message to log with safety checks (fallback to print if GUI is gone).
        Also suppresses repeated stop/cancel notices once a stop has been requested.
        """
+       # Direct GUI status messages do not originate from Python logging, so
+       # explicitly send them through the root file handler. Backend logger
+       # records set _from_logging=True to avoid duplicate lines in run.log.
+       if not _from_logging:
+           try:
+               _persist_gui_log_message(message)
+           except Exception:
+               pass
        # Broadcast the raw line to any external listeners (EPUB Reader live
        # streaming view, etc.) before GUI-side filtering. Exceptions in a
        # listener must never break the main log path.
