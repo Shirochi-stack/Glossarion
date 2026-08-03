@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 import epub_library
-from PySide6.QtCore import QEventLoop, QRect, Qt
+from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from epub_library import (
@@ -715,3 +715,62 @@ def test_details_chapters_button_switches_to_failures_view(qapp, monkeypatch):
     assert dialog._toc_title.isChecked() is False
     assert dialog._toc_title.text() == "Chapters  (1/2)"
     dialog.close()
+
+
+def test_empty_failure_view_keeps_chapter_toolbar_vertical_anchor(
+    qapp, monkeypatch
+):
+    monkeypatch.setattr(BookDetailsDialog, "_start_loading", lambda self: None)
+    dialog = BookDetailsDialog(
+        {"path": "C:/layout-test/book.epub", "name": "Book"},
+        config={},
+    )
+    dialog._auto_refresh_timer.stop()
+    dialog._chapters_info = [
+        {
+            "index": index,
+            "filename": f"chapter-{index}.xhtml",
+            "title": f"Chapter {index}",
+            "status": "completed",
+        }
+        for index in range(358)
+    ]
+    first_page = dialog._chapters_info[:20]
+    dialog._chap_list.append_specs([
+        {
+            "info": info,
+            "primary_text": info["title"],
+            "filename": info["filename"],
+        }
+        for info in first_page
+    ])
+
+    try:
+        dialog.resize(1565, 800)
+        dialog._chap_list.show()
+        dialog._chap_container.hide()
+        dialog._toc_bottom_pager.show()
+        dialog._chap_loading_lbl.hide()
+        dialog._chapters_loaded = True
+        dialog._update_toc_toggle_label()
+        dialog.show()
+        qapp.processEvents()
+
+        viewport = dialog._scroll.viewport()
+        body = dialog._scroll.widget()
+        toolbar_body_y = dialog._toc_title.mapTo(body, QPoint(0, 0)).y()
+        dialog._scroll.verticalScrollBar().setValue(toolbar_body_y - 70)
+        qapp.processEvents()
+        before_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+
+        dialog._toc_title.click()
+        qapp.processEvents()
+        after_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+
+        assert dialog._toc_title.text() == "Failures  (0)"
+        assert dialog._chap_list.count() == 0
+        assert dialog._chap_list.reserved_height() > 0
+        assert after_y == before_y
+    finally:
+        dialog.close()
+        qapp.processEvents()

@@ -13729,6 +13729,7 @@ class _ChapterVirtualList(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._row_specs: list[dict] = []
+        self._reserved_height = 0
         self._selected_idx: int | None = None
         self._hover_row = -1
         self.setMouseTracking(True)
@@ -13758,14 +13759,34 @@ class _ChapterVirtualList(QWidget):
         self._selected_idx = idx
         self.update()
 
+    def set_reserved_height(self, height: int) -> None:
+        """Reserve blank result space without stretching the details hero."""
+        height = max(0, int(height or 0))
+        if height == self._reserved_height:
+            return
+        self._reserved_height = height
+        self._sync_height()
+
+    def reserved_height(self) -> int:
+        return self._reserved_height
+
     def _sync_height(self) -> None:
-        height = len(self._row_specs) * self._ROW_HEIGHT
+        height = max(
+            len(self._row_specs) * self._ROW_HEIGHT,
+            self._reserved_height,
+        )
         self.setMinimumHeight(height)
         self.setMaximumHeight(height)
         self.updateGeometry()
 
     def sizeHint(self) -> QSize:
-        return QSize(640, len(self._row_specs) * self._ROW_HEIGHT)
+        return QSize(
+            640,
+            max(
+                len(self._row_specs) * self._ROW_HEIGHT,
+                self._reserved_height,
+            ),
+        )
 
     def _row_at(self, y: int) -> int:
         row = int(y // self._ROW_HEIGHT)
@@ -14893,6 +14914,7 @@ class BookDetailsDialog(QDialog):
             self._chapter_list_transition_pending = False
             self._stop_chapter_list_animation()
             self._set_chapter_list_opacity(1.0)
+            chap_list.set_reserved_height(0)
             chap_list.clear()
             chap_list.hide()
         if getattr(self, "_toc_bottom_pager", None) is not None:
@@ -15511,6 +15533,22 @@ class BookDetailsDialog(QDialog):
         target_visible = True
         use_list_view = True
         chap_list = getattr(self, "_chap_list", None)
+        # Remember the toolbar's viewport anchor before a filter/page swap.
+        # Without this, an empty Failures result shrinks the scroll body by
+        # ~1300 px; Qt clamps the scrollbar and the toolbar jumps downward.
+        # Any blank height needed to retain this anchor is added to the chapter
+        # list itself in _restore_chapter_scroll_anchor(), never to the whole
+        # body (which would cause the hero layout to stretch vertically).
+        chapter_scroll_anchor_y = None
+        if silent and chap_list is not None and chap_list.isVisible():
+            try:
+                scroll = self._scroll
+                viewport = scroll.viewport()
+                chapter_scroll_anchor_y = self._toc_title.mapTo(
+                    viewport, QPoint(0, 0)).y()
+            except Exception:
+                chapter_scroll_anchor_y = None
+        self._chapter_scroll_anchor_y = chapter_scroll_anchor_y
         defer_list_clear = bool(
             silent
             and use_list_view
@@ -15705,6 +15743,59 @@ class BookDetailsDialog(QDialog):
         if use_list_view:
             self._finish_chapter_page_transition()
         self._refresh_chapter_stream_geometry(final=True)
+        self._restore_chapter_scroll_anchor()
+
+    def _restore_chapter_scroll_anchor(self) -> None:
+        """Restore the chapter toolbar's viewport Y after a row-count swap."""
+        anchor_y = getattr(self, "_chapter_scroll_anchor_y", None)
+        self._chapter_scroll_anchor_y = None
+        if anchor_y is None:
+            return
+        try:
+            viewport = self._scroll.viewport()
+            body = self._scroll.widget()
+            scrollbar = self._scroll.verticalScrollBar()
+            chap_list = self._chap_list
+
+            # Discard a reservation left by the preceding page, then grow the
+            # result slot only by each measured scrollbar shortfall.  Usually
+            # two passes are enough: the first exposes the compact layout's
+            # fixed height and the second reaches the exact saved offset.  The
+            # extra passes cover a horizontal scrollbar appearing/disappearing.
+            chap_list.set_reserved_height(0)
+            for _ in range(4):
+                body_layout = body.layout()
+                if body_layout is not None:
+                    body_layout.invalidate()
+                    body_layout.activate()
+                body.adjustSize()
+                toolbar_body_y = self._toc_title.mapTo(
+                    body, QPoint(0, 0)).y()
+                desired_value = max(
+                    0, int(toolbar_body_y) - int(anchor_y))
+                shortfall = desired_value - int(scrollbar.maximum())
+                if shortfall <= 0:
+                    break
+                scrollbar_extent = max(
+                    1,
+                    int(QApplication.style().pixelMetric(
+                        QStyle.PM_ScrollBarExtent)),
+                )
+                chap_list.set_reserved_height(
+                    chap_list.reserved_height()
+                    + shortfall
+                    + scrollbar_extent)
+
+            body_layout = body.layout()
+            if body_layout is not None:
+                body_layout.invalidate()
+                body_layout.activate()
+            body.adjustSize()
+            toolbar_body_y = self._toc_title.mapTo(body, QPoint(0, 0)).y()
+            scrollbar.setValue(
+                max(0, int(toolbar_body_y) - int(anchor_y)))
+        except Exception:
+            pass
 
     def _on_chapter_virtual_clicked(self, idx: int) -> None:
         self._selected_chapter_idx = int(idx)
