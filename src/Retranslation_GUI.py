@@ -65,6 +65,7 @@ _MACHINE_TRANSLATION_DIR = "Machine_Translation"
 # isn't ready yet, warm it once in a background thread instead of blocking.
 _TRANSLATE_MODULE_WARMUP_STARTED = threading.Event()
 _EPUB_LIBRARY_WARMUP_STARTED = threading.Event()
+_EPUB_READER_ENGINE_PREWARM_SCHEDULED = False
 
 
 def _warm_translate_module_in_background():
@@ -122,6 +123,36 @@ def _warm_epub_library_in_background():
         name="epub-reader-module-warmup",
         daemon=True,
     ).start()
+
+
+def _schedule_epub_reader_engine_prewarm():
+    """Create the hidden Chromium warmup view once the lazy import finishes."""
+    global _EPUB_READER_ENGINE_PREWARM_SCHEDULED
+    if _EPUB_READER_ENGINE_PREWARM_SCHEDULED:
+        return
+    _EPUB_READER_ENGINE_PREWARM_SCHEDULED = True
+    _warm_epub_library_in_background()
+
+    def _try_prewarm(attempt=0):
+        module = sys.modules.get('epub_library')
+        prewarm = getattr(module, 'prewarm_epub_reader_webengine', None)
+        if callable(prewarm):
+            try:
+                prewarm()
+            except Exception:
+                pass
+            return
+        # A frozen-build import can take several seconds. Poll without ever
+        # touching its import lock from the GUI thread.
+        if attempt < 200:
+            QTimer.singleShot(
+                50,
+                lambda: _try_prewarm(attempt + 1),
+            )
+
+    # Let the Progress Manager shell and first list batch paint before the
+    # one-time Chromium startup runs on the GUI thread.
+    QTimer.singleShot(250, _try_prewarm)
 # -----------------------------------------------------------------------------
 
 
@@ -16731,7 +16762,7 @@ class RetranslationMixin:
             _progress_item_is_html(info)
             for info in (data.get('chapter_display_info', []) or [])
         ):
-            _warm_epub_library_in_background()
+            _schedule_epub_reader_engine_prewarm()
         
         if not button_frame:
             button_frame = QWidget()

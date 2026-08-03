@@ -17080,6 +17080,80 @@ if _HAS_WEBENGINE:
             return super().eventFilter(obj, event)
 
 
+_EPUB_READER_WEBENGINE_WARMUP_VIEW = None
+_EPUB_READER_WEBENGINE_CLEANUP_CONNECTED = False
+
+
+def prewarm_epub_reader_webengine() -> bool:
+    """Start Chromium in a hidden view before the user opens a reader.
+
+    This must run on the Qt GUI thread. Keeping one invisible view alive is
+    intentional: Chromium otherwise tears its renderer back down before the
+    real reader is constructed, bringing the same cold-start window flash
+    back on the context-menu click.
+    """
+    global _EPUB_READER_WEBENGINE_WARMUP_VIEW
+    global _EPUB_READER_WEBENGINE_CLEANUP_CONNECTED
+    if not _HAS_WEBENGINE:
+        return False
+    existing = _EPUB_READER_WEBENGINE_WARMUP_VIEW
+    if existing is not None:
+        try:
+            existing.page()
+            return True
+        except RuntimeError:
+            _EPUB_READER_WEBENGINE_WARMUP_VIEW = None
+
+    app = QApplication.instance()
+    if app is None:
+        return False
+    try:
+        view = _WheelCapturingView()
+        _configure_epub_reader_web_settings(view)
+        view.resize(1, 1)
+        view.setUrl(QUrl("about:blank"))
+        view.hide()
+        _EPUB_READER_WEBENGINE_WARMUP_VIEW = view
+        if not _EPUB_READER_WEBENGINE_CLEANUP_CONNECTED:
+            app.aboutToQuit.connect(_release_epub_reader_webengine_warmup)
+            _EPUB_READER_WEBENGINE_CLEANUP_CONNECTED = True
+        return True
+    except Exception:
+        logger.debug("EPUB reader WebEngine prewarm failed: %s",
+                     traceback.format_exc())
+        _EPUB_READER_WEBENGINE_WARMUP_VIEW = None
+        return False
+
+
+def _epub_reader_webengine_is_warmed() -> bool:
+    """Return whether the retained hidden Chromium view is still valid."""
+    view = _EPUB_READER_WEBENGINE_WARMUP_VIEW
+    if view is None:
+        return False
+    try:
+        view.page()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _release_epub_reader_webengine_warmup() -> None:
+    """Release the retained warmup view during application shutdown."""
+    global _EPUB_READER_WEBENGINE_WARMUP_VIEW
+    view = _EPUB_READER_WEBENGINE_WARMUP_VIEW
+    _EPUB_READER_WEBENGINE_WARMUP_VIEW = None
+    if view is None:
+        return
+    try:
+        view.stop()
+    except Exception:
+        pass
+    try:
+        view.deleteLater()
+    except Exception:
+        pass
+
+
 class _EpubCacheLoaderThread(QThread):
     """Read the pickled EPUB cache off the UI thread.
 
@@ -18350,6 +18424,12 @@ class EpubReaderDialog(QDialog):
         self._loading_widget.show()
         self._content_widget.hide()
         self._spin_timer.start()
+        # Progress Manager normally prewarms Chromium while its chapter list
+        # is on screen. In that case install the real pane now, while this
+        # dialog is still hidden, so showEvent produces one native-window paint
+        # instead of attaching a Chromium surface to an already-visible dialog.
+        if _epub_reader_webengine_is_warmed():
+            self._initialize_reader_views()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)

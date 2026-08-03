@@ -468,6 +468,38 @@ def test_reader_paints_shell_before_creating_browser_views(
         qapp.processEvents()
 
 
+def test_reader_installs_browser_before_show_when_engine_is_prewarmed(
+    qapp, monkeypatch,
+):
+    load_starts = []
+    monkeypatch.setattr(epub_library, "_HAS_WEBENGINE", False)
+    monkeypatch.setattr(
+        epub_library,
+        "_epub_reader_webengine_is_warmed",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        EpubReaderDialog,
+        "_start_loading",
+        lambda self, preserve_shell=False: load_starts.append(preserve_shell),
+    )
+
+    dialog = EpubReaderDialog("C:/layout-test/prewarmed-reader.epub", config={})
+    try:
+        assert dialog._reader_views_ready
+        assert dialog._reader is not None
+        assert load_starts == [True]
+
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.isVisible()
+        assert not dialog._reader_init_queued
+        assert load_starts == [True]
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
 def test_remote_image_url_survives_local_image_processing(tmp_path):
     remote_url = (
         "https://images.novelpia.com/imagebox/b1/"
