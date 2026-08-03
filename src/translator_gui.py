@@ -462,6 +462,9 @@ import platform
 
 _GUI_LOG_BATCH_MAX_MESSAGES = 250
 _GUI_LOG_BATCH_MAX_CHARS = 256 * 1024
+# Ordinary status bursts should remain live.  Only switch to the coalesced
+# flood queue after this many direct GUI log events are already outstanding.
+_GUI_LOG_DIRECT_EVENT_LIMIT = 100
 
 # macOS GPU rendering safety — must be set BEFORE any Qt/PySide6 import.
 # On Hackintosh (AMD CPU) systems, Qt6's default Metal backend can segfault
@@ -12985,6 +12988,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         self._pending_gui_logs = deque()
         self._pending_gui_log_lock = threading.Lock()
+        self._pending_gui_direct_logs = 0
+        self._gui_log_flood_mode = False
         self._gui_log_drain_scheduled = False
         self._gui_log_drain_timer = QTimer(self)
         self._gui_log_drain_timer.setSingleShot(True)
@@ -36411,13 +36416,33 @@ Important rules:
             pass
 
     def _schedule_log_autoscroll(self):
-        """Coalesce repeated scroll requests into one reusable timer."""
+        """Scroll ordinary logs immediately and rate-limit only log floods."""
         try:
             if not self._should_log_autoscroll():
                 return
             timer = getattr(self, '_log_scroll_timer', None)
+            throttling = False
+            try:
+                with self._pending_gui_log_lock:
+                    throttling = bool(
+                        getattr(self, '_gui_log_flood_mode', False)
+                        or self._pending_gui_logs
+                    )
+            except Exception:
+                throttling = False
+
+            if not throttling:
+                if timer is not None and timer.isActive():
+                    timer.stop()
+                self._scroll_log_after_append()
+                return
+
+            # A flood gets at most one scroll update per timer interval.  Do
+            # not restart an active timer: continuous output should still move
+            # the visible log every 75 ms instead of waiting for total silence.
             if timer is not None:
-                timer.start()
+                if not timer.isActive():
+                    timer.start()
             else:
                 self._scroll_log_after_append()
         except Exception:
@@ -37133,18 +37158,48 @@ Important rules:
 
     def append_log_direct(self, message):
         """Append one message directly; must be called from the GUI thread."""
+        # Worker messages below the flood threshold arrive through log_signal.
+        # Release their outstanding-event slot as soon as Qt dispatches them.
+        try:
+            with self._pending_gui_log_lock:
+                if self._pending_gui_direct_logs > 0:
+                    self._pending_gui_direct_logs -= 1
+        except Exception:
+            pass
         self._append_gui_log_batch((message,))
 
     def _queue_gui_log_message(self, message):
-        """Queue a worker log line and emit only one outstanding GUI wake-up."""
+        """Deliver ordinary worker logs directly; coalesce only real floods."""
+        message = str(message)
+        deliver_directly = False
         should_wake = False
         try:
             with self._pending_gui_log_lock:
-                self._pending_gui_logs.append(str(message))
-                if not self._gui_log_drain_scheduled:
-                    self._gui_log_drain_scheduled = True
-                    should_wake = True
-            if should_wake:
+                direct_pending = int(
+                    getattr(self, '_pending_gui_direct_logs', 0) or 0)
+                flood_mode = bool(
+                    getattr(self, '_gui_log_flood_mode', False))
+                if not flood_mode and direct_pending < _GUI_LOG_DIRECT_EVENT_LIMIT:
+                    self._pending_gui_direct_logs = direct_pending + 1
+                    deliver_directly = True
+                else:
+                    self._gui_log_flood_mode = True
+                    self._pending_gui_logs.append(message)
+                    if not self._gui_log_drain_scheduled:
+                        self._gui_log_drain_scheduled = True
+                        should_wake = True
+            if deliver_directly:
+                try:
+                    self.log_signal.emit(message)
+                except Exception:
+                    with self._pending_gui_log_lock:
+                        self._pending_gui_direct_logs = max(
+                            0,
+                            int(getattr(
+                                self, '_pending_gui_direct_logs', 0) or 0) - 1,
+                        )
+                    raise
+            elif should_wake:
                 self.log_queue_ready_signal.emit()
         except Exception:
             try:
@@ -37183,6 +37238,7 @@ Important rules:
             has_more = bool(self._pending_gui_logs)
             if not has_more:
                 self._gui_log_drain_scheduled = False
+                self._gui_log_flood_mode = False
         return batch, has_more
 
     def _drain_gui_log_queue(self):

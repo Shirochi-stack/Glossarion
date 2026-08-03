@@ -15451,6 +15451,11 @@ class BookDetailsDialog(QDialog):
         self._chapter_list_defer_clear = False
         self._chapter_list_transition_pending = True
         self._set_chapter_list_opacity(0.0)
+        # Switch the title, page summary, navigation state, and bottom pager
+        # in the same event-loop turn as the first replacement rows.  Keeping
+        # these deferred avoids a transient hybrid frame such as
+        # "Failures (0)" beside "Page 1 / 14 · 1-20 of 261".
+        self._update_toc_toggle_label()
 
     def _finish_chapter_page_transition(self) -> None:
         if not bool(getattr(self, "_chapter_list_transition_pending", False)):
@@ -15553,7 +15558,6 @@ class BookDetailsDialog(QDialog):
             silent
             and use_list_view
             and chap_list is not None
-            and chap_list.count() > 0
             and chap_list.isVisible()
         )
         self._chapter_list_defer_clear = defer_list_clear
@@ -15595,7 +15599,8 @@ class BookDetailsDialog(QDialog):
         # Snapshot the state the worker uses so a mid-flight toggle
         # change can't cross-contaminate the rendering flavor.
         filtered_infos = self._filtered_chapter_infos()
-        self._update_chapter_pagination_controls(len(filtered_infos))
+        if not defer_list_clear:
+            self._update_chapter_pagination_controls(len(filtered_infos))
         populate_infos = [
             dict(info or {})
             for info in self._current_chapter_page_infos(filtered_infos)

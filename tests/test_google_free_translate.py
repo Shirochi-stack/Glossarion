@@ -353,11 +353,22 @@ class _TranslatorLogWakeSignal:
         self.calls += 1
 
 
+class _TranslatorDirectLogSignal:
+    def __init__(self):
+        self.messages = []
+
+    def emit(self, message):
+        self.messages.append(message)
+
+
 def _translator_log_queue_harness():
     return types.SimpleNamespace(
         _pending_gui_logs=deque(),
         _pending_gui_log_lock=threading.Lock(),
+        _pending_gui_direct_logs=0,
+        _gui_log_flood_mode=False,
         _gui_log_drain_scheduled=False,
+        log_signal=_TranslatorDirectLogSignal(),
         log_queue_ready_signal=_TranslatorLogWakeSignal(),
     )
 
@@ -389,9 +400,10 @@ def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
     for thread in threads:
         thread.join()
 
+    assert len(gui.log_signal.messages) == translator_gui._GUI_LOG_DIRECT_EVENT_LIMIT
     assert gui.log_queue_ready_signal.calls == 1
 
-    drained = []
+    drained = list(gui.log_signal.messages)
     has_more = True
     while has_more:
         batch, has_more = translator_gui.TranslatorGUI._take_gui_log_batch(gui)
@@ -401,8 +413,77 @@ def test_translator_worker_log_queue_coalesces_wakeups_without_dropping_lines():
     assert len(set(drained)) == line_count
     assert gui._gui_log_drain_scheduled is False
 
+    # Model Qt having dispatched the direct events before the next ordinary
+    # line arrives.  With no flood backlog, it uses the immediate path again.
+    gui._pending_gui_direct_logs = 0
     translator_gui.TranslatorGUI._queue_gui_log_message(gui, "after drain")
-    assert gui.log_queue_ready_signal.calls == 2
+    assert gui.log_signal.messages[-1] == "after drain"
+    assert gui.log_queue_ready_signal.calls == 1
+
+
+def test_translator_worker_normal_log_burst_bypasses_flood_throttle():
+    import translator_gui
+
+    gui = _translator_log_queue_harness()
+
+    for index in range(30):
+        translator_gui.TranslatorGUI._queue_gui_log_message(
+            gui, f"ordinary line {index}")
+
+    assert gui.log_signal.messages == [
+        f"ordinary line {index}" for index in range(30)
+    ]
+    assert list(gui._pending_gui_logs) == []
+    assert gui.log_queue_ready_signal.calls == 0
+    assert gui._gui_log_flood_mode is False
+
+    appended = []
+    gui._append_gui_log_batch = lambda messages: appended.extend(messages)
+    for message in list(gui.log_signal.messages):
+        translator_gui.TranslatorGUI.append_log_direct(gui, message)
+
+    assert appended == gui.log_signal.messages
+    assert gui._pending_gui_direct_logs == 0
+
+
+def test_translator_log_autoscroll_only_uses_timer_during_floods():
+    import translator_gui
+
+    class TimerStub:
+        def __init__(self):
+            self.active = False
+            self.starts = 0
+            self.stops = 0
+
+        def isActive(self):
+            return self.active
+
+        def start(self):
+            self.active = True
+            self.starts += 1
+
+        def stop(self):
+            self.active = False
+            self.stops += 1
+
+    timer = TimerStub()
+    scroll_calls = []
+    gui = _translator_log_queue_harness()
+    gui._log_scroll_timer = timer
+    gui._should_log_autoscroll = lambda: True
+    gui._scroll_log_after_append = lambda: scroll_calls.append(True)
+
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+
+    assert len(scroll_calls) == 1
+    assert timer.starts == 0
+
+    gui._gui_log_flood_mode = True
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+    translator_gui.TranslatorGUI._schedule_log_autoscroll(gui)
+
+    assert timer.starts == 1
+    assert len(scroll_calls) == 1
 
 
 def test_translator_gui_log_batch_takes_an_oversized_first_message():

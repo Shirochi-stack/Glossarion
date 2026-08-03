@@ -771,6 +771,30 @@ def test_empty_failure_view_keeps_chapter_toolbar_vertical_anchor(
         assert dialog._chap_list.count() == 0
         assert dialog._chap_list.reserved_height() > 0
         assert after_y == before_y
+
+        # Restoring from an empty failure view used to expose a hybrid frame:
+        # the pager jumped to the chapter count while the old Failures label
+        # and blank list remained visible until background row prep finished.
+        failure_page_text = dialog._toc_page_label.text()
+        assert failure_page_text == "Page 1 / 1 · 0 of 0"
+        assert not dialog._toc_bottom_pager.isVisible()
+
+        dialog._toc_title.click()
+
+        # Before queued row-prep results are applied, the complete previous
+        # state remains intact rather than showing half of the new state.
+        assert dialog._toc_title.text() == "Failures  (0)"
+        assert dialog._toc_page_label.text() == failure_page_text
+        assert not dialog._toc_bottom_pager.isVisible()
+
+        _pump_events(qapp, timeout=0.3)
+
+        restored_y = dialog._toc_title.mapTo(viewport, QPoint(0, 0)).y()
+        assert dialog._toc_title.text() == "Chapters  (358/358)"
+        assert dialog._toc_page_label.text() == "Page 1 / 18 · 1-20 of 358"
+        assert dialog._toc_bottom_pager.isVisible()
+        assert dialog._chap_list.count() == 20
+        assert restored_y == before_y
     finally:
         dialog.close()
         qapp.processEvents()
