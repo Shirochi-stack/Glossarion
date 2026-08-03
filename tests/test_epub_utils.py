@@ -25,8 +25,10 @@ from qa_scan_runtime import (
     run_qa_scan_path,
 )
 from scan_html_folder import (
+    _format_ai_truncation_last_p_preview,
     _count_quotation_marks,
     _missing_ending_quotation_paragraphs,
+    _record_ai_truncation_issue,
     cross_reference_word_counts,
     detect_quotation_mismatch,
     extract_epub_punctuation_info,
@@ -34,9 +36,63 @@ from scan_html_folder import (
     extract_html_word_counts,
     generate_reports,
     process_html_file_batch,
+    run_ai_truncation_check,
     scan_html_folder,
     update_new_format_progress,
 )
+
+
+class _AITruncationYesClient:
+    def send(self, messages, temperature=0.0, max_tokens=None, context=None):
+        return "YES"
+
+
+def test_ai_truncation_issue_previews_source_and_output_last_html_p():
+    ai_result = run_ai_truncation_check(
+        "<html><body><p>Earlier source.</p><p>Source <em>final</em> paragraph.</p></body></html>",
+        "<html><body><p>Earlier output.</p><p>Output <strong>cut off</strong></p></body></html>",
+        client=_AITruncationYesClient(),
+        log=lambda _message: None,
+    )
+
+    assert ai_result["flagged"] is True
+    assert ai_result["source_last_p"] == "Source final paragraph."
+    assert ai_result["output_last_p"] == "Output cut off"
+
+    row = {"issues": [], "qa_issue_previews": {}, "score": 0}
+    issue_code = _record_ai_truncation_issue(row, ai_result)
+
+    assert row["issues"] == [issue_code]
+    assert row["qa_issue_previews"][issue_code] == (
+        "Source last <p>: Source final paragraph. | "
+        "Output last <p>: Output cut off"
+    )
+    assert row["score"] == 1
+
+
+def test_ai_truncation_last_p_preview_distinguishes_empty_and_missing_tags():
+    assert _format_ai_truncation_last_p_preview("", None) == (
+        "Source last <p>: [empty] | Output last <p>: [no <p> tag]"
+    )
+
+
+def test_progress_display_keeps_both_ai_truncation_paragraph_previews():
+    from Retranslation_GUI import _format_qa_issue_for_progress_display
+
+    issue_code = "ai_truncation_detected (ai_verdict=YES (raw: YES))"
+    preview = _format_ai_truncation_last_p_preview(
+        "source ending " * 20,
+        "output ending " * 20,
+    )
+
+    display = _format_qa_issue_for_progress_display(
+        issue_code,
+        {issue_code: preview},
+    )
+
+    assert "Source last <p>:" in display
+    assert "Output last <p>:" in display
+    assert len(display) > 160
 
 
 def test_header_fallback_parser_respects_matched_quote_delimiters():

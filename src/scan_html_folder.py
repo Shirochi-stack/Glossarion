@@ -5688,13 +5688,19 @@ _truncation_translation_cache = {}
 _AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
 
 
-def _extract_paragraphs(html):
-    """Extract paragraph texts from HTML content."""
+def _extract_paragraphs(html, *, return_last_html_p=False):
+    """Extract paragraph texts and optionally the exact final ``<p>`` text."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "head", "title", "meta", "link"]):
         tag.decompose()
+    paragraph_tags = soup.find_all("p")
+    last_html_p = (
+        paragraph_tags[-1].get_text(" ", strip=True)
+        if paragraph_tags
+        else None
+    )
     paragraphs = []
-    for p in soup.find_all("p"):
+    for p in paragraph_tags:
         text = p.get_text(strip=True)
         if text:
             paragraphs.append(text)
@@ -5702,7 +5708,46 @@ def _extract_paragraphs(html):
     if not paragraphs:
         raw_text = soup.get_text()
         paragraphs = [p.strip() for p in re.split(r'\n\s*\n', raw_text) if p.strip()]
+    if return_last_html_p:
+        return paragraphs, last_html_p
     return paragraphs
+
+
+def _format_ai_truncation_last_p_preview(source_last_p, output_last_p, max_chars_per_p=160):
+    """Format source/output final-paragraph context for Progress Manager."""
+    def _format_value(value):
+        if value is None:
+            return "[no <p> tag]"
+        text = re.sub(r'\s+', ' ', str(value)).strip()
+        if not text:
+            return "[empty]"
+        if len(text) > max_chars_per_p:
+            text = text[:max_chars_per_p - 3].rstrip() + "..."
+        return text
+
+    return (
+        f"Source last <p>: {_format_value(source_last_p)} | "
+        f"Output last <p>: {_format_value(output_last_p)}"
+    )
+
+
+def _record_ai_truncation_issue(result_obj, ai_result):
+    """Attach the AI truncation issue and its final-``<p>`` preview."""
+    issue_code = f"ai_truncation_detected ({ai_result.get('details', 'unknown')})"
+    issues = result_obj.setdefault('issues', [])
+    if issue_code not in issues:
+        issues.append(issue_code)
+
+    previews = result_obj.setdefault('qa_issue_previews', {})
+    if not isinstance(previews, dict):
+        previews = {}
+        result_obj['qa_issue_previews'] = previews
+    previews[issue_code] = _format_ai_truncation_last_p_preview(
+        ai_result.get('source_last_p'),
+        ai_result.get('output_last_p'),
+    )
+    result_obj['score'] = len(issues)
+    return issue_code
 
 
 def check_potential_truncation(raw_text):
@@ -6074,8 +6119,16 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
             'flagged'  (bool)  – True when AI says YES (truncated)
             'answer'   (str)   – raw AI answer
             'details'  (str)   – human-readable explanation
+            'source_last_p' (str | None) – text from the source's final <p>
+            'output_last_p' (str | None) – text from the output's final <p>
     """
-    result = {'flagged': False, 'answer': '', 'details': ''}
+    result = {
+        'flagged': False,
+        'answer': '',
+        'details': '',
+        'source_last_p': None,
+        'output_last_p': None,
+    }
 
     try:
         # Extract plain text from HTML.
@@ -6085,8 +6138,16 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         # before a single request is sent. Two at a time keeps prep far ahead
         # of the API-delay stagger while leaving the GIL breathing room.
         with _AI_TRUNCATION_PARSE_GATE:
-            source_paras = _extract_paragraphs(source_html)
-            trans_paras = _extract_paragraphs(trans_html)
+            source_paras, source_last_p = _extract_paragraphs(
+                source_html,
+                return_last_html_p=True,
+            )
+            trans_paras, output_last_p = _extract_paragraphs(
+                trans_html,
+                return_last_html_p=True,
+            )
+        result['source_last_p'] = source_last_p
+        result['output_last_p'] = output_last_p
 
         if not source_paras or not trans_paras:
             result['details'] = 'insufficient_text'
@@ -10272,8 +10333,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             _ai_checked += 1
                             if _ai_tr['flagged']:
                                 _ai_flagged += 1
-                                _ai_r_obj['issues'].append(f"ai_truncation_detected ({_ai_tr['details']})")
-                                _ai_r_obj['score'] = len(_ai_r_obj['issues'])
+                                _record_ai_truncation_issue(_ai_r_obj, _ai_tr)
                                 log(f"   ⚠️ {_ai_r_obj['filename']}: AI detected truncation - {_ai_tr['details']}")
                     except Exception:
                         pass

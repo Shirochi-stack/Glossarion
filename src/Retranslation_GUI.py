@@ -304,6 +304,25 @@ def _progress_entry_model_for_display(entry):
     return ''
 
 
+def _format_qa_issue_for_progress_display(issue, qa_issue_previews=None):
+    """Render a QA issue with its saved preview context."""
+    issue_code = str(issue)
+    previews = qa_issue_previews if isinstance(qa_issue_previews, dict) else {}
+    preview = re.sub(
+        r'\s+',
+        ' ',
+        str(previews.get(issue_code, '') or ''),
+    ).strip()
+    preview_limit = 420 if issue_code.startswith('ai_truncation_detected') else 160
+    if len(preview) > preview_limit:
+        preview = preview[:preview_limit - 3].rstrip() + '...'
+    return (
+        f'{issue_code} — Preview: {preview}'
+        if preview
+        else issue_code
+    )
+
+
 def _select_progress_entry_for_display(entries, display_status=None):
     """Pick the single progress entry that should drive a visible row."""
     candidates = [entry for entry in (entries or []) if isinstance(entry, dict)]
@@ -13629,7 +13648,14 @@ class RetranslationMixin:
                     status_label = f"{status_label} ⭐"
                 display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
                 if issues:
-                    issues_display = ', '.join(issues[:2])
+                    qa_issue_previews = entry.get('qa_issue_previews', {}) if isinstance(entry, dict) else {}
+                    if not isinstance(qa_issue_previews, dict):
+                        qa_issue_previews = {}
+
+                    issues_display = ', '.join(
+                        _format_qa_issue_for_progress_display(issue, qa_issue_previews)
+                        for issue in issues[:2]
+                    )
                     if len(issues) > 2:
                         issues_display += f' (+{len(issues)-2} more)'
                     display += f" | {issues_display}"
@@ -20104,23 +20130,9 @@ class RetranslationMixin:
                 if not isinstance(qa_issue_previews, dict):
                     qa_issue_previews = {}
 
-                def _format_qa_issue(issue):
-                    issue_code = str(issue)
-                    preview = re.sub(
-                        r'\s+',
-                        ' ',
-                        str(qa_issue_previews.get(issue_code, '') or ''),
-                    ).strip()
-                    if len(preview) > 160:
-                        preview = preview[:157].rstrip() + '...'
-                    return (
-                        f'{issue_code} — Preview: {preview}'
-                        if preview
-                        else issue_code
-                    )
-
                 issues_display = ', '.join(
-                    _format_qa_issue(issue) for issue in qa_issues[:2]
+                    _format_qa_issue_for_progress_display(issue, qa_issue_previews)
+                    for issue in qa_issues[:2]
                 )
                 if len(qa_issues) > 2:
                     issues_display += f' (+{len(qa_issues)-2} more)'
