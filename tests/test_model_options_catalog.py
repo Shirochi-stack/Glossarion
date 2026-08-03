@@ -53,22 +53,51 @@ def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
     import multi_api_key_manager
 
     dialog = multi_api_key_manager.MultiAPIKeyDialog
+    qt = multi_api_key_manager.Qt
+    window_flags = dialog._standard_manager_window_flags(
+        qt.Dialog | qt.WindowCloseButtonHint | qt.WindowContextHelpButtonHint
+    )
+    assert not window_flags & qt.WindowMinimizeButtonHint
+    assert window_flags & qt.WindowMaximizeButtonHint
+    assert window_flags & qt.WindowCloseButtonHint
+    assert window_flags & qt.WindowSystemMenuHint
+    assert (window_flags & qt.WindowType_Mask) == qt.Window
+    assert not window_flags & qt.WindowContextHelpButtonHint
+
     assert dialog._bounded_api_key_tree_font_size(1) == 8
     assert dialog._bounded_api_key_tree_font_size(18) == 18
     assert dialog._bounded_api_key_tree_font_size(99) == 32
     assert dialog._bounded_api_key_tree_height(20) == 150
     assert dialog._bounded_api_key_tree_height(500) == 500
     assert dialog._bounded_api_key_tree_height(5000) == 1200
+    assert dialog._proportional_api_key_tree_column_widths(
+        (100, 200, 50),
+        700,
+    ) == (200, 400, 100)
+    assert dialog._proportional_api_key_tree_column_widths(
+        (100, 200, 50),
+        300,
+    ) == (86, 171, 43)
+    assert sum(dialog._proportional_api_key_tree_column_widths(
+        (116, 220, 42, 105, 100, 90, 100, 42, 42, 80),
+        965,
+    )) == 965
 
     source = inspect.getsource(dialog)
     assert source.count("self._enable_api_key_tree_font_zoom(") == 4
     assert source.count("self._add_api_key_tree_height_resizer(") == 4
+    assert source.count("self._enable_api_key_tree_responsive_columns(") == 4
     assert 'QKeySequence("Ctrl++")' in source
     assert 'QKeySequence("Ctrl+-")' in source
     assert "event.modifiers() & Qt.ControlModifier" in source
     assert "multi_api_key_tree_font_size" in source
     assert "multi_api_key_tree_heights" in source
     assert "Qt.SizeVerCursor" in source
+    assert "handle.mouseDoubleClickEvent = mouse_double_click_event" in source
+    assert "_reset_api_key_tree_height" in source
+    assert "header.setStretchLastSection(False)" in source
+    assert "font-size: {point_size}pt" in source
+    assert "header.style().polish(header)" in source
 
 
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):

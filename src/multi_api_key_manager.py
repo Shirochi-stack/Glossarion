@@ -1538,6 +1538,7 @@ class MultiAPIKeyDialog(QDialog):
     API_KEY_TREE_HEIGHTS_CONFIG = 'multi_api_key_tree_heights'
     API_KEY_TREE_MIN_HEIGHT = 150
     API_KEY_TREE_MAX_HEIGHT = 1200
+    API_KEY_TREE_UNBOUNDED_HEIGHT = 16777215
 
     @staticmethod
     def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
@@ -1637,12 +1638,28 @@ class MultiAPIKeyDialog(QDialog):
         self._initializing = True
         self._create_dialog()
 
-        # Make it a window (not just a dialog)
-        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        # Use a native resizable window frame with the full system controls.
+        self.setWindowFlags(self._standard_manager_window_flags(self.windowFlags()))
 
     def showEvent(self, event):
         super().showEvent(event)
         self._start_deferred_key_pool_render()
+
+    @staticmethod
+    def _standard_manager_window_flags(flags):
+        """Return native window flags with maximize and close controls."""
+        flag_value = (int(flags) & ~int(Qt.WindowType_Mask)) | int(Qt.Window)
+        flag_value |= int(
+            Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        flag_value &= ~int(
+            Qt.WindowContextHelpButtonHint
+            | Qt.WindowMinimizeButtonHint
+        )
+        return Qt.WindowType(flag_value)
 
     def _set_icon(self, window):
         """Set Halgakos.ico as window icon if available."""
@@ -1700,6 +1717,37 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 pass
 
+    def _reset_api_key_tree_height(self, tree, tree_id, persist=True):
+        """Remove one saved height and restore layout-managed tree sizing."""
+        tree_id = str(tree_id)
+        self._api_key_tree_heights.pop(tree_id, None)
+        try:
+            tree.setMinimumHeight(self.API_KEY_TREE_MIN_HEIGHT)
+            tree.setMaximumHeight(self.API_KEY_TREE_UNBOUNDED_HEIGHT)
+            default_height = max(self.API_KEY_TREE_MIN_HEIGHT, tree.sizeHint().height())
+            tree.resize(tree.width(), default_height)
+            tree.updateGeometry()
+            parent = tree.parentWidget()
+            if parent is not None:
+                parent_layout = parent.layout()
+                if parent_layout is not None:
+                    parent_layout.invalidate()
+                    parent_layout.activate()
+                parent.updateGeometry()
+        except RuntimeError:
+            return
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_HEIGHTS_CONFIG] = dict(self._api_key_tree_heights)
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
     @staticmethod
     def _api_key_tree_resize_event_y(event):
         """Read a mouse event's global Y coordinate across PySide6 versions."""
@@ -1723,7 +1771,10 @@ class MultiAPIKeyDialog(QDialog):
         handle.setObjectName('apiKeyTreeHeightResizeHandle')
         handle.setFixedHeight(9)
         handle.setCursor(Qt.SizeVerCursor)
-        handle.setToolTip("Drag up or down to resize this API-key tree")
+        handle.setToolTip(
+            "Drag up or down to resize this API-key tree\n"
+            "Double-click to reset its default height"
+        )
         handle.setAccessibleName(f"Resize {tree_id} API-key tree height")
         handle.setStyleSheet("""
             QFrame#apiKeyTreeHeightResizeHandle {
@@ -1742,6 +1793,7 @@ class MultiAPIKeyDialog(QDialog):
         original_mouse_press = handle.mousePressEvent
         original_mouse_move = handle.mouseMoveEvent
         original_mouse_release = handle.mouseReleaseEvent
+        original_mouse_double_click = handle.mouseDoubleClickEvent
 
         def mouse_press_event(event):
             if event.button() == Qt.LeftButton:
@@ -1775,12 +1827,98 @@ class MultiAPIKeyDialog(QDialog):
                 return
             original_mouse_release(event)
 
+        def mouse_double_click_event(event):
+            if event.button() == Qt.LeftButton:
+                drag_state['active'] = False
+                if handle.mouseGrabber() is handle:
+                    handle.releaseMouse()
+                self._reset_api_key_tree_height(tree, tree_id, persist=True)
+                event.accept()
+                return
+            original_mouse_double_click(event)
+
         handle.mousePressEvent = mouse_press_event
         handle.mouseMoveEvent = mouse_move_event
         handle.mouseReleaseEvent = mouse_release_event
+        handle.mouseDoubleClickEvent = mouse_double_click_event
         parent_layout.addWidget(handle)
         self._api_key_tree_height_handles.append(handle)
         return handle
+
+    @staticmethod
+    def _proportional_api_key_tree_column_widths(base_widths, available_width):
+        """Fit all tree columns inside the viewport using stable proportions."""
+        proportional_widths = [max(1, int(width)) for width in base_widths]
+        proportional_total = sum(proportional_widths)
+        try:
+            available_width = int(available_width)
+        except Exception:
+            available_width = proportional_total
+        available_width = max(len(proportional_widths), available_width)
+
+        raw_widths = [
+            available_width * width / proportional_total
+            for width in proportional_widths
+        ]
+        widths = [int(width) for width in raw_widths]
+        remaining = available_width - sum(widths)
+        fractional_order = sorted(
+            range(len(widths)),
+            key=lambda index: raw_widths[index] - widths[index],
+            reverse=True,
+        )
+        for index in fractional_order[:remaining]:
+            widths[index] += 1
+        return tuple(widths)
+
+    def _resize_api_key_tree_columns(self, tree):
+        """Fit a registered key tree's columns to its current viewport width."""
+        try:
+            base_widths = tuple(getattr(tree, '_api_key_tree_base_column_widths', ()))
+            if not base_widths or tree.columnCount() != len(base_widths):
+                return
+            available_width = tree.viewport().width()
+            widths = self._proportional_api_key_tree_column_widths(
+                base_widths,
+                available_width,
+            )
+            for column, width in enumerate(widths):
+                tree.setColumnWidth(column, width)
+        except RuntimeError:
+            return
+        except Exception:
+            pass
+
+    def _enable_api_key_tree_responsive_columns(self, tree, base_widths):
+        """Make every key-tree column grow proportionally with the dialog."""
+        if tree is None or bool(tree.property('apiKeyTreeResponsiveColumnsEnabled')):
+            return
+        base_widths = tuple(int(width) for width in base_widths)
+        if tree.columnCount() != len(base_widths):
+            return
+
+        tree.setProperty('apiKeyTreeResponsiveColumnsEnabled', True)
+        tree._api_key_tree_base_column_widths = base_widths
+        header = tree.header()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(16)
+        for column in range(tree.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+
+        original_resize_event = tree.resizeEvent
+
+        def responsive_resize_event(event):
+            original_resize_event(event)
+            self._resize_api_key_tree_columns(tree)
+
+        tree.resizeEvent = responsive_resize_event
+        tree.verticalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum, target=tree: QTimer.singleShot(
+                0,
+                lambda: self._resize_api_key_tree_columns(target),
+            )
+        )
+        QTimer.singleShot(0, lambda: self._resize_api_key_tree_columns(tree))
 
     def _set_api_key_tree_font_size(self, point_size, persist=True):
         """Apply one zoom level to all key trees in this manager window."""
@@ -1799,11 +1937,32 @@ class MultiAPIKeyDialog(QDialog):
                 header_font.setPointSize(point_size)
                 header_font.setBold(True)
                 header.setFont(header_font)
+                header_base_style = getattr(
+                    tree,
+                    '_api_key_tree_header_base_stylesheet',
+                    '',
+                )
+                header_zoom_style = f"""
+                    QHeaderView::section {{
+                        font-size: {point_size}pt;
+                        font-weight: bold;
+                    }}
+                """
+                header.setStyleSheet(
+                    f"{header_base_style}\n{header_zoom_style}"
+                    if header_base_style
+                    else header_zoom_style
+                )
                 header.setMinimumHeight(header.fontMetrics().height() + 12)
+                header.style().unpolish(header)
+                header.style().polish(header)
+                header.updateGeometry()
+                header.viewport().update()
 
                 tree.doItemsLayout()
                 tree.updateGeometry()
                 tree.viewport().update()
+                self._resize_api_key_tree_columns(tree)
                 live_trees.append(tree)
             except RuntimeError:
                 # Deferred pool sections can be destroyed while the dialog is
@@ -1844,6 +2003,7 @@ class MultiAPIKeyDialog(QDialog):
             return
         tree.setProperty('apiKeyTreeFontZoomEnabled', True)
         self._api_key_trees.append(tree)
+        tree._api_key_tree_header_base_stylesheet = tree.header().styleSheet()
 
         if self._api_key_tree_font_size <= 0:
             self._api_key_tree_font_size = self._bounded_api_key_tree_font_size(
@@ -3362,6 +3522,10 @@ class MultiAPIKeyDialog(QDialog):
         fb_header_font.setPointSize(11)
         fb_header.setFont(fb_header_font)
         self._enable_api_key_tree_font_zoom(self.fallback_tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.fallback_tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+        )
 
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
@@ -4639,6 +4803,10 @@ class MultiAPIKeyDialog(QDialog):
         header_font.setPointSize(11)
         header.setFont(header_font)
         self._enable_api_key_tree_font_zoom(self.tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 42, 105, 100, 90, 100, 42, 42, 80),
+        )
 
         # Set context menu
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -6122,6 +6290,10 @@ class MultiAPIKeyDialog(QDialog):
         gl_header_font.setPointSize(11)
         gl_header.setFont(gl_header_font)
         self._enable_api_key_tree_font_zoom(self.glossary_tree)
+        self._enable_api_key_tree_responsive_columns(
+            self.glossary_tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+        )
 
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
@@ -9205,6 +9377,10 @@ class MultiAPIKeyDialog(QDialog):
         header_font.setPointSize(11)
         header.setFont(header_font)
         self._enable_api_key_tree_font_zoom(tree)
+        self._enable_api_key_tree_responsive_columns(
+            tree,
+            (self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80),
+        )
         tree.setContextMenuPolicy(Qt.CustomContextMenu)
         tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
         tree.setMinimumHeight(150)
