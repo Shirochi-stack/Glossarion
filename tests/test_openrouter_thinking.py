@@ -8,6 +8,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from other_settings import DEEPSEEK_V4_EFFORT_OPTIONS, _apply_gpt_thinking_toggle
+import unified_api_client as api_module
 from unified_api_client import UnifiedClient
 
 
@@ -63,3 +64,57 @@ def test_deepseek_v4_effort_options_and_normalization_include_none_and_low():
     assert UnifiedClient._normalize_deepseek_v4_effort("high") == "high"
     assert UnifiedClient._normalize_deepseek_v4_effort("max") == "max"
     assert UnifiedClient._normalize_deepseek_v4_effort("xhigh") == "max"
+
+
+def test_deepseek_responses_toggle_routes_and_passes_none(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeResponse:
+        def model_dump_json(self):
+            return '{"output_text":"ok","status":"completed"}'
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):
+            raise AssertionError("DeepSeek should use the Responses API when enabled")
+
+    class FakeOpenAIClient:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+            self.chat = SimpleNamespace(completions=FakeChatCompletions())
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("DEEPSEEK_USE_RESPONSES_API", "1")
+    monkeypatch.setenv("DEEPSEEK_EFFORT", "none")
+    monkeypatch.setenv("ENABLE_STREAMING", "0")
+    monkeypatch.setattr(api_module, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+    monkeypatch.setattr(api_module, "httpx", None)
+
+    client = UnifiedClient("test-key", "deepseek-v4-flash", str(tmp_path))
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_should_show_api_lifecycle_logs", lambda: False)
+
+    response = client._send_openai_compatible(
+        messages=[
+            {"role": "system", "content": "Translate."},
+            {"role": "user", "content": "Text"},
+        ],
+        temperature=0.3,
+        max_tokens=500,
+        base_url="https://api.deepseek.com/v1",
+        response_name="responses-toggle-test",
+        provider="deepseek",
+    )
+
+    assert response.content == "ok"
+    assert captured["model"] == "deepseek-v4-flash"
+    assert captured["reasoning"] == {"effort": "none"}
+    assert captured["instructions"] == "Translate."
+    assert "messages" not in captured
+    assert "thinking" not in captured.get("extra_body", {})

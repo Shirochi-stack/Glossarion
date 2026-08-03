@@ -22520,13 +22520,15 @@ class UnifiedClient:
                     except Exception:
                         pass
 
-                    # Decide endpoint: chat vs Responses API (GPT-*-pro on OpenAI)
+                    # Decide endpoint: chat vs Responses API.
                     use_responses_api = False
                     try:
                         ml = (effective_model or "").lower().strip()
                         model_leaf = ml.split("/")[-1]
                         import re as _re
-                        if provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
+                        if provider == 'deepseek' and os.getenv('DEEPSEEK_USE_RESPONSES_API', '0') == '1':
+                            use_responses_api = True
+                        elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                             use_responses_api = True
                     except Exception:
                         use_responses_api = False
@@ -22592,6 +22594,12 @@ class UnifiedClient:
                         response_max_tokens = norm_max_completion_tokens if norm_max_completion_tokens is not None else norm_max_tokens
                         if response_max_tokens is not None:
                             params["max_output_tokens"] = response_max_tokens
+                        if provider == 'deepseek':
+                            params["reasoning"] = {
+                                "effort": self._normalize_deepseek_v4_effort(
+                                    os.getenv('DEEPSEEK_EFFORT', 'high')
+                                )
+                            }
                     else:
                         params = {
                             "model": effective_model,
@@ -22717,7 +22725,7 @@ class UnifiedClient:
                     #     "thinking": {"type": "enabled"}  AND  "reasoning_effort": "none"|"low"|"high"|"max"
                     #   Controlled by DEEPSEEK_EFFORT env var (none/low/high/max, default high)
                     # - Older DeepSeek models: only extra_body={"thinking":{"type":"enabled"}}
-                    if provider == 'deepseek' or is_chutes_thinking_endpoint:
+                    if (provider == 'deepseek' and not use_responses_api) or is_chutes_thinking_endpoint:
                         try:
                             enable_ds = enable_ds_env
                             _em_lower = (effective_model or '').lower()
@@ -23021,20 +23029,24 @@ class UnifiedClient:
                                 fb_headers = _sanitize_headers_ascii(fb_headers)
                                 fb_headers["Idempotency-Key"] = self._get_idempotency_key()
                                 _norm_mt, _norm_mct = self._normalize_token_params(max_tokens, None)
-                                fb_body = {
-                                    "model": effective_model,
-                                    "messages": messages,
-                                    "temperature": temperature,
-                                }
-                                if temperature is None:
-                                    fb_body.pop("temperature", None)
-                                if _norm_mct is not None:
-                                    fb_body["max_completion_tokens"] = _norm_mct
-                                elif _norm_mt is not None:
-                                    fb_body["max_tokens"] = _norm_mt
-                                if provider == 'openrouter':
-                                    self._apply_openrouter_thinking_disabled(fb_body)
-                                fb_endpoint = "/chat/completions"
+                                if use_responses_api:
+                                    fb_body = dict(params)
+                                    fb_endpoint = "/responses"
+                                else:
+                                    fb_body = {
+                                        "model": effective_model,
+                                        "messages": messages,
+                                        "temperature": temperature,
+                                    }
+                                    if temperature is None:
+                                        fb_body.pop("temperature", None)
+                                    if _norm_mct is not None:
+                                        fb_body["max_completion_tokens"] = _norm_mct
+                                    elif _norm_mt is not None:
+                                        fb_body["max_tokens"] = _norm_mt
+                                    if provider == 'openrouter':
+                                        self._apply_openrouter_thinking_disabled(fb_body)
+                                    fb_endpoint = "/chat/completions"
                                 fb_resp = self._http_request_with_retries(
                                     method="POST",
                                     url=f"{base_url}{fb_endpoint}",
@@ -23046,7 +23058,10 @@ class UnifiedClient:
                                     use_session=True,
                                 )
                                 fb_json = fb_resp.json()
-                                fb_content, fb_fr, fb_usage = self._extract_openai_json(fb_json)
+                                if use_responses_api:
+                                    fb_content, fb_fr, fb_usage = self._extract_openai_responses_json(fb_json)
+                                else:
+                                    fb_content, fb_fr, fb_usage = self._extract_openai_json(fb_json)
                                 return UnifiedResponse(
                                     content=fb_content,
                                     finish_reason=fb_fr,
@@ -24455,7 +24470,9 @@ class UnifiedClient:
                 model_leaf = ml.split("/")[-1]
                 # NOTE: Do not use the name `re` here; this function has conditional `import re` statements
                 # in other branches which make `re` a local variable and can trigger UnboundLocalError.
-                if provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
+                if provider == 'deepseek' and os.getenv('DEEPSEEK_USE_RESPONSES_API', '0') == '1':
+                    use_responses_api = True
+                elif provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
                     use_responses_api = True
                 elif model_leaf.endswith("-instruct") or "instruct" in model_leaf:
                     use_text_completions = True
@@ -24530,6 +24547,12 @@ class UnifiedClient:
                 response_max_tokens = norm_max_completion_tokens if norm_max_completion_tokens is not None else norm_max_tokens
                 if response_max_tokens is not None:
                     data["max_output_tokens"] = response_max_tokens
+                if provider == 'deepseek':
+                    data["reasoning"] = {
+                        "effort": self._normalize_deepseek_v4_effort(
+                            os.getenv('DEEPSEEK_EFFORT', 'high')
+                        )
+                    }
 
             elif use_text_completions:
                 try:

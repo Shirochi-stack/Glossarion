@@ -1599,6 +1599,7 @@ class _InputOutputDialog(QDialog):
         'ANTHROPIC_FORCE_ADAPTIVE',
         'ENABLE_GEMINI_THINKING',
         'ENABLE_DEEPSEEK_THINKING',
+        'DEEPSEEK_USE_RESPONSES_API',
         'ENABLE_GPT_THINKING',
         'GPT_REASONING_TOKENS',
         'GPT_EFFORT',
@@ -13382,6 +13383,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # NEW: DeepSeek thinking (OpenAI-compatible extra_body)
         self.enable_deepseek_thinking_var = self.config.get('enable_deepseek_thinking', True)
         self.deepseek_effort_var = self.config.get('deepseek_effort', 'high')
+        self.deepseek_use_responses_api_var = self.config.get('deepseek_use_responses_api', False)
         # NEW: Anthropic extended/adaptive thinking
         self.enable_anthropic_thinking_var = self.config.get('enable_anthropic_thinking', False)
         self.anthropic_thinking_budget_var = str(self.config.get('anthropic_thinking_budget', '10000'))
@@ -32748,6 +32750,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # DeepSeek thinking (DeepSeek OpenAI-compatible API)
             'ENABLE_DEEPSEEK_THINKING': "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0",
             'DEEPSEEK_EFFORT': getattr(self, 'deepseek_effort_var', 'high'),
+            'DEEPSEEK_USE_RESPONSES_API': "1" if getattr(self, 'deepseek_use_responses_api_var', False) else "0",
             # Anthropic extended/adaptive thinking
             'ENABLE_ANTHROPIC_THINKING': "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0",
             'ANTHROPIC_THINKING_BUDGET': str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0',
@@ -33095,6 +33098,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # DeepSeek thinking
                 os.environ['ENABLE_DEEPSEEK_THINKING'] = "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0"
                 os.environ['DEEPSEEK_EFFORT'] = getattr(self, 'deepseek_effort_var', 'high')
+                os.environ['DEEPSEEK_USE_RESPONSES_API'] = "1" if getattr(self, 'deepseek_use_responses_api_var', False) else "0"
                 # Anthropic extended/adaptive thinking
                 os.environ['ENABLE_ANTHROPIC_THINKING'] = "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0"
                 os.environ['ANTHROPIC_THINKING_BUDGET'] = str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0'
@@ -42832,6 +42836,7 @@ Important rules:
                 ('pass_thinking_all_openai', ['pass_thinking_all_openai_var'], False, bool),
                 ('enable_deepseek_thinking', ['enable_deepseek_thinking_var'], True, bool),
                 ('deepseek_effort', ['deepseek_effort_var'], 'high', str),
+                ('deepseek_use_responses_api', ['deepseek_use_responses_api_var'], False, bool),
                 # Anthropic extended/adaptive thinking
                 ('enable_anthropic_thinking', ['enable_anthropic_thinking_var'], False, bool),
                 ('anthropic_thinking_budget', ['anthropic_thinking_budget_var'], 10000, lambda v: int(v) if str(v).lstrip('-').isdigit() else 10000),
@@ -43505,6 +43510,7 @@ Important rules:
             'GPT_EFFORT': 'GPT reasoning effort level',
             'PASS_THINKING_TO_OPENAI_COMPATIBLE': 'Pass reasoning effort to all OpenAI-compatible routes',
             'ENABLE_DEEPSEEK_THINKING': 'Enable DeepSeek thinking mode',
+            'DEEPSEEK_USE_RESPONSES_API': 'Use the DeepSeek Responses API format',
             
             # API Endpoints
             'OPENAI_CUSTOM_BASE_URL': 'Custom OpenAI API base URL',
@@ -43798,6 +43804,7 @@ Important rules:
 
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
+                ('DEEPSEEK_USE_RESPONSES_API', '1' if self.config.get('deepseek_use_responses_api', False) else '0'),
                 ('ENABLE_STREAMING', '1' if bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False))) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0'),
                 ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),

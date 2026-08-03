@@ -3473,6 +3473,32 @@ def _create_response_handling_section(self, parent):
             pass
     self.deepseek_effort_combo.currentTextChanged.connect(_on_deepseek_effort_changed)
     deepseek_h.addWidget(self.deepseek_effort_combo)
+
+    deepseek_h.addSpacing(20)
+    deepseek_responses_cb = self._create_styled_checkbox("Use Responses API format")
+    deepseek_responses_cb.setToolTip(
+        "Switches the DeepSeek endpoint and request format.\n\n"
+        "Off — Chat Completions API\n"
+        "POST /v1/chat/completions\n"
+        '{"messages":[...],"thinking":{"type":"enabled"},"reasoning_effort":"low"}\n\n'
+        "On — Responses API\n"
+        "POST /v1/responses\n"
+        '{"input":[...],"reasoning":{"effort":"low"}}'
+    )
+    try:
+        deepseek_responses_cb.setChecked(bool(getattr(self, 'deepseek_use_responses_api_var', False)))
+    except Exception:
+        deepseek_responses_cb.setChecked(False)
+
+    def _on_deepseek_responses_toggle(checked):
+        try:
+            self.deepseek_use_responses_api_var = bool(checked)
+            os.environ['DEEPSEEK_USE_RESPONSES_API'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    deepseek_responses_cb.toggled.connect(_on_deepseek_responses_toggle)
+    deepseek_h.addWidget(deepseek_responses_cb)
     deepseek_h.addStretch()
     section_v.addWidget(deepseek_row)
 
@@ -3496,7 +3522,7 @@ def _create_response_handling_section(self, parent):
     self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
     _set_thinking_widget_enabled(self.deepseek_effort_combo, _ds_initially_enabled)
 
-    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models (deepseek-v4-flash/pro) also send reasoning_effort (none/low/high/max).")
+    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models also send the selected effort; Responses API format uses reasoning:{effort:...}.")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)
