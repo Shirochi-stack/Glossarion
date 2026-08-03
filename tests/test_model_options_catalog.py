@@ -1,5 +1,6 @@
 import base64
 import io
+import inspect
 import sys
 import types
 import urllib.error
@@ -46,6 +47,22 @@ def test_multi_key_test_timeout_uses_optional_api_key_classification(
     )
 
     assert multi_api_key_manager._api_key_test_timeout_seconds("example/model") == expected_timeout
+
+
+def test_multi_key_trees_share_persistent_keyboard_and_wheel_zoom():
+    import multi_api_key_manager
+
+    dialog = multi_api_key_manager.MultiAPIKeyDialog
+    assert dialog._bounded_api_key_tree_font_size(1) == 8
+    assert dialog._bounded_api_key_tree_font_size(18) == 18
+    assert dialog._bounded_api_key_tree_font_size(99) == 32
+
+    source = inspect.getsource(dialog)
+    assert source.count("self._enable_api_key_tree_font_zoom(") == 4
+    assert 'QKeySequence("Ctrl++")' in source
+    assert 'QKeySequence("Ctrl+-")' in source
+    assert "event.modifiers() & Qt.ControlModifier" in source
+    assert "multi_api_key_tree_font_size" in source
 
 
 def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, monkeypatch):

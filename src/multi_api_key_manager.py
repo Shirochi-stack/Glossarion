@@ -1532,6 +1532,9 @@ class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
 
     API_KEY_TREE_FIRST_COLUMN_WIDTH = 116
+    API_KEY_TREE_FONT_SIZE_CONFIG = 'multi_api_key_tree_font_size'
+    API_KEY_TREE_MIN_FONT_SIZE = 8
+    API_KEY_TREE_MAX_FONT_SIZE = 32
 
     @staticmethod
     def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
@@ -1593,6 +1596,20 @@ class MultiAPIKeyDialog(QDialog):
         self.preview_pool = (str(preview_pool or '').strip() or None)
         self.tree = None
         self.test_results = queue.Queue()
+        self._api_key_trees = []
+        self._api_key_tree_zoom_shortcuts = []
+        configured_tree_font_size = (
+            getattr(self.translator_gui, 'config', {}) or {}
+        ).get(self.API_KEY_TREE_FONT_SIZE_CONFIG, 0)
+        try:
+            configured_tree_font_size = int(configured_tree_font_size or 0)
+        except Exception:
+            configured_tree_font_size = 0
+        self._api_key_tree_font_size = (
+            self._bounded_api_key_tree_font_size(configured_tree_font_size)
+            if configured_tree_font_size > 0
+            else 0
+        )
 
         self.key_pool = APIKeyPool("Multi-key manager pool")
 
@@ -1625,6 +1642,125 @@ class MultiAPIKeyDialog(QDialog):
                     pass
         except Exception:
             pass
+
+    @classmethod
+    def _bounded_api_key_tree_font_size(cls, point_size):
+        """Return a safe font size for every API-key tree."""
+        try:
+            point_size = int(point_size)
+        except Exception:
+            point_size = 10
+        return max(cls.API_KEY_TREE_MIN_FONT_SIZE, min(cls.API_KEY_TREE_MAX_FONT_SIZE, point_size))
+
+    def _set_api_key_tree_font_size(self, point_size, persist=True):
+        """Apply one zoom level to all key trees in this manager window."""
+        point_size = self._bounded_api_key_tree_font_size(point_size)
+        self._api_key_tree_font_size = point_size
+
+        live_trees = []
+        for tree in getattr(self, '_api_key_trees', []):
+            try:
+                font = tree.font()
+                font.setPointSize(point_size)
+                tree.setFont(font)
+
+                header = tree.header()
+                header_font = header.font()
+                header_font.setPointSize(point_size)
+                header_font.setBold(True)
+                header.setFont(header_font)
+                header.setMinimumHeight(header.fontMetrics().height() + 12)
+
+                tree.doItemsLayout()
+                tree.updateGeometry()
+                tree.viewport().update()
+                live_trees.append(tree)
+            except RuntimeError:
+                # Deferred pool sections can be destroyed while the dialog is
+                # closing; do not keep stale Qt wrappers in the registry.
+                continue
+            except Exception:
+                live_trees.append(tree)
+        self._api_key_trees = live_trees
+
+        if persist:
+            try:
+                config = getattr(self.translator_gui, 'config', None)
+                if isinstance(config, dict):
+                    config[self.API_KEY_TREE_FONT_SIZE_CONFIG] = point_size
+                save_config = getattr(self.translator_gui, 'save_config', None)
+                if callable(save_config):
+                    save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _adjust_api_key_tree_font_size(self, delta):
+        """Zoom every API-key tree in or out by one point."""
+        current = int(getattr(self, '_api_key_tree_font_size', 0) or 0)
+        if current <= 0:
+            trees = getattr(self, '_api_key_trees', [])
+            if trees:
+                try:
+                    current = trees[0].font().pointSize()
+                except Exception:
+                    current = 0
+        if current <= 0:
+            current = 10
+        self._set_api_key_tree_font_size(current + int(delta), persist=True)
+
+    def _enable_api_key_tree_font_zoom(self, tree):
+        """Add glossary-editor-style keyboard and Ctrl-wheel zoom to a key tree."""
+        if tree is None or bool(tree.property('apiKeyTreeFontZoomEnabled')):
+            return
+        tree.setProperty('apiKeyTreeFontZoomEnabled', True)
+        self._api_key_trees.append(tree)
+
+        if self._api_key_tree_font_size <= 0:
+            self._api_key_tree_font_size = self._bounded_api_key_tree_font_size(
+                tree.font().pointSize() or 10
+            )
+        self._set_api_key_tree_font_size(self._api_key_tree_font_size, persist=False)
+
+        registered_sequences = set()
+
+        def add_zoom_shortcuts(sequences, delta):
+            for raw_sequence in sequences:
+                sequence = QKeySequence(raw_sequence)
+                sequence_id = sequence.toString()
+                if not sequence_id or sequence_id in registered_sequences:
+                    continue
+                registered_sequences.add(sequence_id)
+                shortcut = QShortcut(sequence, tree)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(
+                    lambda zoom_delta=delta: self._adjust_api_key_tree_font_size(zoom_delta)
+                )
+                self._api_key_tree_zoom_shortcuts.append(shortcut)
+
+        add_zoom_shortcuts(
+            (QKeySequence.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")),
+            1,
+        )
+        add_zoom_shortcuts(
+            (QKeySequence.ZoomOut, QKeySequence("Ctrl+-")),
+            -1,
+        )
+
+        original_wheel_event = tree.wheelEvent
+
+        def zoomable_wheel_event(event):
+            try:
+                if event.modifiers() & Qt.ControlModifier:
+                    delta = event.angleDelta().y() or event.pixelDelta().y()
+                    if delta:
+                        self._adjust_api_key_tree_font_size(1 if delta > 0 else -1)
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            original_wheel_event(event)
+
+        tree.wheelEvent = zoomable_wheel_event
 
     def _tighten_api_key_tree_first_column(self, tree):
         """Reduce the unused left gutter in API key trees."""
@@ -3095,6 +3231,7 @@ class MultiAPIKeyDialog(QDialog):
         fb_header_font.setBold(True)
         fb_header_font.setPointSize(11)
         fb_header.setFont(fb_header_font)
+        self._enable_api_key_tree_font_zoom(self.fallback_tree)
 
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
@@ -4364,6 +4501,7 @@ class MultiAPIKeyDialog(QDialog):
         header_font.setBold(True)
         header_font.setPointSize(11)
         header.setFont(header_font)
+        self._enable_api_key_tree_font_zoom(self.tree)
 
         # Set context menu
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -5841,6 +5979,7 @@ class MultiAPIKeyDialog(QDialog):
         gl_header_font.setBold(True)
         gl_header_font.setPointSize(11)
         gl_header.setFont(gl_header_font)
+        self._enable_api_key_tree_font_zoom(self.glossary_tree)
 
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
@@ -8916,6 +9055,7 @@ class MultiAPIKeyDialog(QDialog):
         header_font.setBold(True)
         header_font.setPointSize(11)
         header.setFont(header_font)
+        self._enable_api_key_tree_font_zoom(tree)
         tree.setContextMenuPolicy(Qt.CustomContextMenu)
         tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
         tree.setMinimumHeight(150)
