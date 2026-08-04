@@ -58,6 +58,41 @@ from translation_artifacts import (
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
+_RAW_FOREIGN_TEXT_QA_RE = re.compile(
+    r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)"
+    r"_text_found_\d+_chars_",
+    re.IGNORECASE,
+)
+
+
+def _progress_entry_has_raw_foreign_text_qa(entry):
+    """Return whether a progress entry carries a raw foreign-text QA issue."""
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        values = []
+        for key in (
+            'qa_issues_found', 'qa_issues', 'failure_reason', 'error_message'
+        ):
+            value = current.get(key)
+            if isinstance(value, dict):
+                values.extend(value.keys())
+                values.extend(value.values())
+            elif isinstance(value, (list, tuple, set)):
+                values.extend(value)
+            elif value is not None:
+                values.append(value)
+        for value in values:
+            text = str(value or '').strip()
+            normalized = text.lower().replace('-', '_').replace(' ', '_')
+            if (
+                _RAW_FOREIGN_TEXT_QA_RE.search(normalized)
+                or ('_text_found_' in normalized and '_chars_' in normalized)
+            ):
+                return True
+        current = current.get('previous_progress_entry')
+    return False
 
 # --- Non-blocking access to TransateKRtoEN.ProgressManager ------------------
 # TransateKRtoEN is a very heavy import chain (tiktoken, ebooklib, bs4,
@@ -10797,6 +10832,121 @@ class RetranslationMixin:
 
             QTimer.singleShot(0, _refresh)
 
+    def _start_single_progress_qa_resolution(self, data, display_info):
+        """Run Partial.b for exactly one foreign-text QA progress entry."""
+        data = data if isinstance(data, dict) else {}
+        display_info = display_info if isinstance(display_info, dict) else {}
+        chapters = data.get('prog', {}).get('chapters', {})
+        progress_key = display_info.get('progress_key')
+        progress_entry = (
+            chapters.get(progress_key)
+            if progress_key and isinstance(chapters, dict)
+            else None
+        )
+        output_file = display_info.get('output_file')
+        if not isinstance(progress_entry, dict) and isinstance(chapters, dict):
+            output_folded = os.path.basename(
+                str(output_file or '')
+            ).casefold()
+            match = next(
+                (
+                    (key, entry)
+                    for key, entry in chapters.items()
+                    if isinstance(entry, dict)
+                    and os.path.basename(
+                        str(entry.get('output_file') or '')
+                    ).casefold() == output_folded
+                ),
+                None,
+            )
+            if match:
+                progress_key, progress_entry = match
+
+        if not _progress_entry_has_raw_foreign_text_qa(progress_entry):
+            self._show_message(
+                'info',
+                "QA Issue Already Resolved",
+                "This entry no longer has a raw foreign-text QA issue.",
+                parent=data.get('dialog', self),
+            )
+            try:
+                self._refresh_retranslation_data(data)
+            except Exception:
+                pass
+            return False
+
+        source_value = str(data.get('file_path') or '').strip()
+        source_path = os.path.abspath(source_value) if source_value else ''
+        if not source_path or not os.path.isfile(source_path):
+            self._show_message(
+                'error',
+                "Source File Missing",
+                f"Could not start Partial.b because the source file is missing:\n"
+                f"{source_path or '[unknown]'}",
+                parent=data.get('dialog', self),
+            )
+            return False
+        if (
+            getattr(self, 'translation_thread', None)
+            and self.translation_thread.is_alive()
+        ) or (
+            getattr(self, 'glossary_thread', None)
+            and self.glossary_thread.is_alive()
+        ):
+            self._show_message(
+                'info',
+                "Process Running",
+                "Wait for the current translation or glossary process to finish first.",
+                parent=data.get('dialog', self),
+            )
+            return False
+
+        self._single_qa_resolution_request = {
+            'source_path': source_path,
+            'progress_path': (
+                os.path.abspath(str(data.get('progress_file')).strip())
+                if str(data.get('progress_file') or '').strip() else ''
+            ),
+            'progress_key': str(progress_key or ''),
+            'output_file': str(
+                output_file or progress_entry.get('output_file') or ''
+            ),
+            'actual_num': progress_entry.get(
+                'actual_num', progress_entry.get('chapter_num')
+            ),
+        }
+        self.selected_files = [source_path]
+        self.current_file_index = 0
+        self._metadata_only_run = False
+        self._single_chapter_filter = None
+        self._force_stream_all = False
+        try:
+            if hasattr(self, 'entry_epub') and self.entry_epub is not None:
+                self.entry_epub.setText(source_path)
+        except Exception:
+            pass
+
+        label = (
+            display_info.get('translation_artifact_label')
+            or display_info.get('metadata_label')
+            or output_file
+            or f"entry {progress_key}"
+        )
+        try:
+            self.append_log(
+                f"⚠️ Queued Partial.b QA resolution for {label} only"
+            )
+        except Exception:
+            pass
+        self.run_translation_thread()
+        started = bool(
+            getattr(self, 'translation_thread', None)
+            and self.translation_thread.is_alive()
+        )
+        if not started:
+            self._single_qa_resolution_request = None
+        return started
+
     @staticmethod
     def _is_metadata_progress_info(info):
         if not isinstance(info, dict):
@@ -18678,6 +18828,9 @@ class RetranslationMixin:
                 qa_issues = []
                 
             has_missing_images = any('missing_images' in str(issue) for issue in qa_issues)
+            has_raw_foreign_text_qa = (
+                _progress_entry_has_raw_foreign_text_qa(progress_entry)
+            )
             
             # Fallback: Check item text directly as it definitely contains the issue if visible
             if not has_missing_images and 'missing_images' in item_text:
@@ -18727,6 +18880,7 @@ class RetranslationMixin:
 
             act_open = act_review_sdlxliff = act_open_audio = None
             act_delete_audio = act_notepad_qa = act_retranslate = None
+            act_resolve_qa = None
             act_insert_img = act_remove_qa = act_restore_in_progress = None
             act_copy_qa = act_open_epub_reader = None
             selected_infos = []
@@ -18751,6 +18905,8 @@ class RetranslationMixin:
                         "📖 Open in EPUB reader"
                     )
                 act_retranslate = menu.addAction("🔁 Retranslate Selected")
+                if has_raw_foreign_text_qa:
+                    act_resolve_qa = menu.addAction("⚠️ resolve QA issue")
 
                 if has_missing_images:
                     act_insert_img = menu.addAction("🖼️ Insert Missing Image")
@@ -18811,6 +18967,10 @@ class RetranslationMixin:
                 _open_epub_reader_for_item(display_info)
             elif chosen == act_retranslate:
                 retranslate_selected()
+            elif act_resolve_qa and chosen == act_resolve_qa:
+                self._start_single_progress_qa_resolution(
+                    data, display_info
+                )
             elif act_insert_img and chosen == act_insert_img:
                 # IN-PLACE RESTORATION LOGIC using ContentProcessor
                 try:

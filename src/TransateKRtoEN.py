@@ -17293,6 +17293,45 @@ def _append_partial_b_translation_artifact_chapters(
     return result
 
 
+def _partial_b_target_request_matches(
+    *,
+    target_progress_key="",
+    target_output_file="",
+    target_actual_num="",
+    candidate_progress_key="",
+    candidate_output_file="",
+    candidate_actual_num="",
+):
+    """Match one Partial.b candidate against an optional one-row request."""
+    target_progress_key = str(target_progress_key or "").strip()
+    target_output_file = os.path.basename(
+        str(target_output_file or "")
+    ).casefold()
+    target_actual_num = str(target_actual_num or "").strip()
+    if not (
+        target_progress_key or target_output_file or target_actual_num
+    ):
+        return True
+    if (
+        target_progress_key
+        and str(candidate_progress_key or "").strip()
+        == target_progress_key
+    ):
+        return True
+    if target_output_file:
+        return (
+            os.path.basename(
+                str(candidate_output_file or "")
+            ).casefold() == target_output_file
+        )
+    if target_progress_key:
+        return False
+    return bool(
+        target_actual_num
+        and str(candidate_actual_num) == target_actual_num
+    )
+
+
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False, multipass_partial_mode=False):
     mode = config.OUTPUT_MODE
     multipass_refinement_mode = str(
@@ -17538,6 +17577,44 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 best_entry = entry
         return best_key, best_entry
 
+    targeted_partial_progress_key = str(
+        os.getenv("PARTIAL_B_TARGET_PROGRESS_KEY", "") or ""
+    ).strip()
+    targeted_partial_output_file = os.path.basename(
+        str(os.getenv("PARTIAL_B_TARGET_OUTPUT_FILE", "") or "")
+    ).casefold()
+    targeted_partial_actual_num = str(
+        os.getenv("PARTIAL_B_TARGET_ACTUAL_NUM", "") or ""
+    ).strip()
+    targeted_partial_request = bool(
+        targeted_partial_progress_key
+        or targeted_partial_output_file
+        or targeted_partial_actual_num
+    )
+
+    def _matches_targeted_partial_request(
+        chapter, output_file, actual_num
+    ):
+        if not targeted_partial_request:
+            return True
+        chapter = chapter if isinstance(chapter, dict) else {}
+        chapter_progress_key = str(
+            chapter.get("translation_artifact_progress_key") or ""
+        ).strip()
+        matched_key, _matched_entry = _find_progress_entry_for_output(
+            output_file, actual_num
+        )
+        return _partial_b_target_request_matches(
+            target_progress_key=targeted_partial_progress_key,
+            target_output_file=targeted_partial_output_file,
+            target_actual_num=targeted_partial_actual_num,
+            candidate_progress_key=(
+                chapter_progress_key or matched_key
+            ),
+            candidate_output_file=output_file,
+            candidate_actual_num=actual_num,
+        )
+
     def _finalize_translation_artifact_progress(
         chapter, content_hash, backup_path
     ):
@@ -17606,6 +17683,17 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
         if not output_path:
             return "skipped", f"⬜ Chapter {actual_num}: translated output not found ({output_file})"
+        if (
+            multipass_partial_mode
+            and not _matches_targeted_partial_request(
+                chapter, output_file, actual_num
+            )
+        ):
+            return "excluded", None, {
+                "kind": "not_targeted",
+                "chapter": actual_num,
+                "reason": "not the selected QA entry",
+            }
         if mode == "refinement":
             normalized_output_path = os.path.normcase(os.path.abspath(output_path))
             with progress_lock:
@@ -18223,6 +18311,14 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
             if not output_path:
                 return "skipped", f"Chapter {actual_num}: translated output not found ({output_file})"
+            if not _matches_targeted_partial_request(
+                chapter, output_file, actual_num
+            ):
+                return "excluded", None, {
+                    "kind": "not_targeted",
+                    "chapter": actual_num,
+                    "reason": "not the selected QA entry",
+                }
 
             normalized_output_path = os.path.normcase(os.path.abspath(output_path))
             with progress_lock:

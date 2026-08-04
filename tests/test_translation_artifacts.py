@@ -1,15 +1,21 @@
 import json
+import os
 
-from Retranslation_GUI import RetranslationMixin
+from Retranslation_GUI import (
+    RetranslationMixin,
+    _progress_entry_has_raw_foreign_text_qa,
+)
 from TransateKRtoEN import (
     ProgressManager,
     _apply_partial_refinement_response,
     _append_partial_b_translation_artifact_chapters,
+    _partial_b_target_request_matches,
     _partial_refinement_target_fragment,
 )
 from qa_scan_runtime import default_qa_scan_settings
 from scan_html_folder import scan_html_folder, update_new_format_progress
 from translate_headers_standalone import load_translations_from_file
+from translator_gui import TranslatorGUI
 from translation_artifacts import (
     apply_translation_artifact_response,
     collect_translation_artifact_partial_targets,
@@ -444,3 +450,182 @@ def test_progress_update_keeps_artifact_identity_and_clears_qa(tmp_path):
     assert entry["translation_artifact_file"] == "TOC.txt"
     assert "qa_issues" not in entry
     assert "qa_issues_found" not in entry
+
+
+def test_resolve_qa_action_visibility_requires_raw_foreign_text_issue():
+    assert _progress_entry_has_raw_foreign_text_qa(
+        {
+            "status": "qa_failed",
+            "qa_issues_found": [
+                "Chinese_text_found_4_chars_[\u5931\u8d25\u6587\u5b57]"
+            ],
+        }
+    ) is True
+    assert _progress_entry_has_raw_foreign_text_qa(
+        {
+            "status": "in_progress",
+            "previous_progress_entry": {
+                "status": "qa_failed",
+                "qa_issues_found": [
+                    "Japanese_text_found_2_chars_[\u5931\u6557]"
+                ],
+            },
+        }
+    ) is True
+    assert _progress_entry_has_raw_foreign_text_qa(
+        {
+            "status": "qa_failed",
+            "qa_issues_found": ["missing_images: cover.jpg"],
+        }
+    ) is False
+
+
+def test_targeted_partial_b_matches_only_requested_progress_entry():
+    target = {
+        "target_progress_key": "chapter:12",
+        "target_output_file": "response_chapter0012.xhtml",
+        "target_actual_num": 12,
+    }
+
+    assert _partial_b_target_request_matches(
+        **target,
+        candidate_progress_key="chapter:12",
+        candidate_output_file="different.xhtml",
+        candidate_actual_num=99,
+    ) is True
+    assert _partial_b_target_request_matches(
+        **target,
+        candidate_progress_key="different-key",
+        candidate_output_file="response_Chapter0012.xhtml",
+        candidate_actual_num=99,
+    ) is True
+    assert _partial_b_target_request_matches(
+        **target,
+        candidate_progress_key="chapter:13",
+        candidate_output_file="response_chapter0013.xhtml",
+        candidate_actual_num=12,
+    ) is False
+
+
+def test_prepare_single_qa_resolution_filters_other_foreign_failures(
+    tmp_path, monkeypatch
+):
+    progress_path = tmp_path / "translation_progress.json"
+    source_path = tmp_path / "book.epub"
+    failures = [
+        {
+            "source": "book.epub",
+            "source_path": str(source_path),
+            "progress_path": str(progress_path),
+            "progress_key": "11",
+            "chapter": 11,
+            "output_file": "chapter0011.xhtml",
+            "issues": ["Chinese_text_found_2_chars_[\u5931\u8d25]"],
+        },
+        {
+            "source": "book.epub",
+            "source_path": str(source_path),
+            "progress_path": str(progress_path),
+            "progress_key": "12",
+            "chapter": 12,
+            "output_file": "chapter0012.xhtml",
+            "issues": ["Chinese_text_found_2_chars_[\u5931\u8d25]"],
+        },
+    ]
+
+    class Dummy:
+        _translation_qa_failure_key = (
+            TranslatorGUI._translation_qa_failure_key
+        )
+        _qa_failure_matches_resolution_request = staticmethod(
+            TranslatorGUI._qa_failure_matches_resolution_request
+        )
+
+        def _get_output_mode(self):
+            return "translation"
+
+        def _collect_translation_qa_failures(
+            self, files=None, *, foreign_character_only=False
+        ):
+            return list(failures)
+
+    dummy = Dummy()
+    request = {
+        "source_path": str(source_path),
+        "progress_path": str(progress_path),
+        "progress_key": "12",
+        "output_file": "chapter0012.xhtml",
+        "actual_num": 12,
+    }
+    monkeypatch.setenv("PARTIAL_B_TARGET_PROGRESS_KEY", "")
+    monkeypatch.setenv("PARTIAL_B_TARGET_OUTPUT_FILE", "")
+    monkeypatch.setenv("PARTIAL_B_TARGET_ACTUAL_NUM", "")
+
+    targeted = TranslatorGUI._prepare_multipass_qa_refinement_run(
+        dummy,
+        True,
+        "partial.b",
+        requested_target=request,
+    )
+
+    assert [failure["progress_key"] for failure in targeted] == ["12"]
+    assert dummy._translation_run_followup_translation_after_refinement is False
+    assert dummy._translation_run_forced_multipass_mode == "partial.b"
+    assert os.environ["PARTIAL_B_TARGET_PROGRESS_KEY"] == "12"
+    assert os.environ["PARTIAL_B_TARGET_OUTPUT_FILE"] == "chapter0012.xhtml"
+
+
+def test_progress_context_queues_one_clicked_qa_entry(tmp_path):
+    source_path = tmp_path / "book.epub"
+    source_path.write_bytes(b"epub")
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text("{}", encoding="utf-8")
+    issue = "Chinese_text_found_2_chars_[\u5931\u8d25]"
+    progress_entry = {
+        "actual_num": 12,
+        "output_file": "chapter0012.xhtml",
+        "status": "qa_failed",
+        "qa_issues_found": [issue],
+    }
+
+    class AliveThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class Dummy:
+        translation_thread = None
+        glossary_thread = None
+        entry_epub = None
+
+        def append_log(self, message):
+            self.log_message = message
+
+        def run_translation_thread(self):
+            self.translation_thread = AliveThread()
+
+        def _show_message(self, *_args, **_kwargs):
+            raise AssertionError("unexpected message box")
+
+    dummy = Dummy()
+    data = {
+        "file_path": str(source_path),
+        "progress_file": str(progress_path),
+        "prog": {"chapters": {"12": progress_entry}},
+    }
+    display_info = {
+        "progress_key": "12",
+        "output_file": "chapter0012.xhtml",
+        "info": progress_entry,
+    }
+
+    started = RetranslationMixin._start_single_progress_qa_resolution(
+        dummy, data, display_info
+    )
+
+    assert started is True
+    assert dummy.selected_files == [str(source_path.resolve())]
+    assert dummy._single_qa_resolution_request["progress_key"] == "12"
+    assert dummy._single_qa_resolution_request["output_file"] == (
+        "chapter0012.xhtml"
+    )
