@@ -11655,6 +11655,24 @@ class RetranslationMixin:
                 return kw
         return None
 
+    def _special_skip_keyword_for_progress_info(self, info):
+        """Return a skip keyword only for ordinary chapter/file rows."""
+        if (
+            self._is_metadata_progress_info(info)
+            or self._is_translation_artifact_progress_info(info)
+        ):
+            return None
+        filename = (
+            info.get('original_filename', '')
+            or info.get('output_file', '')
+            or info.get('key', '')
+        )
+        if not self._progress_file_is_skipped_special(
+            filename, info.get('is_special', False)
+        ):
+            return None
+        return self._special_skip_keyword_for_filename(filename)
+
     def _remove_special_skip_keyword(self, keyword):
         """Drop *keyword* from the Other Settings special-file lists.
 
@@ -18936,12 +18954,9 @@ class RetranslationMixin:
             act_do_not_skip = None
             _skip_keyword = None
             try:
-                _skip_fname = (display_info.get('original_filename', '')
-                               or display_info.get('output_file', '')
-                               or display_info.get('key', ''))
-                if self._progress_file_is_skipped_special(
-                        _skip_fname, display_info.get('is_special', False)):
-                    _skip_keyword = self._special_skip_keyword_for_filename(_skip_fname)
+                _skip_keyword = self._special_skip_keyword_for_progress_info(
+                    display_info
+                )
             except Exception:
                 _skip_keyword = None
 

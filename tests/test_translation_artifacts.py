@@ -276,6 +276,36 @@ def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
     ]["status"] == "in_progress"
 
 
+def test_managed_artifact_rows_do_not_use_special_file_keywords():
+    gui = RetranslationMixin()
+    gui.config = {
+        "translate_special_files": False,
+        "special_file_keywords": "title, toc, header",
+    }
+
+    managed_rows = (
+        {"output_file": "metadata.json", "special_type": "metadata"},
+        {
+            "output_file": "TOC.txt",
+            "special_type": "toc",
+            "translation_artifact": True,
+        },
+        {
+            "output_file": "translated_headers.txt",
+            "special_type": "headers",
+            "translation_artifact": True,
+        },
+    )
+    assert all(
+        gui._special_skip_keyword_for_progress_info(row) is None
+        for row in managed_rows
+    )
+    assert gui._special_skip_keyword_for_progress_info({
+        "original_filename": "toc.xhtml",
+        "is_special": True,
+    }) == "toc"
+
+
 def test_scanner_progress_updates_all_three_artifacts_and_metadata_siblings(
     tmp_path,
 ):
