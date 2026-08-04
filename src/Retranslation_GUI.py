@@ -456,6 +456,61 @@ def _progress_entry_refinement_failed_for_display(entry):
     return str(entry.get('refinement_status') or '').lower().strip() in ('failed', 'error')
 
 
+def _combine_glossary_progress_legend_stats(
+    chapter_stats,
+    refinement_status_counts,
+):
+    """Combine chapter and refinement rows into the displayed legend totals."""
+    chapter_stats = chapter_stats if isinstance(chapter_stats, dict) else {}
+    refinement_status_counts = (
+        refinement_status_counts
+        if isinstance(refinement_status_counts, dict)
+        else {}
+    )
+
+    def _count(mapping, key):
+        try:
+            return max(0, int(mapping.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    normalized_refinement = {}
+    for raw_status, raw_count in refinement_status_counts.items():
+        status = str(raw_status or 'unknown').strip().lower().replace(' ', '_')
+        try:
+            count = max(0, int(raw_count or 0))
+        except (TypeError, ValueError):
+            count = 0
+        normalized_refinement[status] = (
+            normalized_refinement.get(status, 0) + count
+        )
+
+    result = {
+        key: _count(chapter_stats, key)
+        for key in (
+            'total',
+            'completed',
+            'in_progress',
+            'failed',
+            'merged',
+            'remaining',
+        )
+    }
+    result['total'] += sum(normalized_refinement.values())
+    result['completed'] += (
+        normalized_refinement.get('completed', 0)
+        + normalized_refinement.get('refined', 0)
+    )
+    result['in_progress'] += normalized_refinement.get('in_progress', 0)
+    result['not_refined'] = normalized_refinement.get('not_refined', 0)
+    result['refine_failed'] = (
+        normalized_refinement.get('refine_failed', 0)
+        + normalized_refinement.get('failed', 0)
+        + normalized_refinement.get('error', 0)
+    )
+    return result
+
+
 def _progress_entry_model_for_display(entry):
     if not isinstance(entry, dict):
         return ''
@@ -14532,15 +14587,28 @@ class RetranslationMixin:
             n_in_progress = len(_in_prog_set_init)
             n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
             _gp_ref_counts_init = _gp_refinement_status_counts(gp_data)
-            n_not_refined = _gp_ref_counts_init.get('not_refined', 0)
-            n_refine_failed = _gp_ref_counts_init.get('refine_failed', 0)
+            _legend_stats_init = _combine_glossary_progress_legend_stats(
+                {
+                    'total': panel_state['total'],
+                    'completed': n_completed,
+                    'in_progress': n_in_progress,
+                    'failed': n_failed,
+                    'merged': n_merged,
+                    'remaining': n_remaining,
+                },
+                _gp_ref_counts_init,
+            )
+            n_completed = _legend_stats_init['completed']
+            n_in_progress = _legend_stats_init['in_progress']
+            n_not_refined = _legend_stats_init['not_refined']
+            n_refine_failed = _legend_stats_init['refine_failed']
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
             gp_stats_layout.setContentsMargins(0, 5, 0, 5)
             gp_stats_font = QFont('Arial', 10)
             
-            lbl_total = QLabel(f"Total: {panel_state['total']} | ")
+            lbl_total = QLabel(f"Total: {_legend_stats_init['total']} | ")
             lbl_total.setFont(gp_stats_font)
             gp_stats_layout.addWidget(lbl_total)
             
@@ -14697,18 +14765,21 @@ class RetranslationMixin:
                 _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
                 _ref_counts2 = _gp_refinement_status_counts(_d)
-                _not_refined2 = _ref_counts2.get('not_refined', 0)
-                _refine_failed2 = _ref_counts2.get('refine_failed', 0)
-                return {
-                    'total': _total,
-                    'completed': len(_comp2 - _merg2),
-                    'in_progress': len(_prog2),
-                    'failed': len(_fail2),
-                    'merged': len(_merg2),
-                    'not_refined': _not_refined2,
-                    'refine_failed': _refine_failed2,
-                    'remaining': max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2)),
-                }
+                return _combine_glossary_progress_legend_stats(
+                    {
+                        'total': _total,
+                        'completed': len(_comp2 - _merg2),
+                        'in_progress': len(_prog2),
+                        'failed': len(_fail2),
+                        'merged': len(_merg2),
+                        'remaining': max(
+                            0,
+                            _total
+                            - len(_comp2 | _fail2 | _merg2 | _prog2),
+                        ),
+                    },
+                    _ref_counts2,
+                )
 
             def _apply_gp_stats(stats):
                 if not isinstance(stats, dict):
@@ -16261,19 +16332,7 @@ class RetranslationMixin:
                         _refresh_stats_from_dict(_d)
                         return True
                     
-                    _total = result['total']
-                    lbl_total.setText(f"Total: {_total} | ")
-                    lbl_gp_completed.setText(f"✅ Completed: {len(result['comp'] - result['merg'])} | ")
-                    lbl_gp_in_progress.setText(f"🔄 In Progress: {len(result['prog'])} | ")
-                    lbl_gp_in_progress.setVisible(True)
-                    lbl_gp_failed.setText(f"❌ Failed: {len(result['fail'])} | ")
-                    lbl_gp_merged.setText(f"🔗 Merged: {len(result['merg'])} | ")
-                    lbl_gp_merged.setVisible(len(result['merg']) > 0)
-                    lbl_gp_remaining.setText(f"⬜ Not Translated: {result['nr']}{' | ' if (result['not_refined'] or result.get('refine_failed', 0)) else ''}")
-                    lbl_gp_not_refined.setText(f"✨ Not Refined: {result['not_refined']}")
-                    lbl_gp_not_refined.setVisible(result['not_refined'] > 0)
-                    lbl_gp_refine_failed.setText(f"💀 Refine Failed: {result.get('refine_failed', 0)}")
-                    lbl_gp_refine_failed.setVisible(result.get('refine_failed', 0) > 0)
+                    _apply_gp_stats(result['legend_stats'])
                     
                     if result.get('bt') and bt_label:
                         bt_label.setText(f"📖 {result['bt']}")
@@ -16374,8 +16433,6 @@ class RetranslationMixin:
                             _comp, _fail, _merg = _gp_sets(_d)
                             _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
                             _ref_counts = _gp_refinement_status_counts(_d)
-                            _not_refined = _ref_counts.get('not_refined', 0)
-                            _refine_failed = _ref_counts.get('refine_failed', 0)
                             _cache = _gp_status_cache(_d)
 
                             _item_updates = []
@@ -16387,6 +16444,17 @@ class RetranslationMixin:
                                 _item_updates.append((ci, new_status, new_color, display_text, _issues))
 
                             _nr = max(0, _snap_total - len(_comp | _fail | _merg | _prog))
+                            _legend_stats = _combine_glossary_progress_legend_stats(
+                                {
+                                    'total': _snap_total,
+                                    'completed': len(_comp - _merg),
+                                    'in_progress': len(_prog),
+                                    'failed': len(_fail),
+                                    'merged': len(_merg),
+                                    'remaining': _nr,
+                                },
+                                _ref_counts,
+                            )
                             gp_refresh_bridge.finished.emit({
                                 'd': _d,
                                 'path': _rp,
@@ -16396,8 +16464,7 @@ class RetranslationMixin:
                                 'spine_result': _spine_result,
                                 'cur_ts': _cur_ts,
                                 'comp': _comp, 'fail': _fail, 'merg': _merg, 'prog': _prog,
-                                'not_refined': _not_refined,
-                                'refine_failed': _refine_failed,
+                                'legend_stats': _legend_stats,
                                 'nr': _nr, 'total': _snap_total,
                                 'item_updates': _item_updates,
                                 'bt': _d.get('book_title', ''),

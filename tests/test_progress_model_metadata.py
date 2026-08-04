@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 from Retranslation_GUI import (
     RetranslationMixin,
+    _combine_glossary_progress_legend_stats,
     _glossary_progress_filename_keys,
     _index_epub_html_members,
     _match_epub_html_member_basename,
@@ -594,6 +595,36 @@ def test_progress_display_selector_prefers_active_and_refined_entries():
     )
     assert selected is refined_completed
     assert _progress_entry_refined_for_display(selected)
+
+
+def test_glossary_progress_legend_includes_refinement_rows():
+    stats = _combine_glossary_progress_legend_stats(
+        {
+            "total": 674,
+            "completed": 109,
+            "in_progress": 0,
+            "failed": 0,
+            "merged": 565,
+            "remaining": 0,
+        },
+        {
+            "completed": 4,
+            "in_progress": 6,
+            "not_refined": 2,
+            "refine_failed": 1,
+        },
+    )
+
+    assert stats == {
+        "total": 687,
+        "completed": 113,
+        "in_progress": 6,
+        "failed": 0,
+        "merged": 565,
+        "remaining": 0,
+        "not_refined": 2,
+        "refine_failed": 1,
+    }
 
 
 def test_glossary_progress_index_uses_filename_before_full_spine_row():
