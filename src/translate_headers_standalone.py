@@ -1107,18 +1107,54 @@ def translate_headers_standalone(
             )
         else:
             translated_headers = {}
-        
+
+        translated_headers = translated_headers or {}
+
         # Merge reused translations
         if reused_from_toc:
             translated_headers.update(reused_from_toc)
-            # Re-save the full file with merged entries
-            if save_to_file:
-                translator._save_translations_to_file(
-                    headers_to_translate, translated_headers,
-                    os.path.join(output_dir, 'translated_headers.txt'),
-                    current_titles_map
+
+        if save_to_file:
+            # Always persist the complete source set, including failures. The
+            # lower-level method returns before saving when an entire request
+            # fails, and saves only the API subset when TOC reuse removed some
+            # entries. A full cache is required for deterministic retry.
+            translations_file = os.path.join(output_dir, 'translated_headers.txt')
+            translator._save_translations_to_file(
+                headers_to_translate,
+                translated_headers,
+                translations_file,
+                current_titles_map,
+            )
+
+            # One bounded same-run retry. Existing-cache runs use this same
+            # helper before application, so both newly generated and older
+            # failed records follow identical semantics.
+            recovered_now = {}
+            if os.path.exists(translations_file):
+                translated_before_retry = set(translated_headers)
+                _, retried_headers, _ = retry_failed_header_translations(
+                    translations_file,
+                    translator=translator,
+                    batch_size=config.get('headers_per_batch', -1) if config else None,
+                    other_file_path=toc_file,
+                    log_callback=log_callback,
                 )
-                log("📝 Re-saved translated_headers.txt with cross-referenced entries")
+                recovered_now = {
+                    num: title
+                    for num, title in retried_headers.items()
+                    if num not in translated_before_retry
+                }
+                translated_headers = retried_headers
+
+            # The first translation pass already updated its successes. Apply
+            # only newly recovered headings after the retry pass.
+            if update_html and recovered_now:
+                translator._update_html_headers_exact(
+                    output_dir,
+                    recovered_now,
+                    current_titles_map,
+                )
     except KeyboardInterrupt:
         log("\n⛔ Translation interrupted by user")
         translator.set_stop_flag(True)

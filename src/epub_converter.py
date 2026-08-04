@@ -2402,7 +2402,45 @@ class EPUBCompiler:
                                 current_titles=current_titles,
                                 reused_headers=_reused_from_toc,
                                 source_headers_full=source_headers
-                            )
+                            ) or {}
+
+                            if getattr(self, 'save_header_translations', True):
+                                # Persist even an all-failed first response so
+                                # the bounded retry helper has explicit records
+                                # to retry on this same run.
+                                translations_file = os.path.join(
+                                    self.output_dir, 'translated_headers.txt'
+                                )
+                                self.header_translator._save_translations_to_file(
+                                    source_headers,
+                                    translated_headers,
+                                    translations_file,
+                                    current_titles,
+                                )
+                                translated_before_retry = set(translated_headers)
+                                from translate_headers_standalone import retry_failed_header_translations
+                                _, retried_headers, _ = retry_failed_header_translations(
+                                    translations_file,
+                                    translator=self.header_translator,
+                                    batch_size=_hpb if _hpb > 0 else None,
+                                    other_file_path=_toc_file,
+                                    log_callback=self.log,
+                                )
+                                recovered_now = {
+                                    num: title
+                                    for num, title in retried_headers.items()
+                                    if num not in translated_before_retry
+                                }
+                                translated_headers = retried_headers
+                                if (
+                                    recovered_now
+                                    and getattr(self, 'update_html_headers', True)
+                                ):
+                                    self.header_translator._update_html_headers_exact(
+                                        self.html_dir,
+                                        recovered_now,
+                                        current_titles,
+                                    )
 
                             # Update chapter_titles_info with translations
                             if translated_headers:
@@ -6228,6 +6266,109 @@ img {
         except Exception:
             return {}, {}, {}
 
+    def _retry_failed_toc_translations(
+        self,
+        toc_txt_path: str,
+        translator=None,
+    ) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
+        """Retry status-marked failures in TOC.txt exactly once per call."""
+        source, translated, output_files = self._load_toc_translations_file(
+            toc_txt_path
+        )
+        failed_numbers = [num for num in source if num not in translated]
+        if not failed_numbers:
+            return source, translated, output_files
+
+        failed_entries = {num: source[num] for num in failed_numbers}
+        self.log(
+            f"🔁 Retrying {len(failed_entries)} failed source TOC translation(s)..."
+        )
+
+        headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
+        reused, remaining = self._cross_reference_from_other_file(
+            failed_entries,
+            headers_file,
+            'toc',
+        )
+        recovered: Dict[int, str] = dict(reused)
+
+        if remaining and translator is None and getattr(self, 'api_client', None):
+            from metadata_batch_translator import BatchHeaderTranslator
+
+            retry_config = {
+                'batch_header_system_prompt': os.environ.get(
+                    'BATCH_HEADER_SYSTEM_PROMPT'
+                ),
+                'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
+                'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+            }
+            translator = BatchHeaderTranslator(self.api_client, retry_config)
+
+        if remaining and translator is not None:
+            self.log(
+                f"🌐 Sending {len(remaining)} failed source TOC entry(ies) "
+                "for retranslation..."
+            )
+            try:
+                batch_size = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
+                batch_size = batch_size if batch_size > 0 else None
+                api_translations: Dict[int, str] = {}
+
+                if os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1':
+                    unique_entries: Dict[int, str] = {}
+                    first_index_by_label: Dict[str, int] = {}
+                    for num, label in remaining.items():
+                        key = (label or '').strip()
+                        if key not in first_index_by_label:
+                            first_index_by_label[key] = num
+                            unique_entries[num] = label
+                    unique_translations = translator.translate_headers_batch(
+                        unique_entries,
+                        batch_size=batch_size,
+                        translation_type='toc',
+                    ) or {}
+                    for num, label in remaining.items():
+                        first_num = first_index_by_label.get((label or '').strip(), num)
+                        if unique_translations.get(first_num):
+                            api_translations[num] = unique_translations[first_num]
+                else:
+                    api_translations = translator.translate_headers_batch(
+                        remaining,
+                        batch_size=batch_size,
+                        translation_type='toc',
+                    ) or {}
+
+                recovered.update({
+                    num: title
+                    for num, title in api_translations.items()
+                    if num in remaining and title
+                })
+            except Exception as exc:
+                self.log(f"⚠️ Failed source TOC retranslation attempt: {exc}")
+        elif remaining:
+            self.log(
+                f"⚠️ {len(remaining)} failed source TOC entry(ies) could not "
+                "be retried because no API translator is available"
+            )
+
+        if recovered:
+            translated.update(recovered)
+            self._save_toc_translations_file(
+                toc_txt_path,
+                source,
+                translated,
+                output_files,
+            )
+
+        unresolved_count = sum(
+            1 for num in failed_numbers if num not in translated
+        )
+        self.log(
+            f"✅ Recovered {len(recovered)}/{len(failed_numbers)} failed source "
+            f"TOC translation(s); {unresolved_count} remain failed"
+        )
+        return source, translated, output_files
+
     def _cross_reference_from_other_file(self, entries_to_translate: Dict[int, str],
                                           other_file_path: str,
                                           translation_type: str = 'toc') -> Tuple[Dict[int, str], Dict[int, str]]:
@@ -6473,7 +6614,9 @@ img {
             toc_txt_path = os.path.join(self.output_dir, 'TOC.txt')
             if os.path.exists(toc_txt_path):
                 self.log("📁 Found existing TOC.txt - using cached source TOC translations")
-                toc_source_headers, translations, toc_output_files = self._load_toc_translations_file(toc_txt_path)
+                toc_source_headers, translations, toc_output_files = (
+                    self._retry_failed_toc_translations(toc_txt_path)
+                )
                 # If TOC.txt exists, treat it as authoritative: only include entries present in the file.
                 if toc_source_headers:
                     toc_filter_nums = set(toc_source_headers.keys())
@@ -6524,6 +6667,7 @@ img {
                     )
                     
                     new_toc_translations = _reused_toc.copy()
+                    new_toc_translator = None
                     if getattr(self, 'api_client', None):
                         try:
                             if _api_toc_remaining:
@@ -6536,6 +6680,7 @@ img {
                                 if os.environ.get('OUTPUT_LANGUAGE'):
                                     _bt_config['output_language'] = os.environ['OUTPUT_LANGUAGE']
                                 tr = BatchHeaderTranslator(self.api_client, _bt_config)
+                                new_toc_translator = tr
                                 toc_ncx_per_batch = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
                                 _api_trans = tr.translate_headers_batch(
                                     _api_toc_remaining,
@@ -6546,8 +6691,14 @@ img {
                             else:
                                 self.log("♻️ All new TOC entries were reused from cached file; skipping API call.")
                             
-                            if new_toc_translations:
-                                self.log(f"✅ Translated/Reused {len(new_toc_translations)} new TOC entry(ies)")
+                            if new_toc_nums:
+                                if new_toc_translations:
+                                    self.log(f"✅ Translated/Reused {len(new_toc_translations)} new TOC entry(ies)")
+                                else:
+                                    self.log(
+                                        f"⚠️ Initial translation failed for all {len(new_toc_nums)} "
+                                        "new TOC entries; recording them for immediate retry"
+                                    )
                                 translations.update(new_toc_translations)
                                 
                                 # Compute target URIs for new entries (preserve fragments and extensions)
@@ -6608,6 +6759,18 @@ img {
                                         repair_translation_file(toc_txt_path, source_epub_path, self.output_dir, log_callback=self.log)
                                     except Exception as repair_err:
                                         self.log(f"⚠️ Post-append repair check failed: {repair_err}")
+
+                                    # A partial API response writes failed
+                                    # records for the missing new entries. Retry
+                                    # those records immediately on this run.
+                                    (
+                                        toc_source_headers,
+                                        translations,
+                                        toc_output_files,
+                                    ) = self._retry_failed_toc_translations(
+                                        toc_txt_path,
+                                        translator=new_toc_translator,
+                                    )
                                         
                                 except Exception as append_err:
                                     self.log(f"⚠️ Failed to update TOC.txt: {append_err}")
@@ -6692,7 +6855,7 @@ img {
                                 translations.update(api_translations)
                         elif reused_from_headers:
                             self.log("♻️ All TOC entries were reused from translated_headers.txt — no API call needed")
-                        if translations:
+                        if original:
                             # Pre-compute actual output paths so "Output File" shows
                             # the path in the built EPUB, not the raw NCX src.
                             # Strip file extensions to prevent double-extension issues.
@@ -6711,6 +6874,10 @@ img {
                                 output_refs[_idx] = _final_src
                             self._save_toc_translations_file(toc_txt_path, original, translations, output_refs)
                             self.log(f"✅ Saved TOC translations cache: {toc_txt_path}")
+                            _, translations, _ = self._retry_failed_toc_translations(
+                                toc_txt_path,
+                                translator=tr,
+                            )
                         else:
                             self.log(f"⚠️ toc.ncx translation returned no results - skipping cache (will retry next run)")
                     except Exception as e:

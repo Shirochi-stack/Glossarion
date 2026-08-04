@@ -1262,6 +1262,232 @@ Failed chapters: 2
     assert "Successfully translated: 2" in rewritten
 
 
+def test_new_header_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatch):
+    (tmp_path / "response_chapter0001.html").write_text(
+        "<html><body><h1>原一</h1></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "response_chapter0002.html").write_text(
+        "<html><body><h1>原二</h1></body></html>", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "extract_source_chapters_with_opf_mapping",
+        lambda _path, _log=None: (
+            {"chapter0001": "原一", "chapter0002": "原二"},
+            ["Text/chapter0001.xhtml", "Text/chapter0002.xhtml"],
+        ),
+    )
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "match_output_to_source_chapters",
+        lambda *_args, **_kwargs: {
+            "response_chapter0001.html": (
+                "原一",
+                "原一",
+                "response_chapter0001.html",
+            ),
+            "response_chapter0002.html": (
+                "原二",
+                "原二",
+                "response_chapter0002.html",
+            ),
+        },
+    )
+
+    class PartialThenRecoveredTranslator:
+        instances = []
+
+        def __init__(self, _client, _config):
+            self.retry_calls = []
+            self.update_calls = []
+            self.stop_flag = False
+            self.__class__.instances.append(self)
+
+        def translate_and_save_headers(self, **_kwargs):
+            return {1: "Header One"}
+
+        def _save_translations_to_file(
+            self, original, translated, output_path, current_titles
+        ):
+            outputs = {
+                num: Path(info["filename"]).stem.removeprefix("response_")
+                for num, info in current_titles.items()
+            }
+            translate_headers_standalone._write_header_translation_cache(
+                output_path, original, translated, outputs
+            )
+
+        def translate_headers_batch(
+            self, headers_dict, batch_size=None, translation_type="header"
+        ):
+            self.retry_calls.append(
+                (dict(headers_dict), batch_size, translation_type)
+            )
+            return {2: "Header Two"}
+
+        def _update_html_headers_exact(
+            self, _output_dir, translated, _current_titles
+        ):
+            self.update_calls.append(dict(translated))
+
+        def set_stop_flag(self, value):
+            self.stop_flag = value
+
+    monkeypatch.setattr(
+        "metadata_batch_translator.BatchHeaderTranslator",
+        PartialThenRecoveredTranslator,
+    )
+
+    result = translate_headers_standalone.translate_headers_standalone(
+        epub_path="source.epub",
+        output_dir=str(tmp_path),
+        api_client=object(),
+        config={"headers_per_batch": 20},
+        update_html=True,
+        save_to_file=True,
+        log_callback=lambda _message: None,
+    )
+
+    translator = PartialThenRecoveredTranslator.instances[-1]
+    assert translator.retry_calls == [({2: "原二"}, 20, "header")]
+    assert translator.update_calls == [{2: "Header Two"}]
+    assert result == {
+        "response_chapter0001.html": "Header One",
+        "response_chapter0002.html": "Header Two",
+    }
+    _, cached, _ = translate_headers_standalone.load_translations_from_file(
+        str(tmp_path / "translated_headers.txt"),
+        log_callback=lambda _message: None,
+    )
+    assert cached == {1: "Header One", 2: "Header Two"}
+
+
+def test_failed_toc_cache_entries_are_retranslated_and_replaced(tmp_path):
+    toc_path = tmp_path / "TOC.txt"
+    toc_path.write_text(
+        """TOC Translations
+==================================================
+
+Chapter 1:
+  Original:   夜雪篇
+  Translated: Night Snow Arc
+  Target URI: Section0001.xhtml
+----------------------------------------
+Chapter 2:
+  Original:   第1章 出门半步即江湖
+  Translated: 第1章 出门半步即江湖
+  Target URI: Chapter0001.xhtml
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+
+    class RecordingTocTranslator:
+        def __init__(self):
+            self.calls = []
+
+        def translate_headers_batch(
+            self, entries, batch_size=None, translation_type="toc"
+        ):
+            self.calls.append((dict(entries), batch_size, translation_type))
+            return {2: "Chapter 1: Half a Step Into the Jianghu"}
+
+    translator = RecordingTocTranslator()
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+
+    source, translated, outputs = compiler._retry_failed_toc_translations(
+        str(toc_path), translator=translator
+    )
+
+    assert translator.calls == [
+        ({2: "第1章 出门半步即江湖"}, None, "toc")
+    ]
+    assert source == {1: "夜雪篇", 2: "第1章 出门半步即江湖"}
+    assert translated == {
+        1: "Night Snow Arc",
+        2: "Chapter 1: Half a Step Into the Jianghu",
+    }
+    assert outputs == {
+        1: "Section0001.xhtml",
+        2: "Chapter0001.xhtml",
+    }
+    rewritten = toc_path.read_text(encoding="utf-8")
+    assert "translation failed" not in rewritten
+    assert rewritten.count("Chapter 2:\n") == 1
+    assert "Successfully translated: 2" in rewritten
+
+
+def test_new_toc_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatch):
+    source_epub = tmp_path / "source.epub"
+    source_epub.write_bytes(b"placeholder")
+    (tmp_path / "Chapter0001.xhtml").write_text(
+        "<html><body><h1>One</h1></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "Chapter0002.xhtml").write_text(
+        "<html><body><h1>Two</h1></body></html>", encoding="utf-8"
+    )
+
+    class PartialThenRecoveredTocTranslator:
+        instances = []
+
+        def __init__(self, _client, _config):
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def translate_headers_batch(
+            self, entries, batch_size=None, translation_type="toc"
+        ):
+            self.calls.append((dict(entries), batch_size, translation_type))
+            if len(self.calls) == 1:
+                return {1: "TOC One"}
+            return {2: "TOC Two"}
+
+    monkeypatch.setattr(
+        "metadata_batch_translator.BatchHeaderTranslator",
+        PartialThenRecoveredTocTranslator,
+    )
+    monkeypatch.setenv("EPUB_PATH", str(source_epub))
+    monkeypatch.setenv("TOC_NCX_PER_BATCH", "10")
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    compiler.translate_toc_ncx = True
+    compiler.api_client = object()
+    monkeypatch.setattr(
+        compiler,
+        "_extract_source_toc_ncx_entries",
+        lambda _path: [
+            {"label": "原一", "src": "Chapter0001.xhtml"},
+            {"label": "原二", "src": "Chapter0002.xhtml"},
+        ],
+    )
+    monkeypatch.setattr(compiler, "_get_chapter_order_from_opf", lambda: {})
+    spine = [
+        epub_converter.epub.EpubHtml(
+            title="One", file_name="Chapter0001.xhtml"
+        ),
+        epub_converter.epub.EpubHtml(
+            title="Two", file_name="Chapter0002.xhtml"
+        ),
+    ]
+
+    toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
+
+    translator = PartialThenRecoveredTocTranslator.instances[-1]
+    assert translator.calls == [
+        ({1: "原一", 2: "原二"}, 10, "toc"),
+        ({2: "原二"}, 10, "toc"),
+    ]
+    assert [(item.href, item.title) for item in toc] == [
+        ("Chapter0001.xhtml", "TOC One"),
+        ("Chapter0002.xhtml", "TOC Two"),
+    ]
+    _, cached, _ = compiler._load_toc_translations_file(
+        str(tmp_path / "TOC.txt")
+    )
+    assert cached == {1: "TOC One", 2: "TOC Two"}
+
+
 def test_failed_header_cache_is_not_reused_for_toc_translation(tmp_path):
     headers_path = tmp_path / "translated_headers.txt"
     headers_path.write_text(
