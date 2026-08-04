@@ -13730,6 +13730,20 @@ Text to analyze:
         self.batch_translate_headers_var = self.config.get('batch_translate_headers', True)
         self.headers_per_batch_var = self.config.get('headers_per_batch', '-1')
         self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '-1')
+        try:
+            self.failed_translation_retry_attempts_var = min(
+                20,
+                max(
+                    0,
+                    int(
+                        self.config.get(
+                            'failed_translation_retry_attempts', 3
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            self.failed_translation_retry_attempts_var = 3
         self.partial_b2_entries_per_request_var = self.config.get('partial_b2_entries_per_request', '-1')
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
@@ -32784,6 +32798,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
             'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var else "0",
             'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
+            'FAILED_TRANSLATION_RETRY_ATTEMPTS': str(
+                self.failed_translation_retry_attempts_var
+            ),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
             'ALLOW_AI_MARKDOWN_HEADERS': "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0",
@@ -34676,6 +34693,9 @@ Important rules:
             os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var else "0"
             os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
             os.environ['TOC_NCX_PER_BATCH'] = str(self.toc_ncx_per_batch_var)
+            os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
+                self.failed_translation_retry_attempts_var
+            )
             os.environ['PARTIAL_B2_ENTRIES_PER_REQUEST'] = str(getattr(self, 'partial_b2_entries_per_request_var', self.config.get('partial_b2_entries_per_request', '-1')))
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
@@ -42780,6 +42800,7 @@ Important rules:
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
+                ('failed_translation_retry_attempts', ['failed_translation_retry_attempts_var'], 3, lambda v: min(20, max(0, safe_int(v, 3)))),
                 ('partial_b2_entries_per_request', ['partial_b2_entries_per_request_var'], -1, lambda v: safe_int(v, -1)),
 
                 # NIM/AuthND runtime settings
@@ -43529,6 +43550,7 @@ Important rules:
             'METADATA_TRANSLATION_MODE': 'Metadata translation mode',
             'BATCH_TRANSLATE_HEADERS': 'Batch translate headers',
             'HEADERS_PER_BATCH': 'Headers per batch',
+            'FAILED_TRANSLATION_RETRY_ATTEMPTS': 'Failed TOC/header entry retry attempts',
             'PARTIAL_B2_ENTRIES_PER_REQUEST': 'Partial.b2 entries per JSON request',
             'UPDATE_HTML_HEADERS': 'Update HTML headers',
             'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
@@ -44212,6 +44234,7 @@ Important rules:
                 ('METADATA_TRANSLATION_MODE', self.config.get('metadata_translation_mode', 'together')),
                 ('BATCH_TRANSLATE_HEADERS', '1' if getattr(self, 'batch_translate_headers_var', True) else '0'),
                 ('HEADERS_PER_BATCH', str(getattr(self, 'headers_per_batch_var', '-1'))),
+                ('FAILED_TRANSLATION_RETRY_ATTEMPTS', str(getattr(self, 'failed_translation_retry_attempts_var', 3))),
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),

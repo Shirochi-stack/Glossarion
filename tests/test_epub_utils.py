@@ -1262,6 +1262,75 @@ Failed chapters: 2
     assert "Successfully translated: 2" in rewritten
 
 
+def test_failed_header_retry_uses_three_attempts_and_only_resends_pending(tmp_path):
+    translations_path = tmp_path / "translated_headers.txt"
+    translations_path.write_text(
+        """Chapter 1:
+  Original:   One
+  Translated: One
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+Chapter 2:
+  Original:   Two
+  Translated: Two
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+Chapter 3:
+  Original:   Three
+  Translated: Three
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+
+    class OneAtATimeTranslator:
+        def __init__(self):
+            self.calls = []
+
+        def translate_headers_batch(
+            self, entries, batch_size=None, translation_type="header"
+        ):
+            self.calls.append(dict(entries))
+            number = min(entries)
+            return {number: f"Translated {entries[number]}"}
+
+    translator = OneAtATimeTranslator()
+    _, translated, _ = (
+        translate_headers_standalone.retry_failed_header_translations(
+            str(translations_path),
+            translator=translator,
+            max_retry_attempts=3,
+            log_callback=lambda _message: None,
+        )
+    )
+
+    assert translator.calls == [
+        {1: "One", 2: "Two", 3: "Three"},
+        {2: "Two", 3: "Three"},
+        {3: "Three"},
+    ]
+    assert translated == {
+        1: "Translated One",
+        2: "Translated Two",
+        3: "Translated Three",
+    }
+    assert "translation failed" not in translations_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_failed_translation_retry_attempts_default_and_bounds(monkeypatch):
+    monkeypatch.delenv("FAILED_TRANSLATION_RETRY_ATTEMPTS", raising=False)
+    assert translate_headers_standalone.get_failed_translation_retry_attempts() == 3
+
+    monkeypatch.setenv("FAILED_TRANSLATION_RETRY_ATTEMPTS", "7")
+    assert translate_headers_standalone.get_failed_translation_retry_attempts() == 7
+    assert translate_headers_standalone.get_failed_translation_retry_attempts(-2) == 0
+    assert translate_headers_standalone.get_failed_translation_retry_attempts(999) == 20
+    assert translate_headers_standalone.get_failed_translation_retry_attempts("bad") == 3
+
+
 def test_new_header_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatch):
     (tmp_path / "response_chapter0001.html").write_text(
         "<html><body><h1>原一</h1></body></html>", encoding="utf-8"
@@ -1416,6 +1485,41 @@ Chapter 2:
     assert "translation failed" not in rewritten
     assert rewritten.count("Chapter 2:\n") == 1
     assert "Successfully translated: 2" in rewritten
+
+
+def test_failed_toc_retry_respects_configured_attempt_limit(tmp_path):
+    toc_path = tmp_path / "TOC.txt"
+    toc_path.write_text(
+        """Chapter 1:
+  Original:   Still Failed
+  Translated: Still Failed
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+
+    class AlwaysFailingTranslator:
+        def __init__(self):
+            self.calls = []
+
+        def translate_headers_batch(
+            self, entries, batch_size=None, translation_type="toc"
+        ):
+            self.calls.append(dict(entries))
+            return {}
+
+    translator = AlwaysFailingTranslator()
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    _, translated, _ = compiler._retry_failed_toc_translations(
+        str(toc_path),
+        translator=translator,
+        max_retry_attempts=2,
+    )
+
+    assert translator.calls == [{1: "Still Failed"}, {1: "Still Failed"}]
+    assert translated == {}
+    assert "translation failed" in toc_path.read_text(encoding="utf-8")
 
 
 def test_new_toc_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatch):

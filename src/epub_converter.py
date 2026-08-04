@@ -6270,8 +6270,9 @@ img {
         self,
         toc_txt_path: str,
         translator=None,
+        max_retry_attempts: int = None,
     ) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
-        """Retry status-marked failures in TOC.txt exactly once per call."""
+        """Retry status-marked TOC.txt failures up to the configured limit."""
         source, translated, output_files = self._load_toc_translations_file(
             toc_txt_path
         )
@@ -6279,9 +6280,17 @@ img {
         if not failed_numbers:
             return source, translated, output_files
 
+        from translate_headers_standalone import (
+            get_failed_translation_retry_attempts,
+        )
+
         failed_entries = {num: source[num] for num in failed_numbers}
+        retry_attempts = get_failed_translation_retry_attempts(
+            max_retry_attempts
+        )
         self.log(
-            f"🔁 Retrying {len(failed_entries)} failed source TOC translation(s)..."
+            f"🔁 Retrying {len(failed_entries)} failed source TOC "
+            f"translation(s), up to {retry_attempts} API attempt(s)..."
         )
 
         headers_file = os.path.join(self.output_dir, 'translated_headers.txt')
@@ -6292,7 +6301,21 @@ img {
         )
         recovered: Dict[int, str] = dict(reused)
 
-        if remaining and translator is None and getattr(self, 'api_client', None):
+        if recovered:
+            translated.update(recovered)
+            self._save_toc_translations_file(
+                toc_txt_path,
+                source,
+                translated,
+                output_files,
+            )
+
+        if (
+            remaining
+            and retry_attempts > 0
+            and translator is None
+            and getattr(self, 'api_client', None)
+        ):
             from metadata_batch_translator import BatchHeaderTranslator
 
             retry_config = {
@@ -6304,60 +6327,95 @@ img {
             }
             translator = BatchHeaderTranslator(self.api_client, retry_config)
 
-        if remaining and translator is not None:
-            self.log(
-                f"🌐 Sending {len(remaining)} failed source TOC entry(ies) "
-                "for retranslation..."
-            )
-            try:
-                batch_size = int(os.environ.get('TOC_NCX_PER_BATCH', '-1'))
-                batch_size = batch_size if batch_size > 0 else None
-                api_translations: Dict[int, str] = {}
-
-                if os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1':
-                    unique_entries: Dict[int, str] = {}
-                    first_index_by_label: Dict[str, int] = {}
-                    for num, label in remaining.items():
-                        key = (label or '').strip()
-                        if key not in first_index_by_label:
-                            first_index_by_label[key] = num
-                            unique_entries[num] = label
-                    unique_translations = translator.translate_headers_batch(
-                        unique_entries,
-                        batch_size=batch_size,
-                        translation_type='toc',
-                    ) or {}
-                    for num, label in remaining.items():
-                        first_num = first_index_by_label.get((label or '').strip(), num)
-                        if unique_translations.get(first_num):
-                            api_translations[num] = unique_translations[first_num]
-                else:
-                    api_translations = translator.translate_headers_batch(
-                        remaining,
-                        batch_size=batch_size,
-                        translation_type='toc',
-                    ) or {}
-
-                recovered.update({
+        if remaining and translator is not None and retry_attempts > 0:
+            for attempt in range(1, retry_attempts + 1):
+                pending = {
                     num: title
-                    for num, title in api_translations.items()
-                    if num in remaining and title
-                })
-            except Exception as exc:
-                self.log(f"⚠️ Failed source TOC retranslation attempt: {exc}")
-        elif remaining:
+                    for num, title in remaining.items()
+                    if num not in recovered
+                }
+                if not pending:
+                    break
+                if getattr(translator, 'stop_flag', False):
+                    self.log(
+                        "⏹️ Source TOC retranslation stopped before the next "
+                        "retry attempt"
+                    )
+                    break
+
+                self.log(
+                    f"🌐 TOC retry attempt {attempt}/{retry_attempts}: sending "
+                    f"{len(pending)} failed source TOC entry(ies)..."
+                )
+                try:
+                    batch_size = int(
+                        os.environ.get('TOC_NCX_PER_BATCH', '-1')
+                    )
+                    batch_size = batch_size if batch_size > 0 else None
+                    api_translations: Dict[int, str] = {}
+
+                    if (
+                        os.environ.get(
+                            'SKIP_DUPLICATE_TOC_TRANSLATION', '0'
+                        ) == '1'
+                    ):
+                        unique_entries: Dict[int, str] = {}
+                        first_index_by_label: Dict[str, int] = {}
+                        for num, label in pending.items():
+                            key = (label or '').strip()
+                            if key not in first_index_by_label:
+                                first_index_by_label[key] = num
+                                unique_entries[num] = label
+                        unique_translations = (
+                            translator.translate_headers_batch(
+                                unique_entries,
+                                batch_size=batch_size,
+                                translation_type='toc',
+                            ) or {}
+                        )
+                        for num, label in pending.items():
+                            first_num = first_index_by_label.get(
+                                (label or '').strip(), num
+                            )
+                            if unique_translations.get(first_num):
+                                api_translations[num] = (
+                                    unique_translations[first_num]
+                                )
+                    else:
+                        api_translations = translator.translate_headers_batch(
+                            pending,
+                            batch_size=batch_size,
+                            translation_type='toc',
+                        ) or {}
+
+                    recovered_this_attempt = {
+                        num: title
+                        for num, title in api_translations.items()
+                        if num in pending and title
+                    }
+                    if recovered_this_attempt:
+                        recovered.update(recovered_this_attempt)
+                        translated.update(recovered_this_attempt)
+                        self._save_toc_translations_file(
+                            toc_txt_path,
+                            source,
+                            translated,
+                            output_files,
+                        )
+                except Exception as exc:
+                    self.log(
+                        f"⚠️ Source TOC retranslation attempt "
+                        f"{attempt}/{retry_attempts} failed: {exc}"
+                    )
+        elif remaining and retry_attempts == 0:
+            self.log(
+                f"ℹ️ {len(remaining)} failed source TOC entry(ies) remain; "
+                "failed-entry API retries are disabled"
+            )
+        elif remaining and translator is None:
             self.log(
                 f"⚠️ {len(remaining)} failed source TOC entry(ies) could not "
                 "be retried because no API translator is available"
-            )
-
-        if recovered:
-            translated.update(recovered)
-            self._save_toc_translations_file(
-                toc_txt_path,
-                source,
-                translated,
-                output_files,
             )
 
         unresolved_count = sum(

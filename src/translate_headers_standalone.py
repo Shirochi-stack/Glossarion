@@ -16,6 +16,24 @@ from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
 
 
+DEFAULT_FAILED_TRANSLATION_RETRY_ATTEMPTS = 3
+MAX_FAILED_TRANSLATION_RETRY_ATTEMPTS = 20
+
+
+def get_failed_translation_retry_attempts(value=None) -> int:
+    """Return the configured bounded retry count for failed TOC/header entries."""
+    if value is None:
+        value = os.getenv(
+            'FAILED_TRANSLATION_RETRY_ATTEMPTS',
+            str(DEFAULT_FAILED_TRANSLATION_RETRY_ATTEMPTS),
+        )
+    try:
+        attempts = int(value)
+    except (TypeError, ValueError):
+        attempts = DEFAULT_FAILED_TRANSLATION_RETRY_ATTEMPTS
+    return min(MAX_FAILED_TRANSLATION_RETRY_ATTEMPTS, max(0, attempts))
+
+
 def get_basename_without_ext(filename: str) -> str:
     """
     Get filename without extension(s) - handles double extensions like .htm.xhtml
@@ -905,14 +923,16 @@ def retry_failed_header_translations(
     batch_size: int = None,
     other_file_path: str = None,
     log_callback=None,
+    max_retry_attempts: int = None,
 ) -> Tuple[Dict[int, str], Dict[int, str], Dict[int, str]]:
     """Retry failed records in an existing ``translated_headers.txt`` cache.
 
     Failed records are identified by ``load_translations_from_file`` excluding
     their status-marked fallback from ``translated_headers``. Successful
     translations from TOC.txt may be reused first; every remaining failed
-    record is sent to the supplied translator. Resolved records replace their
-    old failed blocks when the cache is rewritten, so duplicates cannot form.
+    record is sent to the supplied translator up to the configured retry
+    limit. Resolved records replace their old failed blocks after each attempt,
+    so progress is preserved and duplicates cannot form.
     """
     def log(message):
         if log_callback:
@@ -934,33 +954,16 @@ def retry_failed_header_translations(
         num: source_headers[num]
         for num in failed_numbers
     }
-    log(f"🔁 Retrying {len(failed_headers)} failed chapter header translation(s)...")
+    retry_attempts = get_failed_translation_retry_attempts(max_retry_attempts)
+    log(
+        f"🔁 Retrying {len(failed_headers)} failed chapter header "
+        f"translation(s), up to {retry_attempts} API attempt(s)..."
+    )
 
     reused, remaining = _cross_reference_from_file(
         failed_headers, other_file_path, log_callback
     )
     recovered: Dict[int, str] = dict(reused)
-
-    if remaining and translator is not None:
-        log(f"🌐 Sending {len(remaining)} failed chapter header(s) for retranslation...")
-        try:
-            api_translations = translator.translate_headers_batch(
-                remaining,
-                batch_size=batch_size,
-                translation_type='header',
-            ) or {}
-            recovered.update({
-                num: title
-                for num, title in api_translations.items()
-                if num in remaining and title
-            })
-        except Exception as exc:
-            log(f"⚠️ Failed header retranslation attempt: {exc}")
-    elif remaining:
-        log(
-            f"⚠️ {len(remaining)} failed chapter header(s) could not be retried "
-            "because no API translator is available"
-        )
 
     if recovered:
         translated_headers.update(recovered)
@@ -969,6 +972,59 @@ def retry_failed_header_translations(
             source_headers,
             translated_headers,
             output_files,
+        )
+
+    if remaining and translator is not None and retry_attempts > 0:
+        for attempt in range(1, retry_attempts + 1):
+            pending = {
+                num: title
+                for num, title in remaining.items()
+                if num not in recovered
+            }
+            if not pending:
+                break
+            if getattr(translator, 'stop_flag', False):
+                log("⏹️ Header retranslation stopped before the next retry attempt")
+                break
+
+            log(
+                f"🌐 Header retry attempt {attempt}/{retry_attempts}: sending "
+                f"{len(pending)} failed chapter header(s)..."
+            )
+            try:
+                api_translations = translator.translate_headers_batch(
+                    pending,
+                    batch_size=batch_size,
+                    translation_type='header',
+                ) or {}
+                recovered_this_attempt = {
+                    num: title
+                    for num, title in api_translations.items()
+                    if num in pending and title
+                }
+                if recovered_this_attempt:
+                    recovered.update(recovered_this_attempt)
+                    translated_headers.update(recovered_this_attempt)
+                    _write_header_translation_cache(
+                        translations_file,
+                        source_headers,
+                        translated_headers,
+                        output_files,
+                    )
+            except Exception as exc:
+                log(
+                    f"⚠️ Header retranslation attempt "
+                    f"{attempt}/{retry_attempts} failed: {exc}"
+                )
+    elif remaining and retry_attempts == 0:
+        log(
+            f"ℹ️ {len(remaining)} failed chapter header(s) remain; failed-entry "
+            "API retries are disabled"
+        )
+    elif remaining and translator is None:
+        log(
+            f"⚠️ {len(remaining)} failed chapter header(s) could not be retried "
+            "because no API translator is available"
         )
 
     unresolved_count = sum(
@@ -1127,9 +1183,9 @@ def translate_headers_standalone(
                 current_titles_map,
             )
 
-            # One bounded same-run retry. Existing-cache runs use this same
-            # helper before application, so both newly generated and older
-            # failed records follow identical semantics.
+            # Run the configured bounded same-run retries. Existing-cache runs
+            # use this same helper before application, so both newly generated
+            # and older failed records follow identical semantics.
             recovered_now = {}
             if os.path.exists(translations_file):
                 translated_before_retry = set(translated_headers)
@@ -1139,6 +1195,9 @@ def translate_headers_standalone(
                     batch_size=config.get('headers_per_batch', -1) if config else None,
                     other_file_path=toc_file,
                     log_callback=log_callback,
+                    max_retry_attempts=(config or {}).get(
+                        'failed_translation_retry_attempts'
+                    ),
                 )
                 recovered_now = {
                     num: title
@@ -1238,6 +1297,7 @@ def run_translation(
         # Get configuration from environment variables
         config = {
             'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '-1')),
+            'failed_translation_retry_attempts': get_failed_translation_retry_attempts(),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
             # Add Chapter Headers prompts from environment variables - use None if not set so fallback works
@@ -1401,6 +1461,9 @@ def run_translate_headers_gui(gui_instance):
         # Get config from GUI once
         config = {
             'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', -1)),
+            'failed_translation_retry_attempts': get_failed_translation_retry_attempts(
+                getattr(gui_instance, 'failed_translation_retry_attempts_var', 3)
+            ),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
             # Add Chapter Headers prompts from active profile/config
@@ -1502,6 +1565,9 @@ def run_translate_headers_gui(gui_instance):
                         batch_size=config.get('headers_per_batch', -1) if config else None,
                         other_file_path=os.path.join(output_dir, 'TOC.txt'),
                         log_callback=gui_instance.append_log,
+                        max_retry_attempts=config.get(
+                            'failed_translation_retry_attempts'
+                        ),
                     )
                     source_mapping, spine_order = extract_source_chapters_with_opf_mapping(
                         current_epub, gui_instance.append_log

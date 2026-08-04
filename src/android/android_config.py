@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     'translation_history_rolling': True,
     'enable_streaming': False,
     'batch_translate_headers': False,
+    'failed_translation_retry_attempts': 3,
     'use_multi_api_keys': False,
     'multi_api_keys': [],
     'rotation_frequency': 1,

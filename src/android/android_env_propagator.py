@@ -97,6 +97,9 @@ def set_all_env_vars(config):
     # ── Chapter processing ──
     os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if _get('batch_translate_headers', False) else '0'
     os.environ['HEADERS_PER_BATCH'] = str(_get('headers_per_batch', -1))
+    os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
+        _get('failed_translation_retry_attempts', 3)
+    )
     os.environ['IGNORE_HEADER'] = '1' if _get('ignore_header', False) else '0'
     os.environ['USE_TITLE'] = '1' if _get('use_title', False) else '0'
     os.environ['USE_NCX_NAVIGATION'] = '1' if _get('use_ncx_navigation', False) else '0'

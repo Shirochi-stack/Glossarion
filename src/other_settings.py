@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics, QIntValidator
 from PySide6.QtCore import QObject, Signal
 
 
@@ -7681,6 +7681,57 @@ def _create_prompt_management_section(self, parent):
     _toc_btn_h.addStretch()
     
     section_v.addWidget(_toc_btn_row)
+
+    # Shared retry limit for status-marked failures in both translation caches.
+    try:
+        _retry_attempts = int(
+            getattr(
+                self,
+                'failed_translation_retry_attempts_var',
+                self.config.get('failed_translation_retry_attempts', 3),
+            )
+        )
+    except (TypeError, ValueError):
+        _retry_attempts = 3
+    self.failed_translation_retry_attempts_var = min(
+        20, max(0, _retry_attempts)
+    )
+    self.config['failed_translation_retry_attempts'] = (
+        self.failed_translation_retry_attempts_var
+    )
+    os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
+        self.failed_translation_retry_attempts_var
+    )
+
+    retry_row = QWidget()
+    retry_h = QHBoxLayout(retry_row)
+    retry_h.setContentsMargins(0, 0, 0, 0)
+    retry_label = QLabel("Failed-entry retry attempts (TOC + headers):")
+    retry_entry = QLineEdit()
+    retry_entry.setFixedWidth(60)
+    retry_entry.setValidator(QIntValidator(0, 20, retry_entry))
+    retry_entry.setText(str(self.failed_translation_retry_attempts_var))
+    retry_entry.setToolTip(
+        "Maximum API retry attempts for entries still marked failed after TOC.txt or\n"
+        "translated_headers.txt is generated or loaded. Retries stop early when all\n"
+        "entries succeed. Set to 0 to disable failed-entry API retries."
+    )
+
+    def _on_failed_translation_retry_attempts_changed(text):
+        if not text.strip().isdigit():
+            return
+        value = min(20, max(0, int(text.strip())))
+        self.failed_translation_retry_attempts_var = value
+        self.config['failed_translation_retry_attempts'] = value
+        os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(value)
+
+    retry_entry.textChanged.connect(
+        _on_failed_translation_retry_attempts_changed
+    )
+    retry_h.addWidget(retry_label)
+    retry_h.addWidget(retry_entry)
+    retry_h.addStretch()
+    section_v.addWidget(retry_row)
 
     # Separator
     sep_toc_struct = QFrame()

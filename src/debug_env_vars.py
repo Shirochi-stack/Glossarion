@@ -470,6 +470,7 @@ def print_env_var_status():
         'METADATA_TRANSLATION_MODE': 'Metadata translation mode',
         'BATCH_TRANSLATE_HEADERS': 'Batch translate headers',
         'HEADERS_PER_BATCH': 'Headers per batch',
+        'FAILED_TRANSLATION_RETRY_ATTEMPTS': 'Failed TOC/header entry retry attempts',
         'UPDATE_HTML_HEADERS': 'Update HTML headers',
         'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
         'IGNORE_HEADER': 'Ignore header',

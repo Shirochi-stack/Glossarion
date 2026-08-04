@@ -507,6 +507,7 @@ class GlossarionWeb:
             'batch_size': 10,  # Default batch size
             'batching_mode': 'direct',  # Default batching mode (aggressive/direct/conservative)
             'batch_group_size': 3,  # Group size for conservative mode
+            'failed_translation_retry_attempts': 3,
             'text_extraction_method': 'standard',  # CRITICAL: Default extraction method (standard=BeautifulSoup, enhanced=html2text)
             'file_filtering_level': 'smart',  # CRITICAL: Default filtering level (smart/comprehensive/full)
             'enhanced_preserve_structure': True,  # Preserve HTML structure in enhanced mode
@@ -632,6 +633,9 @@ class GlossarionWeb:
         # Chapter Processing Options
         os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if config('batch_translate_headers', False) else '0'
         os.environ['HEADERS_PER_BATCH'] = str(config('headers_per_batch', -1))
+        os.environ['FAILED_TRANSLATION_RETRY_ATTEMPTS'] = str(
+            config('failed_translation_retry_attempts', 3)
+        )
         os.environ['USE_NCX_NAVIGATION'] = '1' if config('use_ncx_navigation', False) else '0'
         os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if config('attach_css_to_chapters', False) else '0'
         os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if config('retain_source_extension', True) else '0'
