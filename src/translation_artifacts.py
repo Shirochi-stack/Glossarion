@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import threading
+import time
+import uuid
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Tuple
 
 
@@ -41,6 +45,102 @@ QA_TRANSLATION_ARTIFACT_FILENAMES = (
     "TOC.txt",
     "translated_headers.txt",
 )
+
+_ARTIFACT_PROGRESS_LOCK = threading.RLock()
+
+
+def update_translation_artifact_progress(
+    output_dir: Any,
+    kind: Any,
+    status: Any,
+    *,
+    model_name: Any = None,
+    error_message: Any = None,
+) -> bool:
+    """Atomically update one TOC/header row in translation_progress.json."""
+    spec = translation_artifact_spec_for_kind(kind)
+    raw_output_dir = str(output_dir or "").strip()
+    normalized_status = str(status or "pending").strip().lower()
+    if not spec or not raw_output_dir or normalized_status not in {
+        "pending", "in_progress", "completed", "failed", "error"
+    }:
+        return False
+    output_dir = os.path.abspath(raw_output_dir)
+
+    progress_path = os.path.join(output_dir, "translation_progress.json")
+    temp_path = None
+    with _ARTIFACT_PROGRESS_LOCK:
+        try:
+            if os.path.isfile(progress_path):
+                with open(progress_path, "r", encoding="utf-8") as progress_file:
+                    progress = json.load(progress_file)
+                if not isinstance(progress, dict):
+                    return False
+            else:
+                progress = {"version": "2.1", "chapters": {}}
+
+            chapters = progress.setdefault("chapters", {})
+            if not isinstance(chapters, dict):
+                return False
+            previous = chapters.get(spec["progress_key"], {})
+            if not isinstance(previous, dict):
+                previous = {}
+
+            entry = dict(previous)
+            entry.update({
+                "actual_num": spec["actual_num"],
+                "output_file": spec["filename"],
+                "original_basename": spec["filename"],
+                "status": normalized_status,
+                "last_updated": time.time(),
+                "is_special": True,
+                "special_type": spec["kind"],
+                "translation_artifact_progress_key": spec["progress_key"],
+                "translation_artifact_label": spec["label"],
+                "artifact_translation_enabled": True,
+            })
+            if model_name:
+                entry["model_name"] = str(model_name)
+
+            artifact_path = os.path.join(output_dir, spec["filename"])
+            if normalized_status == "completed":
+                entry.pop("error_message", None)
+                entry.pop("failure_reason", None)
+                if os.path.isfile(artifact_path):
+                    with open(artifact_path, "rb") as artifact_file:
+                        entry["content_hash"] = hashlib.sha256(
+                            artifact_file.read()
+                        ).hexdigest()
+            elif normalized_status in {"failed", "error"} and error_message:
+                entry["error_message"] = str(error_message)
+
+            chapters[spec["progress_key"]] = entry
+            os.makedirs(output_dir, exist_ok=True)
+            temp_path = (
+                f"{progress_path}.{os.getpid()}.{threading.get_ident()}."
+                f"{uuid.uuid4().hex}.tmp"
+            )
+            with open(temp_path, "w", encoding="utf-8") as progress_file:
+                json.dump(progress, progress_file, ensure_ascii=False, indent=2)
+
+            for attempt in range(5):
+                try:
+                    os.replace(temp_path, progress_path)
+                    temp_path = None
+                    return True
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05 * (2 ** attempt))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+    return False
 
 
 def translation_artifact_spec_for_filename(filename: Any) -> Dict[str, Any] | None:

@@ -22,6 +22,7 @@ from translation_artifacts import (
     render_translation_artifact_document,
     translation_artifact_qa_text,
     translation_artifact_target_fragment,
+    update_translation_artifact_progress,
 )
 
 
@@ -195,6 +196,84 @@ def test_progress_rows_follow_toc_and_header_translation_toggles(tmp_path):
     assert [row["status"] for row in rows] == ["completed", "skipped"]
     assert gui._progress_entry_needs_special_visibility(rows[0]) is False
     assert gui._progress_entry_needs_special_visibility(rows[1]) is True
+
+
+def test_artifact_in_progress_is_preserved_before_cache_file_exists(tmp_path):
+    output_dir = tmp_path / "book"
+    output_dir.mkdir()
+    gui = RetranslationMixin()
+    gui.config = {"use_toc_ncx": True, "batch_translate_headers": True}
+    prog = {
+        "chapters": {
+            "__translation_artifact__:headers": {
+                "status": "in_progress",
+                "output_file": "translated_headers.txt",
+                "special_type": "headers",
+            }
+        }
+    }
+
+    gui._ensure_translation_artifact_progress_entries(
+        prog, str(output_dir), str(tmp_path / "book.epub")
+    )
+
+    assert prog["chapters"][
+        "__translation_artifact__:headers"
+    ]["status"] == "in_progress"
+
+
+def test_batch_header_translation_publishes_live_progress(tmp_path, monkeypatch):
+    from metadata_batch_translator import BatchHeaderTranslator
+
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({"version": "2.1", "chapters": {}}), encoding="utf-8"
+    )
+
+    class Client:
+        output_dir = str(tmp_path)
+        model = "test-model"
+
+    translator = BatchHeaderTranslator(Client(), {"headers_per_batch": 1})
+
+    def send_while_checking_progress(**_kwargs):
+        live = json.loads(progress_path.read_text(encoding="utf-8"))
+        assert live["chapters"][
+            "__translation_artifact__:headers"
+        ]["status"] == "in_progress"
+        return '{"1": "Chapter One"}'
+
+    monkeypatch.setattr(translator, "_send_with_retry", send_while_checking_progress)
+    translated = translator.translate_headers_batch(
+        {1: "Original"}, batch_size=1, translation_type="header"
+    )
+
+    assert translated == {1: "Chapter One"}
+    final = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = final["chapters"]["__translation_artifact__:headers"]
+    assert entry["status"] == "completed"
+    assert entry["model_name"] == "test-model"
+
+
+def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {"1": {"status": "completed", "output_file": "ch1.xhtml"}},
+        }),
+        encoding="utf-8",
+    )
+
+    assert update_translation_artifact_progress(
+        str(tmp_path), "toc", "in_progress", model_name="test-model"
+    )
+
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert progress["chapters"]["1"]["status"] == "completed"
+    assert progress["chapters"][
+        "__translation_artifact__:toc"
+    ]["status"] == "in_progress"
 
 
 def test_scanner_progress_updates_all_three_artifacts_and_metadata_siblings(

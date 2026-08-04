@@ -11362,12 +11362,12 @@ class RetranslationMixin:
             previous_status = str(
                 previous.get('status') or 'pending'
             ).lower()
-            if not artifact_exists:
-                status = 'pending'
-            elif previous_status in {
+            if previous_status in {
                 'qa_failed', 'failed', 'error', 'in_progress'
             }:
                 status = previous_status
+            elif not artifact_exists:
+                status = 'pending'
             else:
                 status = 'completed'
 

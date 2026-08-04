@@ -33,6 +33,7 @@ from bs4 import BeautifulSoup
 from epub_metadata_utils import extract_dc_metadata
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from language_options import TARGET_LANGUAGES
+from translation_artifacts import update_translation_artifact_progress
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -2141,6 +2142,48 @@ class BatchHeaderTranslator:
         return result
 
     def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
+        """Translate one header/TOC workload while publishing its live state."""
+        if not headers_dict:
+            return {}
+
+        artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
+        output_dir = (
+            getattr(self.client, 'output_dir', None)
+            or self.config.get('output_dir')
+            or os.getenv('OUTPUT_DIRECTORY')
+        )
+        model_name = getattr(self.client, 'model', None)
+        if output_dir:
+            update_translation_artifact_progress(
+                output_dir, artifact_kind, 'in_progress', model_name=model_name
+            )
+
+        try:
+            translations = self._translate_headers_batch_impl(
+                headers_dict, batch_size, translation_type
+            )
+        except Exception as exc:
+            if output_dir:
+                update_translation_artifact_progress(
+                    output_dir,
+                    artifact_kind,
+                    'failed',
+                    model_name=model_name,
+                    error_message=exc,
+                )
+            raise
+
+        if output_dir:
+            update_translation_artifact_progress(
+                output_dir,
+                artifact_kind,
+                'completed' if translations else 'failed',
+                model_name=model_name,
+                error_message=None if translations else 'No translations were returned',
+            )
+        return translations
+
+    def _translate_headers_batch_impl(self, headers_dict: Dict[int, str], batch_size: int = None, translation_type: str = 'header') -> Dict[int, str]:
         """Translate headers/TOC entries in batches using configured prompts with parallel execution
         
         Args:
