@@ -171,6 +171,14 @@ from metadata_progress import (
     metadata_field_complete,
     resolve_metadata_field_settings,
 )
+from translation_artifacts import (
+    TRANSLATION_ARTIFACT_SPECS,
+    apply_translation_artifact_response,
+    collect_translation_artifact_partial_targets,
+    render_translation_artifact_document,
+    translation_artifact_spec_for_filename,
+    translation_artifact_target_fragment,
+)
 from refinement_prompts import (
     DEFAULT_REFINEMENT_FAILED_SYSTEM_PROMPT,
     DEFAULT_REFINEMENT_FULL_WITH_RAW_RAW_FOOTER,
@@ -3898,6 +3906,11 @@ class ProgressManager:
                 return None
             return f"{num}@{spine_pos}"
 
+        if chapter_obj and chapter_obj.get(
+            "translation_artifact_progress_key"
+        ):
+            return str(chapter_obj["translation_artifact_progress_key"])
+
         if chapter_obj and chapter_obj.get("subtitle_batch"):
             progress_id = (
                 chapter_obj.get("subtitle_progress_id")
@@ -4689,6 +4702,27 @@ class ProgressManager:
                 ):
                     if chapter_obj.get(source_key) is not None:
                         chapter_info[source_key] = chapter_obj[source_key]
+            if chapter_obj.get("translation_artifact_progress_key"):
+                chapter_info["is_special"] = True
+                chapter_info["artifact_translation_enabled"] = True
+                if chapter_obj.get("special_type") == "metadata":
+                    chapter_info["special_type"] = "metadata"
+                    for metadata_key in (
+                        "metadata_progress_key", "metadata_mode",
+                        "metadata_phase", "metadata_fields",
+                        "metadata_label", "metadata_index",
+                    ):
+                        if metadata_key in existing_info:
+                            chapter_info[metadata_key] = existing_info[metadata_key]
+                else:
+                    for artifact_key in (
+                        "translation_artifact_progress_key",
+                        "translation_artifact_label",
+                        "translation_artifact_file",
+                        "special_type",
+                    ):
+                        if chapter_obj.get(artifact_key) is not None:
+                            chapter_info[artifact_key] = chapter_obj[artifact_key]
         
         # Add raw number tracking
         if raw_num is not None:
@@ -16052,6 +16086,27 @@ def _output_dir_norm_snapshot(out_dir):
 
 
 def _find_existing_translated_output(out_dir, chapter, actual_num, progress_manager):
+    artifact_filename = (
+        chapter.get("translation_artifact_file")
+        if isinstance(chapter, dict)
+        else None
+    )
+    artifact_spec = translation_artifact_spec_for_filename(artifact_filename)
+    if artifact_filename and (
+        artifact_spec
+        or os.path.basename(str(artifact_filename)).casefold()
+        == "metadata.json"
+    ):
+        canonical_filename = (
+            artifact_spec["filename"]
+            if artifact_spec
+            else "metadata.json"
+        )
+        artifact_path = os.path.join(out_dir, canonical_filename)
+        if os.path.isfile(artifact_path):
+            return canonical_filename, artifact_path
+        return canonical_filename, None
+
     expected = FileUtilities.create_chapter_filename(chapter, actual_num)
     candidates = [expected]
 
@@ -16744,6 +16799,14 @@ def _replace_partial_refinement_tag_contents(tag, refined_inner):
 
 
 def _partial_refinement_target_fragment(target, document):
+    if str(target.get("kind") or "").startswith("artifact_"):
+        # Artifact values are plain text embedded in the same placeholder
+        # envelope used for HTML fragments. Escape them so titles containing
+        # angle brackets or ampersands cannot become placeholder markup.
+        return html.escape(
+            translation_artifact_target_fragment(document, target),
+            quote=False,
+        )
     if target.get("kind") == "lines":
         lines = document.get("lines", [])
         return "".join(lines[target["start"]:target["end"] + 1])
@@ -16754,7 +16817,9 @@ def _partial_refinement_target_fragment(target, document):
 def _partial_refinement_target_count(targets):
     total = 0
     for target in targets:
-        if target.get("kind") == "lines":
+        if str(target.get("kind") or "").startswith("artifact_"):
+            total += 1
+        elif target.get("kind") == "lines":
             total += target.get("end", 0) - target.get("start", 0) + 1
         else:
             total += len(target.get("tags", []))
@@ -17035,6 +17100,13 @@ def _partial_refinement_json_response_map(refined_content, expected_requests):
 
 
 def _apply_partial_refinement_response(document, target, refined_fragment):
+    if str(target.get("kind") or "").startswith("artifact_"):
+        apply_translation_artifact_response(
+            document,
+            target,
+            html.unescape(_strip_refinement_code_fence(refined_fragment)),
+        )
+        return
     if target.get("kind") == "lines":
         lines = document.get("lines", [])
         start = target["start"]
@@ -17054,6 +17126,8 @@ def _apply_partial_refinement_response(document, target, refined_fragment):
 
 
 def _render_partial_refinement_document(document):
+    if str(document.get("kind") or "").startswith("artifact_"):
+        return render_translation_artifact_document(document)
     if document.get("kind") == "lines":
         return "".join(document.get("lines", []))
     return str(document.get("soup", ""))
@@ -17126,6 +17200,97 @@ def _html_to_enhanced_refinement_text(html_content, chapter):
                 os.environ[key] = value
     enhanced_info = _enhanced_refinement_chapter_info(chapter, html_content, extractor)
     return refinement_text, enhanced_info
+
+
+def _append_partial_b_translation_artifact_chapters(
+    chapters,
+    out,
+    progress_manager,
+    config,
+):
+    """Add QA-failed metadata/TOC/header artifacts to Partial.b/b2 input."""
+    mode = str(
+        getattr(config, "MULTIPASS_REFINEMENT_MODE", "") or ""
+    ).strip().lower()
+    result = list(chapters or [])
+    if mode not in ("partial.b", "partial.b2"):
+        return result
+
+    existing_names = {
+        os.path.basename(
+            str(
+                chapter.get("translation_artifact_file")
+                or chapter.get("filename")
+                or ""
+            )
+        ).casefold()
+        for chapter in result
+        if isinstance(chapter, dict)
+    }
+    candidates = [
+        {
+            "kind": "metadata",
+            "filename": "metadata.json",
+            "label": "Metadata",
+            "actual_num": -1,
+            "enabled": os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1",
+        }
+    ]
+    for spec in TRANSLATION_ARTIFACT_SPECS:
+        candidates.append({
+            **spec,
+            "enabled": os.getenv(
+                spec["toggle_env"],
+                "1" if spec["default_enabled"] else "0",
+            ) == "1",
+        })
+
+    progress_entries = progress_manager.prog.get("chapters", {})
+    for candidate in candidates:
+        filename = candidate["filename"]
+        if (
+            not candidate["enabled"]
+            or filename.casefold() in existing_names
+            or not os.path.isfile(os.path.join(out, filename))
+        ):
+            continue
+        matches = [
+            (key, entry)
+            for key, entry in progress_entries.items()
+            if isinstance(entry, dict)
+            and os.path.basename(
+                str(entry.get("output_file") or "")
+            ).casefold() == filename.casefold()
+        ]
+        qa_match = next(
+            (
+                (key, entry) for key, entry in matches
+                if _entry_has_foreign_character_qa_issue(entry)
+            ),
+            None,
+        )
+        if not qa_match:
+            continue
+        progress_key, progress_entry = qa_match
+        result.append({
+            "actual_chapter_num": candidate["actual_num"],
+            "num": candidate["actual_num"],
+            "filename": filename,
+            "original_filename": filename,
+            "original_basename": filename,
+            "translation_artifact_file": filename,
+            "translation_artifact_progress_key": progress_key,
+            "translation_artifact_label": candidate["label"],
+            "special_type": candidate["kind"],
+            "is_special": True,
+            "content_hash": progress_entry.get("content_hash", ""),
+        })
+        existing_names.add(filename.casefold())
+        print(
+            f"📄 {mode}: added QA-failed {filename} as a translated "
+            "artifact refinement target"
+        )
+    return result
 
 
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False, multipass_partial_mode=False):
@@ -17373,6 +17538,33 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 best_entry = entry
         return best_key, best_entry
 
+    def _finalize_translation_artifact_progress(
+        chapter, content_hash, backup_path
+    ):
+        """Keep every metadata phase synchronized after one file refinement."""
+        if not isinstance(chapter, dict):
+            return
+        if chapter.get("special_type") != "metadata":
+            return
+        backup_rel = os.path.relpath(backup_path, out).replace("\\", "/")
+        now = time.time()
+        for key, entry in progress_manager.prog.get("chapters", {}).items():
+            if not is_metadata_progress_entry(key, entry):
+                continue
+            entry["status"] = "completed"
+            entry["content_hash"] = content_hash
+            entry["last_updated"] = now
+            entry["refinement_status"] = "refined"
+            entry["refined_at"] = now
+            entry["unrefined_backup_file"] = backup_rel
+            for field in (
+                "qa_issues", "qa_timestamp", "qa_issues_found",
+                "qa_issue_previews", "duplicate_confidence",
+                "failure_reason", "error_message", "refinement_error",
+                "metadata_regeneration_requested",
+            ):
+                entry.pop(field, None)
+
     def _audio_candidates_for_output(output_file, preferred_path=None, entry=None):
         candidates = []
         if entry and entry.get("tts_file"):
@@ -17510,10 +17702,25 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
                 if not isinstance(qa_settings, dict):
                     qa_settings = _load_qa_scanner_settings_from_env()
-                partial_document, partial_targets = _collect_partial_refinement_tag_groups(
-                    html_content,
-                    qa_settings,
-                )
+                if chapter.get("translation_artifact_file"):
+                    partial_document, partial_targets = (
+                        collect_translation_artifact_partial_targets(
+                            chapter["translation_artifact_file"],
+                            html_content,
+                            lambda text: (
+                                _text_has_foreign_characters_for_partial_refinement(
+                                    text, qa_settings
+                                )
+                            ),
+                        )
+                    )
+                else:
+                    partial_document, partial_targets = (
+                        _collect_partial_refinement_tag_groups(
+                            html_content,
+                            qa_settings,
+                        )
+                    )
                 if not partial_targets:
                     return "skipped", None, {
                         "kind": "refinement_skip",
@@ -17854,7 +18061,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 backup_path = _backup_unrefined_file(output_path, backup_dir)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
-                _write_refined_html_sdlxliff_sidecar(out, output_file, chapter, refined)
+                if not chapter.get("translation_artifact_file"):
+                    _write_refined_html_sdlxliff_sidecar(
+                        out, output_file, chapter, refined
+                    )
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
                     progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
@@ -17867,6 +18077,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         chapter_obj=chapter,
                     )
                     progress_manager.prog["chapters"][refinement_key]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    _finalize_translation_artifact_progress(
+                        chapter, new_hash, backup_path
+                    )
                     progress_manager.save()
                 if multipass_partial_mode:
                     return "processed", (
@@ -18089,10 +18302,25 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
             if not isinstance(qa_settings, dict):
                 qa_settings = _load_qa_scanner_settings_from_env()
-            partial_document, partial_targets = _collect_partial_refinement_tag_groups(
-                html_content,
-                qa_settings,
-            )
+            if chapter.get("translation_artifact_file"):
+                partial_document, partial_targets = (
+                    collect_translation_artifact_partial_targets(
+                        chapter["translation_artifact_file"],
+                        html_content,
+                        lambda text: (
+                            _text_has_foreign_characters_for_partial_refinement(
+                                text, qa_settings
+                            )
+                        ),
+                    )
+                )
+            else:
+                partial_document, partial_targets = (
+                    _collect_partial_refinement_tag_groups(
+                        html_content,
+                        qa_settings,
+                    )
+                )
             if not partial_targets:
                 return "skipped", None, {
                     "kind": "refinement_skip",
@@ -18321,7 +18549,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 backup_path = _backup_unrefined_file(item["output_path"], backup_dir)
                 with open(item["output_path"], "w", encoding="utf-8") as f:
                     f.write(refined)
-                _write_refined_html_sdlxliff_sidecar(out, item["output_file"], item["chapter"], refined)
+                if not item["chapter"].get("translation_artifact_file"):
+                    _write_refined_html_sdlxliff_sidecar(
+                        out,
+                        item["output_file"],
+                        item["chapter"],
+                        refined,
+                    )
                 new_hash = ContentProcessor.get_content_hash(refined)
                 with progress_lock:
                     progress_manager.update(
@@ -18341,6 +18575,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         chapter_obj=item["chapter"],
                     )
                     progress_manager.prog["chapters"][refinement_key]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    _finalize_translation_artifact_progress(
+                        item["chapter"], new_hash, backup_path
+                    )
                     progress_manager.save()
                 _record_result((
                     "processed",
@@ -23549,6 +23786,12 @@ def main(log_callback=None, stop_callback=None):
             payloads_dir = out
             os.environ["EPUB_OUTPUT_DIR"] = out
             progress_manager = ProgressManager(payloads_dir)
+        post_mode_chapters = _append_partial_b_translation_artifact_chapters(
+            post_mode_chapters,
+            out,
+            progress_manager,
+            config,
+        )
         _process_refinement_or_tts_mode(
             config,
             client,
@@ -27692,6 +27935,12 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⏭️ Skipping {skipped_special_refinement} copied-as-is special file(s) during multipass refinement")
             if skipped_image_only_refinement:
                 print(f"⏭️ Skipping {skipped_image_only_refinement} copied-as-is image-only chapter(s) during multipass refinement")
+            multipass_chapters = _append_partial_b_translation_artifact_chapters(
+                multipass_chapters,
+                out,
+                progress_manager,
+                config,
+            )
             _process_refinement_or_tts_mode(
                 config,
                 client,

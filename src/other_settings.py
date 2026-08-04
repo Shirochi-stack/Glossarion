@@ -7530,6 +7530,11 @@ def _create_prompt_management_section(self, parent):
             self.translate_toc_ncx_var = bool(checked)
             self.config['translate_toc_ncx'] = self.translate_toc_ncx_var
             os.environ['TRANSLATE_TOC_NCX'] = '1' if checked else '0'
+            sync_progress = getattr(
+                self, '_sync_translation_artifact_progress_toggle', None
+            )
+            if callable(sync_progress):
+                sync_progress('toc', checked)
             # Enable/disable child widgets
             skip_dup_toc_cb.setEnabled(bool(checked))
             toc_batch_label.setEnabled(bool(checked))
@@ -8092,8 +8097,18 @@ def _create_prompt_management_section(self, parent):
     # Toggle function for enabling/disabling controls
     def _toggle_header_controls(checked):
         try:
-            enabled = bool(self.batch_translate_headers_var)
+            previous = bool(self.batch_translate_headers_var)
             self.batch_translate_headers_var = bool(checked)
+            self.config['batch_translate_headers'] = bool(checked)
+            os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if checked else '0'
+            if previous != bool(checked):
+                sync_progress = getattr(
+                    self,
+                    '_sync_translation_artifact_progress_toggle',
+                    None,
+                )
+                if callable(sync_progress):
+                    sync_progress('headers', checked)
         except Exception:
             pass
         headers_per_batch_label.setEnabled(checked)

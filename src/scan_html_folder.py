@@ -44,6 +44,11 @@ from functools import lru_cache
 import concurrent.futures
 import multiprocessing
 from threading import Lock
+from translation_artifacts import (
+    QA_TRANSLATION_ARTIFACT_FILENAMES,
+    translation_artifact_qa_text,
+    translation_artifact_spec_for_filename,
+)
 
 # Optional: psutil for process priority and CPU affinity control
 try:
@@ -4954,6 +4959,16 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         # Method 1: Direct output file match
         chapter_key = output_file_to_chapter_key.get(filename)
         if not chapter_key:
+            filename_folded = os.path.basename(str(filename or '')).casefold()
+            chapter_key = next(
+                (
+                    key for output_name, key in output_file_to_chapter_key.items()
+                    if os.path.basename(str(output_name or '')).casefold()
+                    == filename_folded
+                ),
+                None,
+            )
+        if not chapter_key:
             # Try swapping .html/.txt
             if filename.endswith('.html'):
                 alt_filename = filename[:-5] + '.txt'
@@ -5092,6 +5107,53 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
             # Log failure to find chapter
             log(f"   ⚠️ Could not find chapter entry for {faulty_filename}")
             
+            # Translation artifacts have stable non-chapter progress keys and
+            # must be tracked even though their filenames contain no number.
+            artifact_spec = translation_artifact_spec_for_filename(
+                faulty_filename
+            )
+            if artifact_spec:
+                artifact_path = os.path.join(folder_path, faulty_filename)
+                content_hash = None
+                try:
+                    with open(artifact_path, 'rb') as artifact_file:
+                        content_hash = hashlib.sha256(
+                            artifact_file.read()
+                        ).hexdigest()
+                except OSError:
+                    pass
+                chapter_key = artifact_spec['progress_key']
+                prog["chapters"][chapter_key] = {
+                    "actual_num": artifact_spec['actual_num'],
+                    "content_hash": content_hash,
+                    "output_file": faulty_filename,
+                    "original_basename": faulty_filename,
+                    "status": "qa_failed",
+                    "last_updated": time.time(),
+                    "is_special": True,
+                    "special_type": artifact_spec['kind'],
+                    "translation_artifact_progress_key": chapter_key,
+                    "translation_artifact_label": artifact_spec['label'],
+                    "qa_issues": True,
+                    "qa_timestamp": time.time(),
+                    "qa_issues_found": faulty_row.get("issues", []),
+                    "qa_issue_previews": dict(
+                        faulty_row.get("qa_issue_previews", {})
+                        if isinstance(faulty_row.get("qa_issue_previews"), dict)
+                        else {}
+                    ),
+                    "duplicate_confidence": faulty_row.get(
+                        "duplicate_confidence", 0
+                    ),
+                }
+                log(
+                    f"   └─ Created qa_failed entry for "
+                    f"{artifact_spec['label']} ({faulty_filename})"
+                )
+                updated_count += 1
+                updated_nums_for_log.append(artifact_spec['actual_num'])
+                continue
+
             # Try to create a new entry if we can determine the chapter number
             import re
             matches = re.findall(r'(\d+)', faulty_filename)
@@ -9371,13 +9433,37 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
     else:
         html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
+
+    # These three translated artifacts are intentionally scanned separately
+    # from HTML. Their source/audit fields contain foreign text by design, so
+    # only their translated payload values are eligible for QA.
+    folder_names = {
+        name.casefold(): name
+        for name in os.listdir(folder_path)
+        if os.path.isfile(os.path.join(folder_path, name))
+    }
+    artifact_files = [
+        folder_names[expected.casefold()]
+        for expected in QA_TRANSLATION_ARTIFACT_FILENAMES
+        if expected.casefold() in folder_names
+    ] if not text_file_mode else []
     
     # If specific files were selected, filter to those (by basename)
     if selected_files:
         try:
-            selected_basenames = {os.path.basename(p) for p in selected_files}
-            html_files = [f for f in html_files if f in selected_basenames]
-            log(f"📄 Limited scan to {len(html_files)} selected file(s)")
+            selected_basenames = {
+                os.path.basename(p).casefold() for p in selected_files
+            }
+            html_files = [
+                f for f in html_files if f.casefold() in selected_basenames
+            ]
+            artifact_files = [
+                f for f in artifact_files if f.casefold() in selected_basenames
+            ]
+            log(
+                f"📄 Limited scan to "
+                f"{len(html_files) + len(artifact_files)} selected file(s)"
+            )
         except Exception:
             pass
     
@@ -9612,6 +9698,48 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     dup_time = time.time() - dup_start_time
     log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
+
+    artifact_results = []
+    for artifact_filename in artifact_files:
+        artifact_path = os.path.join(folder_path, artifact_filename)
+        try:
+            with open(
+                artifact_path, 'r', encoding='utf-8', errors='ignore'
+            ) as artifact_file:
+                artifact_content = artifact_file.read()
+        except OSError as exc:
+            log(f"⚠️ Could not read {artifact_filename} for QA: {exc}")
+            continue
+        translated_text = translation_artifact_qa_text(
+            artifact_filename, artifact_content
+        )
+        artifact_results.append({
+            'file_index': len(results) + len(artifact_results),
+            'filename': artifact_filename,
+            'filepath': artifact_path,
+            'issues': [],
+            'qa_issue_previews': {},
+            'preview': translated_text[:300].replace('\n', ' '),
+            'preview_normalized': normalize_text(translated_text[:300]),
+            'score': 0,
+            'chapter_num': None,
+            'hashes': {},
+            'raw_text': translated_text,
+            'dup_text': '',
+            'translation_artifacts': [],
+            'small_file_word_count': _count_small_file_words(translated_text),
+            'small_file_word_threshold': 0,
+            'skip_small_file_checks': False,
+            'qa_header_text': '',
+            'translation_artifact_qa_only': True,
+        })
+    if artifact_results:
+        results.extend(artifact_results)
+        log(
+            f"📄 Checking translated payloads in "
+            f"{len(artifact_results)} workspace artifact file(s): "
+            + ", ".join(result['filename'] for result in artifact_results)
+        )
     
     # For text file mode with word count enabled, check the combined file separately
     if text_file_mode and check_word_count and combined_text_file and original_word_counts:
@@ -9660,6 +9788,24 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             log("⛔ QA scan stopped during issue processing.")
             break
         issues = result.get('issues', [])
+
+        if result.get('translation_artifact_qa_only'):
+            raw_text = result.get('raw_text', '')
+            if raw_text:
+                has_non_english, lang_issues = detect_non_english_content(
+                    raw_text, qa_settings
+                )
+                if has_non_english:
+                    issues.extend(lang_issues)
+            result['issues'] = issues
+            result['score'] = len(issues)
+            if issues:
+                log(
+                    f"   {result['filename']}: "
+                    + ', '.join(str(issue) for issue in issues[:2])
+                    + (" ..." if len(issues) > 2 else "")
+                )
+            continue
         
         # Check duplicates
         if result['filename'] in duplicate_groups:
@@ -9975,6 +10121,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
         def _check_one(result_obj):
             """Run truncation check for a single file. Returns (result_obj, trunc_result) or None."""
+            if result_obj.get('translation_artifact_qa_only'):
+                return None
             if should_stop():
                 return None
             try:
@@ -10188,6 +10336,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
             def _ai_check_one(result_obj):
                 """Run AI truncation check for a single file."""
+                if result_obj.get('translation_artifact_qa_only'):
+                    return None
                 # Check ALL stop flags — not just should_stop() but also env vars
                 # that are set by the GUI's force/graceful stop mechanism
                 if should_stop():

@@ -49,6 +49,12 @@ from metadata_progress import (
     is_metadata_progress_entry,
     metadata_field_complete,
 )
+from translation_artifacts import (
+    TRANSLATION_ARTIFACT_SPECS,
+    is_translation_artifact_progress_entry,
+    translation_artifact_spec_for_filename,
+    translation_artifact_spec_for_kind,
+)
 
 _IS_MACOS = (sys.platform == 'darwin')
 _MACHINE_TRANSLATION_DIR = "Machine_Translation"
@@ -10344,6 +10350,13 @@ class RetranslationMixin:
         i.e. one of the rows the "Show skipped files" toggle reveals."""
         if not isinstance(ch, dict):
             return False
+        if self._is_translation_artifact_progress_info(ch):
+            nested = ch.get('info') if isinstance(ch.get('info'), dict) else {}
+            enabled = ch.get(
+                'artifact_translation_enabled',
+                nested.get('artifact_translation_enabled', True),
+            )
+            return not bool(enabled)
         info = ch.get('info') if isinstance(ch.get('info'), dict) else {}
         fname = (
             ch.get('original_filename') or ch.get('filename')
@@ -10362,6 +10375,28 @@ class RetranslationMixin:
             return bool(getattr(self, 'translate_book_title_var'))
         config = getattr(self, 'config', {})
         return bool(config.get('translate_book_title', True)) if isinstance(config, dict) else True
+
+    def _translation_artifact_progress_tracking_enabled(
+        self, kind, file_path=None
+    ):
+        """Whether one generated translation artifact participates in progress."""
+        if file_path and not str(file_path).lower().endswith('.epub'):
+            return False
+        spec = translation_artifact_spec_for_kind(kind)
+        if not spec:
+            return False
+        attr_name = spec['toggle_attr']
+        if hasattr(self, attr_name):
+            return bool(getattr(self, attr_name))
+        config = getattr(self, 'config', {})
+        if not isinstance(config, dict):
+            return bool(spec['default_enabled'])
+        if spec['toggle_config'] in config:
+            return bool(config[spec['toggle_config']])
+        fallback_key = spec.get('toggle_fallback_config')
+        if fallback_key and fallback_key in config:
+            return bool(config[fallback_key])
+        return bool(spec['default_enabled'])
 
     def _zip_is_subtitle_archive(self, file_path):
         """Inspect and cache whether a ZIP is a non-EPUB subtitle archive."""
@@ -10710,6 +10745,58 @@ class RetranslationMixin:
 
             QTimer.singleShot(0, _refresh)
 
+    def _sync_translation_artifact_progress_toggle(self, kind, enabled):
+        """Refresh Progress Manager rows after TOC/header toggle changes."""
+        spec = translation_artifact_spec_for_kind(kind)
+        if not spec:
+            return
+        enabled = bool(enabled)
+        setattr(self, spec['toggle_attr'], enabled)
+        if isinstance(getattr(self, 'config', None), dict):
+            self.config[spec['toggle_config']] = enabled
+            fallback_key = spec.get('toggle_fallback_config')
+            if fallback_key:
+                self.config[fallback_key] = enabled
+        os.environ[spec['toggle_env']] = '1' if enabled else '0'
+        if spec['kind'] == 'toc':
+            self.translate_toc_ncx_var = enabled
+            os.environ['TRANSLATE_TOC_NCX'] = '1' if enabled else '0'
+
+        cached_data = []
+        cache = getattr(self, '_retranslation_dialog_cache', {})
+        if isinstance(cache, dict):
+            cached_data.extend(
+                value for value in cache.values() if isinstance(value, dict)
+            )
+        multi_dialog = getattr(self, '_multi_file_retranslation_dialog', None)
+        if multi_dialog is not None:
+            cached_data.extend(
+                value for value in getattr(multi_dialog, '_tab_data', [])
+                if isinstance(value, dict)
+            )
+
+        seen = set()
+        for data in cached_data:
+            data_id = id(data)
+            if data_id in seen or not data.get('progress_file'):
+                continue
+            seen.add(data_id)
+            data.pop('_prefetched_prog', None)
+            data.pop('_prefetched_prog_path', None)
+            data['_refresh_read_only'] = False
+
+            def _refresh(progress_data=data):
+                try:
+                    if self._is_data_valid(progress_data):
+                        self._refresh_retranslation_data(progress_data)
+                except Exception as exc:
+                    print(
+                        f"⚠️ Could not sync translation artifact progress "
+                        f"visibility: {exc}"
+                    )
+
+            QTimer.singleShot(0, _refresh)
+
     @staticmethod
     def _is_metadata_progress_info(info):
         if not isinstance(info, dict):
@@ -10720,10 +10807,37 @@ class RetranslationMixin:
         output_file = info.get('output_file') or entry.get('output_file')
         return special_type == 'metadata' or os.path.basename(str(output_file or '')).lower() == 'metadata.json'
 
+    @staticmethod
+    def _is_translation_artifact_progress_info(info):
+        if not isinstance(info, dict):
+            return False
+        nested = info.get('info') if isinstance(info.get('info'), dict) else {}
+        entry = (
+            info.get('progress_entry')
+            if isinstance(info.get('progress_entry'), dict)
+            else nested
+        )
+        key = (
+            info.get('progress_key')
+            or entry.get('translation_artifact_progress_key')
+        )
+        output_file = info.get('output_file') or entry.get('output_file')
+        return is_translation_artifact_progress_entry(
+            key,
+            entry or {'output_file': output_file},
+        )
+
     def _progress_entry_needs_special_visibility(self, info):
         """Return whether a row depends on the special-files visibility toggle."""
         if isinstance(info, dict) and info.get('is_subtitle'):
             return False
+        if self._is_translation_artifact_progress_info(info):
+            nested = info.get('info') if isinstance(info.get('info'), dict) else {}
+            enabled = info.get(
+                'artifact_translation_enabled',
+                nested.get('artifact_translation_enabled', True),
+            )
+            return not bool(enabled)
         if self._is_metadata_progress_info(info):
             nested = info.get('info') if isinstance(info.get('info'), dict) else {}
             enabled = info.get(
@@ -10989,6 +11103,10 @@ class RetranslationMixin:
             for preserved_key in (
                 'model_name', 'model', 'key_identifier', 'failure_reason',
                 'error_message', 'metadata_regeneration_requested',
+                'qa_issues', 'qa_timestamp', 'qa_issues_found',
+                'qa_issue_previews', 'duplicate_confidence',
+                'refinement_status', 'refined_at', 'refinement_error',
+                'unrefined_backup_file',
             ):
                 if preserved_key in previous:
                     entry[preserved_key] = previous[preserved_key]
@@ -10996,6 +11114,102 @@ class RetranslationMixin:
             if old_entries.get(key) != entry:
                 changed = True
         return changed or set(old_entries) != {phase['key'] for phase in plan}
+
+    def _ensure_translation_artifact_progress_entries(
+        self, prog, output_dir, file_path=None
+    ):
+        """Synchronize TOC/header cache rows with their generating toggles."""
+        if not isinstance(prog, dict):
+            return False
+        chapters = prog.setdefault('chapters', {})
+        if not isinstance(chapters, dict):
+            chapters = {}
+            prog['chapters'] = chapters
+
+        changed = False
+        for spec in TRANSLATION_ARTIFACT_SPECS:
+            old_entries = {
+                key: dict(entry)
+                for key, entry in chapters.items()
+                if isinstance(entry, dict)
+                and (
+                    entry.get('special_type') == spec['kind']
+                    or os.path.basename(
+                        str(entry.get('output_file') or '')
+                    ).casefold() == spec['filename'].casefold()
+                )
+            }
+            enabled = self._translation_artifact_progress_tracking_enabled(
+                spec['kind'], file_path
+            )
+            if not enabled:
+                for key in old_entries:
+                    chapters.pop(key, None)
+                changed = changed or bool(old_entries)
+                continue
+
+            artifact_path = os.path.join(output_dir, spec['filename'])
+            artifact_exists = os.path.isfile(artifact_path)
+            previous = (
+                old_entries.get(spec['progress_key'])
+                or next(iter(old_entries.values()), {})
+            )
+            previous_status = str(
+                previous.get('status') or 'pending'
+            ).lower()
+            if not artifact_exists:
+                status = 'pending'
+            elif previous_status in {
+                'qa_failed', 'failed', 'error', 'in_progress'
+            }:
+                status = previous_status
+            else:
+                status = 'completed'
+
+            content_hash = previous.get('content_hash', '')
+            last_updated = previous.get('last_updated', time.time())
+            if artifact_exists:
+                try:
+                    with open(artifact_path, 'rb') as artifact_file:
+                        content_hash = hashlib.sha256(
+                            artifact_file.read()
+                        ).hexdigest()
+                    last_updated = os.path.getmtime(artifact_path)
+                except OSError:
+                    pass
+
+            entry = {
+                'actual_num': spec['actual_num'],
+                'content_hash': content_hash,
+                'output_file': spec['filename'],
+                'original_basename': spec['filename'],
+                'status': status,
+                'last_updated': last_updated,
+                'is_special': True,
+                'special_type': spec['kind'],
+                'translation_artifact_progress_key': spec['progress_key'],
+                'translation_artifact_label': spec['label'],
+                'artifact_translation_enabled': True,
+            }
+            for preserved_key in (
+                'model_name', 'model', 'key_identifier', 'failure_reason',
+                'error_message', 'qa_issues', 'qa_timestamp',
+                'qa_issues_found', 'qa_issue_previews',
+                'duplicate_confidence', 'refinement_status', 'refined_at',
+                'refinement_error', 'unrefined_backup_file',
+            ):
+                if preserved_key in previous:
+                    entry[preserved_key] = previous[preserved_key]
+
+            for key in old_entries:
+                chapters.pop(key, None)
+            chapters[spec['progress_key']] = entry
+            if (
+                len(old_entries) != 1
+                or old_entries.get(spec['progress_key']) != entry
+            ):
+                changed = True
+        return changed
 
     def _progress_view_is_subtitle(self, data):
         """Return whether a Progress Manager dataset belongs to subtitles."""
@@ -11099,6 +11313,96 @@ class RetranslationMixin:
                 'progress_key': key if metadata_enabled else None,
             })
         chapter_display_info[0:0] = rows
+
+    def _append_translation_artifact_display_info(
+        self, data, chapter_display_info
+    ):
+        """Add TOC.txt and translated_headers.txt rows after metadata rows."""
+        if self._progress_view_is_subtitle(data):
+            return
+        file_path = str(data.get('file_path') or '')
+        if not file_path.lower().endswith('.epub'):
+            return
+
+        prog = data.get('prog') or {}
+        chapters = prog.get('chapters', {})
+        rows = []
+        for spec in TRANSLATION_ARTIFACT_SPECS:
+            enabled = self._translation_artifact_progress_tracking_enabled(
+                spec['kind'], file_path
+            )
+            entries = [
+                (key, entry)
+                for key, entry in chapters.items()
+                if isinstance(entry, dict)
+                and (
+                    entry.get('special_type') == spec['kind']
+                    or os.path.basename(
+                        str(entry.get('output_file') or '')
+                    ).casefold() == spec['filename'].casefold()
+                )
+            ]
+            if enabled:
+                if not entries:
+                    continue
+                key, entry = next(
+                    (
+                        item for item in entries
+                        if item[0] == spec['progress_key']
+                    ),
+                    entries[0],
+                )
+            else:
+                key = spec['progress_key']
+                entry = {
+                    'actual_num': spec['actual_num'],
+                    'output_file': spec['filename'],
+                    'original_basename': spec['filename'],
+                    'status': 'skipped',
+                    'is_special': True,
+                    'special_type': spec['kind'],
+                    'translation_artifact_progress_key': key,
+                    'translation_artifact_label': spec['label'],
+                    'artifact_translation_enabled': False,
+                }
+
+            status = str(
+                entry.get('status')
+                or ('pending' if enabled else 'skipped')
+            ).lower()
+            artifact_path = os.path.join(
+                data.get('output_dir') or '', spec['filename']
+            )
+            if not enabled:
+                status = 'skipped'
+            elif status == 'completed' and not os.path.isfile(artifact_path):
+                status = 'pending'
+            rows.append({
+                'key': key,
+                'num': spec['actual_num'],
+                'info': entry,
+                'output_file': spec['filename'],
+                'status': status,
+                'duplicate_count': 1,
+                'entries': [(key, entry)],
+                'original_filename': spec['filename'],
+                'is_special': True,
+                'special_type': spec['kind'],
+                'translation_artifact': True,
+                'translation_artifact_label': spec['label'],
+                'artifact_translation_enabled': enabled,
+                'progress_key': key if enabled else None,
+            })
+
+        insert_at = 0
+        while (
+            insert_at < len(chapter_display_info)
+            and self._is_metadata_progress_info(
+                chapter_display_info[insert_at]
+            )
+        ):
+            insert_at += 1
+        chapter_display_info[insert_at:insert_at] = rows
 
     _SPECIAL_KEYWORDS_DEFAULT = ('title, toc, copyright, preface, nav, message, '
                                  'notice, colophon, dedication, epigraph, foreword, '
@@ -12105,6 +12409,16 @@ class RetranslationMixin:
                     json.dump(prog, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"⚠️ Could not update metadata progress entry: {e}")
+        if self._ensure_translation_artifact_progress_entries(
+            prog, output_dir, file_path
+        ):
+            try:
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(
+                    f"⚠️ Could not update TOC/header progress entries: {e}"
+                )
         
         _pump_loading("Reading progress data...")
         
@@ -12844,6 +13158,9 @@ class RetranslationMixin:
             'progress_source_is_subtitle': progress_source_is_subtitle,
         }
         self._append_metadata_display_info(_display_data, chapter_display_info)
+        self._append_translation_artifact_display_info(
+            _display_data, chapter_display_info
+        )
         self._append_pdf_ocr_display_info(_display_data, chapter_display_info)
         self._append_image_gen_display_info(_display_data, chapter_display_info)
         
@@ -12929,7 +13246,8 @@ class RetranslationMixin:
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
         show_special_files_cb.setToolTip(
             "When enabled, shows files skipped by the special-file rules in Other Settings.\n"
-            "Active metadata.json is always visible; disabled metadata appears here as skipped."
+            "Active metadata.json, TOC.txt, and translated_headers.txt rows are always visible;\n"
+            "disabled rows appear here as skipped."
         )
         
         # Register this checkbox and checkmark with parent dialog for cross-tab syncing
@@ -17039,6 +17357,11 @@ class RetranslationMixin:
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
 
             metadata_selected = [ch for ch in selected_chapters if self._is_metadata_progress_info(ch)]
+            artifact_selected = [
+                ch for ch in selected_chapters
+                if self._is_translation_artifact_progress_info(ch)
+            ]
+            translated_file_selected = metadata_selected + artifact_selected
             tracked_metadata_keys = {
                 key for key, entry in data.get('prog', {}).get('chapters', {}).items()
                 if isinstance(entry, dict) and is_metadata_progress_entry(key, entry)
@@ -17059,20 +17382,50 @@ class RetranslationMixin:
                     "Enable 'Translate Book Title / Metadata' before requesting metadata regeneration.",
                 )
                 return
+            disabled_artifacts = [
+                ch for ch in artifact_selected
+                if not self._translation_artifact_progress_tracking_enabled(
+                    ch.get('special_type')
+                    or (ch.get('info') or {}).get('special_type'),
+                    data.get('file_path'),
+                )
+            ]
+            if disabled_artifacts:
+                disabled_labels = [
+                    ch.get('translation_artifact_label')
+                    or (ch.get('info') or {}).get(
+                        'translation_artifact_label'
+                    )
+                    or ch.get('output_file')
+                    for ch in disabled_artifacts
+                ]
+                self._styled_msgbox(
+                    QMessageBox.Information,
+                    data.get('dialog', self),
+                    "Translation Feature Disabled",
+                    "Enable the matching TOC/header translation toggle before "
+                    "requesting regeneration for: "
+                    + ", ".join(disabled_labels),
+                )
+                return
             if (
                 self._current_progress_output_mode(data) == 'audio'
-                and metadata_selected
-                and len(metadata_selected) != len(selected_chapters)
+                and translated_file_selected
+                and len(translated_file_selected) != len(selected_chapters)
             ):
                 self._styled_msgbox(
                     QMessageBox.Warning,
                     data.get('dialog', self),
                     "Mixed Selection",
-                    "Select metadata.json separately from chapter rows when resetting Audio output.",
+                    "Select metadata.json, TOC.txt, and translated_headers.txt "
+                    "separately from chapter rows when resetting Audio output.",
                 )
                 return
 
-            if self._current_progress_output_mode(data) == 'audio' and not metadata_selected:
+            if (
+                self._current_progress_output_mode(data) == 'audio'
+                and not translated_file_selected
+            ):
                 count = len(selected_chapters)
                 reply = self._styled_msgbox(
                     QMessageBox.Question,
@@ -17209,7 +17562,13 @@ class RetranslationMixin:
                         ch.get('metadata_label')
                         or (ch.get('info') or {}).get('metadata_label')
                         or "Metadata"
-                    ) if self._is_metadata_progress_info(ch) else f"Ch.{ch['num']}"
+                    ) if self._is_metadata_progress_info(ch) else (
+                        ch.get('translation_artifact_label')
+                        or (ch.get('info') or {}).get(
+                            'translation_artifact_label'
+                        )
+                        or ch.get('output_file')
+                    ) if self._is_translation_artifact_progress_info(ch) else f"Ch.{ch['num']}"
                     for ch in selected_chapters
                 ]
                 confirm_msg = f"This will process:\n\n{', '.join(chapters)}\n\n"
@@ -19042,6 +19401,15 @@ class RetranslationMixin:
                 )
             ):
                 _write_progress_json_safely(data['progress_file'], data['prog'])
+            if (
+                not _read_only_tick
+                and self._ensure_translation_artifact_progress_entries(
+                    data['prog'], data['output_dir'], data.get('file_path')
+                )
+            ):
+                _write_progress_json_safely(
+                    data['progress_file'], data['prog']
+                )
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
@@ -19452,6 +19820,9 @@ class RetranslationMixin:
             chapter_display_info.append(display_info)
         
         self._append_metadata_display_info(data, chapter_display_info)
+        self._append_translation_artifact_display_info(
+            data, chapter_display_info
+        )
         self._append_pdf_ocr_display_info(data, chapter_display_info)
         self._append_image_gen_display_info(data, chapter_display_info)
         data['chapter_display_info'] = chapter_display_info
@@ -19595,6 +19966,9 @@ class RetranslationMixin:
         chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
         
         self._append_metadata_display_info(data, chapter_display_info)
+        self._append_translation_artifact_display_info(
+            data, chapter_display_info
+        )
         self._append_pdf_ocr_display_info(data, chapter_display_info)
         self._append_image_gen_display_info(data, chapter_display_info)
 
@@ -20041,9 +20415,12 @@ class RetranslationMixin:
 
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
-        # Metadata is a translation phase, not a chapter post-processing item.
-        # Keep its own status even when the current output mode is TTS/refine.
-        if self._is_metadata_progress_info(info):
+        # Generated translation artifacts are translation phases, not chapter
+        # post-processing items. Keep their own status in TTS/refine views.
+        if (
+            self._is_metadata_progress_info(info)
+            or self._is_translation_artifact_progress_info(info)
+        ):
             status = str(info.get('status') or 'pending').lower()
             if status in ('completed_empty', 'completed_image_only'):
                 return 'completed'
@@ -20366,6 +20743,18 @@ class RetranslationMixin:
                 or 'Metadata'
             )
             display = f"{metadata_label} | {icon} {status_label:11s} | metadata.json -> {output_display}"
+        elif self._is_translation_artifact_progress_info(info):
+            artifact_label = (
+                info.get('translation_artifact_label')
+                or (info.get('info') or {}).get(
+                    'translation_artifact_label'
+                )
+                or output_file
+            )
+            display = (
+                f"{artifact_label} | {icon} {status_label:11s} | "
+                f"{output_file} -> {output_display}"
+            )
         elif info.get('pdf_ocr'):
             display = f"PDF OCR | {icon} {status_label:18s} | {output_display}"
         elif info.get('is_subtitle'):
