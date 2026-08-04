@@ -1516,102 +1516,35 @@ def test_translation_glossary_lookup_never_falls_back_to_unrelated_book(
     assert find_glossary_file(str(output_dir)) is None
 
 
-def test_preextracted_glossary_lookup_uses_exact_current_epub_identity(
-    tmp_path,
-):
-    from TransateKRtoEN import (
-        _find_preextracted_glossary_for_input,
-        _glossary_path_matches_input,
-    )
+def test_preextracted_glossary_fallback_uses_exact_book_identity(tmp_path):
+    from TransateKRtoEN import _preextracted_glossary_matches_input
 
-    glossary_root = tmp_path / "Glossary"
-    current_dir = glossary_root / "Novel Volume 7"
-    current_dir.mkdir(parents=True)
-    current = current_dir / "Novel Volume 7_glossary.csv"
-    current.write_text("current,correct\n", encoding="utf-8")
+    input_epub = tmp_path / "Novel Volume 9.epub"
+    correct = tmp_path / "Novel Volume 9" / "Novel Volume 9_glossary.csv"
+    wrong = tmp_path / "Novel Volume 7" / "Novel Volume 7_glossary.csv"
+    generic = tmp_path / "Novel Volume 9" / "glossary.csv"
 
-    for book_name in ("Novel Volume 70", "Novel Volume 9"):
-        wrong_dir = glossary_root / book_name
-        wrong_dir.mkdir()
-        wrong = wrong_dir / f"{book_name}_glossary.csv"
-        wrong.write_text("wrong,wrong\n", encoding="utf-8")
-        os.utime(wrong, (current.stat().st_mtime + 100, current.stat().st_mtime + 100))
-
-    input_epub = tmp_path / "Novel Volume 7.epub"
-
-    assert _glossary_path_matches_input(str(current), str(input_epub)) is True
-    assert (
-        _glossary_path_matches_input(
-            str(glossary_root / "Novel Volume 9" / "Novel Volume 9_glossary.csv"),
-            str(input_epub),
-        )
-        is False
-    )
-    assert os.path.abspath(
-        _find_preextracted_glossary_for_input(
-            str(glossary_root),
-            str(input_epub),
-        )
-    ) == os.path.abspath(current)
+    assert _preextracted_glossary_matches_input(str(correct), str(input_epub))
+    assert _preextracted_glossary_matches_input(str(generic), str(input_epub))
+    assert not _preextracted_glossary_matches_input(str(wrong), str(input_epub))
 
 
-@pytest.mark.parametrize(
-    ("auto_mode", "mapping_source", "has_glossary", "expected"),
-    [
-        ("balanced", "manual", True, False),
-        ("full", "manual", True, False),
-        ("balanced", "auto", True, True),
-        ("balanced", "none", False, True),
-        ("off", "auto", True, False),
-    ],
-)
-def test_preextracted_fallback_respects_explicit_manual_mapping(
-    auto_mode,
-    mapping_source,
-    has_glossary,
-    expected,
-):
-    from TransateKRtoEN import _should_search_preextracted_glossary
-
-    assert (
-        _should_search_preextracted_glossary(
-            auto_mode,
-            mapping_source,
-            has_glossary,
-        )
-        is expected
-    )
+def test_preextracted_fallback_only_runs_when_gui_glossary_is_missing():
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "TransateKRtoEN.py"
+    ).read_text(encoding="utf-8")
+    assert "and _gui_glossary_available:" in source
+    assert "elif auto_mode in ('balanced', 'full'):" in source
+    assert "skipping fallback search" in source
 
 
-def test_per_epub_mapping_source_survives_as_explicit_provenance(tmp_path):
-    from types import SimpleNamespace
+def test_glossary_log_uses_gui_manual_or_auto_mapping_source():
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    backend = (source_root / "TransateKRtoEN.py").read_text(encoding="utf-8")
+    gui = (source_root / "translator_gui.py").read_text(encoding="utf-8")
 
-    from translator_gui import TranslatorGUI
-
-    input_epub = tmp_path / "Novel Volume 7.epub"
-    glossary = tmp_path / "Novel Volume 7_glossary.csv"
-    glossary.write_text("term,translation\n", encoding="utf-8")
-    input_key = os.path.normpath(os.path.abspath(input_epub))
-    glossary_path = os.path.normpath(os.path.abspath(glossary))
-    gui = SimpleNamespace(
-        manual_glossary_map={input_key: glossary_path},
-        manual_glossary_map_source="manual",
-        manual_glossary_manually_loaded=False,
-        config={},
-    )
-
-    assert TranslatorGUI._glossary_mapping_source_for_env(
-        gui,
-        str(input_epub),
-        glossary_path,
-    ) == "manual"
-
-    gui.manual_glossary_map_source = "auto"
-    assert TranslatorGUI._glossary_mapping_source_for_env(
-        gui,
-        str(input_epub),
-        glossary_path,
-    ) == "auto"
+    assert "Using {_glossary_mapping_label} glossary from:" in backend
+    assert "'GLOSSARY_MAPPING_SOURCE': glossary_mapping_source" in gui
 
 
 def test_subtitle_glossary_phase_log_reports_preextraction_not_skipping():

@@ -11108,11 +11108,10 @@ def find_glossary_file(output_dir):
     return None
 
 
-def _glossary_path_matches_input(glossary_path, input_path):
-    """Return whether an auto-mapped glossary exactly belongs to an input."""
+def _preextracted_glossary_matches_input(glossary_path, input_path):
+    """Match a fallback glossary to the current input without substrings."""
     if not glossary_path or not input_path:
         return False
-
     input_base = os.path.splitext(os.path.basename(input_path))[0].casefold()
     glossary_stem = os.path.splitext(
         os.path.basename(glossary_path)
@@ -11121,85 +11120,10 @@ def _glossary_path_matches_input(glossary_path, input_path):
         os.path.dirname(glossary_path)
     ).casefold()
     return (
-        glossary_stem in {input_base, f"{input_base}_glossary"}
-        or (
-            glossary_parent == input_base
-            and glossary_stem in {
-                "glossary",
-                input_base,
-                f"{input_base}_glossary",
-            }
-        )
+        glossary_stem in (input_base, f"{input_base}_glossary")
+        or glossary_parent == input_base
     )
 
-
-def _find_preextracted_glossary_for_input(glossary_dir, input_path):
-    """Find only the shared glossary belonging to ``input_path``.
-
-    Balanced/Full fallback lookup must never use substring matching: volume
-    names commonly differ only by a number, so ``Volume 7`` must not match a
-    glossary for ``Volume 70`` or another selected book.
-    """
-    if not glossary_dir or not os.path.isdir(glossary_dir) or not input_path:
-        return None
-
-    candidates = []
-    extension_priority = {'.csv': 0, '.json': 1}
-
-    try:
-        for root, dirs, files_in_root in os.walk(glossary_dir):
-            if root != glossary_dir:
-                dirs[:] = []
-            for filename in files_in_root:
-                path = os.path.join(root, filename)
-                if not os.path.isfile(path):
-                    continue
-                stem, extension = os.path.splitext(filename)
-                extension = extension.lower()
-                if extension not in extension_priority:
-                    continue
-                stem_name = stem.casefold()
-                if (
-                    '_progress' in stem_name
-                    or stem_name.endswith('_gender_tracker')
-                    or stem_name.endswith('_glossary_history')
-                ):
-                    continue
-                if not _glossary_path_matches_input(path, input_path):
-                    continue
-                try:
-                    modified = os.path.getmtime(path)
-                except OSError:
-                    modified = 0
-                candidates.append(
-                    (-modified, extension_priority[extension], path)
-                )
-    except Exception:
-        return None
-
-    candidates.sort(key=lambda item: (item[0], item[1], item[2].casefold()))
-    return candidates[0][2] if candidates else None
-
-
-def _should_search_preextracted_glossary(
-    auto_mode,
-    mapping_source,
-    has_resolved_glossary,
-):
-    """Return whether Balanced/Full needs its backend fallback lookup."""
-    normalized_mode = (
-        str(auto_mode or '')
-        .strip()
-        .lower()
-        .replace(' ', '_')
-        .replace('-', '_')
-    )
-    if normalized_mode not in ('balanced', 'full'):
-        return False
-    return not (
-        str(mapping_source or '').strip().lower() == 'manual'
-        and bool(has_resolved_glossary)
-    )
 
 def _single_pass_glossary_mode():
     """Return the requested single-pass glossary depth, or None when disabled."""
@@ -22490,11 +22414,8 @@ def main(log_callback=None, stop_callback=None):
     else:
         print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
         print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
-        print(
-            "📑 DEBUG: GLOSSARY_MAPPING_SOURCE = "
-            f"'{os.getenv('GLOSSARY_MAPPING_SOURCE', 'NOT SET')}'"
-        )
-        print(f"📑 DEBUG: Configured glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
+        print(f"📑 DEBUG: GLOSSARY_MAPPING_SOURCE = '{os.getenv('GLOSSARY_MAPPING_SOURCE', 'NOT SET')}'")
+        print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
         print(f"📑 DEBUG: APPEND_GLOSSARY = '{os.getenv('APPEND_GLOSSARY', '1')}'")
         print(f"📑 DEBUG: APPEND_GLOSSARY_PROMPT = '{os.getenv('APPEND_GLOSSARY_PROMPT', 'NOT SET')}'")
         print(f"📑 DEBUG: Duplicate algorithm = '{os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')}'")
@@ -22552,59 +22473,23 @@ def main(log_callback=None, stop_callback=None):
             except Exception:
                 return False
 
-        _auto_mode_env = (
-            os.getenv("AUTO_GLOSSARY_MODE", "off")
-            .strip()
-            .lower()
-            .replace(" ", "_")
-            .replace("-", "_")
-        )
-        _mapping_source = (
-            os.getenv("GLOSSARY_MAPPING_SOURCE", "")
-            .strip()
-            .lower()
-        )
-        if _mapping_source not in ("manual", "auto", "none"):
-            # Non-GUI and older callers historically use MANUAL_GLOSSARY only
-            # for an explicit choice. Preserve that behavior when the source
-            # marker is absent.
-            _mapping_source = "manual" if config.MANUAL_GLOSSARY else "none"
-        _mapping_label = {
-            "manual": "manual",
-            "auto": "auto-mapped",
-        }.get(_mapping_source, "configured")
-        _resolved_gui_glossary = (
-            config.MANUAL_GLOSSARY
-            if (
-                config.MANUAL_GLOSSARY
-                and os.path.isfile(config.MANUAL_GLOSSARY)
-                and _has_glossary_data(config.MANUAL_GLOSSARY)
-            )
-            else ""
-        )
-        _defer_auto_mapping_validation = bool(
-            _resolved_gui_glossary
-            and _mapping_source == "auto"
-            and _auto_mode_env in ("balanced", "full")
+        _glossary_mapping_source = os.getenv(
+            "GLOSSARY_MAPPING_SOURCE",
+            "manual",
+        ).strip().lower()
+        _glossary_mapping_label = (
+            "auto-mapped"
+            if _glossary_mapping_source == "auto"
+            else "manual"
         )
 
         # If manual glossary is present but empty/header-only, clear it so auto-gen can run
         if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and not _has_glossary_data(config.MANUAL_GLOSSARY):
-            print(
-                f"📑 {_mapping_label.capitalize()} glossary is empty; "
-                "ignoring to allow automatic generation."
-            )
+            print("📑 Manual glossary is empty; ignoring to allow automatic generation.")
             config.MANUAL_GLOSSARY = ""
             os.environ.pop("MANUAL_GLOSSARY", None)
-            _resolved_gui_glossary = ""
-            _defer_auto_mapping_validation = False
 
-        if (
-            config.MANUAL_GLOSSARY
-            and os.path.isfile(config.MANUAL_GLOSSARY)
-            and _has_glossary_data(config.MANUAL_GLOSSARY)
-            and not _defer_auto_mapping_validation
-        ):
+        if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and _has_glossary_data(config.MANUAL_GLOSSARY):
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
             # Treat .txt and .md files as CSV format (keep original extension)
             if ext in [".csv", ".txt"]:
@@ -22625,6 +22510,7 @@ def main(log_callback=None, stop_callback=None):
             # output file. If the user selected an external manual glossary,
             # it is authoritative and must replace a stale glossary left by an
             # older run in the reused output directory.
+            _auto_mode_env = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
             _existing_in_output = find_glossary_file(out)
             if (
                 _auto_mode_env == "off_no_automap"
@@ -22649,14 +22535,11 @@ def main(log_callback=None, stop_callback=None):
             elif os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
                 shutil.copy(config.MANUAL_GLOSSARY, target_path)
                 print(
-                    f"📑 Using {_mapping_label} glossary from:",
+                    f"📑 Using {_glossary_mapping_label} glossary from:",
                     config.MANUAL_GLOSSARY,
                 )
             else:
-                print(
-                    f"📑 Using existing {_mapping_label} glossary:",
-                    config.MANUAL_GLOSSARY,
-                )
+                print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
             
             # Copy glossary extension if configured
             if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
@@ -22674,11 +22557,6 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⚠️ Failed to copy glossary extension: {e}")
                     else:
                         print(f"📑 Using existing glossary extension in output folder")
-        elif _defer_auto_mapping_validation:
-            print(
-                "📑 GUI auto-map candidate awaiting exact Balanced/Full "
-                f"validation: {os.path.basename(_resolved_gui_glossary)}"
-            )
         # If existing glossaries in output are empty, delete them so they don't block auto-gen
         if os.path.exists(existing_glossary_csv) and not _has_glossary_data(existing_glossary_csv):
             try:
@@ -23305,166 +23183,85 @@ def main(log_callback=None, stop_callback=None):
             # Check if the new AUTO_GLOSSARY_MODE is balanced/full
             # (glossary was pre-extracted by the GUI before translation started)
             auto_mode = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
-            if auto_mode in ('balanced', 'full'):
+            _gui_glossary_available = bool(
+                config.MANUAL_GLOSSARY
+                and os.path.isfile(config.MANUAL_GLOSSARY)
+                and _has_glossary_data(config.MANUAL_GLOSSARY)
+            )
+            if auto_mode in ('balanced', 'full') and _gui_glossary_available:
                 print(f"📑 Auto glossary mode: {auto_mode} (pre-extracted by GUI)")
-                has_resolved_glossary = bool(
-                    _resolved_gui_glossary
-                    and os.path.isfile(_resolved_gui_glossary)
-                    and _has_glossary_data(_resolved_gui_glossary)
+                print(
+                    f"📑 {_glossary_mapping_label.capitalize()} glossary already "
+                    "supplied; skipping fallback search: "
+                    f"{os.path.basename(config.MANUAL_GLOSSARY)}"
                 )
-                if not _should_search_preextracted_glossary(
-                    auto_mode,
-                    _mapping_source,
-                    has_resolved_glossary,
-                ):
-                    print(
-                        "📑 Explicit per-EPUB manual glossary already resolved; "
-                        "skipping pre-extracted fallback: "
-                        f"{os.path.basename(_resolved_gui_glossary)}"
-                    )
+            elif auto_mode in ('balanced', 'full'):
+                print(f"📑 Auto glossary mode: {auto_mode} (pre-extracted by GUI)")
+                # The GUI should have set MANUAL_GLOSSARY, but if auto-load failed,
+                # try to find the glossary in the Glossary/ folder as fallback
+                override_dir = os.getenv('OUTPUT_DIRECTORY', '')
+                if override_dir:
+                    glossary_search_dir = os.path.join(override_dir, "Glossary")
                 else:
-                    # Auto-mapped candidates are validated against the current
-                    # EPUB's exact shared-glossary identity. This repairs stale
-                    # global auto-map state without overriding a mapping the
-                    # user explicitly saved in the per-EPUB dialog.
-                    override_dir = os.getenv('OUTPUT_DIRECTORY', '')
-                    if override_dir:
-                        glossary_search_dir = os.path.join(
-                            override_dir,
-                            "Glossary",
-                        )
-                    else:
-                        glossary_search_dir = "Glossary"
-                    # On macOS .app bundles, cwd can be '/' (read-only root).
-                    if (
-                        sys.platform == 'darwin'
-                        and not os.path.isabs(glossary_search_dir)
-                    ):
-                        glossary_search_dir = os.path.join(
-                            os.path.dirname(os.path.abspath(input_path)),
-                            glossary_search_dir,
-                        )
+                    glossary_search_dir = "Glossary"
+                # On macOS .app bundles, cwd can be '/' (read-only root).
+                if sys.platform == 'darwin' and not os.path.isabs(glossary_search_dir):
+                    glossary_search_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), glossary_search_dir)
 
-                    if os.path.isdir(glossary_search_dir):
-                        try:
-                            from glossary_paths import migrate_all_legacy_glossary_files
-                            migrate_all_legacy_glossary_files(
-                                glossary_search_dir,
-                                logger=print,
-                            )
-                        except Exception:
-                            pass
+                if os.path.isdir(glossary_search_dir):
+                    input_base_raw = os.path.splitext(os.path.basename(input_path))[0]
+                    input_base = input_base_raw.lower()
+                    try:
+                        from glossary_paths import migrate_all_legacy_glossary_files
+                        migrate_all_legacy_glossary_files(glossary_search_dir, logger=print)
+                    except Exception:
+                        pass
+                    best_match = None
+                    best_mtime = 0
+                    try:
+                        for root, dirs, files_in_root in os.walk(glossary_search_dir):
+                            if root != glossary_search_dir:
+                                dirs[:] = []
+                            for fn in files_in_root:
+                                fp = os.path.join(root, fn)
+                                if not os.path.isfile(fp):
+                                    continue
+                                stem, ext = os.path.splitext(fn)
+                                if ext.lower() not in ('.csv', '.json'):
+                                    continue
+                                stem_lower = stem.lower()
+                                if (
+                                    '_progress' in stem_lower
+                                    or stem_lower.endswith('_gender_tracker')
+                                    or stem_lower.endswith('_glossary_history')
+                                ):
+                                    continue
+                                if _preextracted_glossary_matches_input(fp, input_path):
+                                    mtime = os.path.getmtime(fp)
+                                    if mtime > best_mtime:
+                                        best_match = fp
+                                        best_mtime = mtime
+                    except Exception:
+                        pass
 
-                        exact_match = _find_preextracted_glossary_for_input(
-                            glossary_search_dir,
-                            input_path,
-                        )
-                        candidate_matches_input = bool(
-                            has_resolved_glossary
-                            and _glossary_path_matches_input(
-                                _resolved_gui_glossary,
-                                input_path,
-                            )
-                        )
-                        selected_glossary = exact_match
-                        if exact_match:
-                            print(
-                                "📑 Validated pre-extracted glossary for "
-                                f"current EPUB: {os.path.basename(exact_match)}"
-                            )
-                        elif candidate_matches_input:
-                            selected_glossary = _resolved_gui_glossary
-                            print(
-                                "📑 No exact shared fallback found; using GUI "
-                                "auto-map candidate validated for current EPUB: "
-                                f"{os.path.basename(selected_glossary)}"
-                            )
-                        elif has_resolved_glossary:
-                            print(
-                                "⚠️ Ignoring GUI auto-map candidate for a "
-                                "different EPUB: "
-                                f"{os.path.basename(_resolved_gui_glossary)}"
-                            )
-                            config.MANUAL_GLOSSARY = ""
-                            os.environ.pop('MANUAL_GLOSSARY', None)
-
-                        if selected_glossary:
-                            target_ext = os.path.splitext(selected_glossary)[1]
-                            target_name = f"glossary{target_ext}"
-                            target_path = os.path.join(out, target_name)
-                            try:
-                                same_path = (
-                                    os.path.abspath(selected_glossary)
-                                    == os.path.abspath(target_path)
-                                )
-                                target_existed = os.path.exists(target_path)
-                                if not same_path:
-                                    shutil.copy2(selected_glossary, target_path)
-                                config.MANUAL_GLOSSARY = selected_glossary
-                                os.environ['MANUAL_GLOSSARY'] = selected_glossary
-                                if same_path:
-                                    print(
-                                        f"📑 Using glossary already in output: "
-                                        f"{target_name}"
-                                    )
-                                elif target_existed:
-                                    print(
-                                        "📑 Refreshed output glossary from "
-                                        f"current EPUB mapping: {target_name}"
-                                    )
-                                else:
-                                    print(
-                                        f"📑 Copied glossary to output: "
-                                        f"{target_name}"
-                                    )
-                            except Exception as e:
-                                print(f"⚠️ Failed to install resolved glossary: {e}")
-                        else:
-                            input_base = os.path.splitext(
-                                os.path.basename(input_path)
-                            )[0]
-                            print(
-                                f"📑 No matching glossary found in "
-                                f"{glossary_search_dir} for '{input_base}'"
-                            )
-                    elif (
-                        has_resolved_glossary
-                        and _glossary_path_matches_input(
-                            _resolved_gui_glossary,
-                            input_path,
-                        )
-                    ):
-                        # The shared folder is unavailable, but the GUI's
-                        # per-file auto-map candidate still exists.
-                        selected_glossary = _resolved_gui_glossary
-                        target_ext = os.path.splitext(selected_glossary)[1]
+                    if best_match:
+                        print(f"📑 Found pre-extracted glossary: {os.path.basename(best_match)}")
+                        # Copy to output dir so find_glossary_file() can find it
+                        target_ext = os.path.splitext(best_match)[1]
                         target_name = f"glossary{target_ext}"
                         target_path = os.path.join(out, target_name)
-                        try:
-                            if (
-                                os.path.abspath(selected_glossary)
-                                != os.path.abspath(target_path)
-                            ):
-                                shutil.copy2(selected_glossary, target_path)
-                            config.MANUAL_GLOSSARY = selected_glossary
-                            os.environ['MANUAL_GLOSSARY'] = selected_glossary
-                            print(
-                                "📑 Shared Glossary folder unavailable; using "
-                                "GUI auto-map candidate: "
-                                f"{os.path.basename(selected_glossary)}"
-                            )
-                        except Exception as e:
-                            print(f"⚠️ Failed to install GUI auto-map glossary: {e}")
+                        if not os.path.exists(target_path):
+                            try:
+                                shutil.copy(best_match, target_path)
+                                print(f"📑 Copied glossary to output: {target_name}")
+                            except Exception as e:
+                                print(f"⚠️ Failed to copy glossary: {e}")
+                        else:
+                            print(f"📑 Glossary already exists in output: {target_name}")
                     else:
-                        if has_resolved_glossary:
-                            print(
-                                "⚠️ Ignoring GUI auto-map candidate for a "
-                                "different EPUB: "
-                                f"{os.path.basename(_resolved_gui_glossary)}"
-                            )
-                            config.MANUAL_GLOSSARY = ""
-                            os.environ.pop('MANUAL_GLOSSARY', None)
-                        print(f"📑 Glossary folder not found: {glossary_search_dir}")
+                        print(f"📑 No matching glossary found in {glossary_search_dir} for '{input_base}'")
+                else:
+                    print(f"📑 Glossary folder not found: {glossary_search_dir}")
             else:
                 print("📑 Automatic glossary generation disabled")
         # Don't create an empty glossary - let any existing manual glossary remain
