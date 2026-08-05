@@ -43311,7 +43311,7 @@ Important rules:
             # Set defaults for settings that might not exist yet
             self.config.setdefault('glossary_auto_backup', True)
             self.config.setdefault('glossary_max_backups', 50)
-            default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
+            default_qa_settings = {'foreign_char_threshold': 0, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': True, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': True, 'check_multiple_headers': True, 'warn_name_mismatch': True, 'check_missing_html_tag': True, 'check_missing_beautifulsoup_tags': False, 'sdlxliff_tag_retention_threshold': 0.9, 'sdlxliff_tag_surplus_tolerance': 0.05, 'check_invalid_nesting': False, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
             self.config.setdefault('qa_scanner_settings', default_qa_settings)
             self.config.setdefault('ai_hunter_config', {}).setdefault(
                 'ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2))
@@ -43623,7 +43623,8 @@ Important rules:
             'QA_REPORT_FORMAT': 'QA report format',
             'QA_AUTO_SAVE_REPORT': 'Auto-save QA reports',
             'QA_CACHE_ENABLED': 'QA cache enabled',
-            'QA_PARAGRAPH_THRESHOLD': 'Paragraph structure threshold',
+            'QA_SDLXLIFF_TAG_RETENTION_THRESHOLD': 'SDLXLIFF source tag retention threshold',
+            'QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE': 'SDLXLIFF surplus output tag tolerance',
             'AI_HUNTER_MAX_WORKERS': 'AI Hunter maximum workers',
         }
         
@@ -43983,7 +43984,8 @@ Important rules:
                 ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
                 ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
                 ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
-                ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                ('QA_SDLXLIFF_TAG_RETENTION_THRESHOLD', str(qa_settings.get('sdlxliff_tag_retention_threshold', 0.9))),
+                ('QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE', str(qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05))),
                 ('QA_CHECK_SILENT_TRUNCATION', '1' if qa_settings.get('check_silent_truncation', False) else '0'),
                 ('QA_CHECK_POTENTIAL_TRUNCATION', '1' if qa_settings.get('check_potential_truncation', False) else '0'),
                 ('QA_CHECK_AI_TRUNCATION_DETECTION', '1' if qa_settings.get('check_ai_truncation_detection', False) else '0'),

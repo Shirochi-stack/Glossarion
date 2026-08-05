@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover - fallback path for stripped builds
     httpx = None
 
 import requests
+from installer_utils import run_logged_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -1930,16 +1931,6 @@ def _automatic_bun_install_command() -> Optional[List[str]]:
     ]
 
 
-def _installer_output(result: subprocess.CompletedProcess) -> str:
-    output = "\n".join(
-        part.strip()
-        for part in (getattr(result, "stdout", ""), getattr(result, "stderr", ""))
-        if part and part.strip()
-    )
-    # Installer output is useful, but should not flood the GUI error dialog.
-    return output[-2000:] if output else "No installer output was returned."
-
-
 def _install_bun_automatically(log_fn=None) -> Dict[str, Any]:
     """Install Bun for the current user and return a structured result."""
     _log = log_fn or _log_noop
@@ -1957,32 +1948,33 @@ def _install_bun_automatically(log_fn=None) -> Dict[str, Any]:
     _log(f"▶ Running: {command_text}")
 
     try:
-        kwargs: Dict[str, Any] = {
-            "capture_output": True,
-            "text": True,
-            "timeout": BUN_INSTALL_TIMEOUT_SECONDS,
-            "check": False,
-        }
+        popen_kwargs: Dict[str, Any] = {}
         if sys.platform == "win32":
             try:
                 from shutdown_utils import subprocess_no_window_kwargs
 
-                kwargs.update(subprocess_no_window_kwargs())
+                popen_kwargs.update(subprocess_no_window_kwargs())
             except Exception:
                 pass
-        result = subprocess.run(command, **kwargs)
-    except subprocess.TimeoutExpired:
-        error = f"Automatic Bun installation timed out after {BUN_INSTALL_TIMEOUT_SECONDS}s."
-        _log(f"❌ {error}")
-        return {"installed": False, "command": command_text, "error": error}
+        result = run_logged_subprocess(
+            command,
+            log_fn=_log,
+            timeout=BUN_INSTALL_TIMEOUT_SECONDS,
+            env=os.environ.copy(),
+            popen_kwargs=popen_kwargs,
+        )
     except Exception as exc:
         error = f"Automatic Bun installation could not start: {exc}"
         _log(f"❌ {error}")
         return {"installed": False, "command": command_text, "error": error}
 
-    output = _installer_output(result)
-    if result.returncode != 0:
-        error = f"Bun installer exited with code {result.returncode}: {output}"
+    output = str(result.get("output") or "No installer output was returned.")
+    if result.get("timed_out"):
+        error = f"Automatic Bun installation timed out after {BUN_INSTALL_TIMEOUT_SECONDS}s."
+        _log(f"❌ {error}")
+        return {"installed": False, "command": command_text, "error": error}
+    if int(result.get("returncode", -1)) != 0:
+        error = f"Bun installer exited with code {result.get('returncode')}: {output}"
         _log(f"❌ {error}")
         return {"installed": False, "command": command_text, "error": error}
 

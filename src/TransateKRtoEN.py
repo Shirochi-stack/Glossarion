@@ -1435,7 +1435,12 @@ def _load_qa_scanner_settings_from_env():
             "report_format": os.getenv("QA_REPORT_FORMAT", "detailed"),
             "auto_save_report": _env_bool("QA_AUTO_SAVE_REPORT", True),
             "cache_enabled": _env_bool("QA_CACHE_ENABLED", True),
-            "paragraph_threshold": _env_float("QA_PARAGRAPH_THRESHOLD", 0.3),
+            "sdlxliff_tag_retention_threshold": _env_float(
+                "QA_SDLXLIFF_TAG_RETENTION_THRESHOLD", 0.9
+            ),
+            "sdlxliff_tag_surplus_tolerance": _env_float(
+                "QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE", 0.05
+            ),
             "check_silent_truncation": _env_bool("QA_CHECK_SILENT_TRUNCATION", False),
             "check_potential_truncation": _env_bool("QA_CHECK_POTENTIAL_TRUNCATION", False),
             "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),

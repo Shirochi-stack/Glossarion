@@ -6547,7 +6547,12 @@ def _sdlxliff_review_tag_counts(folder_path, filename):
         return None, None
 
 
-def _missing_beautifulsoup_tags_issue(source_counts, output_counts):
+def _missing_beautifulsoup_tags_issue(
+    source_counts,
+    output_counts,
+    retention_threshold=1.0,
+    surplus_tolerance=0.0,
+):
     if not isinstance(source_counts, dict):
         return None
     output_counts = output_counts if isinstance(output_counts, dict) else {}
@@ -6561,6 +6566,22 @@ def _missing_beautifulsoup_tags_issue(source_counts, output_counts):
     delta = total_output - total_source
     if delta == 0:
         return None
+    if delta < 0 and total_source > 0:
+        try:
+            threshold = float(retention_threshold)
+        except (TypeError, ValueError):
+            threshold = 1.0
+        threshold = max(0.0, min(threshold, 1.0))
+        if (total_output / total_source) >= threshold:
+            return None
+    if delta > 0 and total_source > 0:
+        try:
+            tolerance = float(surplus_tolerance)
+        except (TypeError, ValueError):
+            tolerance = 0.0
+        tolerance = max(0.0, min(tolerance, 1.0))
+        if (delta / total_source) <= tolerance:
+            return None
     return f"missing_tags: {total_source}/{total_output} ({delta:+d})"
 
 
@@ -8270,8 +8291,6 @@ def process_html_file_batch(args):
                             # Only add issue if source actually had header tags
                             if source_had_headers:
                                 issues.append("missing_header_tags")
-                    elif issue == 'insufficient_paragraph_tags':
-                        issues.append("insufficient_paragraph_tags")
                     elif issue == 'unwrapped_text_content':
                         issues.append("unwrapped_text_content")
                     elif issue == 'unclosed_html_tags':
@@ -8329,7 +8348,16 @@ def process_html_file_batch(args):
                 and raw_file_content):
             source_tag_counts, output_tag_counts = _sdlxliff_review_tag_counts(folder_path, filename)
             if source_tag_counts is not None and output_tag_counts is not None:
-                missing_tag_issue = _missing_beautifulsoup_tags_issue(source_tag_counts, output_tag_counts)
+                missing_tag_issue = _missing_beautifulsoup_tags_issue(
+                    source_tag_counts,
+                    output_tag_counts,
+                    retention_threshold=qa_settings.get(
+                        'sdlxliff_tag_retention_threshold', 0.9
+                    ),
+                    surplus_tolerance=qa_settings.get(
+                        'sdlxliff_tag_surplus_tolerance', 0.05
+                    ),
+                )
                 if missing_tag_issue:
                     issues.append(missing_tag_issue)
         
@@ -8783,7 +8811,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_body_tag': False,
             'check_missing_header_tags': False,
             'check_missing_beautifulsoup_tags': False,
-            'check_paragraph_structure': True,
+            'sdlxliff_tag_retention_threshold': 0.9,
+            'sdlxliff_tag_surplus_tolerance': 0.05,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
             'check_potential_truncation': False,
@@ -8795,7 +8824,6 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'ignore_consecutive_missing_quotations': False,
             'skip_stylistic_single_quotes': False,
             'include_square_brackets_as_quotations': False,
-            'paragraph_threshold': 0.3,
             'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True
@@ -9349,7 +9377,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
     log(f"   ✓ SDLXLIFF source->output p/h tag check: {'ENABLED' if qa_settings.get('check_missing_beautifulsoup_tags', False) else 'DISABLED'}")
-    log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
+    if qa_settings.get('check_missing_beautifulsoup_tags', False):
+        try:
+            retained_pct = int(round(float(
+                qa_settings.get('sdlxliff_tag_retention_threshold', 0.9)
+            ) * 100))
+        except (TypeError, ValueError):
+            retained_pct = 90
+        log(f"      → Minimum source tags retained: {retained_pct}%")
+        try:
+            surplus_pct = int(round(float(
+                qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05)
+            ) * 100))
+        except (TypeError, ValueError):
+            surplus_pct = 5
+        log(f"      → Maximum surplus output tags allowed: {surplus_pct}%")
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
@@ -10764,59 +10806,6 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         log(f"Error checking HTML structure for {file_path}: {e}")
         return False, []
 
-def check_insufficient_paragraph_tags(html_content, threshold=0.3):
-    """
-    Check if HTML content has insufficient paragraph tags.
-    
-    Args:
-        html_content: The raw HTML content from the file
-        threshold: Minimum ratio of text that should be in paragraph tags (default 0.3 = 30%)
-    
-    Returns:
-        bool: True if file has insufficient paragraph tags
-    """
-    from bs4 import BeautifulSoup, NavigableString
-    
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Get total text length
-        total_text = soup.get_text(strip=True)
-        total_length = len(total_text)
-        
-        # Skip short files
-        if total_length < 200:
-            return False
-        
-        # Count text in paragraph tags
-        p_text_length = 0
-        for p in soup.find_all('p'):
-            p_text_length += len(p.get_text(strip=True))
-        
-        # Also check for unwrapped text in body
-        body = soup.find('body')
-        if body:
-            for element in body.children:
-                if isinstance(element, NavigableString):
-                    text = str(element).strip()
-                    if len(text) > 50:  # Significant unwrapped text block
-                        # If we find big chunks of unwrapped text, flag it
-                        return True
-        
-        # Calculate ratio
-        if total_length == 0:
-            return False
-            
-        ratio = p_text_length / total_length
-        
-        # Flag if not enough text is in paragraphs
-        return ratio < threshold
-        
-    except Exception as e:
-        print(f"Error checking paragraph tags: {e}")
-        return False
-
-        
 def launch_gui():
     """Launch GUI interface with mode selection"""
     def run_scan():

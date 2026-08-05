@@ -535,9 +535,9 @@ class QAScannerMixin:
                     'warn_name_mismatch': True,
                     'check_missing_html_tag': True,
                     'check_missing_beautifulsoup_tags': False,
-                    'check_paragraph_structure': True,
+                    'sdlxliff_tag_retention_threshold': 0.9,
+                    'sdlxliff_tag_surplus_tolerance': 0.05,
                     'check_invalid_nesting': False,
-                    'paragraph_threshold': 0.3,
                     'cache_enabled': True,
                     'cache_auto_size': False,
                     'cache_show_stats': False,
@@ -3395,9 +3395,92 @@ class QAScannerMixin:
             )
             check_missing_beautifulsoup_tags_checkbox.setToolTip(
                 "Compares source and output p and h1-h6 tag counts from matching SDLXLIFF sidecars. "
-                "Flags output files where those text-unit wrappers were dropped or added."
+                "Flags files outside the configured missing-tag retention or surplus-tag tolerance."
             )
             detection_layout.addWidget(check_missing_beautifulsoup_tags_checkbox)
+
+            sdlxliff_tag_retention_widget = QWidget()
+            sdlxliff_tag_retention_layout = QHBoxLayout(sdlxliff_tag_retention_widget)
+            sdlxliff_tag_retention_layout.setContentsMargins(20, 5, 0, 5)
+
+            sdlxliff_tag_retention_label = QLabel("Minimum source tags retained:")
+            sdlxliff_tag_retention_label.setFont(QFont('Arial', 10))
+            sdlxliff_tag_retention_label.setFixedWidth(250)
+            sdlxliff_tag_retention_layout.addWidget(sdlxliff_tag_retention_label)
+
+            try:
+                current_tag_retention = int(round(float(
+                    qa_settings.get('sdlxliff_tag_retention_threshold', 0.9)
+                ) * 100))
+            except (TypeError, ValueError):
+                current_tag_retention = 90
+
+            sdlxliff_tag_retention_spinbox = QSpinBox()
+            sdlxliff_tag_retention_spinbox.setMinimum(0)
+            sdlxliff_tag_retention_spinbox.setMaximum(100)
+            sdlxliff_tag_retention_spinbox.setValue(current_tag_retention)
+            sdlxliff_tag_retention_spinbox.setSuffix("%")
+            sdlxliff_tag_retention_spinbox.setMinimumWidth(90)
+            sdlxliff_tag_retention_spinbox.setToolTip(
+                "100% preserves the previous strict behavior. 90% allows up to 10% of source "
+                "p and h1-h6 tags to be missing."
+            )
+            disable_wheel_event(sdlxliff_tag_retention_spinbox)
+            sdlxliff_tag_retention_layout.addWidget(sdlxliff_tag_retention_spinbox)
+
+            sdlxliff_tag_retention_hint = QLabel("(100% = strict)")
+            sdlxliff_tag_retention_hint.setFont(QFont('Arial', 9))
+            sdlxliff_tag_retention_hint.setStyleSheet("color: gray;")
+            sdlxliff_tag_retention_layout.addWidget(sdlxliff_tag_retention_hint)
+            sdlxliff_tag_retention_layout.addStretch()
+            detection_layout.addWidget(sdlxliff_tag_retention_widget)
+
+            sdlxliff_tag_surplus_widget = QWidget()
+            sdlxliff_tag_surplus_layout = QHBoxLayout(sdlxliff_tag_surplus_widget)
+            sdlxliff_tag_surplus_layout.setContentsMargins(20, 0, 0, 5)
+
+            sdlxliff_tag_surplus_label = QLabel("Maximum surplus tags allowed:")
+            sdlxliff_tag_surplus_label.setFont(QFont('Arial', 10))
+            sdlxliff_tag_surplus_label.setFixedWidth(250)
+            sdlxliff_tag_surplus_layout.addWidget(sdlxliff_tag_surplus_label)
+
+            try:
+                current_tag_surplus_tolerance = int(round(float(
+                    qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05)
+                ) * 100))
+            except (TypeError, ValueError):
+                current_tag_surplus_tolerance = 5
+
+            sdlxliff_tag_surplus_spinbox = QSpinBox()
+            sdlxliff_tag_surplus_spinbox.setMinimum(0)
+            sdlxliff_tag_surplus_spinbox.setMaximum(100)
+            sdlxliff_tag_surplus_spinbox.setValue(current_tag_surplus_tolerance)
+            sdlxliff_tag_surplus_spinbox.setSuffix("%")
+            sdlxliff_tag_surplus_spinbox.setMinimumWidth(90)
+            sdlxliff_tag_surplus_spinbox.setToolTip(
+                "Allows this percentage of extra output p and h1-h6 tags relative to the source. "
+                "5% allows up to 5 extra tags per 100 source tags."
+            )
+            disable_wheel_event(sdlxliff_tag_surplus_spinbox)
+            sdlxliff_tag_surplus_layout.addWidget(sdlxliff_tag_surplus_spinbox)
+
+            sdlxliff_tag_surplus_hint = QLabel("(0% = strict)")
+            sdlxliff_tag_surplus_hint.setFont(QFont('Arial', 9))
+            sdlxliff_tag_surplus_hint.setStyleSheet("color: gray;")
+            sdlxliff_tag_surplus_layout.addWidget(sdlxliff_tag_surplus_hint)
+            sdlxliff_tag_surplus_layout.addStretch()
+            detection_layout.addWidget(sdlxliff_tag_surplus_widget)
+
+            def toggle_sdlxliff_tag_retention(checked):
+                sdlxliff_tag_retention_widget.setEnabled(checked)
+                sdlxliff_tag_surplus_widget.setEnabled(checked)
+
+            check_missing_beautifulsoup_tags_checkbox.toggled.connect(
+                toggle_sdlxliff_tag_retention
+            )
+            toggle_sdlxliff_tag_retention(
+                check_missing_beautifulsoup_tags_checkbox.isChecked()
+            )
 
             scroll_layout.addSpacing(20)
             yield
@@ -4588,80 +4671,6 @@ class QAScannerMixin:
             ai_api_group.setContentsMargins(20, 0, 0, 0)
             additional_layout.addWidget(ai_api_group)
 
-            additional_layout.addSpacing(15)
-
-            # NEW: Paragraph Structure Check
-            # Separator line
-            separator_line = QFrame()
-            separator_line.setFrameShape(QFrame.HLine)
-            separator_line.setFrameShadow(QFrame.Sunken)
-            additional_layout.addWidget(separator_line)
-            additional_layout.addSpacing(10)
-
-            # Checkbox for paragraph structure check
-            check_paragraph_structure_checkbox = self._create_styled_checkbox("Check for insufficient paragraph tags")
-            check_paragraph_structure_checkbox.setChecked(qa_settings.get('check_paragraph_structure', True))
-            additional_layout.addWidget(check_paragraph_structure_checkbox)
-
-            # Threshold setting frame
-            threshold_widget = QWidget()
-            threshold_layout = QHBoxLayout(threshold_widget)
-            threshold_layout.setContentsMargins(20, 10, 0, 5)
-
-            threshold_label = QLabel("Minimum text in <p> tags:")
-            threshold_label.setFont(QFont('Arial', 10))
-            threshold_layout.addWidget(threshold_label)
-
-            # Get current threshold value (default 30%)
-            current_threshold = int(qa_settings.get('paragraph_threshold', 0.3) * 100)
-
-            # Spinbox for threshold
-            paragraph_threshold_spinbox = QSpinBox()
-            paragraph_threshold_spinbox.setMinimum(0)
-            paragraph_threshold_spinbox.setMaximum(100)
-            paragraph_threshold_spinbox.setValue(current_threshold)
-            paragraph_threshold_spinbox.setMinimumWidth(80)
-            disable_wheel_event(paragraph_threshold_spinbox)
-            threshold_layout.addWidget(paragraph_threshold_spinbox)
-
-            percent_label = QLabel("%")
-            percent_label.setFont(QFont('Arial', 10))
-            threshold_layout.addWidget(percent_label)
-
-            # Threshold value label
-            threshold_value_label = QLabel(f"(currently {current_threshold}%)")
-            threshold_value_label.setFont(QFont('Arial', 9))
-            threshold_value_label.setStyleSheet("color: gray;")
-            threshold_layout.addWidget(threshold_value_label)
-            threshold_layout.addStretch()
-            additional_layout.addWidget(threshold_widget)
-
-            # Update label when spinbox changes
-            def update_threshold_label(value):
-                threshold_value_label.setText(f"(currently {value}%)")
-            paragraph_threshold_spinbox.valueChanged.connect(update_threshold_label)
-
-            # Description
-            para_desc = QLabel("Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
-                              "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
-                              "Also checks for large blocks of unwrapped text directly in the body element.")
-            para_desc.setFont(QFont('Arial', 9))
-            para_desc.setStyleSheet("color: gray;")
-            para_desc.setWordWrap(True)
-            para_desc.setMaximumWidth(700)
-            para_desc.setContentsMargins(20, 5, 0, 0)
-            additional_layout.addWidget(para_desc)
-
-            # Enable/disable threshold setting based on checkbox
-            def toggle_paragraph_threshold(checked):
-                paragraph_threshold_spinbox.setEnabled(checked)
-                threshold_label.setEnabled(checked)
-                percent_label.setEnabled(checked)
-                threshold_value_label.setEnabled(checked)
-
-            check_paragraph_structure_checkbox.toggled.connect(toggle_paragraph_threshold)
-            toggle_paragraph_threshold(check_paragraph_structure_checkbox.isChecked())  # Set initial state
-
             scroll_layout.addSpacing(20)
             yield
 
@@ -5102,11 +5111,12 @@ class QAScannerMixin:
                         'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
                         'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
                         'check_missing_beautifulsoup_tags': (check_missing_beautifulsoup_tags_checkbox, lambda x: x.isChecked()),
+                        'sdlxliff_tag_retention_threshold': (sdlxliff_tag_retention_spinbox, lambda x: x.value() / 100.0),
+                        'sdlxliff_tag_surplus_tolerance': (sdlxliff_tag_surplus_spinbox, lambda x: x.value() / 100.0),
                         'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
                         'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                         'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
                         'check_invalid_tag_mismatch': (check_invalid_tag_mismatch_checkbox, lambda x: x.isChecked()),
-                        'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                         'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
                         'check_silent_truncation': (check_truncation_checkbox, lambda x: x.isChecked()),
                         'truncation_cheap_threshold': (truncation_cheap_slider, lambda x: x.value()),
@@ -5261,32 +5271,6 @@ class QAScannerMixin:
                         if debug_mode:
                             self.append_log(f"❌ [DEBUG] Failed to save AI Hunter config: {e}")
 
-                    # Validate and save paragraph threshold with debugging
-                    if debug_mode:
-                        self.append_log("🔍 [DEBUG] Validating paragraph threshold...")
-                    try:
-                        threshold_value = paragraph_threshold_spinbox.value()
-                        old_threshold = qa_settings.get('paragraph_threshold', '<NOT SET>')
-
-                        if 0 <= threshold_value <= 100:
-                            new_threshold = threshold_value / 100.0  # Convert to decimal
-                            qa_settings['paragraph_threshold'] = new_threshold
-
-                            if debug_mode:
-                                if old_threshold != new_threshold:
-                                    self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: '{old_threshold}' → '{new_threshold}' ({threshold_value}%)")
-                                else:
-                                    self.append_log(f"🔍 [DEBUG] QA paragraph_threshold: unchanged ('{new_threshold}' / {threshold_value}%)")
-                        else:
-                            raise ValueError("Threshold must be between 0 and 100")
-
-                    except (ValueError, Exception) as e:
-                        # Default to 30% if invalid
-                        qa_settings['paragraph_threshold'] = 0.3
-                        if debug_mode:
-                            self.append_log(f"❌ [DEBUG] Invalid paragraph threshold ({e}), using default 30%")
-                        self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
-
                     # Save to main config with debugging
                     if debug_mode:
                         self.append_log("🔍 [DEBUG] Saving QA settings to main config...")
@@ -5352,7 +5336,8 @@ class QAScannerMixin:
                             ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
                             ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
                             ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
-                            ('QA_PARAGRAPH_THRESHOLD', str(qa_settings.get('paragraph_threshold', 0.3))),
+                            ('QA_SDLXLIFF_TAG_RETENTION_THRESHOLD', str(qa_settings.get('sdlxliff_tag_retention_threshold', 0.9))),
+                            ('QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE', str(qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05))),
                             # Thread-vs-process executor for the scan
                             ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
                             ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2)))),
@@ -5518,7 +5503,6 @@ class QAScannerMixin:
                     ('check_missing_header_tags', check_missing_header_tags_checkbox, True),
                     ('check_all_text_in_header', check_all_text_in_header_checkbox, True),
                     ('check_invalid_tag_mismatch', check_invalid_tag_mismatch_checkbox, False),
-                    ('check_paragraph_structure', check_paragraph_structure_checkbox, True),
                     ('check_invalid_nesting', check_invalid_nesting_checkbox, False),
                     ('check_silent_truncation', check_truncation_checkbox, False),
                     ('truncation_cheap_threshold', truncation_cheap_slider, 12),
@@ -5572,11 +5556,16 @@ class QAScannerMixin:
                         counting_mode_combo.setCurrentIndex(idx)
                 _apply(_set_counting_mode)
 
-                # --- Paragraph threshold: stored as decimal, widget is percent ---
-                def _set_paragraph_threshold():
-                    val = s.get('paragraph_threshold', 0.3)
-                    paragraph_threshold_spinbox.setValue(int(round(float(val) * 100)))
-                _apply(_set_paragraph_threshold)
+                # --- SDLXLIFF retention threshold: stored as decimal, widget is percent ---
+                def _set_sdlxliff_tag_retention_threshold():
+                    val = s.get('sdlxliff_tag_retention_threshold', 0.9)
+                    sdlxliff_tag_retention_spinbox.setValue(int(round(float(val) * 100)))
+                _apply(_set_sdlxliff_tag_retention_threshold)
+
+                def _set_sdlxliff_tag_surplus_tolerance():
+                    val = s.get('sdlxliff_tag_surplus_tolerance', 0.05)
+                    sdlxliff_tag_surplus_spinbox.setValue(int(round(float(val) * 100)))
+                _apply(_set_sdlxliff_tag_surplus_tolerance)
 
                 # --- AI truncation prompt holders (edited via sub-dialog) ---
                 _apply(lambda: _ai_trunc_prompt_holder.__setitem__(
@@ -5710,10 +5699,11 @@ class QAScannerMixin:
                     warn_mismatch_checkbox.setChecked(True)
                     check_missing_html_tag_checkbox.setChecked(True)
                     check_missing_beautifulsoup_tags_checkbox.setChecked(False)
+                    sdlxliff_tag_retention_spinbox.setValue(90)
+                    sdlxliff_tag_surplus_spinbox.setValue(5)
                     check_missing_header_tags_checkbox.setChecked(True)
                     check_all_text_in_header_checkbox.setChecked(True)
                     check_invalid_tag_mismatch_checkbox.setChecked(False)
-                    check_paragraph_structure_checkbox.setChecked(True)
                     check_invalid_nesting_checkbox.setChecked(False)
                     check_truncation_checkbox.setChecked(False)
                     truncation_cheap_slider.setValue(12)
@@ -5729,7 +5719,6 @@ class QAScannerMixin:
                     ai_temp_spin.setValue(0.0)
                     ai_tokens_spin.setValue(2000)
                     ai_url_entry.setText('')
-                    paragraph_threshold_spinbox.setValue(30)  # 30% default
 
                     # Reset cache settings
                     cache_enabled_checkbox.setChecked(True)

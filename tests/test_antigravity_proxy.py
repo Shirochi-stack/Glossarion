@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 import types
 
@@ -7,6 +8,7 @@ import pytest
 import antigravity_proxy
 import unified_api_client
 from html_output_utils import ensure_utf8_html_document
+from installer_utils import run_logged_subprocess
 from model_options import get_model_options
 from unified_api_client import UnifiedClient, UnifiedClientError
 
@@ -1227,11 +1229,12 @@ def test_install_bun_automatically_runs_installer_and_redetects_bun(monkeypatch)
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        kwargs["log_fn"]("Downloading Bun...")
         state["installed"] = True
-        return antigravity_proxy.subprocess.CompletedProcess(command, 0, "Bun installed", "")
+        return {"returncode": 0, "output": "Bun installed", "timed_out": False}
 
     monkeypatch.setenv("ANTIGRAVITY_BUN_INSTALL_CMD", "install-bun --quiet")
-    monkeypatch.setattr(antigravity_proxy.subprocess, "run", fake_run)
+    monkeypatch.setattr(antigravity_proxy, "run_logged_subprocess", fake_run)
     monkeypatch.setattr(
         antigravity_proxy,
         "_candidate_executable",
@@ -1245,6 +1248,7 @@ def test_install_bun_automatically_runs_installer_and_redetects_bun(monkeypatch)
     assert calls[0][0] == ["install-bun", "--quiet"]
     assert calls[0][1]["timeout"] == antigravity_proxy.BUN_INSTALL_TIMEOUT_SECONDS
     assert any("installing Bun automatically" in message for message in logs)
+    assert "Downloading Bun..." in logs
     assert any("Bun installed successfully" in message for message in logs)
 
 
@@ -1253,11 +1257,13 @@ def test_install_bun_automatically_reports_installer_failure(monkeypatch):
 
     monkeypatch.setenv("ANTIGRAVITY_BUN_INSTALL_CMD", "install-bun")
     monkeypatch.setattr(
-        antigravity_proxy.subprocess,
-        "run",
-        lambda command, **_kwargs: antigravity_proxy.subprocess.CompletedProcess(
-            command, 7, "", "download blocked"
-        ),
+        antigravity_proxy,
+        "run_logged_subprocess",
+        lambda command, **_kwargs: {
+            "returncode": 7,
+            "output": "download blocked",
+            "timed_out": False,
+        },
     )
 
     result = antigravity_proxy._install_bun_automatically(log_fn=logs.append)
@@ -1266,6 +1272,45 @@ def test_install_bun_automatically_reports_installer_failure(monkeypatch):
     assert "code 7" in result["error"]
     assert "download blocked" in result["error"]
     assert any("download blocked" in message for message in logs)
+
+
+def test_installer_runner_streams_stdout_and_stderr_progress():
+    logs = []
+    command = [
+        sys.executable,
+        "-u",
+        "-c",
+        (
+            "import sys, time; "
+            "print('Downloading 25%', flush=True); "
+            "time.sleep(0.05); "
+            "print('Installing package', file=sys.stderr, flush=True); "
+            "time.sleep(0.05); "
+            "print('Installing package', flush=True); "
+            "print('Complete', flush=True)"
+        ),
+    ]
+
+    result = run_logged_subprocess(command, log_fn=logs.append, timeout=5)
+
+    assert result["returncode"] == 0
+    assert result["timed_out"] is False
+    assert any("Downloading 25%" in message for message in logs)
+    assert any("Installing package" in message for message in logs)
+    assert any("Complete" in message for message in logs)
+    assert sum("Installing package" in message for message in logs) == 1
+    assert "Downloading 25%" in result["output"]
+
+
+def test_installer_runner_reports_timeout_without_waiting_for_child():
+    result = run_logged_subprocess(
+        [sys.executable, "-u", "-c", "import time; time.sleep(30)"],
+        log_fn=lambda _message: None,
+        timeout=0.2,
+    )
+
+    assert result["timed_out"] is True
+    assert result["returncode"] != 0
 
 
 def test_ensure_proxy_running_installs_bun_when_no_launcher_exists(tmp_path, monkeypatch):

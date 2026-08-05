@@ -104,6 +104,8 @@ def default_qa_scan_settings():
         "check_missing_html_tag": True,
         "check_missing_header_tags": True,
         "check_missing_beautifulsoup_tags": False,
+        "sdlxliff_tag_retention_threshold": 0.9,
+        "sdlxliff_tag_surplus_tolerance": 0.05,
         "check_all_text_in_header": True,
         "check_invalid_tag_mismatch": False,
         "check_invalid_nesting": False,
@@ -223,7 +225,12 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_REPORT_FORMAT": str(settings.get("report_format", "detailed")),
         "QA_AUTO_SAVE_REPORT": "1" if settings.get("auto_save_report", True) else "0",
         "QA_CACHE_ENABLED": "1" if settings.get("cache_enabled", True) else "0",
-        "QA_PARAGRAPH_THRESHOLD": str(settings.get("paragraph_threshold", 0.3)),
+        "QA_SDLXLIFF_TAG_RETENTION_THRESHOLD": str(
+            settings.get("sdlxliff_tag_retention_threshold", 0.9)
+        ),
+        "QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE": str(
+            settings.get("sdlxliff_tag_surplus_tolerance", 0.05)
+        ),
         "QA_USE_THREAD_EXECUTOR": "1" if settings.get("use_thread_executor", False) else "0",
         "QA_USE_WORD_COUNT": "1" if counting_mode == "word" else "0",
         "QA_EXACT_CHAR_COUNT": "1" if counting_mode == "exact" else "0",
@@ -231,7 +238,6 @@ def apply_qa_scan_env_from_settings(qa_settings):
         "QA_CHECK_BODY_TAG": "1" if settings.get("check_body_tag", False) else "0",
         "QA_CHECK_MISSING_HEADER_TAGS": "1" if settings.get("check_missing_header_tags", False) else "0",
         "QA_CHECK_MISSING_BEAUTIFULSOUP_TAGS": "1" if settings.get("check_missing_beautifulsoup_tags", False) else "0",
-        "QA_CHECK_PARAGRAPH_STRUCTURE": "1" if settings.get("check_paragraph_structure", True) else "0",
         "QA_CHECK_INVALID_NESTING": "1" if settings.get("check_invalid_nesting", False) else "0",
         "QA_CHECK_SILENT_TRUNCATION": "1" if settings.get("check_silent_truncation", False) else "0",
         "QA_CHECK_POTENTIAL_TRUNCATION": "1" if settings.get("check_potential_truncation", False) else "0",

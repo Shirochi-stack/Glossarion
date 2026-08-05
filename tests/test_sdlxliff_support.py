@@ -24,10 +24,12 @@ from TransateKRtoEN import (
     should_skip_configured_special_file_for_translation,
 )
 from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxliff_machine_translation_path
+from qa_scan_runtime import default_qa_scan_settings
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
     _missing_beautifulsoup_tags_issue,
     _sdlxliff_review_tag_counts,
+    process_html_file_batch,
 )
 
 
@@ -3388,10 +3390,149 @@ def test_qa_sdlxliff_tag_check_flags_added_output_text_units():
     assert issue == "missing_tags: 212/213 (+1)"
 
 
+def test_qa_sdlxliff_tag_check_defaults_to_configured_tolerances():
+    settings = default_qa_scan_settings()
+
+    assert settings["sdlxliff_tag_retention_threshold"] == 0.9
+    assert settings["sdlxliff_tag_surplus_tolerance"] == 0.05
+
+
 def test_qa_sdlxliff_tag_check_flags_missing_output_text_units():
     issue = _missing_beautifulsoup_tags_issue({"p": 174}, {"p": 173})
 
     assert issue == "missing_tags: 174/173 (-1)"
+
+
+def test_qa_sdlxliff_tag_check_allows_missing_tags_within_retention_threshold():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 100},
+        {"p": 90},
+        retention_threshold=0.9,
+    )
+
+    assert issue is None
+
+
+def test_qa_sdlxliff_tag_check_flags_below_retention_threshold():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 100},
+        {"p": 89},
+        retention_threshold=0.9,
+    )
+
+    assert issue == "missing_tags: 100/89 (-11)"
+
+
+def test_qa_sdlxliff_tag_check_still_flags_added_tags_with_relaxed_threshold():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 100},
+        {"p": 101},
+        retention_threshold=0.9,
+    )
+
+    assert issue == "missing_tags: 100/101 (+1)"
+
+
+def test_qa_sdlxliff_tag_check_allows_surplus_within_tolerance():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 100},
+        {"p": 105},
+        surplus_tolerance=0.05,
+    )
+
+    assert issue is None
+
+
+def test_qa_sdlxliff_tag_check_flags_surplus_above_tolerance():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 100},
+        {"p": 106},
+        surplus_tolerance=0.05,
+    )
+
+    assert issue == "missing_tags: 100/106 (+6)"
+
+
+def _quick_scan_sdlxliff_tag_issues(
+    tmp_path,
+    source_count,
+    output_count,
+    retention_threshold=0.9,
+    surplus_tolerance=0.05,
+):
+    filename = "response_chapter0001.html"
+    source_markup = "".join(f"<p>Source {index}</p>" for index in range(source_count))
+    output_markup = "".join(f"<p>Output {index}</p>" for index in range(output_count))
+    (tmp_path / filename).write_text(
+        f"<html><body>{output_markup}</body></html>",
+        encoding="utf-8",
+    )
+    sidecar_dir = tmp_path / "SDLXLIFF"
+    sidecar_dir.mkdir()
+    (sidecar_dir / f"{filename}.sdlxliff").write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter0001.xhtml" source-language="ko-KR" target-language="en-US">
+    <body>
+      <trans-unit id="html">
+        <source><![CDATA[<html><body>{source_markup}</body></html>]]></source>
+        <target><![CDATA[<html><body>{output_markup}</body></html>]]></target>
+      </trans-unit>
+    </body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    settings = default_qa_scan_settings()
+    settings.update(
+        {
+            "check_missing_beautifulsoup_tags": True,
+            "sdlxliff_tag_retention_threshold": retention_threshold,
+            "sdlxliff_tag_surplus_tolerance": surplus_tolerance,
+        }
+    )
+
+    results = process_html_file_batch(
+        (
+            [(0, filename)],
+            str(tmp_path),
+            settings,
+            "quick-scan",
+            {},
+            {},
+            False,
+            {},
+            {},
+            {},
+        )
+    )
+
+    return results[0]["issues"]
+
+
+def test_quick_scan_sdlxliff_tag_check_allows_ten_percent_missing(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 100, 90)
+
+    assert not any(issue.startswith("missing_tags:") for issue in issues)
+
+
+def test_quick_scan_sdlxliff_tag_check_flags_more_than_ten_percent_missing(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 100, 89)
+
+    assert "missing_tags: 100/89 (-11)" in issues
+
+
+def test_quick_scan_sdlxliff_tag_check_allows_five_percent_surplus(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 100, 105)
+
+    assert not any(issue.startswith("missing_tags:") for issue in issues)
+
+
+def test_quick_scan_sdlxliff_tag_check_flags_more_than_five_percent_surplus(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 100, 106)
+
+    assert "missing_tags: 100/106 (+6)" in issues
 
 
 def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):

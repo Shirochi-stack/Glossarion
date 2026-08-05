@@ -44,6 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from installer_utils import run_logged_subprocess
+
 try:
     import httpx
 except ImportError:  # pragma: no cover - httpx is a required app dependency
@@ -218,15 +220,6 @@ def _format_setup_command(command: List[str]) -> str:
     return shlex.join(command)
 
 
-def _bounded_setup_output(result: subprocess.CompletedProcess) -> str:
-    output = "\n".join(
-        part.strip()
-        for part in (getattr(result, "stdout", ""), getattr(result, "stderr", ""))
-        if part and part.strip()
-    )
-    return output[-3000:] if output else "No installer output was returned."
-
-
 def _run_setup_command(
     command: List[str],
     *,
@@ -239,30 +232,27 @@ def _run_setup_command(
     command_text = _format_setup_command(command)
     logger(f"▶ Running: {command_text}")
     try:
-        result = subprocess.run(
+        result = run_logged_subprocess(
             command,
-            cwd=str(cwd) if cwd is not None else None,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            log_fn=logger,
             timeout=max(1, int(timeout)),
-            creationflags=_creation_flags(),
-            check=False,
+            cwd=str(cwd) if cwd is not None else None,
             env=_subprocess_env(),
+            popen_kwargs={"creationflags": _creation_flags()},
         )
-    except subprocess.TimeoutExpired:
-        error = f"{action} timed out after {max(1, int(timeout))}s."
-        logger(f"❌ {error}")
-        return {"ok": False, "command": command_text, "error": error}
     except Exception as exc:
         error = f"{action} could not start: {exc}"
         logger(f"❌ {error}")
         return {"ok": False, "command": command_text, "error": error}
 
-    output = _bounded_setup_output(result)
-    if result.returncode != 0:
-        error = f"{action} exited with code {result.returncode}: {output}"
+    output = str(result.get("output") or "No installer output was returned.")
+    if result.get("timed_out"):
+        error = f"{action} timed out after {max(1, int(timeout))}s."
+        logger(f"❌ {error}")
+        return {"ok": False, "command": command_text, "error": error, "output": output}
+    returncode = int(result.get("returncode", -1))
+    if returncode != 0:
+        error = f"{action} exited with code {returncode}: {output}"
         logger(f"❌ {error}")
         return {
             "ok": False,
