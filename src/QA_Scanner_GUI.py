@@ -3406,7 +3406,6 @@ class QAScannerMixin:
 
             sdlxliff_tag_retention_label = QLabel("Minimum source tags retained:")
             sdlxliff_tag_retention_label.setFont(QFont('Arial', 10))
-            sdlxliff_tag_retention_label.setFixedWidth(250)
             sdlxliff_tag_retention_layout.addWidget(sdlxliff_tag_retention_label)
 
             try:
@@ -3442,7 +3441,6 @@ class QAScannerMixin:
 
             sdlxliff_tag_surplus_label = QLabel("Maximum surplus tags allowed:")
             sdlxliff_tag_surplus_label.setFont(QFont('Arial', 10))
-            sdlxliff_tag_surplus_label.setFixedWidth(250)
             sdlxliff_tag_surplus_layout.addWidget(sdlxliff_tag_surplus_label)
 
             try:
@@ -3479,10 +3477,20 @@ class QAScannerMixin:
             sdlxliff_min_source_paragraph_layout.setContentsMargins(20, 0, 0, 5)
 
             sdlxliff_min_source_paragraph_label = QLabel(
-                "Minimum source <p> tags to check:"
+                "Minimum source paragraph tags:"
             )
             sdlxliff_min_source_paragraph_label.setFont(QFont('Arial', 10))
-            sdlxliff_min_source_paragraph_label.setFixedWidth(250)
+            aligned_label_width = max(
+                sdlxliff_tag_retention_label.sizeHint().width(),
+                sdlxliff_tag_surplus_label.sizeHint().width(),
+                sdlxliff_min_source_paragraph_label.sizeHint().width(),
+            )
+            for aligned_label in (
+                sdlxliff_tag_retention_label,
+                sdlxliff_tag_surplus_label,
+                sdlxliff_min_source_paragraph_label,
+            ):
+                aligned_label.setFixedWidth(aligned_label_width)
             sdlxliff_min_source_paragraph_layout.addWidget(
                 sdlxliff_min_source_paragraph_label
             )
@@ -3500,8 +3508,7 @@ class QAScannerMixin:
             sdlxliff_min_source_paragraph_spinbox.setValue(
                 current_min_source_paragraph_tags
             )
-            sdlxliff_min_source_paragraph_spinbox.setSuffix(" tags")
-            sdlxliff_min_source_paragraph_spinbox.setMinimumWidth(100)
+            sdlxliff_min_source_paragraph_spinbox.setMinimumWidth(90)
             sdlxliff_min_source_paragraph_spinbox.setToolTip(
                 "Skips this SDLXLIFF tag-count check when the source file contains fewer "
                 "paragraph tags than this value."
