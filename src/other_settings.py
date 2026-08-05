@@ -5455,7 +5455,7 @@ def _create_response_handling_section(self, parent):
 
     # Disable empty response = safety filter heuristic
     if not hasattr(self, 'disable_empty_safety_heuristic_var'):
-        self.disable_empty_safety_heuristic_var = self.config.get('disable_empty_safety_heuristic', False)
+        self.disable_empty_safety_heuristic_var = self.config.get('disable_empty_safety_heuristic', True)
 
     self.disable_empty_safety_heuristic_checkbox = self._create_styled_checkbox("Disable empty response = safety filter check")
     self.disable_empty_safety_heuristic_checkbox.setContentsMargins(20, 0, 0, 0)

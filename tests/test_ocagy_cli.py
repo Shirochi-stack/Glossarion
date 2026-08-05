@@ -1075,3 +1075,407 @@ def test_ocagy_forced_stream_logs_ignore_general_streaming_toggle(monkeypatch):
 
     assert response.content == "LIVE"
     assert captured["log_stream"] is True
+
+
+MISSING_FINISH_PROVIDERS = (
+    (
+        "ocagy",
+        "ocagy/gemini-3.1-pro-high",
+        "_ocagy_send",
+        {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_fallback": True,
+            "finish_reason_source": "fallback_stop",
+            "usage": None,
+        },
+    ),
+    (
+        "authnd",
+        "authnd/z-ai/glm-5.1",
+        "_authnd_send",
+        {
+            "content": "translated",
+            "finish_reason": "stop",
+            "finish_reason_explicit": False,
+            "finish_reason_inference": "done_without_finish_reason",
+            "usage": None,
+        },
+    ),
+)
+
+
+def _make_missing_finish_client(monkeypatch, model):
+    import unified_api_client as unified
+
+    monkeypatch.setattr(unified, "_ocagy_is_cancelled", lambda: False)
+    monkeypatch.setattr(unified, "_ocagy_reset_cancel", lambda: None)
+    monkeypatch.setattr(unified, "_authnd_reset_cancel", lambda: None)
+    client = unified.UnifiedClient("", model, _skip_cancel_reset=True)
+    monkeypatch.setattr(client, "_save_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_save_failed_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_track_stats", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_compute_backoff", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(unified.time, "sleep", lambda _seconds: None)
+    return unified, client
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS,
+)
+def test_missing_finish_reason_toggle_on_routes_to_prohibited_content(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_send(**_kwargs):
+        attempts.append(1)
+        return dict(result)
+
+    monkeypatch.setattr(unified, send_attr, fake_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(monkeypatch, model)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"{provider}-missing-finish-toggle-on",
+    )
+
+    output = "\n".join(logs)
+    assert finish_reason == "prohibited_content"
+    assert len(attempts) == 1
+    assert f"{provider}: missing finish_reason fallback triggered" in output.lower()
+    assert "toggle is on" in output.lower()
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS,
+)
+def test_missing_finish_reason_toggle_off_is_api_error_and_globally_retried(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_send(**_kwargs):
+        attempts.append(1)
+        return dict(result)
+
+    monkeypatch.setattr(unified, send_attr, fake_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(monkeypatch, model)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    with pytest.raises(unified.UnifiedClientError) as exc_info:
+        if provider == "ocagy":
+            client._send_ocagy([], 0.2, 1024, "test")
+        else:
+            client._send_authnd([], 0.2, 1024, "test")
+    assert exc_info.value.error_type == "api_error"
+    attempts.clear()
+    logs.clear()
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"{provider}-missing-finish-toggle-off",
+    )
+
+    output = "\n".join(logs)
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert f"{provider}: missing finish_reason fallback triggered" in output.lower()
+    assert "toggle is off" in output.lower()
+    assert "api_error for global retry" in output.lower()
+    assert "server error (api error)" in output.lower()
+
+
+@pytest.mark.parametrize(
+    "provider,model,send_attr,result",
+    MISSING_FINISH_PROVIDERS,
+)
+def test_explicit_unknown_finish_reason_is_not_treated_as_missing(
+    monkeypatch,
+    provider,
+    model,
+    send_attr,
+    result,
+):
+    import unified_api_client as unified
+
+    explicit_result = dict(result)
+    explicit_result["finish_reason"] = "unknown"
+    if provider == "ocagy":
+        explicit_result["finish_reason_fallback"] = False
+    else:
+        explicit_result["finish_reason_explicit"] = True
+        explicit_result["finish_reason_inference"] = "provider"
+
+    monkeypatch.setattr(unified, send_attr, lambda **_kwargs: explicit_result)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "1")
+    _unified, client = _make_missing_finish_client(monkeypatch, model)
+
+    if provider == "ocagy":
+        response = client._send_ocagy([], 0.2, 1024, "test")
+    else:
+        response = client._send_authnd([], 0.2, 1024, "test")
+
+    assert response.finish_reason == "unknown"
+
+
+def test_translation_environment_exports_disable_empty_safety_toggle():
+    gui_source = (SRC / "translator_gui.py").read_text(encoding="utf-8")
+    environment_builder = gui_source.split(
+        "    def _get_environment_variables(self, epub_path, api_key):",
+        1,
+    )[1].split("\n    def ", 1)[0]
+
+    assert "'DISABLE_EMPTY_SAFETY_HEURISTIC':" in environment_builder
+
+
+@pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
+def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabled(
+    monkeypatch,
+    explicit_finish_reason,
+):
+    import unified_api_client as unified
+
+    monkeypatch.setattr(
+        unified,
+        "_authnd_send",
+        lambda **_kwargs: {
+            "content": "",
+            "finish_reason": explicit_finish_reason,
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+            "raw_response": {"finish_reason": explicit_finish_reason},
+        },
+    )
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    monkeypatch.setattr(client, "_dump_raw_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_log_truncation_failure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_handle_empty_result", lambda *args, **kwargs: "[EMPTY]")
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"authnd-empty-explicit-{explicit_finish_reason}",
+    )
+
+    assert content == "[EMPTY]"
+    assert finish_reason == "error"
+    assert "prohibited content detected" not in "\n".join(logs).lower()
+
+
+@pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
+def test_authnd_explicit_empty_finish_is_prohibited_when_empty_safety_enabled(
+    monkeypatch,
+    explicit_finish_reason,
+):
+    import unified_api_client as unified
+
+    monkeypatch.setattr(
+        unified,
+        "_authnd_send",
+        lambda **_kwargs: {
+            "content": "",
+            "finish_reason": explicit_finish_reason,
+            "finish_reason_explicit": True,
+            "finish_reason_inference": "provider",
+            "usage": None,
+            "raw_response": {"finish_reason": explicit_finish_reason},
+        },
+    )
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "0")
+    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    monkeypatch.setattr(client, "_dump_raw_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_log_truncation_failure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_handle_empty_result", lambda *args, **kwargs: "[EMPTY]")
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id=f"authnd-empty-safety-enabled-{explicit_finish_reason}",
+    )
+
+    assert content == "[EMPTY]"
+    assert finish_reason == "content_filter"
+
+
+def test_authnd_empty_inferred_stop_toggle_off_is_api_error_not_prohibited(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return {
+            "content": "",
+            "finish_reason": "stop",
+            "finish_reason_explicit": False,
+            "finish_reason_inference": "done_without_finish_reason",
+            "usage": None,
+            "raw_response": {"finish_reason": None},
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "authnd/deepseek-ai/deepseek-v4-flash",
+    )
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    _content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="authnd-empty-inferred-stop",
+    )
+
+    output = "\n".join(logs).lower()
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert "api_error for global retry" in output
+    assert "prohibited content detected" not in output
+
+
+def test_empty_safety_toggle_applies_to_providers_outside_old_allowlist(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    client = object.__new__(unified.UnifiedClient)
+    response = unified.UnifiedResponse(
+        content="",
+        finish_reason="stop",
+        raw_response={"finish_reason": "stop"},
+    )
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "0")
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is True
+    )
+
+    monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is False
+    )
+
+
+def test_empty_safety_toggle_defaults_to_enabled(monkeypatch):
+    import unified_api_client as unified
+
+    client = object.__new__(unified.UnifiedClient)
+    response = unified.UnifiedResponse(
+        content="",
+        finish_reason="stop",
+        raw_response={"finish_reason": "stop"},
+    )
+    monkeypatch.delenv("DISABLE_EMPTY_SAFETY_HEURISTIC", raising=False)
+    monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
+
+    assert (
+        client._detect_safety_filter(
+            [],
+            "",
+            "stop",
+            response,
+            "future-provider",
+        )
+        is False
+    )

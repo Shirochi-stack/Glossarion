@@ -15715,7 +15715,7 @@ Recent translations to summarize:
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             ('save_partial_results_var', 'save_partial_results', True),
             ('save_prohibited_results_var', 'save_prohibited_results', False),
-            ('disable_empty_safety_heuristic_var', 'disable_empty_safety_heuristic', False),
+            ('disable_empty_safety_heuristic_var', 'disable_empty_safety_heuristic', True),
             ('unknown_finish_as_prohibited_var', 'missing_finish_as_prohibited', self.config.get('unknown_finish_as_prohibited', False)),
             ('disable_qa_marker_checks_var', 'disable_qa_marker_checks', True),
             ('qa_marker_length_limit_var', 'qa_marker_length_limit', '500'),
@@ -32632,6 +32632,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SPLIT_FAILED_RETRY_ATTEMPTS': str(max(1, int(str(getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))).strip() or "1"))),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
+            'DISABLE_EMPTY_SAFETY_HEURISTIC': "1" if getattr(self, 'disable_empty_safety_heuristic_var', True) else "0",
             'DISABLE_QA_MARKER_CHECKS': "1" if getattr(self, 'disable_qa_marker_checks_var', True) else "0",
             'QA_MARKER_LENGTH_LIMIT': str(getattr(self, 'qa_marker_length_limit_var', '500')),
             'DISABLE_REFUSAL_CHECKS': "1" if getattr(self, 'disable_refusal_checks_var', False) else "0",
@@ -42849,7 +42850,7 @@ Important rules:
                 ('refusal_pattern_length_limit', ['refusal_pattern_length_limit_var'], 1000, lambda v: safe_int(v, 1000)),
                 ('save_partial_results', ['save_partial_results_var'], True, bool),
                 ('save_prohibited_results', ['save_prohibited_results_var'], False, bool),
-                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_var'], False, bool),
+                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_var'], True, bool),
                 ('missing_finish_as_prohibited', ['unknown_finish_as_prohibited_var'], False, bool),
 
                 # Prompts and text fields
@@ -43055,7 +43056,7 @@ Important rules:
                 ('wait_for_chunks', ['wait_for_chunks_checkbox', 'wait_for_chunks_var'], False, bool),
                 ('save_partial_results', ['save_partial_results_checkbox', 'save_partial_results_var'], True, bool),
                 ('save_prohibited_results', ['save_prohibited_results_checkbox', 'save_prohibited_results_var'], False, bool),
-                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_checkbox', 'disable_empty_safety_heuristic_var'], False, bool),
+                ('disable_empty_safety_heuristic', ['disable_empty_safety_heuristic_checkbox', 'disable_empty_safety_heuristic_var'], True, bool),
                 ('missing_finish_as_prohibited', ['unknown_finish_as_prohibited_checkbox', 'unknown_finish_as_prohibited_var'], False, bool),
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
@@ -43315,7 +43316,7 @@ Important rules:
                 'ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2))
             self.config.setdefault('save_partial_results', True)
             self.config.setdefault('save_prohibited_results', False)
-            self.config.setdefault('disable_empty_safety_heuristic', False)
+            self.config.setdefault('disable_empty_safety_heuristic', True)
             self.config.setdefault('missing_finish_as_prohibited', self.config.get('unknown_finish_as_prohibited', False))
             self.config.setdefault('enable_translation_chunk_prompt', False)
             self.config.setdefault('include_previous_chunk', False)
@@ -44135,7 +44136,7 @@ Important rules:
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
                 ('SAVE_PARTIAL_RESULTS', '1' if getattr(self, 'save_partial_results_var', True) else '0'),
                 ('SAVE_PROHIBITED_RESULTS', '1' if getattr(self, 'save_prohibited_results_var', False) else '0'),
-                ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', False) else '0'),
+                ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', True) else '0'),
                 ('MISSING_FINISH_AS_PROHIBITED', '1' if getattr(self, 'unknown_finish_as_prohibited_var', False) else '0'),
                 ('UNKNOWN_FINISH_AS_PROHIBITED', '1' if getattr(self, 'unknown_finish_as_prohibited_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),

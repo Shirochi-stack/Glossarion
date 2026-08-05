@@ -1745,7 +1745,15 @@ class UnifiedClient:
             'adult content', 'explicit', 'violence', 'disturbing',
             'censorship_blocked'
         ]
-        if any(ind in response_str for ind in safety_indicators):
+        # AuthND records whether a finish reason came directly from NVIDIA in
+        # the metadata key ``finish_reason_explicit``. Do not mistake that key
+        # for an "explicit content" safety signal; actual values/messages that
+        # contain "explicit" remain eligible for detection.
+        safety_response_str = response_str.replace(
+            'finish_reason_explicit',
+            'finish_reason_metadata',
+        )
+        if any(ind in safety_response_str for ind in safety_indicators):
             return True
         # 3) Safety phrases in extracted content
         if extracted_content:
@@ -1759,12 +1767,9 @@ class UnifiedClient:
             ]
             if any(p in content_lower for p in safety_phrases):
                 return True
-        # 4) Provider-specific empty behavior (can be disabled via toggle)
-        if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '0') != '1':
-            if (
-                provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']
-                and not response_is_exception
-            ):
+        # 4) Empty-response safety heuristic (can be disabled globally via toggle)
+        if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '1') != '1':
+            if not response_is_exception:
                 # Exclude known model errors that are NOT safety filters
                 _non_safety_reasons = {
                     'error',
@@ -10218,7 +10223,8 @@ class UnifiedClient:
                 http_status = getattr(e, 'http_status', None)
                 retryable_errors = ["500", "502", "503", "504", "api_error", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
                 
-                if (http_status in [500, 502, 503, 504] or 
+                if (getattr(e, "error_type", None) == "api_error" or
+                    http_status in [500, 502, 503, 504] or
                     any(err in error_str for err in retryable_errors)):
                     if attempt < internal_retries - 1:
                         # In multi-key mode, try rotating keys before backing off
@@ -26415,7 +26421,38 @@ class UnifiedClient:
                 log_stream=log_stream,
             )
             content = str(result.get("content", "") or "")
-            finish_reason = self._normalize_finish_reason(result.get("finish_reason", "stop")) or "stop"
+            provider_finish_reason = result.get("finish_reason")
+            finish_reason_fallback = bool(result.get("finish_reason_fallback"))
+            missing_finish_reason = (
+                finish_reason_fallback
+                or self._normalize_finish_reason(provider_finish_reason) is None
+            )
+            if missing_finish_reason:
+                fallback_details = {
+                    "provider": "ocagy",
+                    "finish_reason_source": result.get("finish_reason_source"),
+                    "finish_reason_inference": result.get("finish_reason_inference"),
+                }
+                if self._force_missing_finish_as_prohibited(None):
+                    print(
+                        "OcAgy: missing finish_reason fallback triggered; toggle is ON, "
+                        "routing the response as prohibited_content."
+                    )
+                    # Preserve the missing value so the shared response policy can
+                    # route it through the prohibited-content fallback machinery.
+                    finish_reason = None
+                else:
+                    print(
+                        "OcAgy: missing finish_reason fallback triggered; toggle is OFF, "
+                        "treating the response as API_ERROR for global retry."
+                    )
+                    raise UnifiedClientError(
+                        "OcAgy API_ERROR: provider response did not include a finish_reason.",
+                        error_type="api_error",
+                        details=fallback_details,
+                    )
+            else:
+                finish_reason = self._normalize_finish_reason(provider_finish_reason)
             if finish_reason == "stop" and not content.strip():
                 raise UnifiedClientError(
                     "OpenCode Antigravity returned an empty response.",
@@ -27022,15 +27059,32 @@ class UnifiedClient:
                 usage = result.get("usage")
                 finish_reason_explicit = bool(result.get("finish_reason_explicit"))
                 inference = result.get("finish_reason_inference") or "inferred"
-                if not finish_reason_explicit:
-                    print(f"⚠️ AuthND: NVIDIA did not provide a finish_reason; inferred {finish_reason} ({inference})")
                 response_finish_reason = finish_reason
-                if (
-                    not finish_reason_explicit
-                    and self._force_missing_finish_as_prohibited(None)
-                    and inference != "completion_tokens_reached_max_tokens"
-                ):
-                    response_finish_reason = None
+                if not finish_reason_explicit:
+                    fallback_details = {
+                        "provider": "authnd",
+                        "inferred_finish_reason": finish_reason,
+                        "finish_reason_inference": inference,
+                    }
+                    if self._force_missing_finish_as_prohibited(None):
+                        print(
+                            "AuthND: missing finish_reason fallback triggered; toggle is ON, "
+                            f"routing the response as prohibited_content (inferred {finish_reason}: {inference})."
+                        )
+                        # Preserve the missing value so the shared response policy can
+                        # route it through the prohibited-content fallback machinery.
+                        response_finish_reason = None
+                    else:
+                        print(
+                            "AuthND: missing finish_reason fallback triggered; toggle is OFF, "
+                            f"treating the response as API_ERROR for global retry "
+                            f"(inferred {finish_reason}: {inference})."
+                        )
+                        raise UnifiedClientError(
+                            "AuthND API_ERROR: NVIDIA response did not include a finish_reason.",
+                            error_type="api_error",
+                            details=fallback_details,
+                        )
 
                 return UnifiedResponse(
                     content=content,
@@ -27039,6 +27093,10 @@ class UnifiedClient:
                     raw_response=result,
                 )
 
+            except UnifiedClientError:
+                # Provider policy errors (including missing finish_reason) are
+                # owned by the shared/global retry loop, not this local loop.
+                raise
             except RuntimeError as exc:
                 error_str = str(exc)
                 error_l = error_str.lower()
