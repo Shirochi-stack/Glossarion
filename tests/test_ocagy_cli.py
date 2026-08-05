@@ -799,6 +799,109 @@ def test_missing_cli_error_has_copyable_install_commands(tmp_path, monkeypatch):
         assert ocagy_cli.NODEJS_WINGET_INSTALL_COMMAND in message
 
 
+def test_ensure_opencode_installed_runs_installer_and_redetects_cli(monkeypatch):
+    state = {"installed": False}
+    logs = []
+    setup_calls = []
+
+    def fake_find(_explicit_path=None):
+        if state["installed"]:
+            return "/home/test/.opencode/bin/opencode"
+        raise ocagy_cli.OcAgyError(ocagy_cli.get_install_instructions())
+
+    def fake_setup(command, **kwargs):
+        setup_calls.append((command, kwargs))
+        state["installed"] = True
+        return {"ok": True, "output": "installed"}
+
+    monkeypatch.setattr(ocagy_cli, "find_executable", fake_find)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_opencode_install_command",
+        lambda: ["npm", "install", "-g", "opencode-ai"],
+    )
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    executable = ocagy_cli.ensure_opencode_installed(log_fn=logs.append)
+
+    assert executable == "/home/test/.opencode/bin/opencode"
+    assert setup_calls[0][0] == ["npm", "install", "-g", "opencode-ai"]
+    assert any("installing it automatically" in message for message in logs)
+    assert any("OpenCode installed successfully" in message for message in logs)
+
+
+def test_ensure_opencode_installed_keeps_manual_commands_as_failure_fallback(monkeypatch):
+    def missing(_explicit_path=None):
+        raise ocagy_cli.OcAgyError(ocagy_cli.get_install_instructions())
+
+    monkeypatch.setattr(ocagy_cli, "find_executable", missing)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_opencode_install_command",
+        lambda: ["npm", "install", "-g", "opencode-ai"],
+    )
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_run_setup_command",
+        lambda *_args, **_kwargs: {"ok": False, "error": "network blocked"},
+    )
+
+    with pytest.raises(ocagy_cli.OcAgyError) as error:
+        ocagy_cli.ensure_opencode_installed()
+
+    message = str(error.value)
+    assert "could not install OpenCode automatically" in message
+    assert "network blocked" in message
+    assert ocagy_cli.OPENCODE_NPM_INSTALL_COMMAND in message
+
+
+def test_ensure_auth_plugin_installed_resolves_plugin_through_opencode(tmp_path, monkeypatch):
+    executable = str(tmp_path / "opencode")
+    logs = []
+    calls = []
+    key = str(Path(executable).resolve(strict=False)).casefold()
+    ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES.discard(key)
+
+    def fake_setup(command, **kwargs):
+        calls.append((command, kwargs))
+        return {
+            "ok": True,
+            "output": "google/antigravity-gemini-3.1-pro",
+        }
+
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(ocagy_cli, "_run_setup_command", fake_setup)
+
+    ocagy_cli.ensure_auth_plugin_installed(executable, log_fn=logs.append)
+
+    assert calls[0][0] == [executable, "models", "google"]
+    assert calls[0][1]["cwd"] == tmp_path
+    assert key in ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES
+    assert any("auth plugin is installed and ready" in message for message in logs)
+
+
+def test_ensure_auth_plugin_installed_reports_manual_fallback_after_failure(tmp_path, monkeypatch):
+    executable = str(tmp_path / "opencode-failing")
+    key = str(Path(executable).resolve(strict=False)).casefold()
+    ocagy_cli._PLUGIN_BOOTSTRAPPED_EXECUTABLES.discard(key)
+
+    monkeypatch.setattr(ocagy_cli, "_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        ocagy_cli,
+        "_run_setup_command",
+        lambda *_args, **_kwargs: {"ok": False, "error": "plugin download blocked"},
+    )
+
+    with pytest.raises(ocagy_cli.OcAgyError) as error:
+        ocagy_cli.ensure_auth_plugin_installed(executable)
+
+    message = str(error.value)
+    assert "could not install or verify opencode-antigravity-auth automatically" in message
+    assert "plugin download blocked" in message
+    assert "Fallback:" in message
+    assert "opencode models google" in message
+
+
 def test_model_catalog_exposes_ocagy_high_variant():
     from model_options import get_model_options
 

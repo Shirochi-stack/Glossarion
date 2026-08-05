@@ -1192,6 +1192,125 @@ def test_find_proxy_launch_command_uses_npx_bun_for_downloaded_runtime(tmp_path,
     assert cmd[-1].endswith("src\\server.ts") or cmd[-1].endswith("src/server.ts")
 
 
+def test_candidate_executable_finds_user_local_bun_install(tmp_path, monkeypatch):
+    bun_root = tmp_path / "custom-bun"
+    bun_executable = bun_root / "bin" / "bun"
+    bun_executable.parent.mkdir(parents=True)
+    bun_executable.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(antigravity_proxy.sys, "platform", "linux")
+    monkeypatch.setattr(antigravity_proxy.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("BUN_INSTALL", str(bun_root))
+
+    assert antigravity_proxy._candidate_executable("bun") == str(bun_executable)
+
+
+def test_automatic_bun_install_command_uses_official_windows_installer(monkeypatch):
+    monkeypatch.delenv("ANTIGRAVITY_BUN_INSTALL_CMD", raising=False)
+    monkeypatch.setattr(antigravity_proxy.sys, "platform", "win32")
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_candidate_executable",
+        lambda name: "powershell.exe" if name == "powershell" else None,
+    )
+
+    command = antigravity_proxy._automatic_bun_install_command()
+
+    assert command[0] == "powershell.exe"
+    assert "https://bun.sh/install.ps1" in command[-1]
+
+
+def test_install_bun_automatically_runs_installer_and_redetects_bun(monkeypatch):
+    state = {"installed": False}
+    calls = []
+    logs = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        state["installed"] = True
+        return antigravity_proxy.subprocess.CompletedProcess(command, 0, "Bun installed", "")
+
+    monkeypatch.setenv("ANTIGRAVITY_BUN_INSTALL_CMD", "install-bun --quiet")
+    monkeypatch.setattr(antigravity_proxy.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_candidate_executable",
+        lambda name: "/home/test/.bun/bin/bun" if name == "bun" and state["installed"] else None,
+    )
+
+    result = antigravity_proxy._install_bun_automatically(log_fn=logs.append)
+
+    assert result["installed"] is True
+    assert result["executable"] == "/home/test/.bun/bin/bun"
+    assert calls[0][0] == ["install-bun", "--quiet"]
+    assert calls[0][1]["timeout"] == antigravity_proxy.BUN_INSTALL_TIMEOUT_SECONDS
+    assert any("installing Bun automatically" in message for message in logs)
+    assert any("Bun installed successfully" in message for message in logs)
+
+
+def test_install_bun_automatically_reports_installer_failure(monkeypatch):
+    logs = []
+
+    monkeypatch.setenv("ANTIGRAVITY_BUN_INSTALL_CMD", "install-bun")
+    monkeypatch.setattr(
+        antigravity_proxy.subprocess,
+        "run",
+        lambda command, **_kwargs: antigravity_proxy.subprocess.CompletedProcess(
+            command, 7, "", "download blocked"
+        ),
+    )
+
+    result = antigravity_proxy._install_bun_automatically(log_fn=logs.append)
+
+    assert result["installed"] is False
+    assert "code 7" in result["error"]
+    assert "download blocked" in result["error"]
+    assert any("download blocked" in message for message in logs)
+
+
+def test_ensure_proxy_running_installs_bun_when_no_launcher_exists(tmp_path, monkeypatch):
+    health_checks = iter([
+        {"healthy": False},
+        {"healthy": False},
+        {"healthy": True},
+    ])
+    launch_checks = iter([None, ["bun", "run", "server.ts"]])
+    install_calls = []
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(antigravity_proxy, "_proxy_process", None)
+    monkeypatch.setattr(antigravity_proxy, "_ensure_proxy_config", lambda: str(tmp_path))
+    monkeypatch.setattr(antigravity_proxy, "check_proxy_health", lambda: next(health_checks))
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_ensure_proxy_runtime",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_find_proxy_launch_command",
+        lambda _runtime_dir: next(launch_checks),
+    )
+    monkeypatch.setattr(
+        antigravity_proxy,
+        "_install_bun_automatically",
+        lambda log_fn=None: install_calls.append(log_fn) or {"installed": True},
+    )
+    monkeypatch.setattr(antigravity_proxy.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(antigravity_proxy.time, "sleep", lambda _seconds: None)
+
+    status = antigravity_proxy.ensure_proxy_running(log_fn=lambda _message: None)
+
+    assert status == {"running": True, "auto_launched": True}
+    assert len(install_calls) == 1
+
+
 def test_write_proxy_runtime_package_json_updates_stale_version(tmp_path):
     package_json = tmp_path / "package.json"
     package_json.write_text(

@@ -4171,7 +4171,7 @@ class GlossarionWeb:
                             )
                         try:
                             from ocagy_cli import launch_login
-                            data = launch_login()
+                            data = launch_login(log_fn=print)
                             executable = data.get('executable', 'opencode')
                             return gr.update(
                                 value=(

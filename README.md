@@ -150,7 +150,7 @@
 
 > **AuthGrok browser login:** The `authgrok/` prefix selects browser-based xAI account authentication instead of an xAI API key. Enter a model such as `authgrok/grok-4.5`, click **Grok Login**, and finish signing in through the browser.
 
-> **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Install the OpenCode terminal CLI, click **OCAGY Login**, then choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
+> **OcAgy login and account slots:** OcAgy is separate from the local `antigravity/` proxy. Click **OCAGY Login**; Glossarion installs OpenCode and `opencode-antigravity-auth` automatically when needed, then opens the login so you can choose **Google → OAuth with Google (Antigravity)**. No API key is required. `ocagy0/...` preserves the plugin-managed shared pool/current behavior; `ocagy/...` pins saved account #1, `ocagy1/...` pins account #2, `ocagy2/...` pins account #3, and so on. A pinned route fails clearly if that slot is missing, disabled, or out of quota instead of silently switching accounts.
 
 Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
@@ -163,7 +163,7 @@ Custom endpoints can use either a base URL or a user-defined prefix route for se
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)
 4. **AuthGrok** — type `authgrok/grok-4.5`, click **Grok Login**, and sign in to xAI (Google sign-in is available on xAI's page)
-5. **OcAgy** — install OpenCode, use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login** (no API key needed)
+5. **OcAgy** — use `ocagy0/gemini-3.1-pro-high` for automatic plugin account rotation or a numbered account route for batch translation, then use **OCAGY Login**; Glossarion installs the required OpenCode runtime and auth plugin when needed (no API key required)
 6. **Antigravity** — local Cloud Code proxy on `localhost:3000` via `frieser/antigravity-proxy` (no API key needed)
 7. **Custom Endpoints** — configure base URL for self-hosted or alternative endpoints
 

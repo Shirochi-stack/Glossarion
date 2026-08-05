@@ -29,6 +29,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -55,6 +56,11 @@ _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _PLUGIN_PACKAGE = str(os.environ.get("OCAGY_PLUGIN_PACKAGE", "opencode-antigravity-auth@latest") or "opencode-antigravity-auth@latest").strip()
 OPENCODE_NPM_INSTALL_COMMAND = "npm install -g opencode-ai"
 NODEJS_WINGET_INSTALL_COMMAND = "winget install --id OpenJS.NodeJS.LTS --exact"
+OPENCODE_INSTALL_TIMEOUT_SECONDS = 600
+OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS = 300
+_INSTALL_LOCK = threading.Lock()
+_PLUGIN_BOOTSTRAP_LOCK = threading.Lock()
+_PLUGIN_BOOTSTRAPPED_EXECUTABLES: set[str] = set()
 _ANTIGRAVITY_CLOUD_CODE_BASE = "https://cloudcode-pa.googleapis.com"
 _ANTIGRAVITY_FALLBACK_PROJECT_ID = "rising-fact-p41fc"
 _ANTIGRAVITY_QUOTA_USER_AGENT = "antigravity/windows/amd64"
@@ -167,6 +173,258 @@ def find_executable(explicit_path: Optional[str] = None) -> str:
             return str(candidate.resolve())
 
     raise OcAgyError(get_install_instructions())
+
+
+def _candidate_command(name: str) -> Optional[str]:
+    found = shutil.which(name)
+    if found:
+        return found
+
+    if os.name != "nt":
+        return None
+
+    home = Path.home()
+    appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+    program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+    candidates: List[Path] = []
+    if name in {"npm", "npx"}:
+        candidates.extend(
+            [
+                program_files / "nodejs" / f"{name}.cmd",
+                local_appdata / "Programs" / "nodejs" / f"{name}.cmd",
+                appdata / "npm" / f"{name}.cmd",
+            ]
+        )
+    elif name == "winget":
+        candidates.append(local_appdata / "Microsoft" / "WindowsApps" / "winget.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
+
+
+def _split_setup_override(value: str) -> List[str]:
+    try:
+        return shlex.split(value, posix=(os.name != "nt"))
+    except Exception:
+        return value.split()
+
+
+def _format_setup_command(command: List[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
+
+
+def _bounded_setup_output(result: subprocess.CompletedProcess) -> str:
+    output = "\n".join(
+        part.strip()
+        for part in (getattr(result, "stdout", ""), getattr(result, "stderr", ""))
+        if part and part.strip()
+    )
+    return output[-3000:] if output else "No installer output was returned."
+
+
+def _run_setup_command(
+    command: List[str],
+    *,
+    action: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+    timeout: int = OPENCODE_INSTALL_TIMEOUT_SECONDS,
+    cwd: Optional[Path] = None,
+) -> Dict[str, Any]:
+    logger = log_fn or (lambda _message: None)
+    command_text = _format_setup_command(command)
+    logger(f"▶ Running: {command_text}")
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(1, int(timeout)),
+            creationflags=_creation_flags(),
+            check=False,
+            env=_subprocess_env(),
+        )
+    except subprocess.TimeoutExpired:
+        error = f"{action} timed out after {max(1, int(timeout))}s."
+        logger(f"❌ {error}")
+        return {"ok": False, "command": command_text, "error": error}
+    except Exception as exc:
+        error = f"{action} could not start: {exc}"
+        logger(f"❌ {error}")
+        return {"ok": False, "command": command_text, "error": error}
+
+    output = _bounded_setup_output(result)
+    if result.returncode != 0:
+        error = f"{action} exited with code {result.returncode}: {output}"
+        logger(f"❌ {error}")
+        return {
+            "ok": False,
+            "command": command_text,
+            "error": error,
+            "output": output,
+        }
+    return {
+        "ok": True,
+        "command": command_text,
+        "output": output,
+    }
+
+
+def _nodejs_install_command() -> Optional[List[str]]:
+    override = str(os.environ.get("OCAGY_NODE_INSTALL_CMD", "") or "").strip()
+    if override:
+        return _split_setup_override(override)
+    if os.name != "nt":
+        return None
+    winget = _candidate_command("winget")
+    if not winget:
+        return None
+    return [
+        winget,
+        "install",
+        "--id",
+        "OpenJS.NodeJS.LTS",
+        "--exact",
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]
+
+
+def _opencode_install_command() -> Optional[List[str]]:
+    override = str(os.environ.get("OCAGY_OPENCODE_INSTALL_CMD", "") or "").strip()
+    if override:
+        return _split_setup_override(override)
+
+    # OpenCode recommends its user-local install script on macOS/Linux. On
+    # Windows, npm is the supported native route.
+    if os.name != "nt":
+        curl = _candidate_command("curl")
+        bash = _candidate_command("bash")
+        if curl and bash:
+            return [
+                bash,
+                "-c",
+                f"{shlex.quote(curl)} -fsSL https://opencode.ai/install | {shlex.quote(bash)}",
+            ]
+
+    npm = _candidate_command("npm")
+    if npm:
+        return [npm, "install", "-g", "opencode-ai"]
+    return None
+
+
+def ensure_opencode_installed(log_fn=None) -> str:
+    """Find OpenCode or install it automatically, retaining manual fallback text."""
+    try:
+        return find_executable()
+    except OcAgyError:
+        pass
+
+    logger = log_fn or (lambda _message: None)
+    with _INSTALL_LOCK:
+        try:
+            return find_executable()
+        except OcAgyError:
+            pass
+
+        logger("🧰 OpenCode CLI was not found. Glossarion is installing it automatically...")
+        details: List[str] = []
+        command = _opencode_install_command()
+
+        if command is None and os.name == "nt":
+            node_command = _nodejs_install_command()
+            if node_command is not None:
+                logger("🧰 npm is unavailable. Installing Node.js LTS first...")
+                node_result = _run_setup_command(
+                    node_command,
+                    action="Node.js LTS installation",
+                    log_fn=logger,
+                )
+                if not node_result.get("ok"):
+                    details.append(str(node_result.get("error") or "Node.js installation failed."))
+                command = _opencode_install_command()
+            else:
+                details.append("npm and a supported automatic Node.js installer were not found.")
+
+        if command is not None:
+            install_result = _run_setup_command(
+                command,
+                action="OpenCode installation",
+                log_fn=logger,
+            )
+            if not install_result.get("ok"):
+                details.append(str(install_result.get("error") or "OpenCode installation failed."))
+        elif not details:
+            details.append("No supported automatic OpenCode installer was found for this system.")
+
+        try:
+            executable = find_executable()
+            logger(f"✅ OpenCode installed successfully: {executable}")
+            return executable
+        except OcAgyError:
+            pass
+
+        detail = "\n".join(dict.fromkeys(details))
+        raise OcAgyError(
+            "Glossarion could not install OpenCode automatically.\n"
+            f"Installer details: {detail or 'The installer completed, but opencode was not found.'}\n\n"
+            + get_install_instructions()
+        )
+
+
+def _plugin_fallback_instructions() -> str:
+    return (
+        "Fallback: verify that the Glossarion workspace opencode.json contains "
+        f'\"plugin\": [\"{_PLUGIN_PACKAGE}\"], then run `opencode models google` '
+        "or `opencode auth login` once."
+    )
+
+
+def ensure_auth_plugin_installed(executable: str, log_fn=None) -> None:
+    """Resolve and verify opencode-antigravity-auth through OpenCode itself."""
+    logger = log_fn or (lambda _message: None)
+    key = str(Path(executable).resolve(strict=False)).casefold()
+    if key in _PLUGIN_BOOTSTRAPPED_EXECUTABLES:
+        return
+
+    with _PLUGIN_BOOTSTRAP_LOCK:
+        if key in _PLUGIN_BOOTSTRAPPED_EXECUTABLES:
+            return
+
+        workspace = _workspace_dir()
+        logger(
+            "🧩 Ensuring the OpenCode Antigravity auth plugin is installed "
+            f"({_PLUGIN_PACKAGE})..."
+        )
+        result = _run_setup_command(
+            [executable, "models", "google"],
+            action="OpenCode Antigravity auth plugin installation",
+            log_fn=logger,
+            timeout=OCAGY_PLUGIN_INSTALL_TIMEOUT_SECONDS,
+            cwd=workspace,
+        )
+        output = str(result.get("output") or "")
+        if not result.get("ok") or "google/antigravity-" not in output.lower():
+            detail = str(
+                result.get("error")
+                or "OpenCode finished without exposing any Antigravity plugin models."
+            )
+            raise OcAgyError(
+                "Glossarion could not install or verify opencode-antigravity-auth automatically.\n"
+                f"Installer details: {detail}\n\n{_plugin_fallback_instructions()}"
+            )
+
+        _PLUGIN_BOOTSTRAPPED_EXECUTABLES.add(key)
+        logger("✅ OpenCode Antigravity auth plugin is installed and ready.")
 
 
 def _workspace_dir() -> Path:
@@ -925,9 +1183,10 @@ def _check_account_quota(account: Dict[str, Any], index: int, timeout: float) ->
         return result
 
 
-def get_quota_status(timeout: float = 15.0) -> Dict[str, Any]:
+def get_quota_status(timeout: float = 15.0, log_fn=None) -> Dict[str, Any]:
     """Fetch sanitized live quota data using the plugin's stored OAuth accounts."""
-    executable = find_executable()
+    executable = ensure_opencode_installed(log_fn=log_fn)
+    ensure_auth_plugin_installed(executable, log_fn=log_fn)
     _require_oauth_account()
     account_path = _config_dir() / "antigravity-accounts.json"
     try:
@@ -1006,9 +1265,10 @@ def poll_models(timeout: float = 8.0) -> List[str]:
     return models
 
 
-def launch_login() -> Dict[str, Any]:
+def launch_login(log_fn=None) -> Dict[str, Any]:
     """Open OpenCode's plugin-aware OAuth login in a visible terminal."""
-    exe = find_executable()
+    exe = ensure_opencode_installed(log_fn=log_fn)
+    ensure_auth_plugin_installed(exe, log_fn=log_fn)
     workspace = _workspace_dir()
     if os.name == "nt":
         # The project-local opencode.json already declares the plugin and models.
@@ -2078,12 +2338,13 @@ def _send_chat_completion_buffered(
     if is_cancelled():
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
-    exe = find_executable()
+    logger = log_fn or (lambda _message: None)
+    exe = ensure_opencode_installed(log_fn=logger)
     account_number, _model_suffix = parse_account_route(model)
     selected = _require_oauth_account(account_number)
+    ensure_auth_plugin_installed(exe, log_fn=logger)
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
-    logger = log_fn or (lambda _message: None)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
     base = _workspace_dir()
@@ -2243,12 +2504,13 @@ def send_chat_completion(
     if is_cancelled():
         raise OcAgyError("OpenCode Antigravity request cancelled by user")
 
-    exe = find_executable()
+    logger = log_fn or (lambda _message: None)
+    exe = ensure_opencode_installed(log_fn=logger)
     account_number, _model_suffix = parse_account_route(model)
     selected = _require_oauth_account(account_number)
+    ensure_auth_plugin_installed(exe, log_fn=logger)
     model_id, variant = resolve_model(model)
     prompt = build_prompt(messages)
-    logger = log_fn or (lambda _message: None)
     timeout_seconds = max(1.0, float(timeout or 1800))
 
     base = _workspace_dir()

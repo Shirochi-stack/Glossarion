@@ -18967,7 +18967,8 @@ Recent translations to summarize:
         self.ocagy_login_btn.setText("🔐 OCAGY Login")
         self.ocagy_login_btn.setToolTip(
             "Uses the OpenCode terminal CLI with the opencode-antigravity-auth plugin. "
-            "Install OpenCode or set OCAGY_CLI_PATH if it is not on PATH."
+            "Glossarion installs both automatically when needed; OCAGY_CLI_PATH can "
+            "select an existing custom OpenCode executable."
         )
         self.ocagy_login_btn.setStyleSheet(
             "background-color: #7c3aed; color: white; font-weight: bold; "
@@ -19057,7 +19058,7 @@ Recent translations to summarize:
         def worker():
             try:
                 from ocagy_cli import launch_login
-                self._ocagy_login_data = launch_login()
+                self._ocagy_login_data = launch_login(log_fn=self.append_log)
                 QMetaObject.invokeMethod(self, "_ocagy_login_finished", Qt.QueuedConnection)
             except Exception as exc:
                 self._ocagy_login_error = str(exc)
@@ -19101,8 +19102,8 @@ Recent translations to summarize:
         layout = QVBoxLayout(dialog)
 
         intro = QLabel(
-            "OpenCode CLI is not installed. Open a new PowerShell window and run "
-            "the OpenCode command below."
+            "Glossarion's automatic OpenCode installation did not succeed. "
+            "As a fallback, open a new PowerShell window and run the commands below."
         )
         intro.setWordWrap(True)
         intro.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -19135,7 +19136,7 @@ Recent translations to summarize:
 
         note = QLabel(
             "After installing Node.js, close and reopen PowerShell, run the OpenCode command, "
-            "then restart Glossarion and click OCAGY Login again."
+            "then click OCAGY Login again."
         )
         note.setWordWrap(True)
         note.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -19160,7 +19161,7 @@ Recent translations to summarize:
         def worker():
             try:
                 from ocagy_cli import get_quota_status
-                self._ocagy_status_data = get_quota_status()
+                self._ocagy_status_data = get_quota_status(log_fn=self.append_log)
                 QMetaObject.invokeMethod(self, "_ocagy_status_result", Qt.QueuedConnection)
             except Exception as exc:
                 self._ocagy_status_error_msg = str(exc)
@@ -19370,7 +19371,7 @@ Recent translations to summarize:
         def _worker():
             try:
                 from antigravity_proxy import open_login
-                self._antigravity_login_url = open_login()
+                self._antigravity_login_url = open_login(log_fn=self.append_log)
                 QMetaObject.invokeMethod(self, "_antigravity_login_finished", Qt.QueuedConnection)
             except Exception as exc:
                 self._antigravity_login_error = str(exc)

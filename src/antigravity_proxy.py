@@ -63,6 +63,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 )
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
+BUN_INSTALL_TIMEOUT_SECONDS = 300
 RUNTIME_PATCH_VERSION = "2026-07-12-antigravity-single-forced-account-attempt"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
@@ -1820,9 +1821,18 @@ def _candidate_executable(name: str) -> Optional[str]:
     if path:
         return path
 
+    candidates: List[str] = []
+    home = os.path.expanduser("~")
+
+    if name == "bun":
+        bun_install = os.environ.get("BUN_INSTALL", "").strip()
+        if not bun_install:
+            bun_install = os.path.join(home, ".bun")
+        candidates.append(
+            os.path.join(bun_install, "bin", "bun.exe" if sys.platform == "win32" else "bun")
+        )
+
     if sys.platform == "win32":
-        candidates: List[str] = []
-        home = os.path.expanduser("~")
         candidates.extend(
             [
                 os.path.join(home, ".bun", "bin", f"{name}.exe"),
@@ -1831,9 +1841,22 @@ def _candidate_executable(name: str) -> Optional[str]:
                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "bun", f"{name}.exe"),
             ]
         )
-        for candidate in candidates:
-            if candidate and os.path.isfile(candidate):
-                return candidate
+        if name == "npx":
+            candidates.extend(
+                [
+                    os.path.join(os.environ.get("ProgramFiles", ""), "nodejs", "npx.cmd"),
+                    os.path.join(
+                        os.environ.get("LOCALAPPDATA", ""),
+                        "Programs",
+                        "nodejs",
+                        "npx.cmd",
+                    ),
+                ]
+            )
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
 
     return None
 
@@ -1864,11 +1887,126 @@ def _find_proxy_launch_command(runtime_dir: str) -> Optional[List[str]]:
     return None
 
 
-def _proxy_launch_error() -> str:
+def _format_command_for_log(command: List[str]) -> str:
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
+
+
+def _automatic_bun_install_command() -> Optional[List[str]]:
+    """Return the official Bun install command for the current platform."""
+    override = os.environ.get("ANTIGRAVITY_BUN_INSTALL_CMD", "").strip()
+    if override:
+        try:
+            return shlex.split(override, posix=(sys.platform != "win32"))
+        except Exception:
+            return override.split()
+
+    if sys.platform == "win32":
+        powershell = _candidate_executable("powershell") or _candidate_executable("pwsh")
+        if not powershell:
+            return None
+        return [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            (
+                "$ErrorActionPreference = 'Stop'; "
+                "Invoke-RestMethod https://bun.sh/install.ps1 | Invoke-Expression"
+            ),
+        ]
+
+    curl = _candidate_executable("curl")
+    bash = _candidate_executable("bash")
+    if not curl or not bash:
+        return None
+    return [
+        bash,
+        "-c",
+        f"{shlex.quote(curl)} -fsSL https://bun.com/install | {shlex.quote(bash)}",
+    ]
+
+
+def _installer_output(result: subprocess.CompletedProcess) -> str:
+    output = "\n".join(
+        part.strip()
+        for part in (getattr(result, "stdout", ""), getattr(result, "stderr", ""))
+        if part and part.strip()
+    )
+    # Installer output is useful, but should not flood the GUI error dialog.
+    return output[-2000:] if output else "No installer output was returned."
+
+
+def _install_bun_automatically(log_fn=None) -> Dict[str, Any]:
+    """Install Bun for the current user and return a structured result."""
+    _log = log_fn or _log_noop
+    command = _automatic_bun_install_command()
+    if not command:
+        error = "No supported automatic installer was found for this system."
+        _log(f"❌ {error}")
+        return {
+            "installed": False,
+            "error": error,
+        }
+
+    command_text = _format_command_for_log(command)
+    _log("🧰 Bun and npx were not found. Glossarion is installing Bun automatically...")
+    _log(f"▶ Running: {command_text}")
+
+    try:
+        kwargs: Dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": BUN_INSTALL_TIMEOUT_SECONDS,
+            "check": False,
+        }
+        if sys.platform == "win32":
+            try:
+                from shutdown_utils import subprocess_no_window_kwargs
+
+                kwargs.update(subprocess_no_window_kwargs())
+            except Exception:
+                pass
+        result = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired:
+        error = f"Automatic Bun installation timed out after {BUN_INSTALL_TIMEOUT_SECONDS}s."
+        _log(f"❌ {error}")
+        return {"installed": False, "command": command_text, "error": error}
+    except Exception as exc:
+        error = f"Automatic Bun installation could not start: {exc}"
+        _log(f"❌ {error}")
+        return {"installed": False, "command": command_text, "error": error}
+
+    output = _installer_output(result)
+    if result.returncode != 0:
+        error = f"Bun installer exited with code {result.returncode}: {output}"
+        _log(f"❌ {error}")
+        return {"installed": False, "command": command_text, "error": error}
+
+    bun = _candidate_executable("bun")
+    if not bun:
+        error = f"The Bun installer finished, but Glossarion could not find bun. {output}"
+        _log(f"❌ {error}")
+        return {"installed": False, "command": command_text, "error": error}
+
+    _log(f"✅ Bun installed successfully: {bun}")
+    return {"installed": True, "command": command_text, "executable": bun}
+
+
+def _proxy_launch_error(install_error: Optional[str] = None) -> str:
+    if install_error:
+        return (
+            "Could not find Bun or npx, and Glossarion's automatic Bun installation failed.\n"
+            f"Installer details: {install_error}\n"
+            "Check the internet connection or security policy, then retry Antigravity Login."
+        )
     return (
         "Could not find Bun or npx to launch the Antigravity proxy.\n"
-        "Install Node.js/npm or Bun, then restart Glossarion.\n"
-        "Git is not required; Glossarion downloads the proxy runtime itself."
+        "Glossarion could not start an automatic Bun installer on this system.\n"
+        "Check the internet connection or security policy, then retry Antigravity Login."
     )
 
 
@@ -1940,7 +2078,19 @@ def ensure_proxy_running(log_fn=None, notify_started: bool = True) -> Dict[str, 
 
         cmd = _find_proxy_launch_command(runtime_dir)
         if not cmd:
-            return {"running": False, "auto_launched": False, "error": _proxy_launch_error()}
+            install = _install_bun_automatically(log_fn=_log)
+            if install.get("installed"):
+                cmd = _find_proxy_launch_command(runtime_dir)
+            if not cmd:
+                install_error = str(
+                    install.get("error")
+                    or "Bun was installed, but no usable proxy launch command was found."
+                )
+                return {
+                    "running": False,
+                    "auto_launched": False,
+                    "error": _proxy_launch_error(install_error),
+                }
 
         _log(f"🚀 Auto-launching Antigravity proxy with: {' '.join(cmd)}")
 
