@@ -1441,6 +1441,9 @@ def _load_qa_scanner_settings_from_env():
             "sdlxliff_tag_surplus_tolerance": _env_float(
                 "QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE", 0.05
             ),
+            "sdlxliff_min_source_paragraph_tags": _env_int(
+                "QA_SDLXLIFF_MIN_SOURCE_PARAGRAPH_TAGS", 20
+            ),
             "check_silent_truncation": _env_bool("QA_CHECK_SILENT_TRUNCATION", False),
             "check_potential_truncation": _env_bool("QA_CHECK_POTENTIAL_TRUNCATION", False),
             "check_ai_truncation_detection": _env_bool("QA_CHECK_AI_TRUNCATION_DETECTION", False),

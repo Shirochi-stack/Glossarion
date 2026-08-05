@@ -3395,6 +3395,7 @@ def test_qa_sdlxliff_tag_check_defaults_to_configured_tolerances():
 
     assert settings["sdlxliff_tag_retention_threshold"] == 0.9
     assert settings["sdlxliff_tag_surplus_tolerance"] == 0.05
+    assert settings["sdlxliff_min_source_paragraph_tags"] == 20
 
 
 def test_qa_sdlxliff_tag_check_flags_missing_output_text_units():
@@ -3453,12 +3454,33 @@ def test_qa_sdlxliff_tag_check_flags_surplus_above_tolerance():
     assert issue == "missing_tags: 100/106 (+6)"
 
 
+def test_qa_sdlxliff_tag_check_ignores_files_below_minimum_source_paragraphs():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 19, "h1": 100},
+        {"p": 20, "h1": 100},
+        min_source_paragraph_tags=20,
+    )
+
+    assert issue is None
+
+
+def test_qa_sdlxliff_tag_check_checks_files_at_minimum_source_paragraphs():
+    issue = _missing_beautifulsoup_tags_issue(
+        {"p": 20, "h1": 100},
+        {"p": 21, "h1": 100},
+        min_source_paragraph_tags=20,
+    )
+
+    assert issue == "missing_tags: 120/121 (+1)"
+
+
 def _quick_scan_sdlxliff_tag_issues(
     tmp_path,
     source_count,
     output_count,
     retention_threshold=0.9,
     surplus_tolerance=0.05,
+    min_source_paragraph_tags=20,
 ):
     filename = "response_chapter0001.html"
     source_markup = "".join(f"<p>Source {index}</p>" for index in range(source_count))
@@ -3490,6 +3512,7 @@ def _quick_scan_sdlxliff_tag_issues(
             "check_missing_beautifulsoup_tags": True,
             "sdlxliff_tag_retention_threshold": retention_threshold,
             "sdlxliff_tag_surplus_tolerance": surplus_tolerance,
+            "sdlxliff_min_source_paragraph_tags": min_source_paragraph_tags,
         }
     )
 
@@ -3533,6 +3556,18 @@ def test_quick_scan_sdlxliff_tag_check_flags_more_than_five_percent_surplus(tmp_
     issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 100, 106)
 
     assert "missing_tags: 100/106 (+6)" in issues
+
+
+def test_quick_scan_sdlxliff_tag_check_ignores_small_source_paragraph_files(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 19, 20)
+
+    assert not any(issue.startswith("missing_tags:") for issue in issues)
+
+
+def test_quick_scan_sdlxliff_tag_check_checks_minimum_source_paragraph_boundary(tmp_path):
+    issues = _quick_scan_sdlxliff_tag_issues(tmp_path, 20, 22)
+
+    assert "missing_tags: 20/22 (+2)" in issues
 
 
 def test_qa_sdlxliff_tag_check_ignores_empty_text_units(tmp_path):

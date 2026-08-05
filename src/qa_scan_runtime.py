@@ -106,6 +106,7 @@ def default_qa_scan_settings():
         "check_missing_beautifulsoup_tags": False,
         "sdlxliff_tag_retention_threshold": 0.9,
         "sdlxliff_tag_surplus_tolerance": 0.05,
+        "sdlxliff_min_source_paragraph_tags": 20,
         "check_all_text_in_header": True,
         "check_invalid_tag_mismatch": False,
         "check_invalid_nesting": False,
@@ -230,6 +231,9 @@ def apply_qa_scan_env_from_settings(qa_settings):
         ),
         "QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE": str(
             settings.get("sdlxliff_tag_surplus_tolerance", 0.05)
+        ),
+        "QA_SDLXLIFF_MIN_SOURCE_PARAGRAPH_TAGS": str(
+            settings.get("sdlxliff_min_source_paragraph_tags", 20)
         ),
         "QA_USE_THREAD_EXECUTOR": "1" if settings.get("use_thread_executor", False) else "0",
         "QA_USE_WORD_COUNT": "1" if counting_mode == "word" else "0",

@@ -6552,10 +6552,19 @@ def _missing_beautifulsoup_tags_issue(
     output_counts,
     retention_threshold=1.0,
     surplus_tolerance=0.0,
+    min_source_paragraph_tags=0,
 ):
     if not isinstance(source_counts, dict):
         return None
     output_counts = output_counts if isinstance(output_counts, dict) else {}
+    try:
+        min_paragraphs = int(min_source_paragraph_tags)
+    except (TypeError, ValueError):
+        min_paragraphs = 0
+    min_paragraphs = max(0, min_paragraphs)
+    source_paragraphs = _safe_int(source_counts.get('p'), 0)
+    if source_paragraphs < min_paragraphs:
+        return None
     total_source = 0
     total_output = 0
     for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
@@ -8357,6 +8366,9 @@ def process_html_file_batch(args):
                     surplus_tolerance=qa_settings.get(
                         'sdlxliff_tag_surplus_tolerance', 0.05
                     ),
+                    min_source_paragraph_tags=qa_settings.get(
+                        'sdlxliff_min_source_paragraph_tags', 20
+                    ),
                 )
                 if missing_tag_issue:
                     issues.append(missing_tag_issue)
@@ -8813,6 +8825,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_missing_beautifulsoup_tags': False,
             'sdlxliff_tag_retention_threshold': 0.9,
             'sdlxliff_tag_surplus_tolerance': 0.05,
+            'sdlxliff_min_source_paragraph_tags': 20,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
             'check_potential_truncation': False,
@@ -9392,6 +9405,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         except (TypeError, ValueError):
             surplus_pct = 5
         log(f"      → Maximum surplus output tags allowed: {surplus_pct}%")
+        try:
+            min_source_paragraphs = int(
+                qa_settings.get('sdlxliff_min_source_paragraph_tags', 20)
+            )
+        except (TypeError, ValueError):
+            min_source_paragraphs = 20
+        log(f"      → Minimum source <p> tags to check: {min_source_paragraphs}")
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")

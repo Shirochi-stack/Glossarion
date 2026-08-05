@@ -537,6 +537,7 @@ class QAScannerMixin:
                     'check_missing_beautifulsoup_tags': False,
                     'sdlxliff_tag_retention_threshold': 0.9,
                     'sdlxliff_tag_surplus_tolerance': 0.05,
+                    'sdlxliff_min_source_paragraph_tags': 20,
                     'check_invalid_nesting': False,
                     'cache_enabled': True,
                     'cache_auto_size': False,
@@ -3471,9 +3472,58 @@ class QAScannerMixin:
             sdlxliff_tag_surplus_layout.addStretch()
             detection_layout.addWidget(sdlxliff_tag_surplus_widget)
 
+            sdlxliff_min_source_paragraph_widget = QWidget()
+            sdlxliff_min_source_paragraph_layout = QHBoxLayout(
+                sdlxliff_min_source_paragraph_widget
+            )
+            sdlxliff_min_source_paragraph_layout.setContentsMargins(20, 0, 0, 5)
+
+            sdlxliff_min_source_paragraph_label = QLabel(
+                "Minimum source <p> tags to check:"
+            )
+            sdlxliff_min_source_paragraph_label.setFont(QFont('Arial', 10))
+            sdlxliff_min_source_paragraph_label.setFixedWidth(250)
+            sdlxliff_min_source_paragraph_layout.addWidget(
+                sdlxliff_min_source_paragraph_label
+            )
+
+            try:
+                current_min_source_paragraph_tags = int(
+                    qa_settings.get('sdlxliff_min_source_paragraph_tags', 20)
+                )
+            except (TypeError, ValueError):
+                current_min_source_paragraph_tags = 20
+
+            sdlxliff_min_source_paragraph_spinbox = QSpinBox()
+            sdlxliff_min_source_paragraph_spinbox.setMinimum(0)
+            sdlxliff_min_source_paragraph_spinbox.setMaximum(10000)
+            sdlxliff_min_source_paragraph_spinbox.setValue(
+                current_min_source_paragraph_tags
+            )
+            sdlxliff_min_source_paragraph_spinbox.setSuffix(" tags")
+            sdlxliff_min_source_paragraph_spinbox.setMinimumWidth(100)
+            sdlxliff_min_source_paragraph_spinbox.setToolTip(
+                "Skips this SDLXLIFF tag-count check when the source file contains fewer "
+                "paragraph tags than this value."
+            )
+            disable_wheel_event(sdlxliff_min_source_paragraph_spinbox)
+            sdlxliff_min_source_paragraph_layout.addWidget(
+                sdlxliff_min_source_paragraph_spinbox
+            )
+
+            sdlxliff_min_source_paragraph_hint = QLabel("(0 = check all)")
+            sdlxliff_min_source_paragraph_hint.setFont(QFont('Arial', 9))
+            sdlxliff_min_source_paragraph_hint.setStyleSheet("color: gray;")
+            sdlxliff_min_source_paragraph_layout.addWidget(
+                sdlxliff_min_source_paragraph_hint
+            )
+            sdlxliff_min_source_paragraph_layout.addStretch()
+            detection_layout.addWidget(sdlxliff_min_source_paragraph_widget)
+
             def toggle_sdlxliff_tag_retention(checked):
                 sdlxliff_tag_retention_widget.setEnabled(checked)
                 sdlxliff_tag_surplus_widget.setEnabled(checked)
+                sdlxliff_min_source_paragraph_widget.setEnabled(checked)
 
             check_missing_beautifulsoup_tags_checkbox.toggled.connect(
                 toggle_sdlxliff_tag_retention
@@ -5113,6 +5163,7 @@ class QAScannerMixin:
                         'check_missing_beautifulsoup_tags': (check_missing_beautifulsoup_tags_checkbox, lambda x: x.isChecked()),
                         'sdlxliff_tag_retention_threshold': (sdlxliff_tag_retention_spinbox, lambda x: x.value() / 100.0),
                         'sdlxliff_tag_surplus_tolerance': (sdlxliff_tag_surplus_spinbox, lambda x: x.value() / 100.0),
+                        'sdlxliff_min_source_paragraph_tags': (sdlxliff_min_source_paragraph_spinbox, lambda x: x.value()),
                         'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
                         'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                         'check_all_text_in_header': (check_all_text_in_header_checkbox, lambda x: x.isChecked()),
@@ -5338,6 +5389,7 @@ class QAScannerMixin:
                             ('QA_CACHE_ENABLED', '1' if qa_settings.get('cache_enabled', True) else '0'),
                             ('QA_SDLXLIFF_TAG_RETENTION_THRESHOLD', str(qa_settings.get('sdlxliff_tag_retention_threshold', 0.9))),
                             ('QA_SDLXLIFF_TAG_SURPLUS_TOLERANCE', str(qa_settings.get('sdlxliff_tag_surplus_tolerance', 0.05))),
+                            ('QA_SDLXLIFF_MIN_SOURCE_PARAGRAPH_TAGS', str(qa_settings.get('sdlxliff_min_source_paragraph_tags', 20))),
                             # Thread-vs-process executor for the scan
                             ('QA_USE_THREAD_EXECUTOR', '1' if qa_settings.get('use_thread_executor', False) else '0'),
                             ('AI_HUNTER_MAX_WORKERS', str(self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', max(1, (os.cpu_count() or 4) // 2)))),
@@ -5499,6 +5551,7 @@ class QAScannerMixin:
                     ('warn_name_mismatch', warn_mismatch_checkbox, True),
                     ('check_missing_html_tag', check_missing_html_tag_checkbox, True),
                     ('check_missing_beautifulsoup_tags', check_missing_beautifulsoup_tags_checkbox, False),
+                    ('sdlxliff_min_source_paragraph_tags', sdlxliff_min_source_paragraph_spinbox, 20),
                     ('check_body_tag', check_body_tag_checkbox, False),
                     ('check_missing_header_tags', check_missing_header_tags_checkbox, True),
                     ('check_all_text_in_header', check_all_text_in_header_checkbox, True),
@@ -5701,6 +5754,7 @@ class QAScannerMixin:
                     check_missing_beautifulsoup_tags_checkbox.setChecked(False)
                     sdlxliff_tag_retention_spinbox.setValue(90)
                     sdlxliff_tag_surplus_spinbox.setValue(5)
+                    sdlxliff_min_source_paragraph_spinbox.setValue(20)
                     check_missing_header_tags_checkbox.setChecked(True)
                     check_all_text_in_header_checkbox.setChecked(True)
                     check_invalid_tag_mismatch_checkbox.setChecked(False)
