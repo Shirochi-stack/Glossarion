@@ -3531,6 +3531,22 @@ class QAScannerMixin:
                 sdlxliff_tag_retention_widget.setEnabled(checked)
                 sdlxliff_tag_surplus_widget.setEnabled(checked)
                 sdlxliff_min_source_paragraph_widget.setEnabled(checked)
+                label_color = "white" if checked else "#707070"
+                hint_color = "gray" if checked else "#555555"
+                for label in (
+                    sdlxliff_tag_retention_label,
+                    sdlxliff_tag_surplus_label,
+                    sdlxliff_min_source_paragraph_label,
+                ):
+                    label.setEnabled(checked)
+                    label.setStyleSheet(f"color: {label_color};")
+                for hint in (
+                    sdlxliff_tag_retention_hint,
+                    sdlxliff_tag_surplus_hint,
+                    sdlxliff_min_source_paragraph_hint,
+                ):
+                    hint.setEnabled(checked)
+                    hint.setStyleSheet(f"color: {hint_color};")
 
             check_missing_beautifulsoup_tags_checkbox.toggled.connect(
                 toggle_sdlxliff_tag_retention
