@@ -244,11 +244,11 @@ class VolumeOrderDialog(QDialog):
             QMenu {
                 background-color: #2b2b2b; color: #e2e8f0;
                 border: 1px solid #555; border-radius: 4px;
-                padding: 4px 8px 4px 4px;
-                min-width: 285px;
+                padding: 4px;
+                min-width: 220px;
             }
             QMenu::item {
-                padding: 7px 42px 7px 24px;
+                padding: 7px 12px 7px 24px;
                 margin: 1px 3px;
                 border-radius: 3px;
             }
