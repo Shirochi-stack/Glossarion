@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 from Retranslation_GUI import (
     RetranslationMixin,
+    _clear_refinement_progress_fields,
     _combine_glossary_progress_legend_stats,
     _glossary_progress_filename_keys,
     _index_epub_html_members,
@@ -45,6 +46,53 @@ def _clear_actual_request_metadata():
     set_current_thread_actual_request_model(None, None)
     yield
     set_current_thread_actual_request_model(None, None)
+
+
+def test_remove_refinement_status_clears_current_and_restorable_state():
+    entry = {
+        "status": "completed",
+        "refinement_status": "refined",
+        "refined_at": 123.0,
+        "refinement_error": "old failure",
+        "unrefined_backup_file": "_unrefined/chapter.xhtml",
+        "previous_progress_entry": {
+            "status": "completed",
+            "refinement_status": "refined",
+            "refined_at": 122.0,
+            "unrefined_backup_file": "_unrefined/older.xhtml",
+        },
+    }
+
+    removed = _clear_refinement_progress_fields(entry)
+
+    assert removed == 7
+    for field in (
+        "refinement_status",
+        "refined_at",
+        "refinement_error",
+        "unrefined_backup_file",
+    ):
+        assert field not in entry
+        assert field not in entry["previous_progress_entry"]
+
+
+def test_progress_context_menu_places_remove_refinement_after_remove_qa():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "Retranslation_GUI.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("        def show_context_menu(pos):")
+    end = source.index(
+        "        listbox.customContextMenuRequested.connect(show_context_menu)",
+        start,
+    )
+    menu_block = source[start:end]
+
+    assert menu_block.index("Remove QA Failed Mark") < menu_block.index(
+        "Remove refinement status"
+    )
+    assert "remove_refinement_status()" in menu_block
 
 
 def test_cleanup_missing_files_uses_one_directory_snapshot(tmp_path, monkeypatch):

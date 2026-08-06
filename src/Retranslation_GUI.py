@@ -444,6 +444,30 @@ def _progress_path_signature(path):
         return None
 
 
+def _clear_refinement_progress_fields(entry):
+    """Remove refinement state from an entry and its restorable snapshot."""
+    if not isinstance(entry, dict):
+        return 0
+    removed = 0
+    fields = (
+        "refinement_status",
+        "refined_at",
+        "refinement_error",
+        "unrefined_backup_file",
+    )
+    for field in fields:
+        if field in entry:
+            entry.pop(field, None)
+            removed += 1
+    previous_entry = entry.get("previous_progress_entry")
+    if isinstance(previous_entry, dict):
+        for field in fields:
+            if field in previous_entry:
+                previous_entry.pop(field, None)
+                removed += 1
+    return removed
+
+
 def _progress_entry_refined_for_display(entry):
     if not isinstance(entry, dict):
         return False
@@ -17397,21 +17421,6 @@ class RetranslationMixin:
         def _machine_translation_path_for_output_file(output_file):
             return _sdlxliff_machine_translation_path(data['output_dir'], output_file)
 
-        def _clear_refinement_progress_fields(entry):
-            """Remove stale refinement metadata when a chapter is queued again."""
-            if not isinstance(entry, dict):
-                return 0
-            removed = 0
-            for field in ("refinement_status", "refined_at", "refinement_error", "unrefined_backup_file"):
-                if field in entry:
-                    entry.pop(field, None)
-                    removed += 1
-            previous_entry = entry.get("previous_progress_entry")
-            if isinstance(previous_entry, dict):
-                for field in ("refinement_status", "refined_at", "refinement_error", "unrefined_backup_file"):
-                    previous_entry.pop(field, None)
-            return removed
-
         def _restore_regular_in_progress_entry(info):
             if not isinstance(info, dict):
                 return None
@@ -17579,6 +17588,100 @@ class RetranslationMixin:
             self._refresh_retranslation_data(data)
             
             self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "Success", f"Removed failed mark from {cleared_count} chapters.")
+
+        def remove_refinement_status():
+            selected_items = data['listbox'].selectedItems()
+            if not selected_items:
+                self._styled_msgbox(
+                    QMessageBox.Warning,
+                    data.get('dialog', self),
+                    "No Selection",
+                    "Please select at least one chapter.",
+                )
+                return
+
+            selected_indices = [
+                data['listbox'].row(item) for item in selected_items
+            ]
+            selected_chapters = [
+                data['chapter_display_info'][index]
+                for index in selected_indices
+            ]
+            chapters = data.get('prog', {}).get('chapters', {})
+            matching_keys = set()
+            for info in selected_chapters:
+                progress_key = info.get('progress_key')
+                if progress_key and isinstance(chapters.get(progress_key), dict):
+                    matching_keys.add(progress_key)
+
+                target_norm = _normalize_filename(info.get('output_file'))
+                if not target_norm:
+                    continue
+                for key, entry in chapters.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if _normalize_filename(entry.get('output_file')) == target_norm:
+                        matching_keys.add(key)
+
+            refinement_fields = {
+                'refinement_status',
+                'refined_at',
+                'refinement_error',
+                'unrefined_backup_file',
+            }
+            keys_with_refinement = []
+            for key in matching_keys:
+                entry = chapters.get(key)
+                if not isinstance(entry, dict):
+                    continue
+                previous_entry = entry.get('previous_progress_entry')
+                if (
+                    refinement_fields.intersection(entry)
+                    or (
+                        isinstance(previous_entry, dict)
+                        and refinement_fields.intersection(previous_entry)
+                    )
+                ):
+                    keys_with_refinement.append(key)
+
+            if not keys_with_refinement:
+                self._styled_msgbox(
+                    QMessageBox.Information,
+                    data.get('dialog', self),
+                    "No Refinement Status",
+                    "None of the selected chapters have refinement status.",
+                )
+                return
+
+            reply = self._styled_msgbox(
+                QMessageBox.Question,
+                data.get('dialog', self),
+                "Confirm Remove Refinement Status",
+                (
+                    "Remove refinement status from "
+                    f"{len(keys_with_refinement)} chapter(s)?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            cleared_count = 0
+            for key in keys_with_refinement:
+                if _clear_refinement_progress_fields(chapters.get(key)):
+                    cleared_count += 1
+
+            if cleared_count:
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                self._refresh_retranslation_data(data)
+
+            self._styled_msgbox(
+                QMessageBox.Information,
+                data.get('dialog', self),
+                "Success",
+                f"Removed refinement status from {cleared_count} chapter(s).",
+            )
         
         def retranslate_selected():
             selected_items = data['listbox'].selectedItems()
@@ -18963,7 +19066,8 @@ class RetranslationMixin:
             act_open = act_review_sdlxliff = act_open_audio = None
             act_delete_audio = act_notepad_qa = act_retranslate = None
             act_resolve_qa = None
-            act_insert_img = act_remove_qa = act_restore_in_progress = None
+            act_insert_img = act_remove_qa = act_remove_refinement = None
+            act_restore_in_progress = None
             act_copy_qa = act_open_epub_reader = None
             selected_infos = []
 
@@ -18994,6 +19098,9 @@ class RetranslationMixin:
                     act_insert_img = menu.addAction("🖼️ Insert Missing Image")
 
                 act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+                act_remove_refinement = menu.addAction(
+                    "⭐ Remove refinement status"
+                )
 
                 try:
                     for selected_item in listbox.selectedItems():
@@ -19170,6 +19277,8 @@ class RetranslationMixin:
                         parent=data.get('dialog', self))
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
+            elif chosen == act_remove_refinement:
+                remove_refinement_status()
             elif act_notepad_qa and chosen == act_notepad_qa:
                 if not qa_file_path or not os.path.isfile(qa_file_path):
                     self._show_message(

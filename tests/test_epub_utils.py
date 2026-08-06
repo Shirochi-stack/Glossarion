@@ -760,6 +760,55 @@ def test_missing_quotation_preview_is_saved_with_progress_entry(tmp_path):
     }
 
 
+def test_qa_failure_removes_existing_refinement_status(tmp_path):
+    progress = {
+        "chapters": {
+            "9": {
+                "actual_num": 9,
+                "output_file": "chapter0009.xhtml",
+                "status": "completed",
+                "refinement_status": "refined",
+                "refined_at": 123.0,
+                "refinement_error": "stale error",
+                "unrefined_backup_file": (
+                    "_unrefined/chapter0009.xhtml"
+                ),
+                "previous_progress_entry": {
+                    "status": "completed",
+                    "refinement_status": "refined",
+                    "refined_at": 122.0,
+                    "unrefined_backup_file": (
+                        "_unrefined/older_chapter0009.xhtml"
+                    ),
+                },
+            }
+        }
+    }
+
+    update_new_format_progress(
+        progress,
+        [{
+            "filename": "chapter0009.xhtml",
+            "chapter_num": 9,
+            "issues": ["Chinese_text_found_2_chars_[失败]"],
+        }],
+        [],
+        lambda _message: None,
+        str(tmp_path),
+    )
+
+    chapter = progress["chapters"]["9"]
+    assert chapter["status"] == "qa_failed"
+    for field in (
+        "refinement_status",
+        "refined_at",
+        "refinement_error",
+        "unrefined_backup_file",
+    ):
+        assert field not in chapter
+        assert field not in chapter["previous_progress_entry"]
+
+
 def test_quotation_scan_can_skip_stylistic_single_quote_pairs(tmp_path):
     chapter_path = tmp_path / "chapter.html"
     chapter_path.write_text("<p>Use 'Naught' here.</p>", encoding="utf-8")

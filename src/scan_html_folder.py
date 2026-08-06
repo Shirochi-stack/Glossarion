@@ -4731,6 +4731,30 @@ def generate_html_report(results, output_path, duplicate_confidence):
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html)
 
+def _clear_refinement_progress_fields(entry):
+    """Remove refinement state that is no longer valid after QA failure."""
+    if not isinstance(entry, dict):
+        return False
+    changed = False
+    fields = (
+        "refinement_status",
+        "refined_at",
+        "refinement_error",
+        "unrefined_backup_file",
+    )
+    for field in fields:
+        if field in entry:
+            entry.pop(field, None)
+            changed = True
+    previous_entry = entry.get("previous_progress_entry")
+    if isinstance(previous_entry, dict):
+        for field in fields:
+            if field in previous_entry:
+                previous_entry.pop(field, None)
+                changed = True
+    return changed
+
+
 def update_progress_file(folder_path, results, log, progress_path=None):
     """Update translation progress file"""
     prog_path = progress_path or os.path.join(folder_path, "translation_progress.json")
@@ -5286,6 +5310,24 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
         log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
     if skipped_count:
         log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues")
+
+    # QA failure invalidates the claim that the current output is refined.
+    # Enforce that invariant across the snapshot, including entries which
+    # were already qa_failed before this scan (for example protected issues
+    # that the resolved-row branch deliberately leaves failed).
+    refinement_reset_count = 0
+    for chapter_info in prog.get("chapters", {}).values():
+        if not isinstance(chapter_info, dict):
+            continue
+        if str(chapter_info.get("status") or "").lower() != "qa_failed":
+            continue
+        if _clear_refinement_progress_fields(chapter_info):
+            refinement_reset_count += 1
+    if refinement_reset_count:
+        log(
+            f"Removed stale refinement status from "
+            f"{refinement_reset_count} QA-failed chapter(s)"
+        )
 
     return updated_nums_for_log, resolved_nums_for_log
 
