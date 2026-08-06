@@ -933,3 +933,76 @@ def test_last_successful_catalog_markers_survive_failure_and_reload(tmp_path, mo
     assert model_options.get_last_successful_provider_models()["xai"] == [
         "grok-replacement"
     ]
+
+
+def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    qt_widgets = pytest.importorskip("PySide6.QtWidgets")
+    import translator_gui
+
+    class ModelComboHarness:
+        setup_model_combobox_bindings = (
+            translator_gui.TranslatorGUI.setup_model_combobox_bindings
+        )
+        _install_model_completer = translator_gui.TranslatorGUI._install_model_completer
+        _model_editor_or_popup_is_active = (
+            translator_gui.TranslatorGUI._model_editor_or_popup_is_active
+        )
+        _replace_model_combo_catalog = (
+            translator_gui.TranslatorGUI._replace_model_combo_catalog
+        )
+        _refresh_model_combo_catalog = (
+            translator_gui.TranslatorGUI._refresh_model_combo_catalog
+        )
+        _schedule_pending_model_combo_catalog_refresh = (
+            translator_gui.TranslatorGUI._schedule_pending_model_combo_catalog_refresh
+        )
+        _apply_pending_model_combo_catalog_refresh = (
+            translator_gui.TranslatorGUI._apply_pending_model_combo_catalog_refresh
+        )
+
+    app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    window = qt_widgets.QWidget()
+    layout = qt_widgets.QVBoxLayout(window)
+    combo = qt_widgets.QComboBox()
+    combo.setEditable(True)
+    old_models = ["authnd/old-model", "authgpt/existing-model"]
+    combo.addItems(old_models)
+    other_field = qt_widgets.QLineEdit()
+    layout.addWidget(combo)
+    layout.addWidget(other_field)
+
+    harness = ModelComboHarness()
+    harness.model_combo = combo
+    harness._model_all_values = list(old_models)
+    harness.setup_model_combobox_bindings()
+
+    window.show()
+    window.activateWindow()
+    editor = combo.lineEdit()
+    editor.setFocus()
+    editor.setText("authnd/partially-typed")
+    editor.setCursorPosition(len("authnd/partially"))
+    app.processEvents()
+    assert editor.hasFocus()
+
+    new_models = ["authnd/new-model", "authnd/newer-model"]
+    assert not harness._refresh_model_combo_catalog(new_models)
+    assert [combo.itemText(index) for index in range(combo.count())] == old_models
+    assert editor.text() == "authnd/partially-typed"
+    assert editor.cursorPosition() == len("authnd/partially")
+    assert editor.hasFocus()
+
+    # The connected editingFinished handler applies the newest pending list on
+    # the next event-loop turn without taking focus back from the next field.
+    other_field.setFocus()
+    app.processEvents()
+    app.processEvents()
+
+    assert [combo.itemText(index) for index in range(combo.count())] == new_models
+    assert editor.text() == "authnd/partially-typed"
+    assert editor.cursorPosition() == len("authnd/partially")
+    assert other_field.hasFocus()
+    assert harness._pending_model_combo_catalog_values is None
+
+    window.close()
