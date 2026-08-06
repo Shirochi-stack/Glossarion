@@ -426,6 +426,30 @@ def count_review_tokens(review_input: ReviewInput, log_fn: Callable = print) -> 
     return total
 
 
+def _save_review_text(
+    review_text: str,
+    output_dir: str,
+    log_fn: Callable,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
+) -> List[str]:
+    """Save a review to its default path or to every explicitly requested path."""
+    if review_output_paths is None:
+        paths = [os.path.join(output_dir, "review", "review.md")]
+    else:
+        paths = list(dict.fromkeys(os.fspath(path) for path in review_output_paths))
+
+    for review_path in paths:
+        os.makedirs(os.path.dirname(os.path.abspath(review_path)), exist_ok=True)
+        with open(review_path, 'w', encoding='utf-8') as file:
+            file.write(review_text.strip())
+
+    if len(paths) == 1:
+        log_fn(f"💾 Review saved to: {paths[0]}")
+    else:
+        log_fn(f"💾 Combined review saved inside all {len(paths)} volume folders")
+    return paths
+
+
 # ─── Chapter chunking helper ────────────────────────────────────────────
 
 import re
@@ -678,6 +702,7 @@ def generate_review(
     config: dict,
     log_fn: Callable = print,
     stop_check_fn: Callable = None,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
 ) -> Optional[str]:
     """
     Generate a review of an EPUB by sending content in a single API call.
@@ -695,6 +720,7 @@ def generate_review(
         config: Full config dict (for multi-key support etc.)
         log_fn: Logging callback
         stop_check_fn: Stop check callback
+        review_output_paths: Optional explicit paths that all receive the review
         
     Returns:
         The generated review text, or None on failure.
@@ -820,14 +846,12 @@ def generate_review(
         log_fn(f"✅ Review generated in {elapsed:.1f}s (finish_reason: {finish_reason})")
 
         # 7. Save review
-        review_dir = os.path.join(output_dir, "review")
-        os.makedirs(review_dir, exist_ok=True)
-        review_path = os.path.join(review_dir, "review.md")
-
-        with open(review_path, 'w', encoding='utf-8') as f:
-            f.write(review_text.strip())
-
-        log_fn(f"💾 Review saved to: {review_path}")
+        _save_review_text(
+            review_text,
+            output_dir,
+            log_fn,
+            review_output_paths=review_output_paths,
+        )
         return review_text.strip()
 
     except Exception as e:
@@ -994,6 +1018,7 @@ def generate_chunked_review(
     batch_size: int = 1,
     log_fn: Callable = print,
     stop_check_fn: Callable = None,
+    review_output_paths: Optional[Sequence[Union[str, os.PathLike]]] = None,
 ) -> Optional[str]:
     """
     Generate a review by splitting content into chunks, reviewing each
@@ -1015,6 +1040,7 @@ def generate_chunked_review(
         batch_size: Number of parallel chunk workers (1 = sequential)
         log_fn: Logging callback
         stop_check_fn: Stop check callback
+        review_output_paths: Optional explicit paths that all receive the review
 
     Returns:
         The final synthesized review text, or None on failure.
@@ -1070,6 +1096,7 @@ def generate_chunked_review(
             config=config,
             log_fn=log_fn,
             stop_check_fn=stop_check_fn,
+            review_output_paths=review_output_paths,
         )
 
     log_fn(f"📦 Chunk Mode: splitting into {total_chunks} chunks (batch_size={batch_size})")
@@ -1304,12 +1331,10 @@ def generate_chunked_review(
         final_text = combined_chunks
 
     # 7. Save
-    review_dir = os.path.join(output_dir, "review")
-    os.makedirs(review_dir, exist_ok=True)
-    review_path = os.path.join(review_dir, "review.md")
-
-    with open(review_path, 'w', encoding='utf-8') as f:
-        f.write(final_text.strip())
-
-    log_fn(f"💾 Review saved to: {review_path}")
+    _save_review_text(
+        final_text,
+        output_dir,
+        log_fn,
+        review_output_paths=review_output_paths,
+    )
     return final_text.strip()

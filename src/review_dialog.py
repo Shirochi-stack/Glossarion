@@ -49,6 +49,22 @@ def _natural_path_key(path: str):
     return key, os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
+def _alphabetical_path_key(path: str):
+    """Case-insensitive A-to-Z filename key without numerical coercion."""
+    path = os.fspath(path)
+    return os.path.basename(path).casefold(), os.path.normcase(os.path.abspath(path))
+
+
+def _modified_path_key(path: str):
+    """Newest-first modification-time key with a stable alphabetical tie-break."""
+    path = os.fspath(path)
+    try:
+        modified = os.path.getmtime(path)
+    except OSError:
+        modified = float('-inf')
+    return -modified, _alphabetical_path_key(path)
+
+
 class VolumeOrderDialog(QDialog):
     """Reorder the files that Volume Mode treats as one continuous book."""
 
@@ -102,11 +118,24 @@ class VolumeOrderDialog(QDialog):
 
         move_buttons = QVBoxLayout()
         move_buttons.setSpacing(8)
+        self.top_btn = QPushButton("⏫ Move to Top")
         self.up_btn = QPushButton("▲ Move Up")
         self.down_btn = QPushButton("▼ Move Down")
+        self.bottom_btn = QPushButton("⏬ Move to Bottom")
         numerical_btn = QPushButton("1→9 Numerical Sort")
-        for button in (self.up_btn, self.down_btn, numerical_btn):
-            button.setMinimumWidth(145)
+        alphabetical_btn = QPushButton("A→Z Alphabetical Sort")
+        date_btn = QPushButton("Newest Date Sort")
+        date_btn.setToolTip("Sort by file modification date, newest first")
+        for button in (
+            self.top_btn,
+            self.up_btn,
+            self.down_btn,
+            self.bottom_btn,
+            numerical_btn,
+            alphabetical_btn,
+            date_btn,
+        ):
+            button.setMinimumWidth(180)
             button.setCursor(Qt.PointingHandCursor)
             button.setStyleSheet(
                 "QPushButton { background-color: #383838; color: #ddd; border: 1px solid #555; "
@@ -114,13 +143,21 @@ class VolumeOrderDialog(QDialog):
                 "QPushButton:hover { background-color: #4a4a4a; border-color: #5a9fd4; }"
                 "QPushButton:disabled { color: #666; background-color: #2d2d2d; }"
             )
+        self.top_btn.clicked.connect(lambda: self._move_selected_to_edge(True))
         self.up_btn.clicked.connect(lambda: self._move_selected(-1))
         self.down_btn.clicked.connect(lambda: self._move_selected(1))
+        self.bottom_btn.clicked.connect(lambda: self._move_selected_to_edge(False))
         numerical_btn.clicked.connect(self._sort_numerically)
+        alphabetical_btn.clicked.connect(self._sort_alphabetically)
+        date_btn.clicked.connect(self._sort_by_date)
+        move_buttons.addWidget(self.top_btn)
         move_buttons.addWidget(self.up_btn)
         move_buttons.addWidget(self.down_btn)
+        move_buttons.addWidget(self.bottom_btn)
         move_buttons.addSpacing(10)
         move_buttons.addWidget(numerical_btn)
+        move_buttons.addWidget(alphabetical_btn)
+        move_buttons.addWidget(date_btn)
         move_buttons.addStretch()
         body.addLayout(move_buttons)
         layout.addLayout(body, 1)
@@ -158,8 +195,29 @@ class VolumeOrderDialog(QDialog):
         self.file_list.setCurrentRow(target)
         self._renumber()
 
+    def _move_selected_to_edge(self, to_top):
+        row = self.file_list.currentRow()
+        count = self.file_list.count()
+        if row < 0 or count < 2:
+            return
+        target = 0 if to_top else count - 1
+        if row == target:
+            return
+        item = self.file_list.takeItem(row)
+        self.file_list.insertItem(target, item)
+        self.file_list.setCurrentRow(target)
+        self._renumber()
+
     def _sort_numerically(self):
-        paths = sorted(self.ordered_paths(), key=_natural_path_key)
+        self._replace_paths(sorted(self.ordered_paths(), key=_natural_path_key))
+
+    def _sort_alphabetically(self):
+        self._replace_paths(sorted(self.ordered_paths(), key=_alphabetical_path_key))
+
+    def _sort_by_date(self):
+        self._replace_paths(sorted(self.ordered_paths(), key=_modified_path_key))
+
+    def _replace_paths(self, paths):
         self.file_list.clear()
         for path in paths:
             item = QListWidgetItem()
@@ -172,23 +230,51 @@ class VolumeOrderDialog(QDialog):
 
     def _update_move_buttons(self, row):
         count = self.file_list.count()
+        self.top_btn.setEnabled(row > 0)
         self.up_btn.setEnabled(row > 0)
         self.down_btn.setEnabled(0 <= row < count - 1)
+        self.bottom_btn.setEnabled(0 <= row < count - 1)
 
     def _show_context_menu(self, pos):
         row = self.file_list.indexAt(pos).row()
         if row >= 0:
             self.file_list.setCurrentRow(row)
         menu = QMenu(self.file_list)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2b2b2b; color: #e2e8f0;
+                border: 1px solid #555; border-radius: 4px;
+                padding: 4px 8px 4px 4px;
+                min-width: 285px;
+            }
+            QMenu::item {
+                padding: 7px 42px 7px 24px;
+                margin: 1px 3px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected { background-color: #4a7ba7; color: white; }
+            QMenu::item:disabled { color: #777; }
+            QMenu::separator { height: 1px; background: #555; margin: 5px 10px; }
+        """)
+        move_top = menu.addAction("⏫ Move to Top")
         move_up = menu.addAction("▲ Move Up")
         move_down = menu.addAction("▼ Move Down")
+        move_bottom = menu.addAction("⏬ Move to Bottom")
+        move_top.setEnabled(row > 0)
         move_up.setEnabled(row > 0)
         move_down.setEnabled(0 <= row < self.file_list.count() - 1)
+        move_bottom.setEnabled(0 <= row < self.file_list.count() - 1)
+        move_top.triggered.connect(lambda: self._move_selected_to_edge(True))
         move_up.triggered.connect(lambda: self._move_selected(-1))
         move_down.triggered.connect(lambda: self._move_selected(1))
+        move_bottom.triggered.connect(lambda: self._move_selected_to_edge(False))
         menu.addSeparator()
         numerical = menu.addAction("1→9 Numerical Sort")
         numerical.triggered.connect(self._sort_numerically)
+        alphabetical = menu.addAction("A→Z Alphabetical Sort")
+        alphabetical.triggered.connect(self._sort_alphabetically)
+        date_modified = menu.addAction("Date Modified (Newest First)")
+        date_modified.triggered.connect(self._sort_by_date)
         menu.exec(self.file_list.mapToGlobal(pos))
 
 
@@ -689,7 +775,8 @@ class ReviewDialog(QDialog):
         self.volume_mode_checkbox = self._create_styled_checkbox("Volume Mode")
         self.volume_mode_checkbox.setToolTip(
             "Treat all selected files as one continuous book and generate one review.\n"
-            "Files start in numerical filename order (for example, Volume 2 before Volume 10)."
+            "Files start in numerical filename order (for example, Volume 2 before Volume 10).\n"
+            "The combined review is saved in every volume under review/combined_review/."
         )
         self.volume_mode_checkbox.setChecked(False)
         self.volume_mode_checkbox.stateChanged.connect(self._on_volume_mode_toggled)
@@ -922,11 +1009,36 @@ class ReviewDialog(QDialog):
             return self._volume_paths[0]
         return self.file_path
 
-    def _review_output_base(self):
-        stem = os.path.splitext(os.path.basename(self._primary_input_path()))[0]
-        if self._is_volume_mode() and len(self._volume_paths) > 1:
-            return f"{stem}_Volume"
-        return stem
+    def _output_dir_for_file(self, file_path):
+        """Return the normal per-file output directory on every supported OS."""
+        stem = os.path.splitext(os.path.basename(file_path))[0]
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
+                       getattr(self.translator_gui, 'config', {}).get('output_directory')
+        if override_dir:
+            return os.path.join(os.path.abspath(os.path.expanduser(override_dir)), stem)
+        return os.path.join(_get_app_dir(), stem)
+
+    def _get_review_paths(self):
+        """Return every path that should contain the active review."""
+        if self._is_volume_mode():
+            paths = [
+                os.path.join(
+                    self._output_dir_for_file(file_path),
+                    "review",
+                    "combined_review",
+                    "review.md",
+                )
+                for file_path in self._volume_paths
+            ]
+        else:
+            paths = [
+                os.path.join(
+                    self._output_dir_for_file(self.file_path),
+                    "review",
+                    "review.md",
+                )
+            ]
+        return list(dict.fromkeys(paths))
 
     def _rebuild_epub_combo(self):
         current_path = self.file_path
@@ -963,6 +1075,10 @@ class ReviewDialog(QDialog):
         self._epub_combo.setEnabled(not volume_mode)
         self._volume_order_btn.setVisible(volume_mode and multiple)
         self.start_btn.setText("🚀 Start Volume Review" if volume_mode else "🚀 Start Review")
+        self.start_btn.setMinimumWidth(195 if volume_mode else 140)
+        # The stop button also contains a 32px spinner, so it needs more room
+        # than the corresponding start button for the full Volume Mode label.
+        self.stop_btn.setMinimumWidth(210 if volume_mode else 150)
         self.start_btn.setToolTip(
             f"Generate one review from all {len(self._volume_paths)} files in the shown order"
             if volume_mode else "Generate a review for the selected file"
@@ -1231,8 +1347,9 @@ class ReviewDialog(QDialog):
         self._raw_review_md = ''
         self.save_btn.setEnabled(False)
         self.delete_btn.setEnabled(False)
-        review_path = self._get_review_path()
-        if review_path and os.path.exists(review_path):
+        review_paths = self._get_review_paths()
+        review_path = next((path for path in review_paths if os.path.exists(path)), None)
+        if review_path:
             try:
                 with open(review_path, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -1252,16 +1369,10 @@ class ReviewDialog(QDialog):
                 pass
 
     def _get_review_path(self) -> str:
-        """Get the review output path for the current EPUB."""
+        """Get the primary path used to display the active review."""
         try:
-            epub_base = self._review_output_base()
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
-                           getattr(self.translator_gui, 'config', {}).get('output_directory')
-            if override_dir:
-                output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
-            else:
-                output_dir = os.path.join(_get_app_dir(), epub_base)
-            return os.path.join(output_dir, "review", "review.md")
+            paths = self._get_review_paths()
+            return paths[0] if paths else None
         except Exception:
             return None
 
@@ -1349,8 +1460,8 @@ class ReviewDialog(QDialog):
             return  # Already running
 
         # Warn only if a saved review file exists on disk
-        review_path = self._get_review_path()
-        if review_path and os.path.exists(review_path):
+        review_paths = self._get_review_paths()
+        if any(os.path.exists(path) for path in review_paths):
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Warning)
@@ -1405,13 +1516,10 @@ class ReviewDialog(QDialog):
         if isinstance(review_input, list):
             review_input = list(review_input)  # Freeze the manual order for this run.
 
-        # Determine output directory
-        epub_base = self._review_output_base()
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
-        if override_dir:
-            output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
-        else:
-            output_dir = os.path.join(_get_app_dir(), epub_base)
+        # Use the first volume's normal output for API-client working data, while
+        # the review itself is written inside every volume's review folder.
+        output_dir = self._output_dir_for_file(self._primary_input_path())
+        review_output_paths = self._get_review_paths() if self._is_volume_mode() else None
 
         # UI state
         self.start_btn.hide()
@@ -1547,6 +1655,7 @@ class ReviewDialog(QDialog):
                         batch_size=chunk_batch_size,
                         log_fn=_log,
                         stop_check_fn=_stop_check,
+                        review_output_paths=review_output_paths,
                     )
                 else:
                     result = generate_review(
@@ -1562,6 +1671,7 @@ class ReviewDialog(QDialog):
                         config=config,
                         log_fn=_log,
                         stop_check_fn=_stop_check,
+                        review_output_paths=review_output_paths,
                     )
                 self._review_queue.put(('done', result))
             except Exception as e:
@@ -2716,18 +2826,18 @@ class ReviewDialog(QDialog):
             # Also save review text to file if present
             review_text = (self._raw_review_md or self.log_field.toPlainText()).strip()
             if review_text:
-                review_path = self._get_review_path()
-                if review_path:
+                review_paths = self._get_review_paths()
+                for review_path in review_paths:
                     os.makedirs(os.path.dirname(review_path), exist_ok=True)
                     with open(review_path, 'w', encoding='utf-8') as f:
                         f.write(review_text)
 
-                    # Update indicator
-                    try:
-                        if hasattr(self.translator_gui, '_update_review_indicator'):
-                            self.translator_gui._update_review_indicator()
-                    except Exception:
-                        pass
+                # Update indicator
+                try:
+                    if hasattr(self.translator_gui, '_update_review_indicator'):
+                        self.translator_gui._update_review_indicator()
+                except Exception:
+                    pass
 
             # Animate button: flash green "Saved!"
             original_text = "💾 Save"
@@ -2764,8 +2874,8 @@ class ReviewDialog(QDialog):
         import shutil
         from datetime import datetime
 
-        review_path = self._get_review_path()
-        if not review_path or not os.path.exists(review_path):
+        review_paths = [path for path in self._get_review_paths() if os.path.exists(path)]
+        if not review_paths:
             # Flash "No review found" on the button
             original_text = self.delete_btn.text()
             original_style = self.delete_btn.styleSheet()
@@ -2778,17 +2888,15 @@ class ReviewDialog(QDialog):
             return
 
         try:
-            # Create backups subfolder next to review/
-            review_dir = os.path.dirname(review_path)
-            backups_dir = os.path.join(review_dir, "backups")
-            os.makedirs(backups_dir, exist_ok=True)
-
             # Timestamped backup filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_name = f"review_{timestamp}.md"
-            backup_path = os.path.join(backups_dir, backup_name)
-
-            shutil.move(review_path, backup_path)
+            for review_path in review_paths:
+                review_dir = os.path.dirname(review_path)
+                backups_dir = os.path.join(review_dir, "backups")
+                os.makedirs(backups_dir, exist_ok=True)
+                backup_path = os.path.join(backups_dir, backup_name)
+                shutil.move(review_path, backup_path)
 
             # Clear UI
             self.log_field.clear()
@@ -2797,7 +2905,8 @@ class ReviewDialog(QDialog):
             # Ensure start button is usable after delete
             self.start_btn.show()
             self.start_btn.setEnabled(True)
-            if hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1:
+            if (hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1
+                    and not self._is_volume_mode()):
                 self.generate_all_btn.show()
                 self.generate_all_btn.setEnabled(True)
 
@@ -2824,7 +2933,9 @@ class ReviewDialog(QDialog):
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt; }"
                 "QPushButton:disabled { background-color: #555; color: #888; }"
             )
-            self.delete_btn.setText("✅ Moved to backups")
+            self.delete_btn.setText(
+                "✅ Copies moved to backups" if len(review_paths) > 1 else "✅ Moved to backups"
+            )
             self.delete_btn.setStyleSheet(
                 "background-color: #6c757d; color: white; font-weight: bold; "
                 "padding: 10px 24px; border-radius: 4px; font-size: 11pt;"
@@ -2876,12 +2987,12 @@ class ReviewDialog(QDialog):
                 return
 
             latest = os.path.join(backups_dir, backups[0])
-            review_path = self._get_review_path()
-            if not review_path:
+            review_paths = self._get_review_paths()
+            if not review_paths:
                 return
 
             # Warn if there's a current review.md that would be overwritten
-            if os.path.exists(review_path):
+            if any(os.path.exists(path) for path in review_paths):
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
                 msg.setWindowTitle("Restore Backup")
@@ -2907,11 +3018,12 @@ class ReviewDialog(QDialog):
                 if msg.exec() != QMessageBox.Yes:
                     return
 
-            os.makedirs(os.path.dirname(review_path), exist_ok=True)
-            shutil.copy2(latest, review_path)
+            for review_path in review_paths:
+                os.makedirs(os.path.dirname(review_path), exist_ok=True)
+                shutil.copy2(latest, review_path)
 
             # Load restored content into UI
-            with open(review_path, 'r', encoding='utf-8') as f:
+            with open(review_paths[0], 'r', encoding='utf-8') as f:
                 content = f.read()
             self._raw_review_md = content
             self._last_rendered_html = self._md_to_html(content, **self._get_font_kwargs())
