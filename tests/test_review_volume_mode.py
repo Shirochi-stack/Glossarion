@@ -160,7 +160,37 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
         assert dialog._all_epub_paths == [str(first), str(second)]
         assert dialog._volume_paths == [str(second), str(first)]
 
+        original_load = dialog._load_existing_review
+        original_restore_visibility = dialog._update_restore_btn_visibility
+        original_token_count = dialog._start_token_count
+        original_save_config = dialog._save_prompt_to_config
+        deferred_calls = []
+
+        def slow_load():
+            time.sleep(0.15)
+            deferred_calls.append("load")
+
+        dialog._load_existing_review = slow_load
+        dialog._update_restore_btn_visibility = lambda: deferred_calls.append("restore")
+        dialog._start_token_count = lambda: deferred_calls.append("tokens")
+        dialog._save_prompt_to_config = lambda: deferred_calls.append("save")
+
+        toggle_started = time.monotonic()
         dialog.volume_mode_checkbox.setChecked(True)
+        assert time.monotonic() - toggle_started < 0.1
+        assert deferred_calls == []
+
+        deferred_deadline = time.monotonic() + 1
+        while "tokens" not in deferred_calls and time.monotonic() < deferred_deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert deferred_calls == ["load", "restore", "tokens"]
+
+        dialog._load_existing_review = original_load
+        dialog._update_restore_btn_visibility = original_restore_visibility
+        dialog._start_token_count = original_token_count
+        dialog._save_prompt_to_config = original_save_config
+        dialog._start_token_count()
         deadline = time.monotonic() + 2
         while "Volume tokens" not in dialog.token_label.text() and time.monotonic() < deadline:
             app.processEvents()

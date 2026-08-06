@@ -293,6 +293,7 @@ class ReviewDialog(QDialog):
         self._token_count_generation = 0
         self._volume_order_customized = False
         self._volume_paths = []
+        self._volume_toggle_generation = 0
         self._settings_loaded = False
         self._raw_review_md = ''  # Raw markdown stored separately for saving
 
@@ -1098,15 +1099,32 @@ class ReviewDialog(QDialog):
             self._epub_combo.setToolTip("")
 
     def _on_volume_mode_toggled(self, _state):
+        """Update cheap UI state now; defer file/config work until after repaint."""
+        self._volume_toggle_generation += 1
+        generation = self._volume_toggle_generation
         self._update_volume_mode_ui()
         if not self._settings_loaded:
+            return
+
+        # Keep the current value available to the rest of the app immediately,
+        # without synchronously serializing the entire configuration on click.
+        enabled = self._is_volume_mode()
+        self.translator_gui.review_volume_mode_var = enabled
+        if hasattr(self.translator_gui, 'config'):
+            self.translator_gui.config['review_volume_mode'] = enabled
+
+        # Clearing/rendering a saved review and starting its token-count job can
+        # be noticeable for large file sets. Let Qt paint the checkbox first.
+        QTimer.singleShot(25, lambda: self._apply_deferred_volume_mode_change(generation))
+
+    def _apply_deferred_volume_mode_change(self, generation):
+        if generation != self._volume_toggle_generation:
             return
         self.log_field.clear()
         self._raw_review_md = ''
         self._load_existing_review()
         self._update_restore_btn_visibility()
         self._start_token_count()
-        self._save_prompt_to_config()
 
     def _open_volume_order_dialog(self):
         if len(self._all_epub_paths) <= 1:
