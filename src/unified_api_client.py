@@ -9534,8 +9534,41 @@ class UnifiedClient:
                         details={"refusal_message": extracted_content[:500]}
                     )
 
+                # A provider can return usable-looking text while still explicitly
+                # marking the request as failed. Route that finish reason through the
+                # same API_ERROR retry branch as raised provider/server errors.
+                is_empty_response = (
+                    not extracted_content
+                    or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]
+                )
+                normalized_finish_reason = self._normalize_finish_reason(finish_reason) or finish_reason
+                if not is_empty_response and normalized_finish_reason == 'error':
+                    finish_reason_error = UnifiedClientError(
+                        "Provider returned finish_reason='error'",
+                        error_type="api_error",
+                        details={
+                            "finish_reason": finish_reason,
+                            "provider": getattr(self, 'client_type', 'unknown'),
+                        },
+                    )
+                    if attempt < internal_retries - 1:
+                        print(
+                            f"⚠️ Provider returned finish_reason='error' on attempt "
+                            f"{attempt + 1}/{internal_retries}; routing API_ERROR through global retry logic"
+                        )
+                        raise finish_reason_error
+
+                    print(
+                        f"❌ Global API_ERROR retries exhausted after {internal_retries} attempt(s); "
+                        "returning finish_reason='error' (QA issue: API_ERROR)"
+                    )
+                    self._save_failed_request(messages, finish_reason_error, context, response)
+                    self._track_stats(context, False, "finish_reason_error", time.time() - start_time)
+                    self._attach_usage_to_last_payload(usage)
+                    return extracted_content, 'error'
+
                 # Handle empty responses
-                if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
+                if is_empty_response:
                     is_likely_safety_filter = self._detect_safety_filter(messages, extracted_content, finish_reason, response, getattr(self, 'client_type', 'unknown'))
                     
                     # Try fallback keys for safety filter detection
@@ -9623,20 +9656,38 @@ class UnifiedClient:
                         if retry_res:
                             return retry_res
 
-                    # Retry transient empty responses (finish_reason='error') before giving up.
-                    # Safety-filter empties go straight to finalize — retrying won't help.
-                    if finish_reason == 'error' and not is_likely_safety_filter and attempt < internal_retries - 1:
-                        # Exponential backoff: 10s → 20s → 40s → 80s, cap 120s, +jitter
-                        _base = min(10 * (2 ** min(attempt, 3)), 120)
-                        _delay = _base + random.uniform(0, 5)
-                        print(
-                            f"⚠️ Empty response (finish_reason='error') on attempt {attempt + 1}/{internal_retries} "
-                            f"— likely transient server error, retrying in {_delay:.1f}s..."
+                    # Every non-safety, non-truncation empty result is an API error.
+                    # This includes explicit provider finish reasons such as stop or
+                    # unknown when the empty-response safety heuristic is disabled.
+                    if (
+                        not is_likely_safety_filter
+                        and not self._is_truncation_finish_reason(finish_reason)
+                    ):
+                        provider_finish_reason = finish_reason
+                        finish_reason = 'error'
+                        finish_reason_error = UnifiedClientError(
+                            "Provider returned an empty API response "
+                            f"(finish_reason={provider_finish_reason!r})",
+                            error_type="api_error",
+                            details={
+                                "finish_reason": provider_finish_reason,
+                                "provider": getattr(self, 'client_type', 'unknown'),
+                                "empty_response": True,
+                            },
                         )
-                        self._last_retry_error_type = 'empty_error_response'
-                        if not self._sleep_with_cancel(_delay, 0.5):
-                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                        continue  # restart the for-loop attempt
+
+                        if attempt < internal_retries - 1:
+                            print(
+                                f"⚠️ Empty response normalized to finish_reason='error' on attempt "
+                                f"{attempt + 1}/{internal_retries} (provider finish_reason={provider_finish_reason!r}); "
+                                "routing API_ERROR through global retry logic"
+                            )
+                            raise finish_reason_error
+
+                        print(
+                            f"❌ Global API_ERROR retries exhausted after {internal_retries} attempt(s); "
+                            "returning finish_reason='error' (QA issue: API_ERROR)"
+                        )
 
 
                     # Finalize empty handling
@@ -10304,7 +10355,11 @@ class UnifiedClient:
                 # If we get here, this is the last attempt or a non-retryable error
                 # Save failed request and return fallback only if we've exhausted retries
                 if attempt >= internal_retries - 1:
-                    print(f"❌ Final attempt failed, returning fallback response")
+                    print(
+                        f"❌ Final attempt failed; global retries exhausted after "
+                        f"{internal_retries} attempt(s). Returning finish_reason='error' "
+                        "(QA issue: API_ERROR)"
+                    )
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))

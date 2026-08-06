@@ -1380,21 +1380,23 @@ def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabl
 ):
     import unified_api_client as unified
 
-    monkeypatch.setattr(
-        unified,
-        "_authnd_send",
-        lambda **_kwargs: {
+    attempts = []
+
+    def fake_authnd_send(**_kwargs):
+        attempts.append(1)
+        return {
             "content": "",
             "finish_reason": explicit_finish_reason,
             "finish_reason_explicit": True,
             "finish_reason_inference": "provider",
             "usage": None,
             "raw_response": {"finish_reason": explicit_finish_reason},
-        },
-    )
+        }
+
+    monkeypatch.setattr(unified, "_authnd_send", fake_authnd_send)
     monkeypatch.setenv("MISSING_FINISH_AS_PROHIBITED", "0")
     monkeypatch.setenv("DISABLE_EMPTY_SAFETY_HEURISTIC", "1")
-    monkeypatch.setenv("MAX_RETRIES", "1")
+    monkeypatch.setenv("MAX_RETRIES", "3")
     monkeypatch.setenv("USE_FALLBACK_KEYS", "0")
     monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
     unified, client = _make_missing_finish_client(
@@ -1423,7 +1425,61 @@ def test_authnd_explicit_empty_finish_is_not_prohibited_when_empty_safety_disabl
 
     assert content == "[EMPTY]"
     assert finish_reason == "error"
-    assert "prohibited content detected" not in "\n".join(logs).lower()
+    assert len(attempts) == 3
+    output = "\n".join(logs).lower()
+    assert "routing api_error through global retry logic" in output
+    assert "global api_error retries exhausted after 3 attempt(s)" in output
+    assert "qa issue: api_error" in output
+    assert "prohibited content detected" not in output
+
+
+def test_finish_reason_error_uses_global_retries_then_returns_api_error_for_qa(
+    monkeypatch,
+):
+    import unified_api_client as unified
+
+    attempts = []
+
+    def fake_response(*_args, **_kwargs):
+        attempts.append(1)
+        return unified.UnifiedResponse(
+            content="partial provider response",
+            finish_reason="error",
+            raw_response={"finish_reason": "error"},
+        )
+
+    monkeypatch.setenv("MAX_RETRIES", "3")
+    monkeypatch.setenv("DISABLE_REFUSAL_CHECKS", "1")
+    unified, client = _make_missing_finish_client(
+        monkeypatch,
+        "ocagy/gemini-3.1-pro-high",
+    )
+    monkeypatch.setattr(client, "_get_response", fake_response)
+    monkeypatch.setattr(client, "_save_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(client, "_attach_usage_to_last_payload", lambda *args, **kwargs: None)
+    logs = []
+    monkeypatch.setattr(
+        unified,
+        "print",
+        lambda *values, **_kwargs: logs.append(" ".join(str(value) for value in values)),
+        raising=False,
+    )
+
+    content, finish_reason = client._send_internal(
+        [{"role": "user", "content": "test"}],
+        temperature=0.2,
+        max_tokens=1024,
+        context="translation",
+        request_id="explicit-finish-reason-error",
+    )
+
+    output = "\n".join(logs).lower()
+    assert content == "partial provider response"
+    assert finish_reason == "error"
+    assert len(attempts) == 3
+    assert "server error (api error)" in output
+    assert "global api_error retries exhausted after 3 attempt(s)" in output
+    assert "qa issue: api_error" in output
 
 
 @pytest.mark.parametrize("explicit_finish_reason", ("stop", "unknown"))
