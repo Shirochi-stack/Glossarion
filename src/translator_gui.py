@@ -13364,6 +13364,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.review_spoiler_mode_var = self.config.get('review_spoiler_mode', False)
         self.review_chunk_mode_var = self.config.get('review_chunk_mode', False)
         self.review_chunk_wrap_var = self.config.get('review_chunk_wrap', True)
+        self.review_volume_mode_var = self.config.get('review_volume_mode', False)
         self.review_final_prompt_var = self.config.get('review_final_prompt', '')
         # Request merging - combine multiple chapters into single API request
         self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
@@ -42902,6 +42903,7 @@ Important rules:
                 ('review_spoiler_mode', ['review_spoiler_mode_var'], False, bool),
                 ('review_chunk_mode', ['review_chunk_mode_var'], False, bool),
                 ('review_chunk_wrap', ['review_chunk_wrap_var'], True, bool),
+                ('review_volume_mode', ['review_volume_mode_var'], False, bool),
                 ('review_final_prompt', ['review_final_prompt_var'], '', str),
 
                 # Image settings

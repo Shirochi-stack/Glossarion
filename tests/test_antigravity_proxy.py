@@ -171,6 +171,18 @@ def test_normalize_model_name_prefixes_sandbox_ids_for_upstream_proxy():
         == "antigravity-gemini-3.1-pro-low"
     )
     assert (
+        antigravity_proxy._normalize_model_name("antigravity/gemini-3.1-pro-high")
+        == "antigravity-gemini-3.1-pro-high"
+    )
+    assert (
+        antigravity_proxy._normalize_model_name("antigravity/gemini-3.5-flash-medium")
+        == "antigravity-gemini-3.5-flash-medium"
+    )
+    assert (
+        antigravity_proxy._normalize_model_name("antigravity/gemini-3.5-flash-high")
+        == "antigravity-gemini-3.5-flash-high"
+    )
+    assert (
         antigravity_proxy._normalize_model_name("antigravity-claude-opus-4-6-thinking-high")
         == "antigravity-claude-opus-4-6-thinking-high"
     )
@@ -864,8 +876,14 @@ def test_model_options_match_current_antigravity_dashboard_catalog():
         "antigravity/gemini-3-flash-agent",
         "antigravity/gemini-3.1-flash-image",
         "antigravity/gemini-3.1-flash-lite",
+        "antigravity/gemini-3.6-flash-low",
+        "antigravity/gemini-3.6-flash-medium",
+        "antigravity/gemini-3.6-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
+        "antigravity/gemini-3.5-flash-medium",
+        "antigravity/gemini-3.5-flash-high",
+        "antigravity/gemini-3.1-pro-high",
         "antigravity/gemini-3.1-pro-low",
         "antigravity/gemini-pro-agent",
         "antigravity/gemini-2.5-flash",
@@ -952,7 +970,8 @@ def test_patch_runtime_gemini35_flash_support(tmp_path):
         '            } else if (baseModel.includes("gemini-3-pro")) {\n'
         '                googleModel = `gemini-3-pro-${extractedTier || "high"}`;\n'
         '            }\n'
-        '        }\n',
+        '        }\n'
+        'googleRequest.generationConfig.thinkingConfig.thinkingLevel = extractedTier || "low";\n',
         encoding="utf-8",
     )
 
@@ -963,8 +982,28 @@ def test_patch_runtime_gemini35_flash_support(tmp_path):
     assert '"gemini-3.5-flash-medium"' in content
     assert '"gemini-3.5-flash-low"' in content
     assert '"gemini-3.5-flash",' in content
-    assert 'googleModel = "gemini-3.5-flash-low";' not in content
+    assert 'extractedTier === "medium" || extractedTier === "high"' in content
+    assert '? "gemini-3.5-flash-low"' in content
     assert '`gemini-3.5-flash-${extractedTier || "medium"}`' in content
+    assert 'thinkingLevel = extractedTier || "low";' in content
+
+
+def test_patch_runtime_gemini31_pro_high_alias_uses_low_model_with_high_thinking(tmp_path):
+    transform_file = tmp_path / "src" / "utils" / "transform.ts"
+    transform_file.parent.mkdir(parents=True)
+    transform_file.write_text(
+        'googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;\n'
+        'googleRequest.generationConfig.thinkingConfig.thinkingLevel = extractedTier || "low";\n',
+        encoding="utf-8",
+    )
+
+    assert antigravity_proxy._patch_runtime_gemini31_pro_high_alias(str(tmp_path))
+
+    content = transform_file.read_text(encoding="utf-8")
+    assert (
+        'extractedTier === "high" ? "gemini-3.1-pro-low"' in content
+    )
+    assert 'thinkingLevel = extractedTier || "low";' in content
 
 
 def test_patch_runtime_account_reset_support_clears_capabilities(tmp_path):

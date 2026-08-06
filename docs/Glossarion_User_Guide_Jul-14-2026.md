@@ -628,7 +628,7 @@ Turn on a second pass that re-reads and improves your finished translation:
 
 ### Review generator
 
-**Generate Review** produces an AI-written summary/review of a selected EPUB. Options include reviewing the **whole book in chunks** (works around token limits) and **Full Review mode** (includes both the first *and* last chapters, 50/50, for a complete picture instead of just the opening). A ✓ shows when a review already exists for that book.
+**Generate Review** produces an AI-written summary/review of a selected EPUB or other supported text file. **Full Review Mode** reviews the whole book in chunks, while **50/50 Split Mode** samples both the beginning and ending. **Volume Mode** treats every selected file as one continuous book and creates one combined review. Volume files start in numerical filename order; use **File Order…** to reorder them with drag and drop, the Move Up/Down buttons, or the right-click menu. The combined token total appears beside the controls, and the review is saved under `first-file_Volume/review/review.md` so it does not replace an individual-file review. A ✓ shows when a review already exists for the selected book.
 
 > **⚠️ You must enable an Input Token Limit to use the Review Generator.** Turn on **Enable Input Token Limit** (Section 6) first — with the limit disabled, the review won't run. Set a sensible cap (e.g. `200000`) and try again.
 

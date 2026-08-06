@@ -7,11 +7,13 @@ Launched from the "Generate Review" button in translator_gui.py.
 import os
 import sys
 import platform
+import re
 import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter,
-    QComboBox, QWidget, QSpinBox
+    QComboBox, QWidget, QSpinBox, QListWidget, QListWidgetItem,
+    QAbstractItemView, QMenu, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Slot, QEvent
 from PySide6.QtGui import QFont, QIcon
@@ -21,6 +23,7 @@ from review_generator import (
     DEFAULT_REVIEW_PROMPT,
     DEFAULT_FINAL_REVIEW_PROMPT,
     count_epub_tokens,
+    count_review_tokens,
     generate_review,
     generate_chunked_review,
 )
@@ -35,6 +38,160 @@ def _get_app_dir() -> str:
     return os.getcwd()
 
 
+_NATURAL_PART_RE = re.compile(r'(\d+)')
+
+
+def _natural_path_key(path: str):
+    """Case-insensitive natural key, so Volume 2 sorts before Volume 10."""
+    name = os.path.basename(os.fspath(path))
+    parts = _NATURAL_PART_RE.split(name.casefold())
+    key = tuple((0, int(part)) if part.isdigit() else (1, part) for part in parts)
+    return key, os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+class VolumeOrderDialog(QDialog):
+    """Reorder the files that Volume Mode treats as one continuous book."""
+
+    def __init__(self, parent, paths):
+        super().__init__(parent)
+        self.setWindowTitle("Volume File Order")
+        self.setModal(True)
+        self.setMinimumSize(640, 430)
+        self.resize(760, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "Files are read from top to bottom as one book. Drag rows to reorder them, "
+            "or use the buttons and right-click menu."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        layout.addWidget(info)
+
+        body = QHBoxLayout()
+        body.setSpacing(10)
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.file_list.setDragEnabled(True)
+        self.file_list.setAcceptDrops(True)
+        self.file_list.setDropIndicatorShown(True)
+        self.file_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.file_list.setDefaultDropAction(Qt.MoveAction)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._show_context_menu)
+        self.file_list.setStyleSheet("""
+            QListWidget {
+                background-color: #2b2b2b; color: #e2e8f0;
+                border: 1px solid #555; border-radius: 4px;
+                padding: 4px; font-size: 10pt;
+            }
+            QListWidget::item { padding: 8px 6px; border-bottom: 1px solid #3d3d3d; }
+            QListWidget::item:selected { background-color: #4a7ba7; color: white; }
+        """)
+        for path in paths:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, os.fspath(path))
+            item.setToolTip(os.fspath(path))
+            self.file_list.addItem(item)
+        self.file_list.model().rowsMoved.connect(lambda *_: QTimer.singleShot(0, self._renumber))
+        self.file_list.currentRowChanged.connect(self._update_move_buttons)
+        body.addWidget(self.file_list, 1)
+
+        move_buttons = QVBoxLayout()
+        move_buttons.setSpacing(8)
+        self.up_btn = QPushButton("▲ Move Up")
+        self.down_btn = QPushButton("▼ Move Down")
+        numerical_btn = QPushButton("1→9 Numerical Sort")
+        for button in (self.up_btn, self.down_btn, numerical_btn):
+            button.setMinimumWidth(145)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(
+                "QPushButton { background-color: #383838; color: #ddd; border: 1px solid #555; "
+                "border-radius: 3px; padding: 7px 10px; }"
+                "QPushButton:hover { background-color: #4a4a4a; border-color: #5a9fd4; }"
+                "QPushButton:disabled { color: #666; background-color: #2d2d2d; }"
+            )
+        self.up_btn.clicked.connect(lambda: self._move_selected(-1))
+        self.down_btn.clicked.connect(lambda: self._move_selected(1))
+        numerical_btn.clicked.connect(self._sort_numerically)
+        move_buttons.addWidget(self.up_btn)
+        move_buttons.addWidget(self.down_btn)
+        move_buttons.addSpacing(10)
+        move_buttons.addWidget(numerical_btn)
+        move_buttons.addStretch()
+        body.addLayout(move_buttons)
+        layout.addLayout(body, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttons.button(QDialogButtonBox.Ok).setText("Apply Order")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._renumber()
+        if self.file_list.count():
+            self.file_list.setCurrentRow(0)
+
+    def ordered_paths(self):
+        return [
+            self.file_list.item(row).data(Qt.UserRole)
+            for row in range(self.file_list.count())
+        ]
+
+    def _renumber(self):
+        for row in range(self.file_list.count()):
+            item = self.file_list.item(row)
+            path = item.data(Qt.UserRole)
+            item.setText(f"{row + 1}.  {os.path.basename(path)}")
+        self._update_move_buttons(self.file_list.currentRow())
+
+    def _move_selected(self, offset):
+        row = self.file_list.currentRow()
+        target = row + offset
+        if row < 0 or target < 0 or target >= self.file_list.count():
+            return
+        item = self.file_list.takeItem(row)
+        self.file_list.insertItem(target, item)
+        self.file_list.setCurrentRow(target)
+        self._renumber()
+
+    def _sort_numerically(self):
+        paths = sorted(self.ordered_paths(), key=_natural_path_key)
+        self.file_list.clear()
+        for path in paths:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.file_list.addItem(item)
+        self._renumber()
+        if self.file_list.count():
+            self.file_list.setCurrentRow(0)
+
+    def _update_move_buttons(self, row):
+        count = self.file_list.count()
+        self.up_btn.setEnabled(row > 0)
+        self.down_btn.setEnabled(0 <= row < count - 1)
+
+    def _show_context_menu(self, pos):
+        row = self.file_list.indexAt(pos).row()
+        if row >= 0:
+            self.file_list.setCurrentRow(row)
+        menu = QMenu(self.file_list)
+        move_up = menu.addAction("▲ Move Up")
+        move_down = menu.addAction("▼ Move Down")
+        move_up.setEnabled(row > 0)
+        move_down.setEnabled(0 <= row < self.file_list.count() - 1)
+        move_up.triggered.connect(lambda: self._move_selected(-1))
+        move_down.triggered.connect(lambda: self._move_selected(1))
+        menu.addSeparator()
+        numerical = menu.addAction("1→9 Numerical Sort")
+        numerical.triggered.connect(self._sort_numerically)
+        menu.exec(self.file_list.mapToGlobal(pos))
+
+
 class ReviewDialog(QDialog):
     """Dialog for generating an AI-powered review/summary of an EPUB."""
 
@@ -47,6 +204,10 @@ class ReviewDialog(QDialog):
         self._review_thread = None
         self._counting = False
         self._token_cache = {}  # {file_path: token_count} — avoids recounting on switch
+        self._token_count_generation = 0
+        self._volume_order_customized = False
+        self._volume_paths = []
+        self._settings_loaded = False
         self._raw_review_md = ''  # Raw markdown stored separately for saving
 
         self.setWindowTitle("Generate Review")
@@ -71,6 +232,8 @@ class ReviewDialog(QDialog):
 
         self._build_ui()
         self._load_saved_prompt()
+        self._settings_loaded = True
+        self._update_volume_mode_ui()
         self._load_existing_review()
         self._update_restore_btn_visibility()
         self._start_token_count()
@@ -162,6 +325,8 @@ class ReviewDialog(QDialog):
         # Ensure current file is in the list
         if self.file_path not in self._all_epub_paths:
             self._all_epub_paths.insert(0, self.file_path)
+        self._all_epub_paths = list(dict.fromkeys(self._all_epub_paths))
+        self._volume_paths = sorted(self._all_epub_paths, key=_natural_path_key)
 
         nav_arrow_style = (
             "QPushButton { background-color: #3a3a3a; color: white; border: 1px solid #555; "
@@ -520,6 +685,31 @@ class ReviewDialog(QDialog):
         self.chunk_mode_checkbox.setChecked(False)
         controls_layout.addWidget(self.chunk_mode_checkbox)
 
+        # Treat every selected file as consecutive parts of one book.
+        self.volume_mode_checkbox = self._create_styled_checkbox("Volume Mode")
+        self.volume_mode_checkbox.setToolTip(
+            "Treat all selected files as one continuous book and generate one review.\n"
+            "Files start in numerical filename order (for example, Volume 2 before Volume 10)."
+        )
+        self.volume_mode_checkbox.setChecked(False)
+        self.volume_mode_checkbox.stateChanged.connect(self._on_volume_mode_toggled)
+        controls_layout.addWidget(self.volume_mode_checkbox)
+
+        self._volume_order_btn = QPushButton("↕ File Order…")
+        self._volume_order_btn.setFixedHeight(26)
+        self._volume_order_btn.setCursor(Qt.PointingHandCursor)
+        self._volume_order_btn.setToolTip(
+            "Change Volume Mode file order with drag and drop, Move Up/Down, or numerical sorting"
+        )
+        self._volume_order_btn.setStyleSheet(
+            "QPushButton { background-color: #2b3a4a; color: #5a9fd4; border: 1px solid #3d5a73; "
+            "border-radius: 3px; padding: 2px 8px; font-size: 9pt; font-weight: 600; }"
+            "QPushButton:hover { background-color: #3a4f66; color: #7ab8e8; border-color: #5a9fd4; }"
+        )
+        self._volume_order_btn.clicked.connect(self._open_volume_order_dialog)
+        self._volume_order_btn.hide()
+        controls_layout.addWidget(self._volume_order_btn)
+
         # Wrap Chunks toggle
         self.chunk_wrap_checkbox = self._create_styled_checkbox("Wrap Chunks")
         self.chunk_wrap_checkbox.setToolTip(
@@ -714,6 +904,112 @@ class ReviewDialog(QDialog):
 
     # ─── EPUB list sync ──────────────────────────────────────────────
 
+    def _is_volume_mode(self):
+        return bool(
+            hasattr(self, 'volume_mode_checkbox')
+            and self.volume_mode_checkbox.isChecked()
+        )
+
+    def _review_input(self):
+        """Return the active single path or ordered Volume Mode path list."""
+        if self._is_volume_mode():
+            return list(self._volume_paths)
+        return self.file_path
+
+    def _primary_input_path(self):
+        """Return the path whose output folder owns the combined review."""
+        if self._is_volume_mode() and self._volume_paths:
+            return self._volume_paths[0]
+        return self.file_path
+
+    def _review_output_base(self):
+        stem = os.path.splitext(os.path.basename(self._primary_input_path()))[0]
+        if self._is_volume_mode() and len(self._volume_paths) > 1:
+            return f"{stem}_Volume"
+        return stem
+
+    def _rebuild_epub_combo(self):
+        current_path = self.file_path
+        self._epub_combo.blockSignals(True)
+        self._epub_combo.clear()
+        for path in self._all_epub_paths:
+            self._epub_combo.addItem(f"📖 Review: {os.path.basename(path)}", path)
+        try:
+            index = self._all_epub_paths.index(current_path)
+        except ValueError:
+            index = 0
+        self._epub_combo.setCurrentIndex(index)
+        self._epub_combo.blockSignals(False)
+
+    def _update_volume_mode_ui(self):
+        if not hasattr(self, 'volume_mode_checkbox'):
+            return
+        volume_mode = self._is_volume_mode()
+        multiple = len(self._all_epub_paths) > 1
+        try:
+            index = self._all_epub_paths.index(self.file_path)
+        except ValueError:
+            index = 0
+
+        show_nav = multiple and not volume_mode
+        self._nav_prev_btn.setVisible(show_nav)
+        self._nav_next_btn.setVisible(show_nav)
+        self._nav_counter.setVisible(show_nav)
+        self._nav_prev_btn.setEnabled(show_nav and index > 0)
+        self._nav_next_btn.setEnabled(show_nav and index < len(self._all_epub_paths) - 1)
+        if show_nav:
+            self._nav_counter.setText(f"{index + 1} / {len(self._all_epub_paths)}")
+
+        self._epub_combo.setEnabled(not volume_mode)
+        self._volume_order_btn.setVisible(volume_mode and multiple)
+        self.start_btn.setText("🚀 Start Volume Review" if volume_mode else "🚀 Start Review")
+        self.start_btn.setToolTip(
+            f"Generate one review from all {len(self._volume_paths)} files in the shown order"
+            if volume_mode else "Generate a review for the selected file"
+        )
+        self.generate_all_btn.setVisible(multiple and not volume_mode)
+
+        if volume_mode:
+            self.setWindowTitle(f"Generate Review — Volume Mode ({len(self._volume_paths)} files)")
+            if self._volume_paths:
+                first_name = os.path.basename(self._volume_paths[0])
+                last_name = os.path.basename(self._volume_paths[-1])
+                self._epub_combo.setToolTip(
+                    f"Combined order: {first_name} → {last_name}. Use File Order… to change it."
+                )
+        else:
+            self.setWindowTitle(f"Generate Review — {os.path.basename(self.file_path)}")
+            self._epub_combo.setToolTip("")
+
+    def _on_volume_mode_toggled(self, _state):
+        self._update_volume_mode_ui()
+        if not self._settings_loaded:
+            return
+        self.log_field.clear()
+        self._raw_review_md = ''
+        self._load_existing_review()
+        self._update_restore_btn_visibility()
+        self._start_token_count()
+        self._save_prompt_to_config()
+
+    def _open_volume_order_dialog(self):
+        if len(self._all_epub_paths) <= 1:
+            return
+        dialog = VolumeOrderDialog(self, self._volume_paths)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        ordered_paths = dialog.ordered_paths()
+        if ordered_paths == self._volume_paths:
+            return
+        self._volume_paths = ordered_paths
+        self._volume_order_customized = True
+        self._update_volume_mode_ui()
+        self.log_field.clear()
+        self._raw_review_md = ''
+        self._load_existing_review()
+        self._update_restore_btn_visibility()
+        self._start_token_count()
+
     def refresh_epub_list(self):
         """Re-read selected files from translator_gui and update the dropdown."""
         _REVIEW_EXTS = ('.epub', '.pdf', '.txt', '.html', '.htm', '.xhtml', '.md')
@@ -725,47 +1021,35 @@ class ReviewDialog(QDialog):
             f_str = str(f)
             if f_str.lower().endswith(_REVIEW_EXTS) and os.path.exists(f_str):
                 new_paths.append(f_str)
+        new_paths = list(dict.fromkeys(new_paths))
         # If no files at all, fall back to current file_path if it still exists
         if not new_paths and os.path.exists(self.file_path):
             new_paths = [self.file_path]
 
+        if self._volume_order_customized:
+            selected_set = set(new_paths)
+            kept = [path for path in self._volume_paths if path in selected_set]
+            added = sorted((path for path in new_paths if path not in kept), key=_natural_path_key)
+            new_volume_paths = kept + added
+        else:
+            new_volume_paths = sorted(new_paths, key=_natural_path_key)
+
         # Skip update if list hasn't changed
-        if new_paths == self._all_epub_paths:
+        if new_paths == self._all_epub_paths and new_volume_paths == self._volume_paths:
             return
 
         self._all_epub_paths = new_paths
-        show_nav = len(new_paths) > 1
+        self._volume_paths = new_volume_paths
+        multiple = len(new_paths) > 1
 
         # If current file_path is no longer in the list, switch to first
         if self.file_path not in new_paths and new_paths:
             self.file_path = new_paths[0]
 
-        # Update combo
-        self._epub_combo.blockSignals(True)
-        self._epub_combo.clear()
-        for ep in new_paths:
-            self._epub_combo.addItem(f"📖 Review: {os.path.basename(ep)}", ep)
-        try:
-            idx = new_paths.index(self.file_path)
-        except ValueError:
-            idx = 0
-        self._epub_combo.setCurrentIndex(idx)
-        self._epub_combo.blockSignals(False)
-
-        # Show/hide nav elements
-        self._nav_prev_btn.setVisible(show_nav)
-        self._nav_next_btn.setVisible(show_nav)
-        self._nav_counter.setVisible(show_nav)
-        if show_nav:
-            self._nav_prev_btn.setEnabled(idx > 0)
-            self._nav_next_btn.setEnabled(idx < len(new_paths) - 1)
-            self._nav_counter.setText(f"{idx + 1} / {len(new_paths)}")
-        # Show/hide Review All button
-        if hasattr(self, 'generate_all_btn'):
-            self.generate_all_btn.setVisible(show_nav)
+        self._rebuild_epub_combo()
 
         # Update combo style for single vs multi
-        if not show_nav:
+        if not multiple:
             self._epub_combo.setStyleSheet(
                 "QComboBox { background-color: #2b2b2b; color: white; border: none; "
                 "border-radius: 3px; padding: 4px 8px; font-size: 12pt; font-weight: bold; }"
@@ -789,8 +1073,8 @@ class ReviewDialog(QDialog):
                 }
             """)
 
-        # Update window title and reload for new file
-        self.setWindowTitle(f"Generate Review — {os.path.basename(self.file_path)}")
+        # Update mode-specific navigation/title and reload the appropriate review.
+        self._update_volume_mode_ui()
         self.log_field.clear()
         self._load_existing_review()
         self._update_restore_btn_visibility()
@@ -811,6 +1095,10 @@ class ReviewDialog(QDialog):
         self.chunk_mode_checkbox.setChecked(bool(chunk_mode))
         chunk_wrap = config.get('review_chunk_wrap', True)
         self.chunk_wrap_checkbox.setChecked(bool(chunk_wrap))
+        volume_mode = config.get('review_volume_mode', False)
+        self.volume_mode_checkbox.blockSignals(True)
+        self.volume_mode_checkbox.setChecked(bool(volume_mode))
+        self.volume_mode_checkbox.blockSignals(False)
         # Load final review prompt (stored separately from the main system prompt)
         self._final_review_prompt = config.get('review_final_prompt', '') or DEFAULT_FINAL_REVIEW_PROMPT
 
@@ -821,6 +1109,7 @@ class ReviewDialog(QDialog):
         gui.review_spoiler_mode_var = self.spoiler_checkbox.isChecked()
         gui.review_chunk_mode_var = self.chunk_mode_checkbox.isChecked()
         gui.review_chunk_wrap_var = self.chunk_wrap_checkbox.isChecked()
+        gui.review_volume_mode_var = self.volume_mode_checkbox.isChecked()
         gui.review_final_prompt_var = getattr(self, '_final_review_prompt', DEFAULT_FINAL_REVIEW_PROMPT)
 
     def _save_prompt_to_config(self):
@@ -939,6 +1228,9 @@ class ReviewDialog(QDialog):
 
     def _load_existing_review(self):
         """If a review already exists, load it into the log field."""
+        self._raw_review_md = ''
+        self.save_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
         review_path = self._get_review_path()
         if review_path and os.path.exists(review_path):
             try:
@@ -962,7 +1254,7 @@ class ReviewDialog(QDialog):
     def _get_review_path(self) -> str:
         """Get the review output path for the current EPUB."""
         try:
-            epub_base = os.path.splitext(os.path.basename(self.file_path))[0]
+            epub_base = self._review_output_base()
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or \
                            getattr(self.translator_gui, 'config', {}).get('output_directory')
             if override_dir:
@@ -976,63 +1268,78 @@ class ReviewDialog(QDialog):
     # ─── Token counting (background thread) ──────────────────────────
 
     def _start_token_count(self):
-        """Count EPUB tokens in a background thread (cached per file)."""
-        # Check cache first
-        cached = self._token_cache.get(self.file_path)
+        """Count active input tokens in a background thread."""
+        self._token_count_generation += 1
+        generation = self._token_count_generation
+        volume_mode = self._is_volume_mode()
+        review_input = self._review_input()
+        paths = list(review_input) if isinstance(review_input, list) else [review_input]
+        cache_key = ('volume', tuple(paths)) if volume_mode else paths[0]
+
+        # A combined count is exactly the sum of the cached source-text counts.
+        cached = self._token_cache.get(cache_key)
+        if cached is None and volume_mode and all(path in self._token_cache for path in paths):
+            cached = sum(self._token_cache[path] for path in paths)
+            self._token_cache[cache_key] = cached
         if cached is not None:
-            self.token_label.setText(f"📊 File tokens: {cached:,}")
+            if volume_mode:
+                self.token_label.setText(f"📚 Volume tokens ({len(paths)} files): {cached:,}")
+            else:
+                self.token_label.setText(f"📊 File tokens: {cached:,}")
             self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
             self._counting = False
             return
 
         self._counting = True
-        self._token_result = None  # Will be set by background thread
-        self.token_label.setText("⏳ Counting tokens...")
+        result_holder = {'value': None}
+        if volume_mode:
+            self.token_label.setText(f"⏳ Counting {len(paths)} files...")
+        else:
+            self.token_label.setText("⏳ Counting tokens...")
         self.token_label.setStyleSheet("color: #f59e0b; font-size: 10pt;")
-
-        file_path_for_count = self.file_path  # Capture for thread + closure
 
         def _count():
             try:
-                total = count_epub_tokens(file_path_for_count)
-                self._token_result = ('ok', total, file_path_for_count)
+                total = count_review_tokens(paths) if volume_mode else count_epub_tokens(paths[0])
+                result_holder['value'] = ('ok', total)
             except Exception as e:
                 import traceback
                 err_msg = f"{e}\n{traceback.format_exc()}"
                 print(f"[ReviewDialog] Token counting error: {err_msg}")
-                self._token_result = ('error', err_msg, file_path_for_count)
+                result_holder['value'] = ('error', err_msg)
 
         t = threading.Thread(target=_count, daemon=True)
         t.start()
 
         # Poll for result on the main thread every 200ms
-        self._token_poll_timer = QTimer(self)
-        self._token_poll_timer.setInterval(200)
+        timer = QTimer(self)
+        self._token_poll_timer = timer
+        timer.setInterval(200)
         def _check_result():
-            result = self._token_result
+            result = result_holder['value']
             if result is None:
                 return  # Still counting
-            self._token_poll_timer.stop()
+            timer.stop()
+            if generation != self._token_count_generation:
+                return
             self._counting = False
-            counted_path = result[2]
             if result[0] == 'error':
-                # Only update label if still on the same file
-                if self.file_path == counted_path:
-                    self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
-                    self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+                self.token_label.setText(f"⚠️ Token count failed: {result[1][:100]}")
+                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
             elif result[1] >= 0:
-                # Always cache the result
-                self._token_cache[counted_path] = result[1]
-                # Only update label if still on the same file
-                if self.file_path == counted_path:
+                self._token_cache[cache_key] = result[1]
+                if volume_mode:
+                    self.token_label.setText(
+                        f"📚 Volume tokens ({len(paths)} files): {result[1]:,}"
+                    )
+                else:
                     self.token_label.setText(f"📊 File tokens: {result[1]:,}")
-                    self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
+                self.token_label.setStyleSheet("color: #22c55e; font-size: 10pt;")
             else:
-                if self.file_path == counted_path:
-                    self.token_label.setText("⚠️ Could not count tokens")
-                    self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
-        self._token_poll_timer.timeout.connect(_check_result)
-        self._token_poll_timer.start()
+                self.token_label.setText("⚠️ Could not count tokens")
+                self.token_label.setStyleSheet("color: #ef4444; font-size: 10pt;")
+        timer.timeout.connect(_check_result)
+        timer.start()
 
     # ─── Review generation ───────────────────────────────────────────
 
@@ -1094,9 +1401,12 @@ class ReviewDialog(QDialog):
         output_lang = getattr(gui, 'lang_var', 'English')
         system_prompt = system_prompt.replace('{target_lang}', output_lang)
         spoiler_mode = self.spoiler_checkbox.isChecked()
+        review_input = self._review_input()
+        if isinstance(review_input, list):
+            review_input = list(review_input)  # Freeze the manual order for this run.
 
         # Determine output directory
-        epub_base = os.path.splitext(os.path.basename(self.file_path))[0]
+        epub_base = self._review_output_base()
         override_dir = os.environ.get('OUTPUT_DIRECTORY') or config.get('output_directory')
         if override_dir:
             output_dir = os.path.join(os.path.abspath(override_dir), epub_base)
@@ -1106,7 +1416,9 @@ class ReviewDialog(QDialog):
         # UI state
         self.start_btn.hide()
         self.generate_all_btn.hide()
-        self._stop_text_label.setText("Stop Review")
+        self._stop_text_label.setText(
+            "Stop Volume Review" if self._is_volume_mode() else "Stop Review"
+        )
         self.stop_btn.show()
         self._stop_spinner_timer.start()
         self.log_field.clear()
@@ -1114,6 +1426,9 @@ class ReviewDialog(QDialog):
         self.save_btn.setEnabled(False)
         self.delete_btn.setEnabled(False)
         self.restore_btn.hide()
+        self.volume_mode_checkbox.setEnabled(False)
+        self._volume_order_btn.setEnabled(False)
+        self._epub_combo.setEnabled(False)
 
         # Clear any lingering cancellation from a previous force stop
         try:
@@ -1217,7 +1532,7 @@ class ReviewDialog(QDialog):
             try:
                 if chunk_mode:
                     result = generate_chunked_review(
-                        epub_path=self.file_path,
+                        epub_path=review_input,
                         output_dir=output_dir,
                         api_key=api_key,
                         model=model,
@@ -1235,7 +1550,7 @@ class ReviewDialog(QDialog):
                     )
                 else:
                     result = generate_review(
-                        epub_path=self.file_path,
+                        epub_path=review_input,
                         output_dir=output_dir,
                         api_key=api_key,
                         model=model,
@@ -1279,6 +1594,10 @@ class ReviewDialog(QDialog):
         """Generate reviews for all selected EPUBs (sequential or parallel)."""
         if self._review_thread and self._review_thread.is_alive():
             return  # Already running
+
+        if self._is_volume_mode():
+            self._on_start_review()
+            return
 
         if len(self._all_epub_paths) <= 1:
             self._on_start_review()
@@ -1363,6 +1682,8 @@ class ReviewDialog(QDialog):
         self._nav_prev_btn.setEnabled(False)
         self._nav_next_btn.setEnabled(False)
         self._epub_combo.setEnabled(False)
+        self.volume_mode_checkbox.setEnabled(False)
+        self._volume_order_btn.setEnabled(False)
 
         # Clear cancellation
         try:
@@ -1557,6 +1878,8 @@ class ReviewDialog(QDialog):
                     self.generate_all_btn.show()
                     self.start_btn.setEnabled(True)
                     self.generate_all_btn.setEnabled(True)
+                    self.volume_mode_checkbox.setEnabled(True)
+                    self._volume_order_btn.setEnabled(True)
                     self.save_btn.setEnabled(True)
 
                     # Sync self.file_path and nav button states to current combo selection
@@ -1572,6 +1895,7 @@ class ReviewDialog(QDialog):
                         pass
                     # Re-enable combo
                     self._epub_combo.setEnabled(True)
+                    self._update_volume_mode_ui()
 
                     # Load the current EPUB's review into the output
                     self._load_existing_review()
@@ -2072,9 +2396,12 @@ class ReviewDialog(QDialog):
         self._stop_spinner_timer.stop()
         self.start_btn.show()
         self.start_btn.setEnabled(True)
-        if hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1:
+        if (hasattr(self, 'generate_all_btn') and len(self._all_epub_paths) > 1
+                and not self._is_volume_mode()):
             self.generate_all_btn.show()
             self.generate_all_btn.setEnabled(True)
+        self.volume_mode_checkbox.setEnabled(True)
+        self._volume_order_btn.setEnabled(True)
 
         # Re-enable save (was disabled at review start)
         self.save_btn.setEnabled(True)
@@ -2095,6 +2422,7 @@ class ReviewDialog(QDialog):
                 self._nav_counter.setText(f"{cur_idx + 1} / {n}")
         except Exception:
             pass
+        self._update_volume_mode_ui()
 
         if error:
             self._append_log(f"\n❌ Error: {error}")

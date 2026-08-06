@@ -131,6 +131,19 @@ def test_openrouter_online_catalog_replaces_static_provider_section(tmp_path, mo
     assert "or/vendor/new-model" in model_options.get_model_options()
 
 
+def test_antigravity_catalog_retains_local_tier_aliases():
+    merged = model_options._merge_dynamic_model_options(
+        ["gemini-3.5-flash", "antigravity/obsolete-model"],
+        {"antigravity": ["antigravity/gemini-3.5-flash-low"]},
+    )
+
+    assert "antigravity/obsolete-model" not in merged
+    assert "antigravity/gemini-3.5-flash-low" in merged
+    assert "antigravity/gemini-3.5-flash-medium" in merged
+    assert "antigravity/gemini-3.5-flash-high" in merged
+    assert "antigravity/gemini-3.1-pro-high" in merged
+
+
 def test_failed_online_catalog_uses_corrected_static_openrouter_list(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
 

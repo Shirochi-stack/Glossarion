@@ -65,7 +65,7 @@ PROXY_GITHUB_ARCHIVE_URL = (
 PROXY_DEFAULT_TAG = "v1.7.1"
 BUN_NPM_PACKAGE = os.environ.get("ANTIGRAVITY_BUN_PACKAGE", "bun@latest")
 BUN_INSTALL_TIMEOUT_SECONDS = 300
-RUNTIME_PATCH_VERSION = "2026-07-12-antigravity-single-forced-account-attempt"
+RUNTIME_PATCH_VERSION = "2026-08-06-gemini-tier-aliases-via-low"
 
 ANTIGRAVITY_SITE_URL = "https://antigravity.google/changelog"
 ANTIGRAVITY_CLIENT_VERSION_FALLBACK = "2.2.1"
@@ -363,13 +363,18 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
     )
     changed = changed or count > 0
 
-    mapping_marker = 'googleModel = `gemini-3.5-flash-${extractedTier || "medium"}`;'
-    updated, count = re.subn(
-        r'googleModel = "gemini-3\.5-flash-low";',
-        mapping_marker,
-        updated,
+    mapping_marker = (
+        'googleModel = extractedTier === "medium" || extractedTier === "high" '
+        '? "gemini-3.5-flash-low" '
+        ': `gemini-3.5-flash-${extractedTier || "medium"}`;'
     )
-    changed = changed or count > 0
+    for legacy_mapping in (
+        'googleModel = "gemini-3.5-flash-low";',
+        'googleModel = `gemini-3.5-flash-${extractedTier || "medium"}`;',
+    ):
+        if mapping_marker not in updated and legacy_mapping in updated:
+            updated = updated.replace(legacy_mapping, mapping_marker, 1)
+            changed = True
 
     if mapping_marker not in updated:
         def add_flash_mapping(match: re.Match) -> str:
@@ -401,6 +406,37 @@ def _patch_runtime_gemini35_flash_support(runtime_dir: str) -> bool:
         and '"gemini-3.5-flash-low"' in updated
         and '"gemini-3.5-flash",' in updated
         and mapping_marker in updated
+        and 'thinkingLevel = extractedTier || "low";' in updated
+    )
+
+
+def _patch_runtime_gemini31_pro_high_alias(runtime_dir: str) -> bool:
+    """Route Gemini 3.1 Pro high thinking through the available low model ID."""
+    transform_path = os.path.join(runtime_dir, "src", "utils", "transform.ts")
+    if not os.path.exists(transform_path):
+        return False
+
+    with open(transform_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    original_mapping = (
+        'googleModel = `gemini-3.1-pro-${extractedTier || "high"}`;'
+    )
+    alias_mapping = (
+        'googleModel = extractedTier === "high" ? "gemini-3.1-pro-low" '
+        ': `gemini-3.1-pro-${extractedTier || "high"}`;'
+    )
+    updated = content
+    if alias_mapping not in updated and original_mapping in updated:
+        updated = updated.replace(original_mapping, alias_mapping, 1)
+        with open(transform_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+
+    # The alias keeps extractedTier="high", which the transform applies as the
+    # Gemini thinking level even though the backend model ID is the low variant.
+    return (
+        alias_mapping in updated
+        and 'thinkingLevel = extractedTier || "low";' in updated
     )
 
 
@@ -919,6 +955,8 @@ def _download_proxy_runtime(
             raise RuntimeError("Downloaded proxy archive did not contain ANTIGRAVITY_VERSION")
         if not _patch_runtime_gemini35_flash_support(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.5 Flash")
+        if not _patch_runtime_gemini31_pro_high_alias(archive_root):
+            raise RuntimeError("Downloaded proxy archive could not be patched for Gemini 3.1 Pro high")
         if not _patch_runtime_finish_reason_mapping(archive_root):
             raise RuntimeError("Downloaded proxy archive could not be patched for finish reason mapping")
         if not _patch_runtime_account_reset_support(archive_root):
@@ -969,6 +1007,8 @@ def _patch_cached_runtime(
         if not _patch_runtime_antigravity_client_version(runtime_dir, client_version):
             return False
         if not _patch_runtime_gemini35_flash_support(runtime_dir):
+            return False
+        if not _patch_runtime_gemini31_pro_high_alias(runtime_dir):
             return False
         if not _patch_runtime_finish_reason_mapping(runtime_dir):
             return False

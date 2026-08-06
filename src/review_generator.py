@@ -12,7 +12,7 @@ import time
 import zipfile
 import threading
 import queue
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, Sequence, Union
 
 import tiktoken
 
@@ -328,6 +328,42 @@ def extract_chapter_texts(file_path: str, log_fn: Callable = print) -> List[Tupl
         return _extract_text_file(file_path, log_fn)
 
 
+ReviewInput = Union[str, os.PathLike, Sequence[Union[str, os.PathLike]]]
+
+
+def _normalise_review_paths(review_input: ReviewInput) -> List[str]:
+    """Return one or more review input paths as a concrete list."""
+    if isinstance(review_input, (str, os.PathLike)):
+        return [os.fspath(review_input)]
+    return [os.fspath(path) for path in review_input]
+
+
+def extract_review_chapters(
+    review_input: ReviewInput,
+    log_fn: Callable = print,
+) -> List[Tuple[str, str]]:
+    """Extract an ordered file set as one continuous, volume-aware book.
+
+    A single path preserves the historical chapter names. For multiple paths,
+    every section name is prefixed with its volume number and filename so chunk
+    logs and model input retain the boundary between books.
+    """
+    paths = _normalise_review_paths(review_input)
+    if len(paths) == 1:
+        return extract_chapter_texts(paths[0], log_fn=log_fn)
+
+    chapters: List[Tuple[str, str]] = []
+    total = len(paths)
+    for index, path in enumerate(paths, start=1):
+        basename = os.path.basename(path)
+        log_fn(f"Extracting volume {index}/{total}: {basename}")
+        sections = extract_chapter_texts(path, log_fn=log_fn)
+        for section_name, text in sections:
+            name = f"Volume {index}/{total}: {basename} / {section_name}"
+            chapters.append((name, text))
+    return chapters
+
+
 # ─── Token counting ─────────────────────────────────────────────────────
 
 def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
@@ -361,6 +397,32 @@ def count_epub_tokens(epub_path: str, log_fn: Callable = print) -> int:
         total = sum(f.result() for f in as_completed(futures))
 
     print(f"[TokenCount] Done: {total:,} tokens in {time.time() - t0:.1f}s")
+    return total
+
+
+def count_review_tokens(review_input: ReviewInput, log_fn: Callable = print) -> int:
+    """Count tokens across an ordered group of files treated as one book."""
+    paths = _normalise_review_paths(review_input)
+    if len(paths) == 1:
+        return count_epub_tokens(paths[0], log_fn=log_fn)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    started = time.time()
+    print(f"[TokenCount] Starting volume count for {len(paths)} files")
+    chapters = extract_review_chapters(paths, log_fn=lambda *_: None)
+    if not chapters:
+        return 0
+
+    _get_encoder()
+    with ThreadPoolExecutor(max_workers=min(8, len(chapters))) as pool:
+        futures = [pool.submit(count_tokens, text) for _, text in chapters]
+        total = sum(future.result() for future in as_completed(futures))
+
+    print(
+        f"[TokenCount] Volume total: {total:,} tokens across "
+        f"{len(paths)} files in {time.time() - started:.1f}s"
+    )
     return total
 
 
@@ -604,7 +666,7 @@ IMPORTANT: Your entire output must be in {target_lang}. Do NOT include any raw/u
 # ─── Main review generation ─────────────────────────────────────────────
 
 def generate_review(
-    epub_path: str,
+    epub_path: ReviewInput,
     output_dir: str,
     api_key: str,
     model: str,
@@ -621,7 +683,7 @@ def generate_review(
     Generate a review of an EPUB by sending content in a single API call.
     
     Args:
-        epub_path: Path to the EPUB file
+        epub_path: Path to one file, or ordered paths treated as one book
         output_dir: Output directory (review saved under review/ subfolder)
         api_key: API key for the model
         model: Model name
@@ -641,8 +703,15 @@ def generate_review(
         return None
 
     # 1. Extract chapters
-    log_fn(f"📖 Extracting content from {os.path.basename(epub_path)}...")
-    chapters = extract_chapter_texts(epub_path, log_fn=log_fn)
+    input_paths = _normalise_review_paths(epub_path)
+    if not input_paths:
+        log_fn("❌ No input files were provided")
+        return None
+    if len(input_paths) > 1:
+        log_fn(f"📚 Extracting one volume from {len(input_paths)} ordered files...")
+    else:
+        log_fn(f"📖 Extracting content from {os.path.basename(input_paths[0])}...")
+    chapters = extract_review_chapters(input_paths, log_fn=log_fn)
 
     if not chapters:
         log_fn("❌ No text content found in file")
@@ -910,7 +979,7 @@ def _split_into_chunks(
 
 
 def generate_chunked_review(
-    epub_path: str,
+    epub_path: ReviewInput,
     output_dir: str,
     api_key: str,
     model: str,
@@ -931,7 +1000,7 @@ def generate_chunked_review(
     chunk separately, then synthesizing all chunk reviews into one final review.
 
     Args:
-        epub_path: Path to the file
+        epub_path: Path to one file, or ordered paths treated as one book
         output_dir: Output directory
         api_key: API key
         model: Model name
@@ -954,8 +1023,15 @@ def generate_chunked_review(
         return None
 
     # 1. Extract chapters
-    log_fn(f"📖 Extracting content from {os.path.basename(epub_path)}...")
-    chapters = extract_chapter_texts(epub_path, log_fn=log_fn)
+    input_paths = _normalise_review_paths(epub_path)
+    if not input_paths:
+        log_fn("❌ No input files were provided")
+        return None
+    if len(input_paths) > 1:
+        log_fn(f"📚 Extracting one volume from {len(input_paths)} ordered files...")
+    else:
+        log_fn(f"📖 Extracting content from {os.path.basename(input_paths[0])}...")
+    chapters = extract_review_chapters(input_paths, log_fn=log_fn)
 
     if not chapters:
         log_fn("❌ No text content found in file")

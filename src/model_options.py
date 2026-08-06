@@ -346,6 +346,9 @@ def _get_static_model_options() -> List[str]:
         "antigravity/gemini-3.6-flash-high",
         "antigravity/gemini-3.5-flash-extra-low",
         "antigravity/gemini-3.5-flash-low",
+        "antigravity/gemini-3.5-flash-medium",
+        "antigravity/gemini-3.5-flash-high",
+        "antigravity/gemini-3.1-pro-high",
         "antigravity/gemini-3.1-pro-low",
         "antigravity/gemini-pro-agent",
         "antigravity/gemini-2.5-flash",
@@ -825,13 +828,24 @@ def _deduplicate_models(models: Iterable[str]) -> List[str]:
     return result
 
 
+_PROVIDER_CATALOG_COMPATIBILITY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "antigravity": (
+        "antigravity/gemini-3.5-flash-medium",
+        "antigravity/gemini-3.5-flash-high",
+        "antigravity/gemini-3.1-pro-high",
+    ),
+}
+
+
 def _merge_dynamic_model_options(
     static_models: Sequence[str],
     provider_models: Mapping[str, Sequence[str]],
 ) -> List[str]:
-    """Replace each successfully fetched provider section, preserving catalog order."""
+    """Replace fetched provider sections while retaining local compatibility aliases."""
     replacements = {
-        str(provider): _deduplicate_models(models)
+        str(provider): _deduplicate_models(
+            [*models, *_PROVIDER_CATALOG_COMPATIBILITY_ALIASES.get(str(provider), ())]
+        )
         for provider, models in provider_models.items()
         if models
     }
