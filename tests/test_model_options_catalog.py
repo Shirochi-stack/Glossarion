@@ -193,6 +193,13 @@ def test_public_openrouter_catalog_does_not_send_api_key(tmp_path, monkeypatch):
     _isolated_cache(tmp_path, monkeypatch)
     calls = []
 
+    assert model_options.provider_model_catalog_supports_anonymous_poll(
+        "or/openrouter/free"
+    )
+    assert not model_options.provider_model_catalog_supports_anonymous_poll(
+        "grok-3-mini"
+    )
+
     def fake_get(url, headers, timeout):
         calls.append((url, dict(headers)))
         if "openrouter.ai" in url:
@@ -1006,3 +1013,57 @@ def test_gui_catalog_refresh_waits_until_model_typing_finishes(monkeypatch):
     assert harness._pending_model_combo_catalog_values is None
 
     window.close()
+
+
+@pytest.mark.parametrize(
+    ("model", "api_key", "should_poll"),
+    [
+        ("grok-3-mini", "", False),
+        ("or/openrouter/free", "", True),
+        ("or/openrouter/free", "openrouter-key", True),
+        ("authnd/nvidia/model", "", True),
+    ],
+)
+def test_gui_auto_poll_respects_unified_client_optional_key_models(
+    monkeypatch,
+    model,
+    api_key,
+    should_poll,
+):
+    import translator_gui
+
+    due_calls = []
+    poll_calls = []
+
+    def fake_due_provider(active_model, active_api_key, custom_routes):
+        due_calls.append((active_model, active_api_key, custom_routes))
+        return "selected-provider"
+
+    monkeypatch.setattr(
+        translator_gui,
+        "due_provider_catalog_for_model",
+        fake_due_provider,
+    )
+
+    gui = SimpleNamespace(
+        model_combo=SimpleNamespace(currentText=lambda: model),
+        api_key_entry=SimpleNamespace(text=lambda: api_key),
+        config={},
+        custom_prefix_routes=[],
+        _normalize_custom_prefix_routes=lambda _routes: [],
+        _start_provider_model_catalog_refresh=(
+            lambda **kwargs: poll_calls.append(kwargs) or True
+        ),
+    )
+
+    translator_gui.TranslatorGUI._auto_poll_current_provider_catalog(gui)
+
+    if should_poll:
+        assert due_calls == [(model, api_key, [])]
+        assert poll_calls == [{
+            "only_provider": "selected-provider",
+            "automatic": True,
+        }]
+    else:
+        assert due_calls == []
+        assert poll_calls == []

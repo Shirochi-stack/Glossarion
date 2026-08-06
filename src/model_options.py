@@ -1236,6 +1236,20 @@ def catalog_provider_for_model(model: str, custom_routes: object = None) -> Opti
     return custom_specs[0].name if custom_specs else None
 
 
+def provider_model_catalog_supports_anonymous_poll(
+    model: str,
+    custom_routes: object = None,
+) -> bool:
+    """Return whether the selected route exposes a public model catalog."""
+    provider = catalog_provider_for_model(model, custom_routes)
+    if not provider:
+        return False
+    specs = list(PROVIDER_CATALOG_SPECS)
+    specs.extend(_custom_catalog_specs(custom_routes, model))
+    spec = next((item for item in specs if item.name == provider), None)
+    return bool(spec is not None and spec.public)
+
+
 def provider_model_catalog_refresh_due(
     provider: str,
     *,

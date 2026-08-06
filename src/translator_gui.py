@@ -558,6 +558,7 @@ from model_options import (
     due_provider_catalog_for_model,
     get_last_successful_provider_models,
     get_model_options,
+    provider_model_catalog_supports_anonymous_poll,
     provider_model_catalog_refresh_due,
     start_provider_model_catalog_refresh,
 )
@@ -19994,12 +19995,30 @@ Recent translations to summarize:
             active_api_key = self.api_key_entry.text().strip()
         except (AttributeError, RuntimeError):
             return
+
         try:
             custom_routes = self._normalize_custom_prefix_routes(
                 getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
             )
         except Exception:
             custom_routes = []
+
+        # Catalog authentication and inference authentication are separate.
+        # OpenRouter's or/ route, for example, needs a key for inference but
+        # exposes a public catalog that should still auto-poll without one.
+        anonymous_catalog = provider_model_catalog_supports_anonymous_poll(
+            active_model,
+            custom_routes,
+        )
+        if not active_api_key and not anonymous_catalog:
+            try:
+                from unified_api_client import UnifiedClient as _UC
+                if _UC._model_needs_api_key(active_model):
+                    return
+            except Exception:
+                # If the classification cannot be loaded, an empty key should
+                # fail closed for catalogs that are not explicitly public.
+                return
 
         provider = due_provider_catalog_for_model(
             active_model,
