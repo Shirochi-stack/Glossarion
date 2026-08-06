@@ -160,17 +160,17 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
         assert dialog._all_epub_paths == [str(first), str(second)]
         assert dialog._volume_paths == [str(second), str(first)]
 
-        original_load = dialog._load_existing_review
+        original_async_load = dialog._load_existing_review_async
         original_restore_visibility = dialog._update_restore_btn_visibility
         original_token_count = dialog._start_token_count
         original_save_config = dialog._save_prompt_to_config
         deferred_calls = []
 
-        def slow_load():
+        def slow_load(_generation):
             time.sleep(0.15)
             deferred_calls.append("load")
 
-        dialog._load_existing_review = slow_load
+        dialog._load_existing_review_async = slow_load
         dialog._update_restore_btn_visibility = lambda: deferred_calls.append("restore")
         dialog._start_token_count = lambda: deferred_calls.append("tokens")
         dialog._save_prompt_to_config = lambda: deferred_calls.append("save")
@@ -186,7 +186,7 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
             time.sleep(0.01)
         assert deferred_calls == ["load", "restore", "tokens"]
 
-        dialog._load_existing_review = original_load
+        dialog._load_existing_review_async = original_async_load
         dialog._update_restore_btn_visibility = original_restore_visibility
         dialog._start_token_count = original_token_count
         dialog._save_prompt_to_config = original_save_config
@@ -252,5 +252,28 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
         assert order_dialog.top_btn.isEnabled() is False
         assert order_dialog.bottom_btn.isEnabled() is True
         order_dialog.close()
+
+        deferred_calls.clear()
+        dialog._load_existing_review_async = slow_load
+        dialog._update_restore_btn_visibility = lambda: deferred_calls.append("restore")
+        dialog._start_token_count = lambda: deferred_calls.append("tokens")
+        dialog._save_prompt_to_config = lambda: deferred_calls.append("save")
+
+        untoggle_started = time.monotonic()
+        dialog.volume_mode_checkbox.setChecked(False)
+        assert time.monotonic() - untoggle_started < 0.1
+        assert deferred_calls == []
+
+        deferred_deadline = time.monotonic() + 1
+        while "tokens" not in deferred_calls and time.monotonic() < deferred_deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert deferred_calls == ["load", "restore", "tokens"]
+        assert gui.review_volume_mode_var is False
+
+        dialog._load_existing_review_async = original_async_load
+        dialog._update_restore_btn_visibility = original_restore_visibility
+        dialog._start_token_count = original_token_count
+        dialog._save_prompt_to_config = original_save_config
     finally:
         dialog.close()

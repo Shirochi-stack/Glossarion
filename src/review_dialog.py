@@ -1099,11 +1099,11 @@ class ReviewDialog(QDialog):
             self._epub_combo.setToolTip("")
 
     def _on_volume_mode_toggled(self, _state):
-        """Update cheap UI state now; defer file/config work until after repaint."""
+        """Return immediately so Qt can paint the checkbox before other work."""
         self._volume_toggle_generation += 1
         generation = self._volume_toggle_generation
-        self._update_volume_mode_ui()
         if not self._settings_loaded:
+            self._update_volume_mode_ui()
             return
 
         # Keep the current value available to the rest of the app immediately,
@@ -1113,16 +1113,21 @@ class ReviewDialog(QDialog):
         if hasattr(self.translator_gui, 'config'):
             self.translator_gui.config['review_volume_mode'] = enabled
 
-        # Clearing/rendering a saved review and starting its token-count job can
-        # be noticeable for large file sets. Let Qt paint the checkbox first.
-        QTimer.singleShot(25, lambda: self._apply_deferred_volume_mode_change(generation))
+        # Even the navigation/layout swap is queued so the checkbox's own paint
+        # event wins this click cycle. Review work starts after that repaint.
+        QTimer.singleShot(0, lambda: self._apply_deferred_volume_mode_ui(generation))
+        QTimer.singleShot(75, lambda: self._apply_deferred_volume_mode_change(generation))
+
+    def _apply_deferred_volume_mode_ui(self, generation):
+        if generation == self._volume_toggle_generation:
+            self._update_volume_mode_ui()
 
     def _apply_deferred_volume_mode_change(self, generation):
         if generation != self._volume_toggle_generation:
             return
         self.log_field.clear()
         self._raw_review_md = ''
-        self._load_existing_review()
+        self._load_existing_review_async(generation)
         self._update_restore_btn_visibility()
         self._start_token_count()
 
@@ -1372,19 +1377,74 @@ class ReviewDialog(QDialog):
                 with open(review_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 if content.strip():
-                    self._raw_review_md = content
-                    self._last_rendered_html = self._md_to_html(content, **self._get_font_kwargs())
-                    self.log_field.setHtml(self._last_rendered_html)
-                    self._load_remote_images()
-                    self.save_btn.setEnabled(True)
-                    self.delete_btn.setEnabled(True)
-                    # Apply font size on widget level
                     font_kwargs = self._get_font_kwargs()
-                    f = self.log_field.font()
-                    f.setPointSize(font_kwargs['font_size'])
-                    self.log_field.document().setDefaultFont(f)
+                    html = self._md_to_html(content, **font_kwargs)
+                    self._apply_loaded_review(content, html, font_kwargs)
             except Exception:
                 pass
+
+    def _load_existing_review_async(self, generation):
+        """Read and convert the toggled-to review without blocking the GUI."""
+        self._raw_review_md = ''
+        self.save_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        review_path = next(
+            (path for path in self._get_review_paths() if os.path.exists(path)),
+            None,
+        )
+        if not review_path:
+            return
+
+        previous_timer = getattr(self, '_volume_review_load_timer', None)
+        if previous_timer is not None:
+            previous_timer.stop()
+
+        font_kwargs = self._get_font_kwargs()
+        result_holder = {'value': None}
+
+        def _read_and_render():
+            try:
+                with open(review_path, 'r', encoding='utf-8') as file:
+                    content = file.read()
+                if content.strip():
+                    html = ReviewDialog._md_to_html(content, **font_kwargs)
+                    result_holder['value'] = ('ok', content, html)
+                else:
+                    result_holder['value'] = ('empty', None, None)
+            except Exception as exc:
+                result_holder['value'] = ('error', str(exc), None)
+
+        threading.Thread(target=_read_and_render, daemon=True).start()
+
+        timer = QTimer(self)
+        self._volume_review_load_timer = timer
+        timer.setInterval(20)
+
+        def _check_result():
+            if generation != self._volume_toggle_generation:
+                timer.stop()
+                return
+            result = result_holder['value']
+            if result is None:
+                return
+            timer.stop()
+            if result[0] == 'ok':
+                self._apply_loaded_review(result[1], result[2], font_kwargs)
+
+        timer.timeout.connect(_check_result)
+        timer.start()
+
+    def _apply_loaded_review(self, content, html, font_kwargs):
+        """Apply already-rendered review content on the Qt GUI thread."""
+        self._raw_review_md = content
+        self._last_rendered_html = html
+        self.log_field.setHtml(html)
+        self._load_remote_images()
+        self.save_btn.setEnabled(True)
+        self.delete_btn.setEnabled(True)
+        font = self.log_field.font()
+        font.setPointSize(font_kwargs['font_size'])
+        self.log_field.document().setDefaultFont(font)
 
     def _get_review_path(self) -> str:
         """Get the primary path used to display the active review."""
