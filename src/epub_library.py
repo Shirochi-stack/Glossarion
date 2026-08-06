@@ -34,6 +34,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPoint, QPointF, QUrl, QEventLoop, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption, QPainter, QColor, QPen
 
+from metadata_progress import is_metadata_progress_entry
+from translation_artifacts import is_translation_artifact_progress_entry
+
 try:
     import dpi_setup
     dpi_setup.install_qt_message_filter()
@@ -2468,18 +2471,19 @@ def _validate_source_epub_for_workspace(folder: str, source_path: str) -> bool:
         stems: set[str] = set()
         for progress_key, ch in chapters.items():
             if isinstance(ch, dict):
-                # Progress Manager scaffolds a synthetic metadata.json row
-                # before any chapter translation begins.  It is not an EPUB
-                # manifest item, so including it in the content-overlap check
-                # makes every valid raw EPUB fail validation while the
-                # workspace contains only that row (the Library then shows
-                # "missing raw" and 0/1).  Ignore every representation used
-                # by metadata_progress.py, including older snapshots that
-                # only carried the reserved progress key.
+                # Progress Manager scaffolds synthetic metadata, TOC, and
+                # chapter-header translation rows before any source chapter
+                # is processed. These are generated workspace artifacts, not
+                # EPUB manifest items. Including them in the content-overlap
+                # check makes every valid source_epub.txt pointer fail while
+                # those are the only rows present, so cards incorrectly show
+                # "missing raw" and never obtain the EPUB's spine count.
+                # Use the shared classifiers so current and legacy forms of
+                # both kinds of synthetic progress row are ignored here.
                 if (
-                    str(progress_key) == "__metadata__"
-                    or str(ch.get("special_type") or "").lower() == "metadata"
+                    is_metadata_progress_entry(progress_key, ch)
                     or bool(ch.get("metadata_progress_key"))
+                    or is_translation_artifact_progress_entry(progress_key, ch)
                 ):
                     continue
                 ob = ch.get("original_basename")

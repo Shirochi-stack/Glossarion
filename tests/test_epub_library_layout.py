@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import zipfile
@@ -619,6 +620,101 @@ def test_details_tags_fall_back_to_source_epub_subjects():
         "판타지",
         "빙의",
     ]
+
+
+def test_output_card_uses_source_epub_when_only_artifact_progress_exists(
+    tmp_path, monkeypatch,
+):
+    """Generated TOC/header rows must not invalidate source_epub.txt."""
+    output_root = tmp_path / "Output"
+    workspace = output_root / "[1058] Test Book"
+    raw_root = tmp_path / "Raws"
+    library_raw = tmp_path / "Library" / "Raw"
+    workspace.mkdir(parents=True)
+    raw_root.mkdir()
+    library_raw.mkdir(parents=True)
+
+    source_epub = raw_root / "[1058] Test Book.epub"
+    container_xml = """<?xml version="1.0"?>
+    <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles>
+        <rootfile full-path="OEBPS/content.opf"
+                  media-type="application/oebps-package+xml"/>
+      </rootfiles>
+    </container>"""
+    opf = """<?xml version="1.0" encoding="UTF-8"?>
+    <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+      <manifest>
+        <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+        <item id="c2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+      </manifest>
+      <spine>
+        <itemref idref="c1"/>
+        <itemref idref="c2"/>
+      </spine>
+    </package>"""
+    with zipfile.ZipFile(source_epub, "w") as epub:
+        epub.writestr("META-INF/container.xml", container_xml)
+        epub.writestr("OEBPS/content.opf", opf)
+        epub.writestr("OEBPS/chapter1.xhtml", "<p>One</p>")
+        epub.writestr("OEBPS/chapter2.xhtml", "<p>Two</p>")
+
+    (workspace / "source_epub.txt").write_text(
+        str(source_epub), encoding="utf-8",
+    )
+    progress = {
+        "version": "2.1",
+        "chapters": {
+            "__metadata__": {
+                "original_basename": "metadata.json",
+                "output_file": "metadata.json",
+                "status": "pending",
+                "special_type": "metadata",
+            },
+            "__translation_artifact__:toc": {
+                "original_basename": "TOC.txt",
+                "output_file": "TOC.txt",
+                "status": "pending",
+                "special_type": "toc",
+                "translation_artifact_progress_key": (
+                    "__translation_artifact__:toc"
+                ),
+            },
+            "__translation_artifact__:headers": {
+                "original_basename": "translated_headers.txt",
+                "output_file": "translated_headers.txt",
+                "status": "pending",
+                "special_type": "headers",
+                "translation_artifact_progress_key": (
+                    "__translation_artifact__:headers"
+                ),
+            },
+        },
+    }
+    (workspace / "translation_progress.json").write_text(
+        json.dumps(progress), encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        epub_library, "_resolve_output_roots",
+        lambda _config=None: [str(output_root)],
+    )
+    monkeypatch.setattr(
+        epub_library, "_origins_raw_sources_for_stem", lambda _stem: [],
+    )
+    monkeypatch.setattr(epub_library, "load_library_raw_inputs", lambda: [])
+    monkeypatch.setattr(
+        epub_library, "get_library_raw_dir", lambda: str(library_raw),
+    )
+
+    rows = epub_library.scan_output_folders({})
+
+    assert len(rows) == 1
+    assert os.path.normpath(rows[0]["raw_source_path"]) == os.path.normpath(
+        str(source_epub)
+    )
+    assert rows[0]["missing_raw_file"] is False
+    assert rows[0]["total_chapters"] == 2
 
 
 def test_details_tags_allow_manually_cleared_metadata_subjects():
