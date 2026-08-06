@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -208,6 +209,95 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
             str(output_root / "Novel 10" / "review" / "combined_review" / "review.md"),
         ]
 
+        # First open must return to Qt immediately, show loading feedback, and
+        # cache the expensive dialog construction for subsequent opens.
+        construction_calls = []
+        reset_calls = []
+
+        class FakeFinishedSignal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+            def emit(self, result):
+                for callback in list(self.callbacks):
+                    callback(result)
+
+        class SlowOrderDialog:
+            def __init__(self, _parent, paths):
+                construction_calls.append(list(paths))
+                time.sleep(0.15)
+                self.finished = FakeFinishedSignal()
+                self.visible = False
+
+            def set_paths(self, paths):
+                reset_calls.append(list(paths))
+
+            def isVisible(self):
+                return self.visible
+
+            def show(self):
+                self.visible = True
+
+                def reject():
+                    self.visible = False
+                    self.finished.emit(review_dialog.QDialog.Rejected)
+
+                review_dialog.QTimer.singleShot(
+                    0,
+                    reject,
+                )
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
+
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(review_dialog, "VolumeOrderDialog", SlowOrderDialog)
+            open_started = time.monotonic()
+            dialog._open_volume_order_dialog()
+            assert time.monotonic() - open_started < 0.1
+            assert construction_calls == []
+            assert dialog._volume_order_open_pending
+            assert dialog._volume_order_btn.text() == "Loading File Order…"
+
+            open_deadline = time.monotonic() + 1
+            while (
+                (
+                    dialog._volume_order_open_pending
+                    or not construction_calls
+                    or getattr(dialog._volume_order_dialog, "visible", False)
+                )
+                and time.monotonic() < open_deadline
+            ):
+                app.processEvents()
+                time.sleep(0.01)
+
+            assert construction_calls == [[str(second), str(first)]]
+            assert dialog._volume_order_btn.text() == "↕ File Order…"
+
+            # The second open reuses the cached dialog and skips the loading
+            # screen's first-open construction delay.
+            dialog._open_volume_order_dialog()
+            cached_deadline = time.monotonic() + 0.5
+            while (
+                (
+                    dialog._volume_order_open_pending
+                    or getattr(dialog._volume_order_dialog, "visible", False)
+                )
+                and time.monotonic() < cached_deadline
+            ):
+                app.processEvents()
+                time.sleep(0.005)
+            assert len(construction_calls) == 1
+            assert reset_calls == [[str(second), str(first)]]
+
+        dialog._volume_order_dialog = None
+
         review_paths = dialog._get_review_paths()
         dialog._raw_review_md = "combined review"
         dialog._on_save()
@@ -226,7 +316,48 @@ def test_volume_mode_ui_uses_combined_token_total_and_reorder_controls(
             for path in review_paths
         )
 
-        order_dialog = review_dialog.VolumeOrderDialog(dialog, dialog._volume_paths)
+        metadata_threads = []
+        main_thread_id = threading.get_ident()
+        original_getmtime = review_dialog.os.path.getmtime
+
+        def slow_getmtime(path):
+            metadata_threads.append(threading.get_ident())
+            time.sleep(0.08)
+            return original_getmtime(path)
+
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(review_dialog.os.path, "getmtime", slow_getmtime)
+            order_started = time.monotonic()
+            order_dialog = review_dialog.VolumeOrderDialog(dialog, dialog._volume_paths)
+            assert time.monotonic() - order_started < 0.1
+            assert not order_dialog.isModal()
+            assert not order_dialog._ui_built
+            assert order_dialog._stack.currentWidget() is order_dialog._loading_page
+
+            order_deadline = time.monotonic() + 1
+            while not order_dialog._ui_built and time.monotonic() < order_deadline:
+                app.processEvents()
+                time.sleep(0.01)
+
+        assert order_dialog._ui_built
+        assert order_dialog._stack.currentWidget() is order_dialog._content_page
+        assert metadata_threads
+        assert all(thread_id != main_thread_id for thread_id in metadata_threads)
+        assert not order_dialog.testAttribute(review_dialog.Qt.WA_DeleteOnClose)
+
+        # Title-bar close only hides the prepared instance; reopening uses the
+        # exact same object and already-built content page.
+        order_dialog.show()
+        app.processEvents()
+        cached_order_dialog = order_dialog
+        order_dialog.close()
+        app.processEvents()
+        assert not order_dialog.isVisible()
+        order_dialog.show()
+        app.processEvents()
+        assert order_dialog is cached_order_dialog
+        assert order_dialog._ui_built
+
         order_dialog.file_list.setCurrentRow(1)
         order_dialog._move_selected(-1)
         assert order_dialog.ordered_paths() == [str(first), str(second)]

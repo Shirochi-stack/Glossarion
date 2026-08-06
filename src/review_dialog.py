@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QPlainTextEdit, QTextEdit, QTextBrowser, QCheckBox, QApplication, QGroupBox, QSplitter,
     QComboBox, QWidget, QSpinBox, QListWidget, QListWidgetItem,
-    QAbstractItemView, QMenu, QDialogButtonBox
+    QAbstractItemView, QMenu, QDialogButtonBox, QProgressBar, QStackedWidget
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Slot, QEvent
 from PySide6.QtGui import QFont, QIcon
@@ -71,11 +71,105 @@ class VolumeOrderDialog(QDialog):
     def __init__(self, parent, paths):
         super().__init__(parent)
         self.setWindowTitle("Volume File Order")
-        self.setModal(True)
+        self.setModal(False)
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
         self.setMinimumSize(640, 430)
         self.resize(760, 520)
+        self.setStyleSheet("QDialog { background-color: #1e1e1e; }")
 
-        layout = QVBoxLayout(self)
+        self._requested_paths = [os.fspath(path) for path in paths]
+        self._prepared_by_path = {}
+        self._prepare_generation = 0
+        self._prepare_results = {}
+        self._ui_built = False
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        self._stack = QStackedWidget()
+        root_layout.addWidget(self._stack)
+
+        self._loading_page = QWidget()
+        self._loading_page.setAttribute(Qt.WA_StyledBackground, True)
+        self._loading_page.setStyleSheet("background-color: #1e1e1e;")
+        loading_layout = QVBoxLayout(self._loading_page)
+        loading_layout.setContentsMargins(80, 60, 80, 60)
+        loading_layout.addStretch()
+        loading_title = QLabel("Loading file order…")
+        loading_title.setAlignment(Qt.AlignCenter)
+        loading_title.setStyleSheet(
+            "color: #e2e8f0; font-size: 13pt; font-weight: 600; background: transparent;"
+        )
+        loading_layout.addWidget(loading_title)
+        self._loading_detail = QLabel()
+        self._loading_detail.setAlignment(Qt.AlignCenter)
+        self._loading_detail.setStyleSheet(
+            "color: #94a3b8; font-size: 9pt; background: transparent;"
+        )
+        loading_layout.addWidget(self._loading_detail)
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        progress.setTextVisible(False)
+        progress.setFixedHeight(10)
+        progress.setStyleSheet(
+            "QProgressBar { background: #252525; border: 1px solid #46515e; "
+            "border-radius: 4px; }"
+            "QProgressBar::chunk { background: #4a7ba7; border-radius: 3px; }"
+        )
+        loading_layout.addWidget(progress)
+        loading_layout.addStretch()
+        self._stack.addWidget(self._loading_page)
+
+        self._prepare_timer = QTimer(self)
+        self._prepare_timer.setInterval(15)
+        self._prepare_timer.timeout.connect(self._check_prepared_paths)
+        self._start_prepare_paths(self._requested_paths)
+
+    def _start_prepare_paths(self, paths):
+        """Prepare filesystem-backed row metadata outside the GUI thread."""
+        paths = [os.fspath(path) for path in paths]
+        self._requested_paths = paths
+        self._prepare_generation += 1
+        generation = self._prepare_generation
+        self._loading_detail.setText(f"Preparing {len(paths)} files in the background")
+        self._stack.setCurrentWidget(self._loading_page)
+        self._prepare_timer.start()
+
+        results = self._prepare_results
+
+        def _prepare():
+            rows = []
+            for path in paths:
+                try:
+                    modified = os.path.getmtime(path)
+                except OSError:
+                    modified = float('-inf')
+                rows.append((path, os.path.basename(path), modified))
+            results[generation] = rows
+
+        threading.Thread(target=_prepare, daemon=True).start()
+
+    def _check_prepared_paths(self):
+        rows = self._prepare_results.pop(self._prepare_generation, None)
+        if rows is None:
+            return
+        for stale_generation in tuple(self._prepare_results):
+            if stale_generation < self._prepare_generation:
+                self._prepare_results.pop(stale_generation, None)
+        self._prepare_timer.stop()
+        self._prepared_by_path.update(
+            {path: (name, modified) for path, name, modified in rows}
+        )
+        if not self._ui_built:
+            self._build_order_ui()
+        self._replace_paths([path for path, _name, _modified in rows])
+        self._stack.setCurrentWidget(self._content_page)
+
+    def _build_order_ui(self):
+        """Build Qt widgets on the GUI thread after background preparation."""
+        self._content_page = QWidget()
+        self._content_page.setAttribute(Qt.WA_StyledBackground, True)
+        self._content_page.setStyleSheet("background-color: #1e1e1e;")
+        layout = QVBoxLayout(self._content_page)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
@@ -84,7 +178,7 @@ class VolumeOrderDialog(QDialog):
             "or use the buttons and right-click menu."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        info.setStyleSheet("color: #94a3b8; font-size: 9pt; background: transparent;")
         layout.addWidget(info)
 
         body = QHBoxLayout()
@@ -107,21 +201,18 @@ class VolumeOrderDialog(QDialog):
             QListWidget::item { padding: 8px 6px; border-bottom: 1px solid #3d3d3d; }
             QListWidget::item:selected { background-color: #4a7ba7; color: white; }
         """)
-        for path in paths:
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, os.fspath(path))
-            item.setToolTip(os.fspath(path))
-            self.file_list.addItem(item)
         self.file_list.model().rowsMoved.connect(lambda *_: QTimer.singleShot(0, self._renumber))
         self.file_list.currentRowChanged.connect(self._update_move_buttons)
         body.addWidget(self.file_list, 1)
 
         move_buttons = QVBoxLayout()
         move_buttons.setSpacing(8)
-        self.top_btn = QPushButton("⏫ Move to Top")
+        # Monochrome glyphs avoid the costly color-emoji font initialization
+        # that made this dialog's first construction noticeably slower.
+        self.top_btn = QPushButton("⇈ Move to Top")
         self.up_btn = QPushButton("▲ Move Up")
         self.down_btn = QPushButton("▼ Move Down")
-        self.bottom_btn = QPushButton("⏬ Move to Bottom")
+        self.bottom_btn = QPushButton("⇊ Move to Bottom")
         numerical_btn = QPushButton("1→9 Numerical Sort")
         alphabetical_btn = QPushButton("A→Z Alphabetical Sort")
         date_btn = QPushButton("Newest Date Sort")
@@ -168,15 +259,34 @@ class VolumeOrderDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self._renumber()
-        if self.file_list.count():
-            self.file_list.setCurrentRow(0)
+        self._stack.addWidget(self._content_page)
+        self._ui_built = True
 
     def ordered_paths(self):
+        if not self._ui_built:
+            return list(self._requested_paths)
         return [
             self.file_list.item(row).data(Qt.UserRole)
             for row in range(self.file_list.count())
         ]
+
+    def set_paths(self, paths):
+        """Reset a cached dialog to the latest unapplied file order."""
+        normalized = [os.fspath(path) for path in paths]
+        self._requested_paths = normalized
+        if not self._ui_built or normalized != self.ordered_paths():
+            self._start_prepare_paths(normalized)
+        elif self.file_list.count():
+            self.file_list.setCurrentRow(0)
+
+    def reject(self):
+        """Hide on Cancel/Escape so the prepared dialog remains reusable."""
+        self.hide()
+
+    def closeEvent(self, event):
+        """Match ReviewDialog: hide on title-bar close and preserve state."""
+        event.ignore()
+        self.hide()
 
     def _renumber(self):
         for row in range(self.file_list.count()):
@@ -215,7 +325,13 @@ class VolumeOrderDialog(QDialog):
         self._replace_paths(sorted(self.ordered_paths(), key=_alphabetical_path_key))
 
     def _sort_by_date(self):
-        self._replace_paths(sorted(self.ordered_paths(), key=_modified_path_key))
+        def _prepared_modified_key(path):
+            prepared = self._prepared_by_path.get(os.fspath(path))
+            if prepared is None:
+                return _modified_path_key(path)
+            return -prepared[1], _alphabetical_path_key(path)
+
+        self._replace_paths(sorted(self.ordered_paths(), key=_prepared_modified_key))
 
     def _replace_paths(self, paths):
         self.file_list.clear()
@@ -256,10 +372,10 @@ class VolumeOrderDialog(QDialog):
             QMenu::item:disabled { color: #777; }
             QMenu::separator { height: 1px; background: #555; margin: 5px 10px; }
         """)
-        move_top = menu.addAction("⏫ Move to Top")
+        move_top = menu.addAction("⇈ Move to Top")
         move_up = menu.addAction("▲ Move Up")
         move_down = menu.addAction("▼ Move Down")
-        move_bottom = menu.addAction("⏬ Move to Bottom")
+        move_bottom = menu.addAction("⇊ Move to Bottom")
         move_top.setEnabled(row > 0)
         move_up.setEnabled(row > 0)
         move_down.setEnabled(0 <= row < self.file_list.count() - 1)
@@ -293,6 +409,8 @@ class ReviewDialog(QDialog):
         self._token_count_generation = 0
         self._volume_order_customized = False
         self._volume_paths = []
+        self._volume_order_dialog = None
+        self._volume_order_open_pending = False
         self._volume_toggle_generation = 0
         self._settings_loaded = False
         self._raw_review_md = ''  # Raw markdown stored separately for saving
@@ -1132,10 +1250,59 @@ class ReviewDialog(QDialog):
         self._start_token_count()
 
     def _open_volume_order_dialog(self):
-        if len(self._all_epub_paths) <= 1:
+        existing = self._volume_order_dialog
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+            except RuntimeError:
+                self._volume_order_dialog = None
+
+        if len(self._all_epub_paths) <= 1 or self._volume_order_open_pending:
             return
-        dialog = VolumeOrderDialog(self, self._volume_paths)
-        if dialog.exec() != QDialog.Accepted:
+
+        # Return from the button signal immediately so its pressed/loading
+        # state is painted before any first-time Qt dialog/font construction.
+        self._volume_order_open_pending = True
+        self._volume_order_btn.setEnabled(False)
+        self._volume_order_btn.setText("Loading File Order…")
+        QTimer.singleShot(0, self._launch_volume_order_dialog)
+
+    def _finish_volume_order_open(self):
+        self._volume_order_open_pending = False
+        try:
+            self._volume_order_btn.setText("↕ File Order…")
+            self._volume_order_btn.setEnabled(True)
+        except RuntimeError:
+            pass
+
+    def _launch_volume_order_dialog(self):
+        """Show the internally-loading order dialog as a modeless window."""
+        if not self._volume_order_open_pending:
+            return
+
+        try:
+            dialog = self._volume_order_dialog
+            if dialog is None:
+                dialog = VolumeOrderDialog(self, self._volume_paths)
+                self._volume_order_dialog = dialog
+                dialog.finished.connect(self._on_volume_order_dialog_finished)
+            else:
+                dialog.set_paths(self._volume_paths)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except RuntimeError:
+            self._volume_order_dialog = None
+            self._finish_volume_order_open()
+            return
+        self._finish_volume_order_open()
+
+    def _on_volume_order_dialog_finished(self, result):
+        dialog = self._volume_order_dialog
+        if result != QDialog.Accepted or dialog is None:
             return
         ordered_paths = dialog.ordered_paths()
         if ordered_paths == self._volume_paths:
