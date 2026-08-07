@@ -255,6 +255,58 @@ def test_batch_header_translation_publishes_live_progress(tmp_path, monkeypatch)
     assert entry["model_name"] == "test-model"
 
 
+def test_batch_header_progress_uses_actual_metadata_key_model(tmp_path, monkeypatch):
+    from metadata_batch_translator import BatchHeaderTranslator
+    from unified_api_client import set_current_thread_actual_request_model
+
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:headers": {
+                    "status": "completed",
+                    "model_name": "main-key-model",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    class Client:
+        output_dir = str(tmp_path)
+        model = "main-key-model"
+
+    translator = BatchHeaderTranslator(Client(), {"headers_per_batch": 1})
+
+    def send_with_metadata_key(**_kwargs):
+        queued = json.loads(progress_path.read_text(encoding="utf-8"))
+        queued_entry = queued["chapters"]["__translation_artifact__:headers"]
+        assert queued_entry["status"] == "in_progress"
+        assert "model_name" not in queued_entry
+
+        set_current_thread_actual_request_model(
+            "metadata-key-model", "MetadataKey#1 (metadata-key-model)"
+        )
+        _kwargs["before_send_callback"]()
+        live = json.loads(progress_path.read_text(encoding="utf-8"))
+        live_entry = live["chapters"]["__translation_artifact__:headers"]
+        assert live_entry["status"] == "in_progress"
+        assert live_entry["model_name"] == "metadata-key-model"
+        return '{"1": "Chapter One"}'
+
+    monkeypatch.setattr(translator, "_send_with_retry", send_with_metadata_key)
+
+    assert translator.translate_headers_batch(
+        {1: "Original"}, batch_size=1, translation_type="header"
+    ) == {1: "Chapter One"}
+
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = progress["chapters"]["__translation_artifact__:headers"]
+    assert entry["status"] == "completed"
+    assert entry["model_name"] == "metadata-key-model"
+
+
 def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
     progress_path = tmp_path / "translation_progress.json"
     progress_path.write_text(

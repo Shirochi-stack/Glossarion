@@ -6309,6 +6309,19 @@ img {
                 translated,
                 output_files,
             )
+            if not remaining:
+                # Every failed entry was recovered from translated_headers.txt,
+                # so no model was dispatched for this TOC repair.
+                try:
+                    from translation_artifacts import update_translation_artifact_progress
+                    update_translation_artifact_progress(
+                        self.output_dir,
+                        'toc',
+                        'completed',
+                        model_name='RECYCLED',
+                    )
+                except Exception:
+                    pass
 
         if (
             remaining
@@ -6658,6 +6671,7 @@ img {
 
         # Optional translation (single API call) with caching to TOC.txt
         translations: Dict[int, str] = {}
+        toc_fully_recycled = False
         toc_filter_nums: Optional[Set[int]] = None
         original: Dict[int, str] = {}
         refs: Dict[int, str] = {}
@@ -6889,6 +6903,9 @@ img {
 
                         # Only send entries that weren't reused to the API
                         entries_for_api = toc_remaining if toc_remaining else {}
+                        toc_fully_recycled = (
+                            bool(reused_from_headers) and not entries_for_api
+                        )
 
                         if entries_for_api:
                             skip_dup_translate = os.environ.get('SKIP_DUPLICATE_TOC_TRANSLATION', '0') == '1'
@@ -6936,6 +6953,17 @@ img {
                                 toc_txt_path,
                                 translator=tr,
                             )
+                            if toc_fully_recycled:
+                                try:
+                                    from translation_artifacts import update_translation_artifact_progress
+                                    update_translation_artifact_progress(
+                                        self.output_dir,
+                                        'toc',
+                                        'completed',
+                                        model_name='RECYCLED',
+                                    )
+                                except Exception:
+                                    pass
                         else:
                             self.log(f"⚠️ toc.ncx translation returned no results - skipping cache (will retry next run)")
                     except Exception as e:

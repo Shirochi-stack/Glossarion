@@ -56,6 +56,7 @@ def update_translation_artifact_progress(
     *,
     model_name: Any = None,
     error_message: Any = None,
+    clear_model_name: bool = False,
 ) -> bool:
     """Atomically update one TOC/header row in translation_progress.json."""
     spec = translation_artifact_spec_for_kind(kind)
@@ -99,7 +100,10 @@ def update_translation_artifact_progress(
                 "translation_artifact_label": spec["label"],
                 "artifact_translation_enabled": True,
             })
-            if model_name:
+            if clear_model_name:
+                entry.pop("model_name", None)
+                entry.pop("model", None)
+            elif model_name:
                 entry["model_name"] = str(model_name)
 
             artifact_path = os.path.join(output_dir, spec["filename"])

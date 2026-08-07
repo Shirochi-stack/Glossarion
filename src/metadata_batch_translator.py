@@ -1956,6 +1956,7 @@ class BatchHeaderTranslator:
         self.client = client
         self.config = config if config is not None else {}
         self.stop_flag = False
+        self._last_batch_actual_model = None
         
         # Use provided stop check or fall back to TransateKRtoEN.is_stop_requested
         if stop_check_fn is not None:
@@ -1988,7 +1989,8 @@ class BatchHeaderTranslator:
         self.stop_flag = flag
     
     def _send_with_retry(self, messages, temperature, max_tokens, context=None,
-                         before_dispatch_callback=None):
+                         before_dispatch_callback=None,
+                         before_send_callback=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
         try:
             from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
@@ -2000,6 +2002,7 @@ class BatchHeaderTranslator:
                     max_tokens=max_tokens,
                     stop_check_fn=self.stop_check_fn,
                     context=context,
+                    before_send_callback=before_send_callback,
                     before_dispatch_callback=before_dispatch_callback,
                 )
         except ImportError:
@@ -2007,12 +2010,28 @@ class BatchHeaderTranslator:
             print("⚠️ send_with_interrupt not available, using direct client.send()")
             if callable(before_dispatch_callback):
                 before_dispatch_callback()
-            response = self.client.send(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                context=context,
-            )
+            callback_tls = None
+            if callable(before_send_callback) and hasattr(
+                self.client, '_get_thread_local_client'
+            ):
+                try:
+                    callback_tls = self.client._get_thread_local_client()
+                    callback_tls.pre_api_call_callback = before_send_callback
+                except Exception:
+                    callback_tls = None
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    context=context,
+                )
+            finally:
+                if callback_tls is not None:
+                    try:
+                        callback_tls.pre_api_call_callback = None
+                    except Exception:
+                        pass
         
         # Extract content from response - handle both object and tuple formats
         response_content = None
@@ -2155,9 +2174,13 @@ class BatchHeaderTranslator:
         model_name = getattr(self.client, 'model', None)
         if output_dir:
             update_translation_artifact_progress(
-                output_dir, artifact_kind, 'in_progress', model_name=model_name
+                output_dir,
+                artifact_kind,
+                'in_progress',
+                clear_model_name=True,
             )
 
+        self._last_batch_actual_model = None
         try:
             translations = self._translate_headers_batch_impl(
                 headers_dict, batch_size, translation_type
@@ -2172,6 +2195,14 @@ class BatchHeaderTranslator:
                     error_message=exc,
                 )
             raise
+
+        # ``self.client.model`` is the main-key default, not necessarily the
+        # concrete model selected by a dedicated metadata key. Each worker
+        # captures the request metadata installed by send_with_interrupt; use
+        # that value for the durable progress row once dispatch has completed.
+        actual_model_name = str(self._last_batch_actual_model or "").strip()
+        if actual_model_name:
+            model_name = actual_model_name
 
         if output_dir:
             update_translation_artifact_progress(
@@ -2274,6 +2305,42 @@ class BatchHeaderTranslator:
         
         # Thread-safe lock for updating all_translations
         translations_lock = threading.Lock()
+        actual_request_models = []
+        actual_request_models_lock = threading.Lock()
+
+        def capture_actual_request_model():
+            """Remember the concrete per-key model used by this batch worker."""
+            try:
+                from unified_api_client import get_current_thread_actual_request_model
+                actual_model = str(
+                    get_current_thread_actual_request_model() or ""
+                ).strip()
+            except Exception:
+                actual_model = ""
+            if not actual_model:
+                return ""
+            with actual_request_models_lock:
+                if actual_model not in actual_request_models:
+                    actual_request_models.append(actual_model)
+            return actual_model
+
+        artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
+        artifact_output_dir = (
+            getattr(self.client, 'output_dir', None)
+            or self.config.get('output_dir')
+            or os.getenv('OUTPUT_DIRECTORY')
+        )
+
+        def publish_actual_in_progress_model():
+            """Refresh the live row after the dedicated key has been selected."""
+            actual_model = capture_actual_request_model()
+            if artifact_output_dir and actual_model:
+                update_translation_artifact_progress(
+                    artifact_output_dir,
+                    artifact_kind,
+                    'in_progress',
+                    model_name=actual_model,
+                )
         
         def translate_batch(batch_num: int, batch_headers: Dict[int, str]):
             """Translate a single batch - thread-safe function"""
@@ -2327,6 +2394,7 @@ class BatchHeaderTranslator:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     context='batch_toc_translation' if translation_type == 'toc' else 'batch_header_translation',
+                    before_send_callback=publish_actual_in_progress_model,
                     before_dispatch_callback=(
                         lambda label=request_label, order=direct_text_order: print(
                             f"📚 {label} [spine-order:{order}] "
@@ -2334,6 +2402,7 @@ class BatchHeaderTranslator:
                         )
                     ) if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1' else None,
                 )
+                capture_actual_request_model()
 
                 if response_content:
                     if os.getenv('DIRECT_TEXT_ORDERED_BATCH', '0') == '1':
@@ -2424,6 +2493,19 @@ class BatchHeaderTranslator:
             
             # Finish progress bar
             ProgressBar.finish()
+
+        if actual_request_models:
+            if len(actual_request_models) == 1:
+                self._last_batch_actual_model = actual_request_models[0]
+            else:
+                shown = actual_request_models[:3]
+                suffix = (
+                    f", +{len(actual_request_models) - 3} more"
+                    if len(actual_request_models) > 3 else ""
+                )
+                self._last_batch_actual_model = (
+                    "mixed: " + ", ".join(shown) + suffix
+                )
         
         print(f"\n✅ Translated {len(all_translations)} headers total (using parallel execution)")
         return all_translations

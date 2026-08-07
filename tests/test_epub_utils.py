@@ -1663,6 +1663,86 @@ def test_failed_header_cache_is_not_reused_for_toc_translation(tmp_path):
     assert remaining == {8: "第14章 苍山庶家"}
 
 
+def test_fully_recycled_toc_is_completed_with_recycled_model(
+    tmp_path, monkeypatch
+):
+    source_epub = tmp_path / "source.epub"
+    source_epub.write_bytes(b"placeholder")
+    monkeypatch.setenv("EPUB_PATH", str(source_epub))
+    for filename in ("Chapter0001.xhtml", "Chapter0002.xhtml"):
+        (tmp_path / filename).write_text(
+            "<html><body><p>chapter</p></body></html>", encoding="utf-8"
+        )
+
+    (tmp_path / "translated_headers.txt").write_text(
+        """Chapter Header Translations
+==================================================
+
+Chapter 1:
+  Original:   Original One
+  Translated: Translated One
+  Output File: Chapter0001
+----------------------------------------
+Chapter 2:
+  Original:   Original Two
+  Translated: Translated Two
+  Output File: Chapter0002
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:toc": {
+                    "status": "in_progress",
+                    "model_name": "main-key-model",
+                    "output_file": "TOC.txt",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    compiler.translate_toc_ncx = True
+    compiler.api_client = object()
+    monkeypatch.setattr(
+        compiler,
+        "_extract_source_toc_ncx_entries",
+        lambda _path: [
+            {"label": "Original One", "src": "Chapter0001.xhtml"},
+            {"label": "Original Two", "src": "Chapter0002.xhtml"},
+        ],
+    )
+    monkeypatch.setattr(compiler, "_get_chapter_order_from_opf", lambda: {})
+    monkeypatch.setattr(
+        BatchHeaderTranslator,
+        "translate_headers_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fully recycled TOC must not make an API call")
+        ),
+    )
+    spine = [
+        epub_converter.epub.EpubHtml(
+            title="One", file_name="Chapter0001.xhtml"
+        ),
+        epub_converter.epub.EpubHtml(
+            title="Two", file_name="Chapter0002.xhtml"
+        ),
+    ]
+
+    toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
+
+    assert [item.title for item in toc] == ["Translated One", "Translated Two"]
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = progress["chapters"]["__translation_artifact__:toc"]
+    assert entry["status"] == "completed"
+    assert entry["model_name"] == "RECYCLED"
+
+
 def test_successful_header_translation_repairs_matching_failed_toc_entry(tmp_path):
     headers_path = tmp_path / "translated_headers.txt"
     headers_path.write_text(
