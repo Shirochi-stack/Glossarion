@@ -2886,6 +2886,24 @@ def test_sdlxliff_review_numbered_tag_label_text_uses_compact_empty_labels():
     assert SDLXLIFFReviewDialog._tag_label_rich_text("Empty(33)") == 'Empty<span style="font-size: 8pt;">(33)</span>'
 
 
+def test_sdlxliff_review_paragraphs_and_list_items_share_ordinal_counter():
+    units = [
+        {"tag": "p", "text": "One"},
+        {"tag": "p", "text": "Two"},
+        {"tag": "li", "text": "Three"},
+        {"tag": "p", "text": "Four"},
+        {"tag": "h1", "text": "Heading"},
+        {"tag": "li", "text": "Five"},
+    ]
+
+    annotated = SDLXLIFFReviewDialog._annotate_review_tag_labels(units)
+
+    assert [unit["tag_label"] for unit in annotated] == [
+        "p", "p(2)", "li(3)", "p(4)", "h1", "li(5)"
+    ]
+    assert [unit["tag_ordinal"] for unit in annotated] == [1, 2, 3, 4, 1, 5]
+
+
 def test_sdlxliff_review_tag_label_font_shrinks_for_numbered_p_to_li_pair():
     short_size = SDLXLIFFReviewDialog._tag_label_font_point_size("p(2)")
     converted_size = SDLXLIFFReviewDialog._tag_label_font_point_size(

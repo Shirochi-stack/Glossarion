@@ -4524,9 +4524,15 @@ class SDLXLIFFReviewDialog(QDialog):
             tag = str((unit or {}).get("tag", "") or "").strip().lower()
             if not tag:
                 continue
-            counts[tag] += 1
-            unit["tag_ordinal"] = counts[tag]
-            unit["tag_label"] = tag if counts[tag] == 1 else f"{tag}({counts[tag]})"
+            # Paragraphs and list items occupy the same sequential text-block
+            # stream in the review viewer. Keep the real tag in the label, but
+            # share its ordinal so a p -> li conversion does not shift every
+            # following paragraph number (p(10) -> li(10), then p(11)).
+            counter_key = "p/li" if tag in {"p", "li"} else tag
+            counts[counter_key] += 1
+            ordinal = counts[counter_key]
+            unit["tag_ordinal"] = ordinal
+            unit["tag_label"] = tag if ordinal == 1 else f"{tag}({ordinal})"
         return units
 
     @staticmethod
