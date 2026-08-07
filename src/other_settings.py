@@ -35,6 +35,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QFontMetrics, QIntValidator
 from PySide6.QtCore import QObject, Signal
+from translation_artifacts import (
+    load_translation_artifact_progress,
+    translation_artifact_path,
+    translation_artifacts_are_recycled_linked,
+    update_translation_artifact_progress,
+)
 
 
 DEEPSEEK_V4_EFFORT_OPTIONS = ("none", "low", "high", "max")
@@ -14106,7 +14112,11 @@ def run_standalone_translate_headers(self):
                                 os.environ['EPUB_PATH'] = epub_path
                                 
                                 self.append_log(f"📂 Output directory: {output_dir}")
-                                fallback_compile_epub(output_dir, log_callback=self.append_log)
+                                fallback_compile_epub(
+                                    output_dir,
+                                    log_callback=self.append_log,
+                                    api_client=api_client,
+                                )
                                 self.append_log("✅ EPUB rebuilt successfully with translated headers!")
                             else:
                                 self.append_log("⚠️ Could not find output directory to rebuild EPUB")
@@ -14302,8 +14312,7 @@ def validate_epub_structure_gui(self):
 
 def delete_translated_headers_file(self):
     """Delete the translated_headers.txt file from the output directory for all selected EPUBs"""
-    from PySide6.QtWidgets import QMessageBox
-    
+
     # Get icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
@@ -14350,6 +14359,8 @@ def delete_translated_headers_file(self):
         files_not_found = []
         files_deleted = []
         errors = []
+        linked_counterparts = {}
+        deleted_file_count = 0
         
         current_dir = os.getcwd()
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14396,6 +14407,11 @@ def delete_translated_headers_file(self):
                 
                 if os.path.exists(headers_file):
                     files_found.append((epub_base, headers_file))
+                    progress = load_translation_artifact_progress(output_dir)
+                    if translation_artifacts_are_recycled_linked(progress):
+                        linked_counterparts[os.path.normcase(headers_file)] = (
+                            translation_artifact_path(output_dir, "toc")
+                        )
                     self.append_log(f"  ✓ Found translated_headers.txt in {os.path.basename(output_dir)}")
                 else:
                     files_not_found.append((epub_base, "translated_headers.txt not found"))
@@ -14440,31 +14456,95 @@ def delete_translated_headers_file(self):
         if files_found:
             summary_text += "This will allow headers to be re-translated on the next run."
             
-            # Confirm deletion
+            # RECYCLED caches form a dependency pair. Let the user choose
+            # whether the manually requested deletion should break both sides.
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Question)
             msg_box.setWindowTitle("Confirm Deletion")
-            msg_box.setText(summary_text)
-            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            msg_box.setDefaultButton(QMessageBox.No)
+            delete_linked = False
+            if linked_counterparts:
+                msg_box.setText(
+                    summary_text
+                    + "\n\nRECYCLED link detected: one of TOC.txt and "
+                    "translated_headers.txt was created by reusing the other. "
+                    "Deleting only translated_headers.txt leaves TOC.txt available, "
+                    "so the header cache may be rebuilt from it without a new API "
+                    "translation.\n\nDelete both linked files to force fresh TOC and "
+                    "header translation, or delete only the header file?"
+                )
+                delete_both_button = msg_box.addButton(
+                    "Delete Both Linked Files",
+                    QMessageBox.ButtonRole.DestructiveRole,
+                )
+                delete_only_button = msg_box.addButton(
+                    "Delete Only Header Files",
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                cancel_button = msg_box.addButton(QMessageBox.Cancel)
+                msg_box.setDefaultButton(cancel_button)
+            else:
+                msg_box.setText(summary_text)
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.No)
             msg_box.setWindowIcon(icon)
             _center_messagebox_buttons(msg_box)
             result = msg_box.exec()
-            
-            if result == QMessageBox.Yes:
+
+            should_delete = result == QMessageBox.Yes
+            if linked_counterparts:
+                clicked_button = msg_box.clickedButton()
+                should_delete = (
+                    clicked_button is delete_both_button
+                    or clicked_button is delete_only_button
+                )
+                delete_linked = clicked_button is delete_both_button
+
+            if should_delete:
                 # Delete the files
                 for epub_base, headers_file in files_found:
                     try:
                         os.remove(headers_file)
                         files_deleted.append(epub_base)
+                        deleted_file_count += 1
+                        update_translation_artifact_progress(
+                            os.path.dirname(headers_file),
+                            "headers",
+                            "pending",
+                            clear_model_name=True,
+                        )
                         self.append_log(f"✅ Deleted translated_headers.txt from {epub_base}")
                     except Exception as e:
                         errors.append((epub_base, f"Delete failed: {e}"))
                         self.append_log(f"❌ Failed to delete translated_headers.txt from {epub_base}: {e}")
                 
+                    counterpart = linked_counterparts.get(
+                        os.path.normcase(headers_file)
+                    )
+                    if delete_linked and counterpart:
+                        try:
+                            if os.path.exists(counterpart):
+                                os.remove(counterpart)
+                                deleted_file_count += 1
+                                self.append_log(
+                                    f"Deleted linked {os.path.basename(counterpart)} "
+                                    f"from {epub_base}"
+                                )
+                            update_translation_artifact_progress(
+                                os.path.dirname(headers_file),
+                                "toc",
+                                "pending",
+                                clear_model_name=True,
+                            )
+                        except Exception as e:
+                            errors.append((epub_base, f"Linked delete failed: {e}"))
+                            self.append_log(
+                                f"Failed to delete linked TOC.txt from "
+                                f"{epub_base}: {e}"
+                            )
+
                 # Show final results
                 if files_deleted:
-                    success_msg = f"Successfully deleted {len(files_deleted)} file(s):\n"
+                    success_msg = f"Successfully deleted {deleted_file_count} file(s):\n"
                     success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
                     if errors:
                         success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."
@@ -14506,8 +14586,7 @@ def delete_translated_headers_file(self):
 
 def delete_toc_txt_file(self):
     """Delete the TOC.txt (toc.txt) file from the output directory for all selected EPUBs"""
-    from PySide6.QtWidgets import QMessageBox
-    
+
     # Get icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
@@ -14554,6 +14633,8 @@ def delete_toc_txt_file(self):
         files_not_found = []
         files_deleted = []
         errors = []
+        linked_counterparts = {}
+        deleted_file_count = 0
         
         current_dir = os.getcwd()
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14602,6 +14683,11 @@ def delete_toc_txt_file(self):
                 
                 if toc_file:
                     files_found.append((epub_base, toc_file))
+                    progress = load_translation_artifact_progress(output_dir)
+                    if translation_artifacts_are_recycled_linked(progress):
+                        linked_counterparts[os.path.normcase(toc_file)] = (
+                            translation_artifact_path(output_dir, "headers")
+                        )
                     self.append_log(f"  ✓ Found {os.path.basename(toc_file)} in {os.path.basename(output_dir)}")
                 else:
                     files_not_found.append((epub_base, "TOC.txt not found"))
@@ -14646,31 +14732,95 @@ def delete_toc_txt_file(self):
         if files_found:
             summary_text += "This will allow TOC entries to be re-translated on the next run."
             
-            # Confirm deletion
+            # RECYCLED caches form a dependency pair. Let the user choose
+            # whether the manually requested deletion should break both sides.
             msg_box = QMessageBox()
             msg_box.setIcon(QMessageBox.Question)
             msg_box.setWindowTitle("Confirm Deletion")
-            msg_box.setText(summary_text)
-            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            msg_box.setDefaultButton(QMessageBox.No)
+            delete_linked = False
+            if linked_counterparts:
+                msg_box.setText(
+                    summary_text
+                    + "\n\nRECYCLED link detected: one of TOC.txt and "
+                    "translated_headers.txt was created by reusing the other. "
+                    "Deleting only TOC.txt leaves translated_headers.txt available, "
+                    "so the TOC cache may be rebuilt from it without a new API "
+                    "translation.\n\nDelete both linked files to force fresh TOC and "
+                    "header translation, or delete only the TOC file?"
+                )
+                delete_both_button = msg_box.addButton(
+                    "Delete Both Linked Files",
+                    QMessageBox.ButtonRole.DestructiveRole,
+                )
+                delete_only_button = msg_box.addButton(
+                    "Delete Only TOC Files",
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                cancel_button = msg_box.addButton(QMessageBox.Cancel)
+                msg_box.setDefaultButton(cancel_button)
+            else:
+                msg_box.setText(summary_text)
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                msg_box.setDefaultButton(QMessageBox.No)
             msg_box.setWindowIcon(icon)
             _center_messagebox_buttons(msg_box)
             result = msg_box.exec()
-            
-            if result == QMessageBox.Yes:
+
+            should_delete = result == QMessageBox.Yes
+            if linked_counterparts:
+                clicked_button = msg_box.clickedButton()
+                should_delete = (
+                    clicked_button is delete_both_button
+                    or clicked_button is delete_only_button
+                )
+                delete_linked = clicked_button is delete_both_button
+
+            if should_delete:
                 # Delete the files
                 for epub_base, toc_file in files_found:
                     try:
                         os.remove(toc_file)
                         files_deleted.append(epub_base)
+                        deleted_file_count += 1
+                        update_translation_artifact_progress(
+                            os.path.dirname(toc_file),
+                            "toc",
+                            "pending",
+                            clear_model_name=True,
+                        )
                         self.append_log(f"✅ Deleted {os.path.basename(toc_file)} from {epub_base}")
                     except Exception as e:
                         errors.append((epub_base, f"Delete failed: {e}"))
                         self.append_log(f"❌ Failed to delete TOC.txt from {epub_base}: {e}")
                 
+                    counterpart = linked_counterparts.get(
+                        os.path.normcase(toc_file)
+                    )
+                    if delete_linked and counterpart:
+                        try:
+                            if os.path.exists(counterpart):
+                                os.remove(counterpart)
+                                deleted_file_count += 1
+                                self.append_log(
+                                    f"Deleted linked {os.path.basename(counterpart)} "
+                                    f"from {epub_base}"
+                                )
+                            update_translation_artifact_progress(
+                                os.path.dirname(toc_file),
+                                "headers",
+                                "pending",
+                                clear_model_name=True,
+                            )
+                        except Exception as e:
+                            errors.append((epub_base, f"Linked delete failed: {e}"))
+                            self.append_log(
+                                f"Failed to delete linked translated_headers.txt "
+                                f"from {epub_base}: {e}"
+                            )
+
                 # Show final results
                 if files_deleted:
-                    success_msg = f"Successfully deleted {len(files_deleted)} file(s):\n"
+                    success_msg = f"Successfully deleted {deleted_file_count} file(s):\n"
                     success_msg += "\n".join([f"• {epub_base}" for epub_base in files_deleted])
                     if errors:
                         success_msg += f"\n\nErrors: {len(errors)} file(s) failed to delete."

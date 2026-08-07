@@ -117,6 +117,10 @@ def update_translation_artifact_progress(
                         ).hexdigest()
             elif normalized_status in {"failed", "error"} and error_message:
                 entry["error_message"] = str(error_message)
+            elif normalized_status == "pending":
+                entry["content_hash"] = ""
+                entry.pop("error_message", None)
+                entry.pop("failure_reason", None)
 
             chapters[spec["progress_key"]] = entry
             os.makedirs(output_dir, exist_ok=True)
@@ -161,6 +165,135 @@ def translation_artifact_spec_for_kind(kind: Any) -> Dict[str, Any] | None:
         if spec["kind"].casefold() == normalized:
             return spec
     return None
+
+
+def translation_artifact_progress_entry(
+    progress: Any,
+    kind: Any,
+) -> Tuple[Any, Dict[str, Any]] | Tuple[None, None]:
+    """Return the tracked progress entry for one TOC/header artifact."""
+    spec = translation_artifact_spec_for_kind(kind)
+    if not spec or not isinstance(progress, Mapping):
+        return None, None
+    chapters = progress.get("chapters")
+    if not isinstance(chapters, Mapping):
+        return None, None
+
+    canonical = chapters.get(spec["progress_key"])
+    if isinstance(canonical, dict):
+        return spec["progress_key"], canonical
+
+    for key, entry in chapters.items():
+        if not isinstance(entry, dict):
+            continue
+        entry_kind = str(entry.get("special_type") or "").strip().casefold()
+        entry_spec = translation_artifact_spec_for_filename(
+            entry.get("output_file")
+        )
+        if entry_kind == spec["kind"].casefold() or (
+            entry_spec and entry_spec["kind"] == spec["kind"]
+        ):
+            return key, entry
+    return None, None
+
+
+def translation_artifacts_are_recycled_linked(progress: Any) -> bool:
+    """Return whether TOC and header caches form a RECYCLED dependency pair."""
+    for spec in TRANSLATION_ARTIFACT_SPECS:
+        _key, entry = translation_artifact_progress_entry(
+            progress, spec["kind"]
+        )
+        if not entry:
+            continue
+        model_name = entry.get("model_name") or entry.get("model")
+        if str(model_name or "").strip().casefold() == "recycled":
+            return True
+    return False
+
+
+def load_translation_artifact_progress(output_dir: Any) -> Dict[str, Any]:
+    """Load a workspace progress file, returning an empty mapping on failure."""
+    raw_output_dir = str(output_dir or "").strip()
+    if not raw_output_dir:
+        return {}
+    progress_path = os.path.join(raw_output_dir, "translation_progress.json")
+    try:
+        with open(progress_path, "r", encoding="utf-8") as progress_file:
+            progress = json.load(progress_file)
+        return progress if isinstance(progress, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def translation_artifact_path(
+    output_dir: Any,
+    kind: Any,
+    *,
+    existing_only: bool = False,
+) -> str | None:
+    """Resolve an artifact cache path, including case variants on disk."""
+    spec = translation_artifact_spec_for_kind(kind)
+    raw_output_dir = str(output_dir or "").strip()
+    if not spec or not raw_output_dir:
+        return None
+    expected_path = os.path.join(raw_output_dir, spec["filename"])
+    if os.path.isfile(expected_path):
+        return expected_path
+    try:
+        expected_name = spec["filename"].casefold()
+        for filename in os.listdir(raw_output_dir):
+            if filename.casefold() == expected_name:
+                candidate = os.path.join(raw_output_dir, filename)
+                if os.path.isfile(candidate):
+                    return candidate
+    except OSError:
+        pass
+    return None if existing_only else expected_path
+
+
+def reset_translation_artifact_progress_entries(
+    progress: Any,
+    kinds: Iterable[Any],
+) -> int:
+    """Reset artifact rows in an in-memory progress document to pending."""
+    if not isinstance(progress, dict):
+        return 0
+    chapters = progress.setdefault("chapters", {})
+    if not isinstance(chapters, dict):
+        return 0
+
+    reset_count = 0
+    seen = set()
+    for kind in kinds:
+        spec = translation_artifact_spec_for_kind(kind)
+        if not spec or spec["kind"] in seen:
+            continue
+        seen.add(spec["kind"])
+        entry_key, previous = translation_artifact_progress_entry(
+            progress, spec["kind"]
+        )
+        entry_key = entry_key or spec["progress_key"]
+        entry = dict(previous or {})
+        entry.update({
+            "actual_num": spec["actual_num"],
+            "output_file": spec["filename"],
+            "original_basename": spec["filename"],
+            "status": "pending",
+            "content_hash": "",
+            "last_updated": time.time(),
+            "is_special": True,
+            "special_type": spec["kind"],
+            "translation_artifact_progress_key": spec["progress_key"],
+            "translation_artifact_label": spec["label"],
+            "artifact_translation_enabled": True,
+        })
+        for field in (
+            "model_name", "model", "failure_reason", "error_message"
+        ):
+            entry.pop(field, None)
+        chapters[entry_key] = entry
+        reset_count += 1
+    return reset_count
 
 
 def is_translation_artifact_progress_entry(key: Any, entry: Any = None) -> bool:

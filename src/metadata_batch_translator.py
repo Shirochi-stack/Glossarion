@@ -2167,8 +2167,8 @@ class BatchHeaderTranslator:
 
         artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
         output_dir = (
-            getattr(self.client, 'output_dir', None)
-            or self.config.get('output_dir')
+            self.config.get('output_dir')
+            or getattr(self.client, 'output_dir', None)
             or os.getenv('OUTPUT_DIRECTORY')
         )
         model_name = getattr(self.client, 'model', None)
@@ -2326,8 +2326,8 @@ class BatchHeaderTranslator:
 
         artifact_kind = 'toc' if translation_type == 'toc' else 'headers'
         artifact_output_dir = (
-            getattr(self.client, 'output_dir', None)
-            or self.config.get('output_dir')
+            self.config.get('output_dir')
+            or getattr(self.client, 'output_dir', None)
             or os.getenv('OUTPUT_DIRECTORY')
         )
 

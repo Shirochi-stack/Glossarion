@@ -14,7 +14,7 @@ import zipfile
 import unicodedata
 import html as html_module
 from xml.etree import ElementTree as ET
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Any, Dict, List, Tuple, Optional, Callable
 
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
@@ -1606,7 +1606,13 @@ class FileUtils:
 class EPUBCompiler:
     """Main EPUB compilation class"""
     
-    def __init__(self, base_dir: str, log_callback: Optional[Callable] = None, stop_callback: Optional[Callable] = None):
+    def __init__(
+        self,
+        base_dir: str,
+        log_callback: Optional[Callable] = None,
+        stop_callback: Optional[Callable] = None,
+        api_client: Any = None,
+    ):
         self.base_dir = os.path.abspath(base_dir)
         self.log_callback = log_callback
         self.stop_callback = stop_callback
@@ -1671,8 +1677,15 @@ class EPUBCompiler:
         self.translate_titles = os.getenv('TRANSLATE_BOOK_TITLE', '1') == '1'
         
         # Initialize API client if needed
-        self.api_client = None
-        if (self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1' or getattr(self, 'translate_toc_ncx', False)):
+        self.api_client = api_client
+        if (
+            self.api_client is None
+            and (
+                self.translate_titles
+                or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                or getattr(self, 'translate_toc_ncx', False)
+            )
+        ):
             model = os.getenv('MODEL')
             api_key = os.getenv('API_KEY')
             # Check if model needs API key (delegates to UnifiedClient's authoritative list)
@@ -1836,6 +1849,7 @@ class EPUBCompiler:
                                     'batch_header_system_prompt': os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'),
                                     'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
                                     'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+                                    'output_dir': self.output_dir,
                                 }
                                 retry_translator = BatchHeaderTranslator(
                                     self.api_client, retry_config
@@ -1971,7 +1985,9 @@ class EPUBCompiler:
                                                     new_translations = dict(_reused_from_toc)
                                                     if _hdr_api_remaining:
                                                         from metadata_batch_translator import BatchHeaderTranslator
-                                                        _bt_config = {}
+                                                        _bt_config = {
+                                                            'output_dir': self.output_dir,
+                                                        }
                                                         if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                                                             _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
                                                         if os.environ.get('BATCH_HEADER_PROMPT'):
@@ -6337,6 +6353,7 @@ img {
                 ),
                 'batch_header_prompt': os.environ.get('BATCH_HEADER_PROMPT'),
                 'output_language': os.environ.get('OUTPUT_LANGUAGE'),
+                'output_dir': self.output_dir,
             }
             translator = BatchHeaderTranslator(self.api_client, retry_config)
 
@@ -6744,7 +6761,9 @@ img {
                         try:
                             if _api_toc_remaining:
                                 from metadata_batch_translator import BatchHeaderTranslator
-                                _bt_config = {}
+                                _bt_config = {
+                                    'output_dir': self.output_dir,
+                                }
                                 if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                                     _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
                                 if os.environ.get('BATCH_HEADER_PROMPT'):
@@ -6884,7 +6903,9 @@ img {
                     try:
                         from metadata_batch_translator import BatchHeaderTranslator
                         # Build config from env vars set by GUI so user's custom prompts are used
-                        _bt_config = {}
+                        _bt_config = {
+                            'output_dir': self.output_dir,
+                        }
                         if os.environ.get('BATCH_HEADER_SYSTEM_PROMPT'):
                             _bt_config['batch_header_system_prompt'] = os.environ['BATCH_HEADER_SYSTEM_PROMPT']
                         if os.environ.get('BATCH_HEADER_PROMPT'):
@@ -8477,12 +8498,16 @@ img {
 
 
 # Main entry point
-def compile_epub(base_dir: str, log_callback: Optional[Callable] = None):
+def compile_epub(
+    base_dir: str,
+    log_callback: Optional[Callable] = None,
+    api_client: Any = None,
+):
     """Compile translated HTML files into EPUB"""
     # Reset stop flag for new compilation
     set_stop_flag(False)
     
-    compiler = EPUBCompiler(base_dir, log_callback)
+    compiler = EPUBCompiler(base_dir, log_callback, api_client=api_client)
     return compiler.compile()
 
 

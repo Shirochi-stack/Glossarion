@@ -1073,6 +1073,13 @@ def translate_headers_standalone(
         else:
             print(message)
     
+    # The GUI commonly reuses one UnifiedClient across several selected EPUBs.
+    # Its ``output_dir`` can therefore point at a previous input. Keep the
+    # standalone workload's resolved directory explicit so progress updates are
+    # written beside the HTML files currently being translated.
+    config = dict(config or {})
+    config['output_dir'] = os.path.abspath(output_dir)
+
     log("=" * 80)
     log("Starting Standalone Header Translation (Content.OPF Based)")
     log("=" * 80)
@@ -1553,8 +1560,10 @@ def run_translate_headers_gui(gui_instance):
                 # --- Reconcile: check if the source EPUB has new chapters ---
                 try:
                     from metadata_batch_translator import BatchHeaderTranslator
+                    retry_config = dict(config or {})
+                    retry_config['output_dir'] = os.path.abspath(output_dir)
                     retry_translator = BatchHeaderTranslator(
-                        gui_instance.api_client, config or {}
+                        gui_instance.api_client, retry_config
                     )
                     if hasattr(gui_instance, '_batch_header_translator'):
                         gui_instance._batch_header_translator = retry_translator

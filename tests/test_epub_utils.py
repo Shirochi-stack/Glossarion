@@ -1480,6 +1480,149 @@ def test_new_header_cache_retries_partial_failures_on_same_run(tmp_path, monkeyp
     assert cached == {1: "Header One", 2: "Header Two"}
 
 
+def test_standalone_header_progress_uses_current_output_directory(
+    tmp_path, monkeypatch
+):
+    from unified_api_client import set_current_thread_actual_request_model
+
+    current_output = tmp_path / "current-book"
+    stale_output = tmp_path / "previous-book"
+    current_output.mkdir()
+    stale_output.mkdir()
+    (current_output / "response_chapter0001.html").write_text(
+        "<html><body><h1>Original One</h1></body></html>",
+        encoding="utf-8",
+    )
+
+    current_progress_path = current_output / "translation_progress.json"
+    current_progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:headers": {
+                    "status": "pending",
+                    "model_name": "old-main-model",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+    stale_progress_path = stale_output / "translation_progress.json"
+    stale_progress = {
+        "version": "2.1",
+        "chapters": {"sentinel": {"status": "completed"}},
+    }
+    stale_progress_path.write_text(json.dumps(stale_progress), encoding="utf-8")
+
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "extract_source_chapters_with_opf_mapping",
+        lambda _path, _log=None: (
+            {"chapter0001": "Original One"},
+            ["Text/chapter0001.xhtml"],
+        ),
+    )
+    monkeypatch.setattr(
+        translate_headers_standalone,
+        "match_output_to_source_chapters",
+        lambda *_args, **_kwargs: {
+            "response_chapter0001.html": (
+                "Original One",
+                "Original One",
+                "response_chapter0001.html",
+            )
+        },
+    )
+
+    class Client:
+        output_dir = str(stale_output)
+        model = "main-key-model"
+
+    def send_with_metadata_key(_translator, **kwargs):
+        queued = json.loads(current_progress_path.read_text(encoding="utf-8"))
+        queued_entry = queued["chapters"]["__translation_artifact__:headers"]
+        assert queued_entry["status"] == "in_progress"
+        assert "model_name" not in queued_entry
+
+        set_current_thread_actual_request_model(
+            "metadata-key-model", "MetadataKey#1 (metadata-key-model)"
+        )
+        kwargs["before_send_callback"]()
+        live = json.loads(current_progress_path.read_text(encoding="utf-8"))
+        live_entry = live["chapters"]["__translation_artifact__:headers"]
+        assert live_entry["status"] == "in_progress"
+        assert live_entry["model_name"] == "metadata-key-model"
+        return '{"1": "Translated One"}'
+
+    monkeypatch.setattr(
+        BatchHeaderTranslator, "_send_with_retry", send_with_metadata_key
+    )
+
+    result = translate_headers_standalone.translate_headers_standalone(
+        epub_path="source.epub",
+        output_dir=str(current_output),
+        api_client=Client(),
+        config={"headers_per_batch": 1},
+        update_html=True,
+        save_to_file=True,
+        log_callback=lambda _message: None,
+    )
+
+    assert result == {"response_chapter0001.html": "Translated One"}
+    current_progress = json.loads(
+        current_progress_path.read_text(encoding="utf-8")
+    )
+    current_entry = current_progress["chapters"][
+        "__translation_artifact__:headers"
+    ]
+    assert current_entry["status"] == "completed"
+    assert current_entry["model_name"] == "metadata-key-model"
+    assert json.loads(stale_progress_path.read_text(encoding="utf-8")) == stale_progress
+
+
+def test_epub_compile_accepts_live_client_from_standalone_rebuild(
+    tmp_path, monkeypatch
+):
+    client = object()
+    monkeypatch.delenv("MODEL", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    compiler = EPUBCompiler(
+        str(tmp_path),
+        log_callback=lambda _message: None,
+        api_client=client,
+    )
+
+    assert compiler.api_client is client
+
+    captured = {}
+
+    class RecordingCompiler:
+        def __init__(self, base_dir, log_callback=None, api_client=None):
+            captured.update({
+                "base_dir": base_dir,
+                "log_callback": log_callback,
+                "api_client": api_client,
+            })
+
+        def compile(self):
+            return "rebuilt.epub"
+
+    log_callback = lambda _message: None
+    monkeypatch.setattr(epub_converter, "EPUBCompiler", RecordingCompiler)
+
+    assert epub_converter.compile_epub(
+        str(tmp_path),
+        log_callback=log_callback,
+        api_client=client,
+    ) == "rebuilt.epub"
+    assert captured == {
+        "base_dir": str(tmp_path),
+        "log_callback": log_callback,
+        "api_client": client,
+    }
+
+
 def test_failed_toc_cache_entries_are_retranslated_and_replaced(tmp_path):
     toc_path = tmp_path / "TOC.txt"
     toc_path.write_text(
@@ -1586,6 +1729,7 @@ def test_new_toc_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatc
 
         def __init__(self, _client, _config):
             self.calls = []
+            self.config = dict(_config)
             self.__class__.instances.append(self)
 
         def translate_headers_batch(
@@ -1627,6 +1771,7 @@ def test_new_toc_cache_retries_partial_failures_on_same_run(tmp_path, monkeypatc
     toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
 
     translator = PartialThenRecoveredTocTranslator.instances[-1]
+    assert translator.config["output_dir"] == str(tmp_path)
     assert translator.calls == [
         ({1: "原一", 2: "原二"}, 10, "toc"),
         ({2: "原二"}, 10, "toc"),

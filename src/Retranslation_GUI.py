@@ -52,6 +52,9 @@ from metadata_progress import (
 from translation_artifacts import (
     TRANSLATION_ARTIFACT_SPECS,
     is_translation_artifact_progress_entry,
+    reset_translation_artifact_progress_entries,
+    translation_artifact_path,
+    translation_artifacts_are_recycled_linked,
     translation_artifact_spec_for_filename,
     translation_artifact_spec_for_kind,
 )
@@ -17699,6 +17702,10 @@ class RetranslationMixin:
                 ch for ch in selected_chapters
                 if self._is_translation_artifact_progress_info(ch)
             ]
+            recycled_artifact_pair_selected = bool(
+                artifact_selected
+                and translation_artifacts_are_recycled_linked(data.get('prog'))
+            )
             translated_file_selected = metadata_selected + artifact_selected
             tracked_metadata_keys = {
                 key for key, entry in data.get('prog', {}).get('chapters', {}).items()
@@ -17916,6 +17923,17 @@ class RetranslationMixin:
                     confirm_msg += f"• {existing_count} existing chapters and SDLXLIFF sidecars will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
+            if recycled_artifact_pair_selected:
+                confirm_msg = confirm_msg.rstrip()
+                if confirm_msg.endswith("Continue?"):
+                    confirm_msg = confirm_msg[:-len("Continue?")].rstrip()
+                confirm_msg += (
+                    "\n\nTOC.txt and translated_headers.txt are linked because one was "
+                    "RECYCLED from the other. Both cache files will be deleted and "
+                    "both progress entries reset so the remaining cache cannot be "
+                    "reused again.\n\nContinue?"
+                )
+
             reply = self._styled_msgbox(QMessageBox.Question, data.get('dialog', self), "Confirm Retranslation", confirm_msg,
                                        QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
@@ -17934,10 +17952,42 @@ class RetranslationMixin:
             progress_updated = False
             metadata_file_deleted = False
 
+            if recycled_artifact_pair_selected:
+                for artifact_kind in ("toc", "headers"):
+                    artifact_path = translation_artifact_path(
+                        data['output_dir'], artifact_kind, existing_only=True
+                    )
+                    if not artifact_path:
+                        continue
+                    try:
+                        os.remove(artifact_path)
+                        deleted_count += 1
+                        print(
+                            "Deleted linked RECYCLED translation artifact: "
+                            f"{artifact_path}"
+                        )
+                    except Exception as e:
+                        print(
+                            "Failed to delete linked RECYCLED translation artifact "
+                            f"{artifact_path}: {e}"
+                        )
+                linked_reset_count = reset_translation_artifact_progress_entries(
+                    data['prog'], ("toc", "headers")
+                )
+                if linked_reset_count:
+                    status_reset_count += linked_reset_count
+                    progress_updated = True
+
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
                 actual_num = ch_info['num']
                 progress_key = ch_info.get('progress_key')
+
+                if (
+                    recycled_artifact_pair_selected
+                    and self._is_translation_artifact_progress_info(ch_info)
+                ):
+                    continue
 
                 if self._is_metadata_progress_info(ch_info):
                     metadata_path = os.path.join(data['output_dir'], 'metadata.json')
@@ -18099,6 +18149,10 @@ class RetranslationMixin:
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
                         ch_entry["error_message"] = ""
+                        if self._is_translation_artifact_progress_info(ch_info):
+                            ch_entry["content_hash"] = ""
+                            ch_entry.pop("model_name", None)
+                            ch_entry.pop("model", None)
                         if _clear_refinement_progress_fields(ch_entry):
                             refinement_cleared_count += 1
                         progress_updated = True

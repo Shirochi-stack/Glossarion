@@ -1,6 +1,8 @@
 import json
 import os
 
+import other_settings
+
 from Retranslation_GUI import (
     RetranslationMixin,
     _progress_entry_has_raw_foreign_text_qa,
@@ -19,7 +21,10 @@ from translator_gui import TranslatorGUI
 from translation_artifacts import (
     apply_translation_artifact_response,
     collect_translation_artifact_partial_targets,
+    reset_translation_artifact_progress_entries,
     render_translation_artifact_document,
+    translation_artifact_path,
+    translation_artifacts_are_recycled_linked,
     translation_artifact_qa_text,
     translation_artifact_target_fragment,
     update_translation_artifact_progress,
@@ -326,6 +331,206 @@ def test_toc_progress_writer_preserves_chapter_rows(tmp_path):
     assert progress["chapters"][
         "__translation_artifact__:toc"
     ]["status"] == "in_progress"
+
+
+def test_recycled_model_links_and_resets_both_artifact_rows(tmp_path):
+    progress = {
+        "chapters": {
+            "__translation_artifact__:toc": {
+                "output_file": "TOC.txt",
+                "status": "completed",
+                "model": " recycled ",
+            },
+            "__translation_artifact__:headers": {
+                "output_file": "translated_headers.txt",
+                "status": "completed",
+                "model_name": "metadata-key-model",
+            },
+        }
+    }
+
+    assert translation_artifacts_are_recycled_linked(progress)
+    assert reset_translation_artifact_progress_entries(
+        progress, ("toc", "headers")
+    ) == 2
+
+    for entry in progress["chapters"].values():
+        assert entry["status"] == "pending"
+        assert entry["content_hash"] == ""
+        assert "model" not in entry
+        assert "model_name" not in entry
+    assert not translation_artifacts_are_recycled_linked(progress)
+
+    (tmp_path / "toc.txt").write_text("TOC", encoding="utf-8")
+    assert os.path.normcase(translation_artifact_path(
+        str(tmp_path), "toc", existing_only=True
+    )) == os.path.normcase(str(tmp_path / "toc.txt"))
+
+
+class _ArtifactDeleteMessageBox:
+    Critical = 1
+    Information = 2
+    Question = 3
+    Yes = 4
+    No = 8
+    Cancel = 16
+
+    class ButtonRole:
+        DestructiveRole = 1
+        AcceptRole = 2
+
+    next_click = "Delete Both Linked Files"
+    shown_texts = []
+
+    def __init__(self):
+        self._text = ""
+        self._buttons = {}
+        self._clicked = None
+
+    def setIcon(self, _icon):
+        pass
+
+    def setWindowTitle(self, _title):
+        pass
+
+    def setText(self, text):
+        self._text = text
+
+    def setStandardButtons(self, _buttons):
+        pass
+
+    def setDefaultButton(self, _button):
+        pass
+
+    def setWindowIcon(self, _icon):
+        pass
+
+    def addButton(self, label, _role=None):
+        button = object()
+        button_label = "Cancel" if label == self.Cancel else str(label)
+        self._buttons[button_label] = button
+        return button
+
+    def exec(self):
+        type(self).shown_texts.append(self._text)
+        self._clicked = self._buttons.get(type(self).next_click)
+        return 0
+
+    def clickedButton(self):
+        return self._clicked
+
+
+class _ArtifactDeleteGui:
+    def __init__(self, epub_path):
+        self.selected_files = [str(epub_path)]
+        self.config = {}
+        self.logs = []
+
+    def append_log(self, message):
+        self.logs.append(message)
+
+    def get_current_epub_path(self):
+        return self.selected_files[0]
+
+
+def _write_recycled_artifact_workspace(root, book_name):
+    epub_path = root / f"{book_name}.epub"
+    epub_path.write_bytes(b"")
+    output_dir = root / book_name
+    output_dir.mkdir()
+    (output_dir / "chapter.xhtml").write_text("<p>chapter</p>", encoding="utf-8")
+    (output_dir / "TOC.txt").write_text("toc", encoding="utf-8")
+    (output_dir / "translated_headers.txt").write_text(
+        "headers", encoding="utf-8"
+    )
+    (output_dir / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "__translation_artifact__:toc": {
+                    "output_file": "TOC.txt",
+                    "status": "completed",
+                    "model_name": "RECYCLED",
+                },
+                "__translation_artifact__:headers": {
+                    "output_file": "translated_headers.txt",
+                    "status": "completed",
+                    "model_name": "metadata-key-model",
+                },
+            }
+        }),
+        encoding="utf-8",
+    )
+    return epub_path, output_dir
+
+
+def test_manual_delete_buttons_offer_and_delete_both_recycled_files(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(other_settings, "QMessageBox", _ArtifactDeleteMessageBox)
+    monkeypatch.setattr(other_settings, "QIcon", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        other_settings, "_center_messagebox_buttons", lambda _message_box: None
+    )
+    _ArtifactDeleteMessageBox.next_click = "Delete Both Linked Files"
+
+    for delete_function, book_name in (
+        (other_settings.delete_translated_headers_file, "HeaderDelete"),
+        (other_settings.delete_toc_txt_file, "TocDelete"),
+    ):
+        root = tmp_path / book_name
+        root.mkdir()
+        epub_path, output_dir = _write_recycled_artifact_workspace(
+            root, book_name
+        )
+        monkeypatch.chdir(root)
+        _ArtifactDeleteMessageBox.shown_texts = []
+
+        delete_function(_ArtifactDeleteGui(epub_path))
+
+        assert not (output_dir / "TOC.txt").exists()
+        assert not (output_dir / "translated_headers.txt").exists()
+        progress = json.loads(
+            (output_dir / "translation_progress.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for entry in progress["chapters"].values():
+            assert entry["status"] == "pending"
+            assert "model_name" not in entry
+        assert any(
+            "without a new API translation" in text
+            and "Delete both linked files" in text
+            for text in _ArtifactDeleteMessageBox.shown_texts
+        )
+
+
+def test_manual_header_delete_can_keep_recycled_toc_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(other_settings, "QMessageBox", _ArtifactDeleteMessageBox)
+    monkeypatch.setattr(other_settings, "QIcon", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        other_settings, "_center_messagebox_buttons", lambda _message_box: None
+    )
+    _ArtifactDeleteMessageBox.next_click = "Delete Only Header Files"
+    epub_path, output_dir = _write_recycled_artifact_workspace(
+        tmp_path, "KeepToc"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    other_settings.delete_translated_headers_file(
+        _ArtifactDeleteGui(epub_path)
+    )
+
+    assert (output_dir / "TOC.txt").exists()
+    assert not (output_dir / "translated_headers.txt").exists()
+    progress = json.loads(
+        (output_dir / "translation_progress.json").read_text(encoding="utf-8")
+    )
+    assert progress["chapters"]["__translation_artifact__:toc"][
+        "model_name"
+    ] == "RECYCLED"
+    assert "model_name" not in progress["chapters"][
+        "__translation_artifact__:headers"
+    ]
 
 
 def test_managed_artifact_rows_do_not_use_special_file_keywords():
