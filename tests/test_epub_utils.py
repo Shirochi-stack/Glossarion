@@ -2627,3 +2627,30 @@ def test_newline_paragraph_conversion_preserves_inline_markup(
     assert '<br' not in html.lower()
     assert '<p><em>First translated line</em></p>' in html
     assert '<p><em>Second translated line</em></p>' in html
+
+
+def test_br_paragraph_normalization_does_not_reserialize_surrounding_lists():
+    from html_output_utils import normalize_br_terminated_paragraphs
+
+    prefix = (
+        '<!DOCTYPE HTML>\n<HTML data-Keep="YES"><BODY>\n'
+        "<UL class='original-list'>\n"
+        '  <LI data-Index="1">Keep this list markup.</LI>\n'
+        '</UL>\n'
+    )
+    paragraph = '<p class="body"><em>First line<br/>Second line</em></p>'
+    suffix = (
+        '\n<OL class="second-list"><LI>Keep this too.</LI></OL>\n'
+        '</BODY></HTML>'
+    )
+
+    normalized = normalize_br_terminated_paragraphs(
+        prefix + paragraph + suffix
+    )
+
+    assert normalized == (
+        prefix
+        + '<p class="body"><em>First line</em></p>'
+        + '<p class="body"><em>Second line</em></p>'
+        + suffix
+    )

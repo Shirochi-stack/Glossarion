@@ -3477,7 +3477,7 @@ class QAScannerMixin:
             sdlxliff_min_source_paragraph_layout.setContentsMargins(20, 0, 0, 5)
 
             sdlxliff_min_source_paragraph_label = QLabel(
-                "Minimum source paragraph tags:"
+                "Minimum source paragraph/list-item tags:"
             )
             sdlxliff_min_source_paragraph_label.setFont(QFont('Arial', 10))
             aligned_label_width = max(
@@ -3511,7 +3511,7 @@ class QAScannerMixin:
             sdlxliff_min_source_paragraph_spinbox.setMinimumWidth(90)
             sdlxliff_min_source_paragraph_spinbox.setToolTip(
                 "Skips this SDLXLIFF tag-count check when the source file contains fewer "
-                "paragraph tags than this value."
+                "&lt;p&gt; and &lt;li&gt; text-unit tags than this value."
             )
             disable_wheel_event(sdlxliff_min_source_paragraph_spinbox)
             sdlxliff_min_source_paragraph_layout.addWidget(

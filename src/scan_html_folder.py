@@ -28,6 +28,7 @@ import zipfile
 import csv
 from bs4 import BeautifulSoup
 from _empty_attr_fix import count_empty_attr_tags, find_empty_attr_tags
+from html_output_utils import normalize_br_terminated_paragraphs
 from langdetect import detect, LangDetectException
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
@@ -2225,7 +2226,9 @@ def _missing_ending_quotation_paragraphs(
     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
         tag.decompose()
 
-    paragraph_texts = [paragraph.get_text() for paragraph in soup.find_all('p')]
+    paragraph_texts = [
+        paragraph.get_text() for paragraph in soup.find_all(['p', 'li'])
+    ]
     if not paragraph_texts and allow_plain_text and soup.find() is None:
         paragraph_texts = [soup.get_text()]
 
@@ -5793,11 +5796,13 @@ _AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
 
 
 def _extract_paragraphs(html, *, return_last_html_p=False):
-    """Extract paragraph texts and optionally the final non-empty ``<p>`` text."""
-    soup = BeautifulSoup(html, "html.parser")
+    """Extract ``<p>``/``<li>`` text and optionally the final non-empty unit."""
+    soup = BeautifulSoup(
+        normalize_br_terminated_paragraphs(html), "html.parser"
+    )
     for tag in soup(["script", "style", "head", "title", "meta", "link"]):
         tag.decompose()
-    paragraph_tags = soup.find_all("p")
+    paragraph_tags = soup.find_all(["p", "li"])
     last_html_p = None
     if paragraph_tags:
         # Preserve the distinction between a document containing only empty
@@ -6492,7 +6497,9 @@ STANDARD_HTML_TAGS = frozenset([
 ])
 
 _HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
-_BEAUTIFULSOUP_REVIEW_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p')
+_BEAUTIFULSOUP_REVIEW_TAGS = (
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'
+)
 
 
 def _strip_html_like_extensions(name):
@@ -6530,7 +6537,9 @@ def _count_beautifulsoup_review_tags(html_content):
     if not isinstance(html_content, str) or not html_content:
         return {}
     try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+        soup = BeautifulSoup(
+            normalize_br_terminated_paragraphs(html_content), 'html.parser'
+        )
         counts = {}
         for tag_name in _BEAUTIFULSOUP_REVIEW_TAGS:
             count = sum(
@@ -6604,8 +6613,11 @@ def _missing_beautifulsoup_tags_issue(
     except (TypeError, ValueError):
         min_paragraphs = 0
     min_paragraphs = max(0, min_paragraphs)
-    source_paragraphs = _safe_int(source_counts.get('p'), 0)
-    if source_paragraphs < min_paragraphs:
+    source_text_units = (
+        _safe_int(source_counts.get('p'), 0)
+        + _safe_int(source_counts.get('li'), 0)
+    )
+    if source_text_units < min_paragraphs:
         return None
     total_source = 0
     total_output = 0
@@ -9453,7 +9465,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             )
         except (TypeError, ValueError):
             min_source_paragraphs = 20
-        log(f"      → Minimum source <p> tags to check: {min_source_paragraphs}")
+        log(
+            f"      → Minimum source <p>/<li> tags to check: "
+            f"{min_source_paragraphs}"
+        )
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
@@ -10677,11 +10692,16 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         if '<' not in content or '>' not in content:
             issues.append('missing_html_structure')
             return True, issues
+
+        # The converter may represent logical paragraph endings as <br>,
+        # <br/>, or <br />. Normalize those boundaries for structural QA so
+        # they count as complete sibling paragraphs instead of missing </p>.
+        structure_content = normalize_br_terminated_paragraphs(content)
         
         # Check 3: Large blocks of unwrapped text
         from bs4 import BeautifulSoup, NavigableString
         try:
-            soup = BeautifulSoup(content, 'html.parser')
+            soup = BeautifulSoup(structure_content, 'html.parser')
             
             # Look for text that's sitting directly in body (not in any tag)
             body = soup.find('body')
@@ -10707,7 +10727,10 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         # Check 4: Malformed and incomplete HTML tags
         import re
         
+        # Keep document-level validation on the original markup so parser
+        # recovery cannot conceal a genuinely missing </html> or </body>.
         content_lower = content.lower()
+        paragraph_structure_lower = structure_content.lower()
         
         # First check for incomplete/malformed opening tags (like <p without closing >)
         # Look for < followed by tag name but missing the closing >
@@ -10717,7 +10740,7 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
             # Match tags like <p" or <div' where quote comes right after tag name
             (r'<([a-zA-Z]+)["\']', 'malformed_tag_with_quote'),
             # Match < followed by tag name and then immediately text without >
-            (r'<(p|div|span|a|img|h[1-6])\s*[^>\s]+[^>]*$', 'incomplete_tag_at_line_end'),
+            (r'<(p|div|span|a|img|h[1-6]|ul|ol|li)\s*[^>\s]+[^>]*$', 'incomplete_tag_at_line_end'),
         ]
         
         # Check for orphaned closing brackets (e.g., p> without <p)
@@ -10749,23 +10772,28 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         
         # Check for unclosed HTML tags - Check common tags with simple logic
         # Note: Excluding 'head' since it's metadata and often missing in translated content
-        tags_to_check = ['html', 'p', 'div', 'span']
+        tags_to_check = ['html', 'p', 'div', 'span', 'ul', 'ol', 'li']
         if check_body_tag:
             tags_to_check.insert(1, 'body')  # Add body after html if enabled
         problematic_tags = []
         
         for tag in tags_to_check:
+            tag_content = (
+                paragraph_structure_lower if tag == 'p' else content_lower
+            )
             # Count: <tag (with space, attributes, or direct close)
-            open_count = len(re.findall(rf'<{tag}(?:\s[^>]*)?>', content_lower))
+            open_count = len(re.findall(rf'<{tag}(?:\s[^>]*)?>', tag_content))
             # Count: </tag>
-            close_count = len(re.findall(rf'</{tag}>', content_lower))
+            close_count = len(re.findall(rf'</{tag}>', tag_content))
             
-            # Flag only if there's a real imbalance
-            # Allow 1-2 difference for edge cases, but flag significant mismatches
+            # Flag only if there's a real imbalance. Preserve the legacy
+            # 1-2 tolerance for general containers, but keep EPUB/XHTML list
+            # markup strict because every <ul>/<ol>/<li> must be balanced.
             diff = abs(open_count - close_count)
             
             if open_count > 0 or close_count > 0:  # Tag exists in file
-                if diff > 2:  # Significant mismatch
+                allowed_difference = 0 if tag in ('ul', 'ol', 'li') else 2
+                if diff > allowed_difference:
                     problematic_tags.append(f"{tag} (open: {open_count}, close: {close_count})")
         
         if problematic_tags:
@@ -10816,7 +10844,7 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         # Check 6: Nested tag validation using BeautifulSoup's parser errors
         try:
             # Parse with html.parser which is more strict
-            soup_strict = BeautifulSoup(content, 'html.parser')
+            soup_strict = BeautifulSoup(structure_content, 'html.parser')
             
             # Check for common nesting issues
             # For example, p tags shouldn't contain div tags

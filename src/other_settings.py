@@ -9873,8 +9873,10 @@ def _create_processing_options_section(self, parent):
     enhanced_opts_v.addWidget(newline_to_break_cb)
 
     newline_to_break_desc = QLabel(
-        "Off replaces newline <br> tags with separate <p>...</p> paragraphs."
+        "Off: each single newline becomes a separate <p>...</p> paragraph.\n"
+        "On: each single newline remains a <br> tag inside its paragraph."
     )
+    newline_to_break_desc.setTextFormat(Qt.PlainText)
     newline_to_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
     newline_to_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(newline_to_break_desc)

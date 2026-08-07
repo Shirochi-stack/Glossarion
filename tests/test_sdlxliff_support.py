@@ -12,6 +12,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from lxml import etree
+from bs4 import BeautifulSoup
 from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 
 from sdlxliff_converter import convert_sdlxliff
@@ -27,8 +28,11 @@ from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxlif
 from qa_scan_runtime import default_qa_scan_settings
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
+    _extract_paragraphs,
     _missing_beautifulsoup_tags_issue,
+    _missing_ending_quotation_paragraphs,
     _sdlxliff_review_tag_counts,
+    check_html_structure_issues,
     process_html_file_batch,
 )
 
@@ -793,6 +797,259 @@ def test_sdlxliff_review_ignores_invisible_empty_html_tags(tmp_path):
     assert piece["rows"][0]["target_tag_label"] == "p"
     assert piece["rows"][0]["source"] == "Real source text."
     assert piece["rows"][0]["target"] == "Real target text."
+
+
+def test_sdlxliff_review_treats_br_terminated_lines_as_paragraph_units(tmp_path):
+    sidecar = tmp_path / "response_chapter_br_units.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>Source paragraph one.</p>"
+        "<p>Source paragraph two.</p>"
+        "<p>Source paragraph three.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body><p>Target paragraph one.<br/>"
+        "Target paragraph two.<br />Target paragraph three.<br></p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_br_units.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_br_units.html"}
+    )
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert piece["mismatch"] is False
+    assert [row["target"] for row in piece["rows"]] == [
+        "Target paragraph one.",
+        "Target paragraph two.",
+        "Target paragraph three.",
+    ]
+
+    edited_html = dialog._target_html_with_edit(
+        piece, piece["rows"][1], "Edited target paragraph two."
+    )
+    assert [
+        unit["text"] for unit in dialog._extract_text_units(edited_html)
+    ] == [
+        "Target paragraph one.",
+        "Edited target paragraph two.",
+        "Target paragraph three.",
+    ]
+
+
+def test_qa_tag_count_treats_br_terminated_lines_as_paragraph_units():
+    output_counts = _count_beautifulsoup_review_tags(
+        "<p>One<br/>Two<br />Three<br></p>"
+    )
+
+    assert output_counts == {"p": 3}
+    assert _missing_beautifulsoup_tags_issue(
+        {"p": 3}, output_counts
+    ) is None
+
+
+def test_qa_structure_accepts_br_as_implicit_paragraph_ending(tmp_path):
+    file_path = tmp_path / "br_terminated_paragraphs.html"
+    file_path.write_text(
+        "<html><body>"
+        "<p>One<br/><p>Two<br /><p>Three<br><p>Four<br/>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+
+    has_issues, issues = check_html_structure_issues(
+        str(file_path), lambda _message: None, check_header_tags=False
+    )
+
+    assert "unclosed_html_tags" not in issues
+    assert "invalid_nesting" not in issues
+    assert has_issues is False
+
+
+def test_br_paragraph_normalization_does_not_hide_missing_html_close(tmp_path):
+    file_path = tmp_path / "missing_html_close_with_br.html"
+    file_path.write_text(
+        "<html><body><p>One<br/>Two<br/></p></body>",
+        encoding="utf-8",
+    )
+
+    has_issues, issues = check_html_structure_issues(
+        str(file_path), lambda _message: None, check_header_tags=False
+    )
+
+    assert has_issues is True
+    assert "incomplete_html_structure" in issues
+    assert "unclosed_html_tags" in issues
+
+
+def test_sdlxliff_review_treats_list_items_as_rows_not_list_containers(tmp_path):
+    sidecar = tmp_path / "response_chapter_list_items.html.sdlxliff"
+    source_html = (
+        "<html><body><ul>"
+        "<li>Source list item one.</li>"
+        "<li>Source list item two.</li>"
+        "</ul></body></html>"
+    )
+    target_html = (
+        "<html><body><ul>"
+        "<li>Target list item one.</li>"
+        "<li>Target list item two.</li>"
+        "</ul></body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_list_items.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_list_items.html"}
+    )
+
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 2
+    assert piece["mismatch"] is False
+    assert [row["source_tag"] for row in piece["rows"]] == ["li", "li"]
+    assert [row["target_tag"] for row in piece["rows"]] == ["li", "li"]
+    assert [row["target"] for row in piece["rows"]] == [
+        "Target list item one.",
+        "Target list item two.",
+    ]
+    assert dialog._tooltip_batch_tag_name("li") == "li"
+
+    edited_html = dialog._target_html_with_edit(
+        piece, piece["rows"][1], "Edited target list item two."
+    )
+    edited_soup = BeautifulSoup(edited_html, "html.parser")
+    assert len(edited_soup.find_all("ul")) == 1
+    assert [item.get_text(" ", strip=True) for item in edited_soup.find_all("li")] == [
+        "Target list item one.",
+        "Edited target list item two.",
+    ]
+
+
+def test_sdlxliff_review_counts_p_and_li_together_without_red_mismatch(tmp_path):
+    sidecar = tmp_path / "response_chapter_p_to_li.html.sdlxliff"
+    source_units = [
+        f"<p>원문 문장 {index}입니다.</p>" for index in range(1, 13)
+    ]
+    target_units = [
+        f"<p>Translated sentence {index}.</p>" for index in range(1, 11)
+    ]
+    target_units.extend(
+        [
+            "<ul><li>Translated list sentence eleven.</li></ul>",
+            "<p>Translated sentence twelve.</p>",
+        ]
+    )
+    source_html = f"<html><body>{''.join(source_units)}</body></html>"
+    target_html = f"<html><body>{''.join(target_units)}</body></html>"
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_p_to_li.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_p_to_li.html"}
+    )
+
+    converted_row = piece["rows"][10]
+    following_row = piece["rows"][11]
+    assert converted_row["source_tag_label"] == "p(11)"
+    assert converted_row["target_tag_label"] == "li(11)"
+    assert converted_row["status"] == "green"
+    assert converted_row["reason"] == "ok"
+    assert following_row["source_tag_label"] == "p(12)"
+    assert following_row["target_tag_label"] == "p(12)"
+    assert piece["red_count"] == 0
+    assert piece["mismatch"] is False
+
+
+def test_qa_tag_count_and_minimum_threshold_include_list_items():
+    output_counts = _count_beautifulsoup_review_tags(
+        "<ul><li>One</li><li>Two</li></ul>"
+    )
+
+    assert output_counts == {"li": 2}
+    assert _missing_beautifulsoup_tags_issue(
+        {"li": 20},
+        {"li": 19},
+        min_source_paragraph_tags=20,
+    ) == "missing_tags: 20/19 (-1)"
+    assert _missing_beautifulsoup_tags_issue(
+        {"li": 19, "h1": 100},
+        {"li": 20, "h1": 100},
+        min_source_paragraph_tags=20,
+    ) is None
+
+    list_html = "<ul><li>First list unit.</li><li>Second list unit.</li></ul>"
+    assert _extract_paragraphs(list_html) == [
+        "First list unit.",
+        "Second list unit.",
+    ]
+    assert len(_missing_ending_quotation_paragraphs(
+        "<ul><li>“Missing closing quotation.</li></ul>"
+    )) == 1
+
+
+def test_qa_structure_checks_list_tag_balance(tmp_path):
+    valid_path = tmp_path / "valid_list.html"
+    valid_path.write_text(
+        "<html><body><ul><li>One</li><li>Two</li></ul></body></html>",
+        encoding="utf-8",
+    )
+    invalid_path = tmp_path / "invalid_list.html"
+    invalid_path.write_text(
+        "<html><body><ul><li>One</li><li>Two</ul></body></html>",
+        encoding="utf-8",
+    )
+
+    valid_has_issues, valid_issues = check_html_structure_issues(
+        str(valid_path), lambda _message: None, check_header_tags=False
+    )
+    invalid_has_issues, invalid_issues = check_html_structure_issues(
+        str(invalid_path), lambda _message: None, check_header_tags=False
+    )
+
+    assert valid_has_issues is False
+    assert "unclosed_html_tags" not in valid_issues
+    assert invalid_has_issues is True
+    assert "unclosed_html_tags" in invalid_issues
 
 
 def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):

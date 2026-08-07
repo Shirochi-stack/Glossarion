@@ -34,6 +34,7 @@ import queue
 import hashlib
 import unicodedata
 from sdlxliff_sidecar_writer import _write_html_sdlxliff_sidecar
+from html_output_utils import normalize_br_terminated_paragraphs
 from glossary_usage import (
     CHECK_PREFIX,
     WARNING_PREFIX,
@@ -777,7 +778,9 @@ class SDLXLIFFReviewDialog(QDialog):
     _review_piece_reload_finished = Signal(int, object)
     _review_generation_progress = Signal(object)
 
-    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
+    # Text-bearing review rows. List containers (<ul>/<ol>) are deliberately
+    # excluded so their combined child text is not counted a second time.
+    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li")
     THEME = {
         "bg": "#1e1e1e",
         "panel": "#2d2d2d",
@@ -2447,7 +2450,13 @@ class SDLXLIFFReviewDialog(QDialog):
                     source_missing=source_missing,
                     target_missing=target_missing,
                 )
-                if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
+                if (
+                    row_data.get("source_tag")
+                    and row_data.get("target_tag")
+                    and not self._review_tags_are_equivalent(
+                        row_data.get("source_tag"), row_data.get("target_tag")
+                    )
+                ):
                     status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
                 row_data["status"] = status
                 row_data["reason"] = reason
@@ -4195,7 +4204,10 @@ class SDLXLIFFReviewDialog(QDialog):
                 source_parts.append(self._inner_xml_or_text(element))
             elif name == "target":
                 target_parts.append(self._inner_xml_or_text(element))
-        return "\n".join(source_parts), "\n".join(target_parts)
+        return (
+            normalize_br_terminated_paragraphs("\n".join(source_parts)),
+            normalize_br_terminated_paragraphs("\n".join(target_parts)),
+        )
 
     def _legend_status_label(self, text, status):
         color = {
@@ -4519,9 +4531,17 @@ class SDLXLIFFReviewDialog(QDialog):
             tag = str((unit or {}).get("tag", "") or "").strip().lower()
             if not tag:
                 continue
-            counts[tag] += 1
-            unit["tag_ordinal"] = counts[tag]
-            unit["tag_label"] = tag if counts[tag] == 1 else f"{tag}({counts[tag]})"
+            # A list item is a paragraph-like text unit in the review UI. Count
+            # <p> and <li> in one sequence so changing p(11) to li(11) does not
+            # shift every paragraph label that follows it.
+            ordinal_group = "paragraph" if tag in {"p", "li"} else tag
+            counts[ordinal_group] += 1
+            unit["tag_ordinal"] = counts[ordinal_group]
+            unit["tag_label"] = (
+                tag
+                if counts[ordinal_group] == 1
+                else f"{tag}({counts[ordinal_group]})"
+            )
         return units
 
     @staticmethod
@@ -4915,6 +4935,12 @@ class SDLXLIFFReviewDialog(QDialog):
         target_heading = bool(re.fullmatch(r"h[1-6]", target_tag))
         return (source_heading and target_tag == "p") or (source_tag == "p" and target_heading)
 
+    @staticmethod
+    def _review_tags_are_equivalent(source_tag, target_tag):
+        source_tag = str(source_tag or "").strip().lower()
+        target_tag = str(target_tag or "").strip().lower()
+        return source_tag == target_tag or {source_tag, target_tag} == {"p", "li"}
+
     def _tag_mismatch_status(self, source_tag, target_tag):
         if self._heading_tag_level_changed(source_tag, target_tag):
             return "yellow", "heading level changed"
@@ -4934,7 +4960,7 @@ class SDLXLIFFReviewDialog(QDialog):
     def _review_units_are_compatible(self, source_unit, target_unit):
         source_tag = str((source_unit or {}).get("tag", "") or "").strip().lower()
         target_tag = str((target_unit or {}).get("tag", "") or "").strip().lower()
-        if source_tag == target_tag:
+        if self._review_tags_are_equivalent(source_tag, target_tag):
             return True
         return (
             self._heading_tag_level_changed(source_tag, target_tag)
@@ -5491,7 +5517,11 @@ class SDLXLIFFReviewDialog(QDialog):
                     source_missing=src is None,
                     target_missing=tgt is None,
                 )
-                if src is not None and tgt is not None and src.get("tag") != tgt.get("tag"):
+                if (
+                    src is not None
+                    and tgt is not None
+                    and not self._review_tags_are_equivalent(src.get("tag"), tgt.get("tag"))
+                ):
                     status, reason = self._tag_mismatch_status(src.get("tag"), tgt.get("tag"))
                 if status == "red":
                     red_count += 1
@@ -7679,7 +7709,7 @@ class SDLXLIFFReviewDialog(QDialog):
     @staticmethod
     def _tooltip_batch_tag_name(tag_name):
         tag_name = str(tag_name or "").strip().lower()
-        if re.fullmatch(r"h[1-6]", tag_name) or tag_name == "p":
+        if re.fullmatch(r"h[1-6]", tag_name) or tag_name in {"p", "li"}:
             return tag_name
         return "p"
 
@@ -8711,7 +8741,13 @@ class SDLXLIFFReviewDialog(QDialog):
             self._recompute_piece_row_statuses(piece)
         else:
             status, reason = self._row_status(row_data.get("source", ""), row_data.get("target", ""))
-            if row_data.get("source_tag") and row_data.get("target_tag") and row_data.get("source_tag") != row_data.get("target_tag"):
+            if (
+                row_data.get("source_tag")
+                and row_data.get("target_tag")
+                and not self._review_tags_are_equivalent(
+                    row_data.get("source_tag"), row_data.get("target_tag")
+                )
+            ):
                 status, reason = self._tag_mismatch_status(row_data.get("source_tag"), row_data.get("target_tag"))
             row_data["status"] = status
             row_data["reason"] = reason
