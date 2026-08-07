@@ -3490,6 +3490,20 @@ class AsyncProcessingDialog:
             )
             else "0"
         )
+        env_vars['ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK'] = (
+            "1"
+            if _bool_val(
+                getattr(
+                    self.gui,
+                    'add_empty_paragraph_after_converted_break_var',
+                    None,
+                ),
+                self.gui.config.get(
+                    'add_empty_paragraph_after_converted_break', True
+                ),
+            )
+            else "0"
+        )
         env_vars['FIX_STRAY_P_GT_EPUB'] = "1" if _bool_val(getattr(self.gui, 'fix_stray_p_gt_epub_var', None), self.gui.config.get('fix_stray_p_gt_epub', False)) else "0"
         env_vars['FIX_STRAY_P_GT_BS'] = "1" if _bool_val(getattr(self.gui, 'fix_stray_p_gt_bs_var', None), self.gui.config.get('fix_stray_p_gt_bs', False)) else "0"
         env_vars['DISABLE_ZERO_DETECTION'] = "1" if _val(self.gui.disable_zero_detection_var, False) else "0"

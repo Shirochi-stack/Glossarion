@@ -9606,6 +9606,11 @@ def _create_processing_options_section(self, parent):
             'enable_newline_to_break_conversion', False
         )
 
+    if not hasattr(self, 'add_empty_paragraph_after_converted_break_var'):
+        self.add_empty_paragraph_after_converted_break_var = self.config.get(
+            'add_empty_paragraph_after_converted_break', True
+        )
+
     if not hasattr(self, 'html2text_escape_snob_var'):
         self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
     
@@ -9880,6 +9885,59 @@ def _create_processing_options_section(self, parent):
     newline_to_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
     newline_to_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(newline_to_break_desc)
+
+    empty_paragraph_after_break_cb = self._create_styled_checkbox(
+        "Add empty paragraph after converted breaks"
+    )
+    empty_paragraph_after_break_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When newline-to-break conversion is off, insert a whitespace-only "
+        "&lt;p&gt; &lt;/p&gt; after every &lt;br&gt; converted into a paragraph "
+        "boundary. This option is enabled by default."
+        "</p></qt>"
+    )
+    try:
+        empty_paragraph_after_break_cb.setChecked(
+            bool(self.add_empty_paragraph_after_converted_break_var)
+        )
+    except Exception:
+        pass
+
+    def _on_empty_paragraph_after_break_toggle(checked):
+        try:
+            self.add_empty_paragraph_after_converted_break_var = bool(checked)
+            self.config['add_empty_paragraph_after_converted_break'] = bool(
+                checked
+            )
+            os.environ['ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    empty_paragraph_after_break_cb.toggled.connect(
+        _on_empty_paragraph_after_break_toggle
+    )
+    empty_paragraph_after_break_cb.setContentsMargins(20, 2, 0, 0)
+    empty_paragraph_after_break_cb.setEnabled(
+        not newline_to_break_cb.isChecked()
+    )
+    enhanced_opts_v.addWidget(empty_paragraph_after_break_cb)
+
+    empty_paragraph_after_break_desc = QLabel(
+        "Off: converted breaks only separate adjacent paragraphs.\n"
+        "On: each converted break also inserts <p> </p> afterwards."
+    )
+    empty_paragraph_after_break_desc.setTextFormat(Qt.PlainText)
+    empty_paragraph_after_break_desc.setStyleSheet(
+        "color: gray; font-size: 8pt;"
+    )
+    empty_paragraph_after_break_desc.setContentsMargins(40, 0, 0, 3)
+    enhanced_opts_v.addWidget(empty_paragraph_after_break_desc)
+
+    newline_to_break_cb.toggled.connect(
+        lambda checked: empty_paragraph_after_break_cb.setEnabled(not checked)
+    )
 
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")

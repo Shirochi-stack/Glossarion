@@ -20590,6 +20590,9 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     enable_newline_to_break = (
         os.getenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0') == '1'
     )
+    add_empty_paragraph_after_break = (
+        os.getenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1') == '1'
+    )
 
     if use_markdown2:
     # Use markdown2 for conversion (legacy behavior)
@@ -20687,7 +20690,12 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # nested <p> that markdown2 creates from pre-existing <p><img/></p>.
                 html = _fix_img_p_nesting(html)
                 if not enable_newline_to_break:
-                    html = normalize_br_terminated_paragraphs(html)
+                    html = normalize_br_terminated_paragraphs(
+                        html,
+                        add_empty_paragraph_after_break=(
+                            add_empty_paragraph_after_break
+                        ),
+                    )
 
                 return html
         except ImportError:
@@ -20767,7 +20775,12 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # nested <p> that markdown creates from pre-existing <p><img/></p>.
             html = _fix_img_p_nesting(html)
             if not enable_newline_to_break:
-                html = normalize_br_terminated_paragraphs(html)
+                html = normalize_br_terminated_paragraphs(
+                    html,
+                    add_empty_paragraph_after_break=(
+                        add_empty_paragraph_after_break
+                    ),
+                )
 
             return html
             

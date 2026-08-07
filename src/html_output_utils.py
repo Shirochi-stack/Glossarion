@@ -30,13 +30,18 @@ _PARAGRAPH_ELEMENT_RE = re.compile(
 )
 
 
-def normalize_br_terminated_paragraphs(content: str) -> str:
+def normalize_br_terminated_paragraphs(
+    content: str,
+    add_empty_paragraph_after_break: bool = False,
+) -> str:
     """Treat ``<br>`` inside ``<p>`` as a logical paragraph boundary.
 
     Each non-empty break-delimited portion becomes a valid sibling
-    ``<p>...</p>`` element. A trailing break closes the current logical
-    paragraph without creating an empty extra paragraph. All common break
-    spellings (``<br>``, ``<br/>``, and ``<br />``) are accepted.
+    ``<p>...</p>`` element. When ``add_empty_paragraph_after_break`` is true,
+    every converted break also emits a whitespace-only ``<p> </p>`` spacer.
+    Otherwise, a trailing break closes the current logical paragraph without
+    creating an empty extra paragraph. All common break spellings (``<br>``,
+    ``<br/>``, and ``<br />``) are accepted.
 
     Inline markup spanning a break is cloned into both resulting paragraphs,
     so formatting is not lost or left with invalid cross-paragraph nesting.
@@ -110,14 +115,16 @@ def normalize_br_terminated_paragraphs(content: str) -> str:
             return fragment
 
         replacements = []
-        for segment in _split_contents(paragraph, soup):
-            if not _has_content(segment):
-                continue
-            replacement = soup.new_tag('p')
-            replacement.attrs = deepcopy(paragraph.attrs)
-            for node in segment:
-                replacement.append(node)
-            replacements.append(str(replacement))
+        segments = _split_contents(paragraph, soup)
+        for index, segment in enumerate(segments):
+            if _has_content(segment):
+                replacement = soup.new_tag('p')
+                replacement.attrs = deepcopy(paragraph.attrs)
+                for node in segment:
+                    replacement.append(node)
+                replacements.append(str(replacement))
+            if add_empty_paragraph_after_break and index < len(segments) - 1:
+                replacements.append('<p> </p>')
         return ''.join(replacements)
 
     return _PARAGRAPH_ELEMENT_RE.sub(_normalize_paragraph_match, text)

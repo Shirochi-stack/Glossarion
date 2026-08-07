@@ -2589,6 +2589,9 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
         'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
     )
     monkeypatch.delenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', raising=False)
+    monkeypatch.delenv(
+        'ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', raising=False
+    )
     source = 'First translated line\nSecond translated line'
 
     default_html = convert_enhanced_text_to_html(
@@ -2598,6 +2601,7 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
     assert '<br' not in default_html.lower()
     assert '<p>First translated line</p>' in default_html
     assert '<p>Second translated line</p>' in default_html
+    assert '<p>First translated line</p><p> </p><p>Second translated line</p>' in default_html
 
     monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '1')
     enabled_html = convert_enhanced_text_to_html(
@@ -2605,6 +2609,30 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
     )
 
     assert enabled_html.lower().count('<br') == 1
+    assert '<p> </p>' not in enabled_html
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_empty_paragraph_after_converted_break_can_be_disabled(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0')
+    monkeypatch.setenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '0')
+
+    html = convert_enhanced_text_to_html(
+        'First translated line\nSecond translated line',
+        {'preserve_structure': True},
+    )
+
+    assert '<br' not in html.lower()
+    assert '<p> </p>' not in html
+    assert '<p>First translated line</p><p>Second translated line</p>' in html
 
 
 @pytest.mark.parametrize('use_markdown2', [False, True])
@@ -2653,4 +2681,17 @@ def test_br_paragraph_normalization_does_not_reserialize_surrounding_lists():
         + '<p class="body"><em>First line</em></p>'
         + '<p class="body"><em>Second line</em></p>'
         + suffix
+    )
+
+
+def test_br_paragraph_normalization_can_add_one_spacer_per_break():
+    from html_output_utils import normalize_br_terminated_paragraphs
+
+    normalized = normalize_br_terminated_paragraphs(
+        '<p>First<br/>Second<br></p>',
+        add_empty_paragraph_after_break=True,
+    )
+
+    assert normalized == (
+        '<p>First</p><p> </p><p>Second</p><p> </p>'
     )
