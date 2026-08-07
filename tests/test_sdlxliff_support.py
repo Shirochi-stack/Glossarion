@@ -3013,6 +3013,23 @@ def test_sdlxliff_review_numbered_tag_label_text_uses_compact_empty_labels():
     assert SDLXLIFFReviewDialog._tag_label_rich_text("Empty(33)") == 'Empty<span style="font-size: 8pt;">(33)</span>'
 
 
+def test_sdlxliff_review_tag_label_font_shrinks_for_numbered_p_to_li_pair():
+    short_size = SDLXLIFFReviewDialog._tag_label_font_point_size("p(2)")
+    converted_size = SDLXLIFFReviewDialog._tag_label_font_point_size(
+        "p(11) -> li(11)"
+    )
+
+    assert short_size == SDLXLIFFReviewDialog.REVIEW_TAG_LABEL_MAX_FONT_PT
+    assert converted_size < short_size
+    assert converted_size >= SDLXLIFFReviewDialog.REVIEW_TAG_LABEL_MIN_FONT_PT
+    assert (
+        f'font-size: {SDLXLIFFReviewDialog._tag_label_ordinal_font_point_size(converted_size):g}pt;'
+        in SDLXLIFFReviewDialog._tag_label_rich_text(
+            "p(11) -> li(11)", converted_size
+        )
+    )
+
+
 def test_sdlxliff_review_regenerates_sidecar_when_source_column_is_empty(tmp_path, monkeypatch):
     output_dir = tmp_path / "Moved Novel"
     moved_dir = tmp_path / "new location"
