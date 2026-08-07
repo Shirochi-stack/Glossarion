@@ -6775,7 +6775,21 @@ class UnifiedClient:
             and (os.getenv('USE_VISION_KEYS', '0') == '1' or os.getenv('USE_QA_SCAN_KEYS', '0') == '1')
         )
         _qa_truncation_parallel_request = context_norm == 'qa_truncation'
-        _serialize_send = (not batch_mode) and (not _vision_parallel_request) and (not _qa_truncation_parallel_request)
+        # Header and TOC translators create their own worker pool even during a
+        # standalone (non-BATCH_TRANSLATION) run.  Dedicated metadata requests
+        # from those workers must not serialize through, or mutate, the shared
+        # client; each request is dispatched through an isolated one-shot client
+        # below instead.
+        _metadata_batch_parallel_request = (
+            context_norm in ('batch_toc_translation', 'batch_header_translation')
+            and os.getenv('USE_METADATA_KEYS', '0') == '1'
+        )
+        _serialize_send = (
+            (not batch_mode)
+            and (not _vision_parallel_request)
+            and (not _qa_truncation_parallel_request)
+            and (not _metadata_batch_parallel_request)
+        )
         watchdog_started = False
         watchdog_context = context or ('image_translation' if image_data else 'translation')
         # Initialize override flags BEFORE try block so the finally clause
@@ -6912,7 +6926,7 @@ class UnifiedClient:
                             self.__class__._metadata_key_pool = APIKeyPool("Metadata key pool")
                         self.__class__._metadata_key_pool.load_from_list(metadata_keys)
                         metadata_pool = self.__class__._metadata_key_pool
-                    if batch_mode:
+                    if batch_mode or _metadata_batch_parallel_request:
                         return self._send_with_isolated_dedicated_key(
                             metadata_pool,
                             metadata_keys,

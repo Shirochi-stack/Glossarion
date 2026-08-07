@@ -2204,13 +2204,29 @@ class BatchHeaderTranslator:
         if actual_model_name:
             model_name = actual_model_name
 
+        requested_keys = set(headers_dict)
+        translated_keys = {
+            key for key in requested_keys
+            if str(translations.get(key, '') or '').strip()
+        }
+        unresolved_count = len(requested_keys - translated_keys)
+        translation_complete = unresolved_count == 0
+
         if output_dir:
             update_translation_artifact_progress(
                 output_dir,
                 artifact_kind,
-                'completed' if translations else 'failed',
+                'completed' if translation_complete else 'failed',
                 model_name=model_name,
-                error_message=None if translations else 'No translations were returned',
+                error_message=(
+                    None
+                    if translation_complete
+                    else (
+                        f'Incomplete translation: {len(translated_keys)} of '
+                        f'{len(requested_keys)} entries translated; '
+                        f'{unresolved_count} unresolved'
+                    )
+                ),
             )
         return translations
 

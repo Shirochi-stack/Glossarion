@@ -882,6 +882,57 @@ def test_sdlxliff_review_treats_paragraph_and_list_item_as_equivalent_text_units
     assert piece["rows"][0]["status"] == "green"
 
 
+def test_sdlxliff_review_counts_hr_as_asterisk_paragraph_unit(tmp_path):
+    sidecar = tmp_path / "response_chapter_hr.html.sdlxliff"
+    source_html = (
+        "<html><body>"
+        "<p>Source before.</p><p>*****</p><p>Source after.</p>"
+        "</body></html>"
+    )
+    target_html = (
+        "<html><body>"
+        "<p>Target before.</p><hr/><p>Target after.</p>"
+        "</body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_hr.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_hr.html"}
+    )
+
+    assert piece["source_count"] == 3
+    assert piece["target_count"] == 3
+    assert piece["mismatch"] is False
+    assert [row["target"] for row in piece["rows"]] == [
+        "Target before.", "*****", "Target after."
+    ]
+    assert [row["target_tag_label"] for row in piece["rows"]] == [
+        "p", "p(2)", "p(3)"
+    ]
+
+    edited_html = dialog._target_html_with_edit(
+        piece, piece["rows"][1], "Edited separator."
+    )
+    edited_soup = BeautifulSoup(edited_html, "html.parser")
+    assert edited_soup.find("hr") is None
+    assert [tag.get_text(" ", strip=True) for tag in edited_soup.find_all("p")] == [
+        "Target before.", "Edited separator.", "Target after."
+    ]
+
+
 def test_qa_counts_and_text_checks_include_list_items():
     list_html = "<ul><li>First list unit.</li><li>Second list unit.</li></ul>"
 

@@ -9608,6 +9608,11 @@ def _create_processing_options_section(self, parent):
 
     if not hasattr(self, 'html2text_escape_snob_var'):
         self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
+
+    if not hasattr(self, 'preserve_asterisk_separator_lines_var'):
+        self.preserve_asterisk_separator_lines_var = self.config.get(
+            'preserve_asterisk_separator_lines', True
+        )
     
     if not hasattr(self, 'use_markdown2_converter_var'):
         self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
@@ -9906,6 +9911,48 @@ def _create_processing_options_section(self, parent):
     escape_snob_desc.setStyleSheet("color: gray; font-size: 8pt;")
     escape_snob_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(escape_snob_desc)
+
+    preserve_asterisk_cb = self._create_styled_checkbox(
+        "Keep asterisk-only lines as text (prevent <hr>)"
+    )
+    preserve_asterisk_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, standalone lines containing three or more consecutive "
+        "asterisks—such as *****—remain literal text instead of becoming an "
+        "HTML &lt;hr&gt; element. Applies to both Markdown converters."
+        "</p></qt>"
+    )
+    try:
+        preserve_asterisk_cb.setChecked(
+            bool(self.preserve_asterisk_separator_lines_var)
+        )
+    except Exception:
+        pass
+
+    def _on_preserve_asterisk_separator_toggle(checked):
+        try:
+            self.preserve_asterisk_separator_lines_var = bool(checked)
+            self.config['preserve_asterisk_separator_lines'] = bool(checked)
+            os.environ['PRESERVE_ASTERISK_SEPARATOR_LINES'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    preserve_asterisk_cb.toggled.connect(
+        _on_preserve_asterisk_separator_toggle
+    )
+    preserve_asterisk_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(preserve_asterisk_cb)
+
+    preserve_asterisk_desc = QLabel(
+        "On: standalone *** / ***** lines remain text.\n"
+        "Off: Markdown may convert those lines into <hr> elements."
+    )
+    preserve_asterisk_desc.setTextFormat(Qt.PlainText)
+    preserve_asterisk_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    preserve_asterisk_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(preserve_asterisk_desc)
     
     # Markdown2 converter option
     markdown2_cb = self._create_styled_checkbox("Use markdown2 Converter (Legacy)")

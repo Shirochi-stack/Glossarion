@@ -2656,3 +2656,32 @@ def test_convert_br_to_paragraphs_preserves_inline_and_surrounding_markup():
         + '<p class="body"><em>Second</em></p>'
         + suffix
     )
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_preserve_asterisk_separator_lines_toggle_defaults_on(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.delenv('PRESERVE_ASTERISK_SEPARATOR_LINES', raising=False)
+    source = 'Before\n\n*****\n\nAfter'
+
+    preserved_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert '<hr' not in preserved_html.lower()
+    assert '<p>*****</p>' in preserved_html
+
+    monkeypatch.setenv('PRESERVE_ASTERISK_SEPARATOR_LINES', '0')
+    converted_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert '<hr' in converted_html.lower()
+    assert '<p>*****</p>' not in converted_html

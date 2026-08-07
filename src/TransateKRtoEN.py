@@ -20388,6 +20388,25 @@ def _escape_invalid_html_tags(html_text: str) -> str:
     return html_text
 
 
+_ASTERISK_SEPARATOR_LINE_RE = re.compile(
+    r'(?m)^([ \t]{0,3})(\*{3,})([ \t]*)(\r?)$'
+)
+
+
+def _protect_asterisk_separator_lines(text):
+    """Escape standalone ``***``-style lines so Markdown keeps them as text."""
+    value = "" if text is None else str(text)
+    return _ASTERISK_SEPARATOR_LINE_RE.sub(
+        lambda match: (
+            match.group(1)
+            + ('\\*' * len(match.group(2)))
+            + match.group(3)
+            + match.group(4)
+        ),
+        value,
+    )
+
+
 def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     """Convert markdown/plain text back to HTML after translation (for enhanced mode)
     
@@ -20584,6 +20603,9 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         )
         result = _fix_img_p_nesting(result)
         return result
+
+    if os.getenv('PRESERVE_ASTERISK_SEPARATOR_LINES', '1') == '1':
+        plain_text = _protect_asterisk_separator_lines(plain_text)
 
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'

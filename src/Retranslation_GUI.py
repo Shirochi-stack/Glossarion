@@ -777,9 +777,10 @@ class SDLXLIFFReviewDialog(QDialog):
     _review_piece_reload_finished = Signal(int, object)
     _review_generation_progress = Signal(object)
 
-    # List containers are excluded so their child text is not counted twice;
-    # each <li> is a standalone review text unit alongside paragraphs/headings.
-    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li")
+    # List containers are excluded so their child text is not counted twice.
+    # Each <li> is a standalone unit, while a void <hr> is represented as a
+    # paragraph-like ***** separator so it consumes the correct row/ordinal.
+    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "hr")
     THEME = {
         "bg": "#1e1e1e",
         "panel": "#2d2d2d",
@@ -4375,14 +4376,22 @@ class SDLXLIFFReviewDialog(QDialog):
                 continue
             current_index = index
             index += 1
-            value = self._normalize_review_text(
-                " ".join(part.strip() for part in el.itertext() if part and part.strip())
+            value = (
+                "*****"
+                if name == "hr"
+                else self._normalize_review_text(
+                    " ".join(
+                        part.strip()
+                        for part in el.itertext()
+                        if part and part.strip()
+                    )
+                )
             )
             if not value:
                 continue
             units.append({
                 "index": current_index,
-                "tag": "p" if name == "div" else name,
+                "tag": "p" if name in {"div", "hr"} else name,
                 "text": value,
             })
         return units
@@ -4410,11 +4419,15 @@ class SDLXLIFFReviewDialog(QDialog):
             return not tag.find(self.TEXT_TAGS)
 
         for index, tag in enumerate(soup.find_all(_is_text_unit)):
-            value = self._normalize_review_text(tag.get_text(" ", strip=True))
+            tag_name = tag.name.lower()
+            value = (
+                "*****"
+                if tag_name == "hr"
+                else self._normalize_review_text(tag.get_text(" ", strip=True))
+            )
             if not value:
                 continue
-            tag_name = tag.name.lower()
-            if tag_name == "div":
+            if tag_name in {"div", "hr"}:
                 tag_name = "p"
             units.append({
                 "index": index,
@@ -8730,6 +8743,15 @@ class SDLXLIFFReviewDialog(QDialog):
             # renders as e.g. "p(3)" instead of "p(3) -> p" after the edit.
             row_data["target_tag_label"] = row_data.get("source_tag_label") or tag_name
             row_data["target_index"] = len(list(soup.find_all(self.TEXT_TAGS))) - 1
+
+        # <hr> is exposed to the reviewer as a paragraph-like ***** unit. If
+        # the user edits that unit, replace the void element with a real <p>
+        # instead of producing invalid <hr>text</hr> markup.
+        if str(getattr(node, "name", "") or "").lower() == "hr":
+            replacement = soup.new_tag("p")
+            node.replace_with(replacement)
+            node = replacement
+            row_data["target_tag"] = "p"
 
         node.clear()
         node.append(str(text or ""))
