@@ -2314,9 +2314,22 @@ class BatchHeaderTranslator:
         # Determine max workers from config or environment variable
         # Use extraction_workers setting, with fallback to default of 3
         configured_workers = int(os.getenv('EXTRACTION_WORKERS', self.config.get('extraction_workers', 3)))
-        # Don't create more workers than batches, cap at configured limit, and ensure at least 1
-        max_workers = max(1, min(configured_workers, total_batches))
-        print(f"[DEBUG] Using ThreadPoolExecutor with {max_workers} workers for {total_batches} batches (configured: {configured_workers})")
+        batch_translation_enabled = os.getenv('BATCH_TRANSLATION', '0') == '1'
+        # The global Batch Translation toggle governs metadata chunks too.
+        # With it off, process every header/TOC batch sequentially so the next
+        # API call begins only after the previous one has fully returned.
+        max_workers = (
+            max(1, min(configured_workers, total_batches))
+            if batch_translation_enabled
+            else 1
+        )
+        execution_mode = 'parallel' if max_workers > 1 else 'sequential'
+        print(
+            f"[DEBUG] Using ThreadPoolExecutor with {max_workers} worker(s) "
+            f"for {total_batches} batches ({execution_mode}; configured: "
+            f"{configured_workers}, batch translation: "
+            f"{'on' if batch_translation_enabled else 'off'})"
+        )
 
         
         # Thread-safe lock for updating all_translations

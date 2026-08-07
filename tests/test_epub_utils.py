@@ -1889,6 +1889,181 @@ Chapter 2:
     assert entry["model_name"] == "RECYCLED"
 
 
+def test_stopped_partial_toc_reuse_preserves_recycled_model(
+    tmp_path, monkeypatch
+):
+    source_epub = tmp_path / "source.epub"
+    source_epub.write_bytes(b"placeholder")
+    monkeypatch.setenv("EPUB_PATH", str(source_epub))
+    monkeypatch.setenv("FAILED_TRANSLATION_RETRY_ATTEMPTS", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+    for filename in ("Chapter0001.xhtml", "Chapter0002.xhtml"):
+        (tmp_path / filename).write_text(
+            "<html><body><p>chapter</p></body></html>", encoding="utf-8"
+        )
+
+    (tmp_path / "translated_headers.txt").write_text(
+        """Chapter Header Translations
+==================================================
+
+Chapter 1:
+  Original:   Original One
+  Translated: Translated One
+  Output File: Chapter0001
+----------------------------------------
+Chapter 2:
+  Original:   Original Two
+  Translated: Original Two
+  Output File: Chapter0002
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:toc": {
+                    "status": "pending",
+                    "output_file": "TOC.txt",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    compiler.translate_toc_ncx = True
+    compiler.api_client = object()
+    monkeypatch.setattr(compiler, "is_stopped", lambda: False)
+    monkeypatch.setattr(
+        compiler,
+        "_extract_source_toc_ncx_entries",
+        lambda _path: [
+            {"label": "Original One", "src": "Chapter0001.xhtml"},
+            {"label": "Original Two", "src": "Chapter0002.xhtml"},
+        ],
+    )
+    monkeypatch.setattr(compiler, "_get_chapter_order_from_opf", lambda: {})
+    monkeypatch.setattr(
+        BatchHeaderTranslator,
+        "translate_headers_batch",
+        lambda *_args, **_kwargs: {},
+    )
+    spine = [
+        epub_converter.epub.EpubHtml(
+            title="One", file_name="Chapter0001.xhtml"
+        ),
+        epub_converter.epub.EpubHtml(
+            title="Two", file_name="Chapter0002.xhtml"
+        ),
+    ]
+
+    toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
+
+    assert [item.title for item in toc] == ["Translated One", "Original Two"]
+    _, cached, _ = compiler._load_toc_translations_file(
+        str(tmp_path / "TOC.txt")
+    )
+    assert cached == {1: "Translated One"}
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = progress["chapters"]["__translation_artifact__:toc"]
+    assert entry["status"] == "pending"
+    assert entry["model_name"] == "RECYCLED"
+
+
+def test_stopped_toc_retry_reuse_replaces_failed_api_model(
+    tmp_path, monkeypatch
+):
+    source_epub = tmp_path / "source.epub"
+    source_epub.write_bytes(b"placeholder")
+    monkeypatch.setenv("EPUB_PATH", str(source_epub))
+    monkeypatch.setenv("FAILED_TRANSLATION_RETRY_ATTEMPTS", "0")
+    monkeypatch.setenv("TRANSLATION_CANCELLED", "1")
+    for filename in ("Chapter0001.xhtml", "Chapter0002.xhtml"):
+        (tmp_path / filename).write_text(
+            "<html><body><p>chapter</p></body></html>", encoding="utf-8"
+        )
+
+    (tmp_path / "translated_headers.txt").write_text(
+        """Chapter 1:
+  Original:   Original One
+  Translated: Translated One
+  Output File: Chapter0001
+----------------------------------------
+Chapter 2:
+  Original:   Original Two
+  Translated: Original Two
+  Output File: Chapter0002
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "TOC.txt").write_text(
+        """Chapter 1:
+  Original:   Original One
+  Translated: Original One
+  Output File: Chapter0001.xhtml
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+Chapter 2:
+  Original:   Original Two
+  Translated: Original Two
+  Output File: Chapter0002.xhtml
+  Status:     ⚠️ Using original (translation failed)
+----------------------------------------
+""",
+        encoding="utf-8",
+    )
+    progress_path = tmp_path / "translation_progress.json"
+    progress_path.write_text(
+        json.dumps({
+            "version": "2.1",
+            "chapters": {
+                "__translation_artifact__:toc": {
+                    "status": "failed",
+                    "model_name": "or/stepfun/step-3.7-flash",
+                    "output_file": "TOC.txt",
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    compiler = EPUBCompiler(str(tmp_path), log_callback=lambda _message: None)
+    compiler.translate_toc_ncx = True
+    compiler.api_client = object()
+    monkeypatch.setattr(compiler, "is_stopped", lambda: False)
+    monkeypatch.setattr(
+        compiler,
+        "_extract_source_toc_ncx_entries",
+        lambda _path: [
+            {"label": "Original One", "src": "Chapter0001.xhtml"},
+            {"label": "Original Two", "src": "Chapter0002.xhtml"},
+        ],
+    )
+    monkeypatch.setattr(compiler, "_get_chapter_order_from_opf", lambda: {})
+    spine = [
+        epub_converter.epub.EpubHtml(
+            title="One", file_name="Chapter0001.xhtml"
+        ),
+        epub_converter.epub.EpubHtml(
+            title="Two", file_name="Chapter0002.xhtml"
+        ),
+    ]
+
+    toc = compiler._build_toc_from_source_toc_ncx(spine, [], {})
+
+    assert [item.title for item in toc] == ["Translated One", "Original Two"]
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    entry = progress["chapters"]["__translation_artifact__:toc"]
+    assert entry["status"] == "failed"
+    assert entry["model_name"] == "RECYCLED"
+
+
 def test_successful_header_translation_repairs_matching_failed_toc_entry(tmp_path):
     headers_path = tmp_path / "translated_headers.txt"
     headers_path.write_text(

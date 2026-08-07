@@ -1774,6 +1774,33 @@ class EPUBCompiler:
         if self.stop_callback and self.stop_callback():
             return True
         return False
+
+    def _translation_stop_requested(self) -> bool:
+        """Check every stop signal that can cancel metadata translation."""
+        if self.is_stopped():
+            return True
+        if any(
+            os.environ.get(name) == '1'
+            for name in (
+                'TRANSLATION_CANCELLED',
+                'GRACEFUL_STOP',
+                'GRACEFUL_STOP_COMPLETED',
+            )
+        ):
+            return True
+        try:
+            from TransateKRtoEN import is_stop_requested as translation_stopped
+            if translation_stopped():
+                return True
+        except Exception:
+            pass
+        try:
+            from unified_api_client import is_stop_requested as api_stopped
+            if api_stopped():
+                return True
+        except Exception:
+            pass
+        return False
             
     def compile(self):
         """Main compilation method"""
@@ -6315,6 +6342,11 @@ img {
             headers_file,
             'toc',
         )
+        recycled_keys = getattr(
+            self, '_toc_recycled_header_keys_current', None
+        )
+        if reused and isinstance(recycled_keys, set):
+            recycled_keys.update(reused)
         recovered: Dict[int, str] = dict(reused)
 
         if recovered:
@@ -6689,6 +6721,8 @@ img {
         # Optional translation (single API call) with caching to TOC.txt
         translations: Dict[int, str] = {}
         toc_fully_recycled = False
+        toc_recycled_header_keys: Set[int] = set()
+        self._toc_recycled_header_keys_current = toc_recycled_header_keys
         toc_filter_nums: Optional[Set[int]] = None
         original: Dict[int, str] = {}
         refs: Dict[int, str] = {}
@@ -6754,6 +6788,7 @@ img {
                     _reused_toc, _api_toc_remaining = self._cross_reference_from_other_file(
                         new_toc_to_translate, _headers_file, 'toc'
                     )
+                    toc_recycled_header_keys.update(_reused_toc)
                     
                     new_toc_translations = _reused_toc.copy()
                     new_toc_translator = None
@@ -6921,6 +6956,7 @@ img {
                         )
                         if reused_from_headers:
                             translations.update(reused_from_headers)
+                            toc_recycled_header_keys.update(reused_from_headers)
 
                         # Only send entries that weren't reused to the API
                         entries_for_api = toc_remaining if toc_remaining else {}
@@ -6990,6 +7026,64 @@ img {
                     except Exception as e:
                         self.log(f"⚠️ toc.ncx translation failed: {e}")
                         translations = {}
+
+            # A hard stop can arrive after translated_headers.txt entries were
+            # copied into TOC.txt but before the remaining TOC entries receive
+            # an API response. Preserve the resulting Pending/Failed status,
+            # but replace its model provenance with RECYCLED so the progress
+            # view records the dependency on the partial header cache.
+            if toc_recycled_header_keys and self._translation_stop_requested():
+                try:
+                    cached_source, cached_translations, _cached_outputs = (
+                        self._load_toc_translations_file(toc_txt_path)
+                    )
+                    cached_valid_keys = {
+                        key for key, value in cached_translations.items()
+                        if str(value or '').strip()
+                    }
+                    recycled_keys_written = (
+                        toc_recycled_header_keys & cached_valid_keys
+                    )
+                    unresolved_keys = set(cached_source) - cached_valid_keys
+                    if recycled_keys_written and unresolved_keys:
+                        from translation_artifacts import (
+                            load_translation_artifact_progress,
+                            translation_artifact_progress_entry,
+                            update_translation_artifact_progress,
+                        )
+                        progress = load_translation_artifact_progress(
+                            self.output_dir
+                        )
+                        _progress_key, progress_entry = (
+                            translation_artifact_progress_entry(progress, 'toc')
+                        )
+                        current_status = str(
+                            (progress_entry or {}).get('status') or 'pending'
+                        ).strip().lower()
+                        if current_status in {'in_progress', 'completed'}:
+                            # The cache is demonstrably incomplete at this
+                            # point, so neither status can remain authoritative.
+                            current_status = 'pending'
+                        if current_status not in {
+                            'pending', 'failed', 'error',
+                        }:
+                            current_status = 'pending'
+                        update_translation_artifact_progress(
+                            self.output_dir,
+                            'toc',
+                            current_status,
+                            model_name='RECYCLED',
+                        )
+                        self.log(
+                            f"♻️ Preserved RECYCLED model info for stopped "
+                            f"partial TOC ({len(recycled_keys_written)} reused, "
+                            f"{len(unresolved_keys)} pending)"
+                        )
+                except Exception as progress_error:
+                    self.log(
+                        "⚠️ Could not preserve stopped partial TOC "
+                        f"RECYCLED progress info: {progress_error}"
+                    )
 
         # Build toc links in source toc.ncx order
         toc_links = []

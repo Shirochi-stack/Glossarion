@@ -303,70 +303,53 @@ def test_partial_batch_translation_marks_artifact_failed(
 
 
 @pytest.mark.parametrize(
-    "context", ("batch_header_translation", "batch_toc_translation")
+    "translation_type", ("header", "toc")
 )
-def test_standalone_metadata_batches_use_isolated_clients(monkeypatch, context):
-    """Standalone header/TOC workers must not mutate or lock a shared client."""
-    import unified_api_client as unified_module
-    from unified_api_client import UnifiedClient
+def test_header_toc_batches_are_sequential_when_batch_toggle_is_off(
+    tmp_path, monkeypatch, translation_type
+):
+    import threading
+    import time
 
-    monkeypatch.setattr(
-        UnifiedClient,
-        "_setup_client",
-        lambda self: setattr(self, "client_type", "test"),
-    )
-    client = UnifiedClient(api_key="main-key", model="gpt-test")
+    from metadata_batch_translator import BatchHeaderTranslator
 
-    class FailIfSerialized:
-        def acquire(self):
-            raise AssertionError("metadata batch request used shared send lock")
+    class Client:
+        output_dir = str(tmp_path)
+        model = "test-model"
 
-        def release(self):
-            raise AssertionError("metadata batch request released shared send lock")
-
-    class FakeMetadataPool:
-        keys = [object()]
-
-        def load_from_list(self, key_data):
-            self.loaded = key_data
-
-    isolated_calls = []
-    fake_pool = FakeMetadataPool()
-    client._sequential_send_lock = FailIfSerialized()
     monkeypatch.setenv("BATCH_TRANSLATION", "0")
-    monkeypatch.setenv("USE_METADATA_KEYS", "1")
-    monkeypatch.setenv(
-        "METADATA_API_KEYS",
-        json.dumps([{"api_key": "metadata-key", "model": "metadata-model"}]),
-    )
-    monkeypatch.setattr(UnifiedClient, "_metadata_key_pool", fake_pool)
-    monkeypatch.setattr(client, "reset_cleanup_state", lambda: None)
-    monkeypatch.setattr(client, "_log_pre_stagger", lambda *_args: None)
-    monkeypatch.setattr(client, "_apply_thread_submission_delay", lambda: None)
-    monkeypatch.setattr(client, "_should_abort_retry", lambda: False)
-    monkeypatch.setattr(client, "_extract_chapter_label", lambda _messages: None)
-    monkeypatch.setattr(
-        client,
-        "_apply_dedicated_key_pool_override",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("metadata batch mutated the shared client")
-        ),
+    monkeypatch.setenv("EXTRACTION_WORKERS", "2")
+    translator = BatchHeaderTranslator(Client(), {})
+    active_calls = 0
+    maximum_active_calls = 0
+    call_count = 0
+    call_lock = threading.Lock()
+
+    def send_batch(**kwargs):
+        nonlocal active_calls, maximum_active_calls, call_count
+        payload = kwargs["messages"][-1]["content"].rsplit(
+            "Titles to translate:\n", 1
+        )[1]
+        batch = json.loads(payload)
+        with call_lock:
+            active_calls += 1
+            call_count += 1
+            maximum_active_calls = max(maximum_active_calls, active_calls)
+        time.sleep(0.05)
+        with call_lock:
+            active_calls -= 1
+        return json.dumps({key: f"Translated {key}" for key in batch})
+
+    monkeypatch.setattr(translator, "_send_with_retry", send_batch)
+    translated = translator.translate_headers_batch(
+        {1: "One", 2: "Two"},
+        batch_size=1,
+        translation_type=translation_type,
     )
 
-    def isolated_send(*args, **kwargs):
-        isolated_calls.append((args, kwargs))
-        return "ok", "stop"
-
-    monkeypatch.setattr(client, "_send_with_isolated_dedicated_key", isolated_send)
-    monkeypatch.setattr(unified_module, "_api_watchdog_started", lambda *_a, **_k: None)
-    monkeypatch.setattr(unified_module, "_api_watchdog_finished", lambda *_a, **_k: None)
-
-    assert client.send([{"role": "user", "content": "test"}], context=context) == (
-        "ok",
-        "stop",
-    )
-    assert len(isolated_calls) == 1
-    assert isolated_calls[0][0][0] is fake_pool
+    assert translated == {1: "Translated 1", 2: "Translated 2"}
+    assert call_count == 2
+    assert maximum_active_calls == 1
 
 
 def test_batch_header_progress_uses_actual_metadata_key_model(tmp_path, monkeypatch):
