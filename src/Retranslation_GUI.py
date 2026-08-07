@@ -11913,6 +11913,46 @@ class RetranslationMixin:
         """)
         result = msg.exec()
         return result
+
+    @staticmethod
+    def _recycled_artifact_retranslation_choice(
+        parent,
+        message,
+        counterpart_filename,
+    ):
+        """Ask whether a RECYCLED artifact reset should include its source."""
+        msg = QMessageBox(parent)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Confirm Linked Retranslation")
+        msg.setText(message)
+        delete_both_button = msg.addButton(
+            "Delete Both Linked Files",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        keep_counterpart_button = msg.addButton(
+            f"Keep {counterpart_filename}",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel_button = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(cancel_button)
+        msg.setStyleSheet("""
+            QPushButton {
+                min-width: 170px;
+                min-height: 38px;
+                padding: 7px 18px;
+                font-size: 10pt;
+            }
+            QDialogButtonBox {
+                qproperty-centerButtons: true;
+            }
+        """)
+        msg.exec()
+        clicked_button = msg.clickedButton()
+        if clicked_button is delete_both_button:
+            return "both"
+        if clicked_button is keep_counterpart_button:
+            return "selected_only"
+        return "cancel"
  
     def _flash_pm_button_green(self, folder_path=None):
         """Flash the Progress Manager button green to indicate a new folder was created.
@@ -17706,6 +17746,20 @@ class RetranslationMixin:
                 artifact_selected
                 and translation_artifacts_are_recycled_linked(data.get('prog'))
             )
+            selected_artifact_kinds = set()
+            for artifact_info in artifact_selected:
+                raw_kind = (
+                    artifact_info.get('special_type')
+                    or (artifact_info.get('info') or {}).get('special_type')
+                )
+                artifact_spec = (
+                    translation_artifact_spec_for_kind(raw_kind)
+                    or translation_artifact_spec_for_filename(
+                        artifact_info.get('output_file')
+                    )
+                )
+                if artifact_spec:
+                    selected_artifact_kinds.add(artifact_spec['kind'])
             translated_file_selected = metadata_selected + artifact_selected
             tracked_metadata_keys = {
                 key for key, entry in data.get('prog', {}).get('chapters', {}).items()
@@ -17923,21 +17977,60 @@ class RetranslationMixin:
                     confirm_msg += f"• {existing_count} existing chapters and SDLXLIFF sidecars will be deleted and retranslated\n"
                 confirm_msg += "\nContinue?"
             
-            if recycled_artifact_pair_selected:
+            delete_both_linked_artifacts = False
+            if (
+                recycled_artifact_pair_selected
+                and len(selected_artifact_kinds) == 1
+            ):
+                selected_kind = next(iter(selected_artifact_kinds))
+                selected_spec = translation_artifact_spec_for_kind(selected_kind)
+                counterpart_kind = (
+                    "headers" if selected_kind == "toc" else "toc"
+                )
+                counterpart_spec = translation_artifact_spec_for_kind(
+                    counterpart_kind
+                )
+                selected_filename = selected_spec['filename']
+                counterpart_filename = counterpart_spec['filename']
                 confirm_msg = confirm_msg.rstrip()
                 if confirm_msg.endswith("Continue?"):
                     confirm_msg = confirm_msg[:-len("Continue?")].rstrip()
                 confirm_msg += (
-                    "\n\nTOC.txt and translated_headers.txt are linked because one was "
-                    "RECYCLED from the other. Both cache files will be deleted and "
-                    "both progress entries reset so the remaining cache cannot be "
-                    "reused again.\n\nContinue?"
+                    f"\n\n{selected_filename} and {counterpart_filename} are linked "
+                    "because one was RECYCLED from the other. Keeping "
+                    f"{counterpart_filename} will delete and reset only the selected "
+                    f"{selected_filename}, but it may be rebuilt by reusing "
+                    f"{counterpart_filename} without a new API translation.\n\n"
+                    "Delete both linked files to force both translations to be "
+                    "generated again, or keep the unselected counterpart?"
                 )
-
-            reply = self._styled_msgbox(QMessageBox.Question, data.get('dialog', self), "Confirm Retranslation", confirm_msg,
-                                       QMessageBox.Yes | QMessageBox.No)
-            if reply != QMessageBox.Yes:
-                return
+                linked_choice = self._recycled_artifact_retranslation_choice(
+                    data.get('dialog', self),
+                    confirm_msg,
+                    counterpart_filename,
+                )
+                if linked_choice == "cancel":
+                    return
+                delete_both_linked_artifacts = linked_choice == "both"
+            else:
+                if recycled_artifact_pair_selected:
+                    confirm_msg = confirm_msg.rstrip()
+                    if confirm_msg.endswith("Continue?"):
+                        confirm_msg = confirm_msg[:-len("Continue?")].rstrip()
+                    confirm_msg += (
+                        "\n\nTOC.txt and translated_headers.txt are RECYCLED-linked. "
+                        "Both linked files are already selected, so both will be "
+                        "deleted and reset.\n\nContinue?"
+                    )
+                reply = self._styled_msgbox(
+                    QMessageBox.Question,
+                    data.get('dialog', self),
+                    "Confirm Retranslation",
+                    confirm_msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
             
             # Process chapters - DELETE FILES AND UPDATE PROGRESS
             deleted_count = 0
@@ -17952,7 +18045,7 @@ class RetranslationMixin:
             progress_updated = False
             metadata_file_deleted = False
 
-            if recycled_artifact_pair_selected:
+            if delete_both_linked_artifacts:
                 for artifact_kind in ("toc", "headers"):
                     artifact_path = translation_artifact_path(
                         data['output_dir'], artifact_kind, existing_only=True
@@ -17984,7 +18077,7 @@ class RetranslationMixin:
                 progress_key = ch_info.get('progress_key')
 
                 if (
-                    recycled_artifact_pair_selected
+                    delete_both_linked_artifacts
                     and self._is_translation_artifact_progress_info(ch_info)
                 ):
                     continue

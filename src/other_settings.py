@@ -601,12 +601,22 @@ def setup_other_settings_methods(gui_instance):
                 setattr(gui_instance, method_name, types.MethodType(method, gui_instance))
 
 
-def _center_messagebox_buttons(msg_box):
-    """Helper to center buttons in a QMessageBox"""
+def _center_messagebox_buttons(
+    msg_box,
+    *,
+    min_button_width=None,
+    min_button_height=None,
+):
+    """Center message-box buttons and optionally enlarge their click targets."""
     from PySide6.QtWidgets import QDialogButtonBox
     button_box = msg_box.findChild(QDialogButtonBox)
     if button_box:
         button_box.setCenterButtons(True)
+        for button in button_box.buttons():
+            if min_button_width is not None:
+                button.setMinimumWidth(min_button_width)
+            if min_button_height is not None:
+                button.setMinimumHeight(min_button_height)
 
 def _create_styled_checkbox(self, text):
     """Create a checkbox with proper checkmark using text overlay - from manga integration"""
@@ -14569,8 +14579,13 @@ def delete_translated_headers_file(self):
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("No Files to Delete")
             msg_box.setText(summary_text)
+            msg_box.setStandardButtons(QMessageBox.Ok)
             msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
+            _center_messagebox_buttons(
+                msg_box,
+                min_button_width=180,
+                min_button_height=46,
+            )
             msg_box.exec()
         
     except Exception as e:
@@ -14845,8 +14860,13 @@ def delete_toc_txt_file(self):
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("No Files to Delete")
             msg_box.setText(summary_text)
+            msg_box.setStandardButtons(QMessageBox.Ok)
             msg_box.setWindowIcon(icon)
-            _center_messagebox_buttons(msg_box)
+            _center_messagebox_buttons(
+                msg_box,
+                min_button_width=180,
+                min_button_height=46,
+            )
             msg_box.exec()
         
     except Exception as e:

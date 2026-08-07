@@ -2,6 +2,7 @@ import json
 import os
 
 import other_settings
+import Retranslation_GUI as retranslation_gui_module
 
 from Retranslation_GUI import (
     RetranslationMixin,
@@ -382,7 +383,7 @@ class _ArtifactDeleteMessageBox:
     next_click = "Delete Both Linked Files"
     shown_texts = []
 
-    def __init__(self):
+    def __init__(self, *_args, **_kwargs):
         self._text = ""
         self._buttons = {}
         self._clicked = None
@@ -403,6 +404,9 @@ class _ArtifactDeleteMessageBox:
         pass
 
     def setWindowIcon(self, _icon):
+        pass
+
+    def setStyleSheet(self, _style):
         pass
 
     def addButton(self, label, _role=None):
@@ -531,6 +535,31 @@ def test_manual_header_delete_can_keep_recycled_toc_file(tmp_path, monkeypatch):
     assert "model_name" not in progress["chapters"][
         "__translation_artifact__:headers"
     ]
+
+
+def test_retranslate_recycled_artifact_dialog_offers_both_keep_and_cancel(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        retranslation_gui_module,
+        "QMessageBox",
+        _ArtifactDeleteMessageBox,
+    )
+
+    _ArtifactDeleteMessageBox.next_click = "Delete Both Linked Files"
+    assert RetranslationMixin._recycled_artifact_retranslation_choice(
+        None, "linked warning", "TOC.txt"
+    ) == "both"
+
+    _ArtifactDeleteMessageBox.next_click = "Keep TOC.txt"
+    assert RetranslationMixin._recycled_artifact_retranslation_choice(
+        None, "linked warning", "TOC.txt"
+    ) == "selected_only"
+
+    _ArtifactDeleteMessageBox.next_click = "Cancel"
+    assert RetranslationMixin._recycled_artifact_retranslation_choice(
+        None, "linked warning", "TOC.txt"
+    ) == "cancel"
 
 
 def test_managed_artifact_rows_do_not_use_special_file_keywords():
