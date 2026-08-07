@@ -20590,8 +20590,11 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     enable_newline_to_break = (
         os.getenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0') == '1'
     )
-    add_empty_paragraph_after_break = (
-        os.getenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1') == '1'
+    add_br_after_break = (
+        os.getenv(
+            'ADD_BR_AFTER_CONVERTED_BREAK',
+            os.getenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1'),
+        ) == '1'
     )
 
     if use_markdown2:
@@ -20692,9 +20695,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 if not enable_newline_to_break:
                     html = normalize_br_terminated_paragraphs(
                         html,
-                        add_empty_paragraph_after_break=(
-                            add_empty_paragraph_after_break
-                        ),
+                        add_br_after_break=add_br_after_break,
                     )
 
                 return html
@@ -20777,9 +20778,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             if not enable_newline_to_break:
                 html = normalize_br_terminated_paragraphs(
                     html,
-                    add_empty_paragraph_after_break=(
-                        add_empty_paragraph_after_break
-                    ),
+                    add_br_after_break=add_br_after_break,
                 )
 
             return html

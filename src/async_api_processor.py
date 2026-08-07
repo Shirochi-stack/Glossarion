@@ -3490,16 +3490,19 @@ class AsyncProcessingDialog:
             )
             else "0"
         )
-        env_vars['ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK'] = (
+        env_vars['ADD_BR_AFTER_CONVERTED_BREAK'] = (
             "1"
             if _bool_val(
                 getattr(
                     self.gui,
-                    'add_empty_paragraph_after_converted_break_var',
+                    'add_br_after_converted_break_var',
                     None,
                 ),
                 self.gui.config.get(
-                    'add_empty_paragraph_after_converted_break', True
+                    'add_br_after_converted_break',
+                    self.gui.config.get(
+                        'add_empty_paragraph_after_converted_break', True
+                    ),
                 ),
             )
             else "0"

@@ -2591,6 +2591,9 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
     )
     monkeypatch.delenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', raising=False)
     monkeypatch.delenv(
+        'ADD_BR_AFTER_CONVERTED_BREAK', raising=False
+    )
+    monkeypatch.delenv(
         'ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', raising=False
     )
     source = 'First translated line\nSecond translated line'
@@ -2599,10 +2602,9 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
         source, {'preserve_structure': True}
     )
 
-    assert '<br' not in default_html.lower()
     assert '<p>First translated line</p>' in default_html
     assert '<p>Second translated line</p>' in default_html
-    assert '<p>First translated line</p><p> </p><p>Second translated line</p>' in default_html
+    assert '<p>First translated line</p><br/><p>Second translated line</p>' in default_html
 
     monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '1')
     enabled_html = convert_enhanced_text_to_html(
@@ -2610,11 +2612,11 @@ def test_markdown_newline_to_break_conversion_is_opt_in(
     )
 
     assert enabled_html.lower().count('<br') == 1
-    assert '<p> </p>' not in enabled_html
+    assert '</p><br/>' not in enabled_html
 
 
 @pytest.mark.parametrize('use_markdown2', [False, True])
-def test_empty_paragraph_after_converted_break_can_be_disabled(
+def test_br_outside_paragraph_after_converted_break_can_be_disabled(
     monkeypatch, use_markdown2
 ):
     from TransateKRtoEN import convert_enhanced_text_to_html
@@ -2624,15 +2626,14 @@ def test_empty_paragraph_after_converted_break_can_be_disabled(
         'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
     )
     monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0')
-    monkeypatch.setenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '0')
+    monkeypatch.setenv('ADD_BR_AFTER_CONVERTED_BREAK', '0')
 
     html = convert_enhanced_text_to_html(
         'First translated line\nSecond translated line',
         {'preserve_structure': True},
     )
 
-    assert '<br' not in html.lower()
-    assert '<p> </p>' not in html
+    assert '</p><br/>' not in html
     assert '<p>First translated line</p><p>Second translated line</p>' in html
 
 
@@ -2646,7 +2647,7 @@ def test_newline_toggle_does_not_reparse_or_change_list_markup(
     monkeypatch.setenv(
         'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
     )
-    monkeypatch.setenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1')
+    monkeypatch.setenv('ADD_BR_AFTER_CONVERTED_BREAK', '1')
     source = (
         'Opening first line\nOpening second line\n\n'
         '- First bullet\n- Second bullet'
@@ -2657,6 +2658,7 @@ def test_newline_toggle_does_not_reparse_or_change_list_markup(
         source, {'preserve_structure': True}
     )
     monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0')
+    monkeypatch.setenv('ADD_BR_AFTER_CONVERTED_BREAK', '1')
     paragraph_html = convert_enhanced_text_to_html(
         source, {'preserve_structure': True}
     )
@@ -2686,7 +2688,7 @@ def test_newline_paragraph_conversion_preserves_inline_markup(
         {'preserve_structure': True},
     )
 
-    assert '<br' not in html.lower()
+    assert '</p><br/><p>' in html
     assert '<p><em>First translated line</em></p>' in html
     assert '<p><em>Second translated line</em></p>' in html
 
@@ -2718,14 +2720,14 @@ def test_br_paragraph_normalization_does_not_reserialize_surrounding_lists():
     )
 
 
-def test_br_paragraph_normalization_can_add_one_spacer_per_break():
+def test_br_paragraph_normalization_can_add_one_external_br_per_break():
     from html_output_utils import normalize_br_terminated_paragraphs
 
     normalized = normalize_br_terminated_paragraphs(
         '<p>First<br/>Second<br></p>',
-        add_empty_paragraph_after_break=True,
+        add_br_after_break=True,
     )
 
     assert normalized == (
-        '<p>First</p><p> </p><p>Second</p><p> </p>'
+        '<p>First</p><br/><p>Second</p><br/>'
     )
