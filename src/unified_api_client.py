@@ -6912,7 +6912,17 @@ class UnifiedClient:
                             self.__class__._metadata_key_pool = APIKeyPool("Metadata key pool")
                         self.__class__._metadata_key_pool.load_from_list(metadata_keys)
                         metadata_pool = self.__class__._metadata_key_pool
-                    if batch_mode:
+                    # Header/TOC translators may need several API calls even
+                    # when global batch mode is off. Use a fresh one-shot client
+                    # for each metadata chunk so request 1 cannot leave shared
+                    # provider/key state that blocks request 2. This does not
+                    # bypass _sequential_send_lock; with batch mode off these
+                    # isolated calls still run strictly one after another.
+                    metadata_chunk_request = context_norm in (
+                        'batch_toc_translation',
+                        'batch_header_translation',
+                    )
+                    if batch_mode or metadata_chunk_request:
                         return self._send_with_isolated_dedicated_key(
                             metadata_pool,
                             metadata_keys,

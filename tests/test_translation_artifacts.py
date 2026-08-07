@@ -352,6 +352,85 @@ def test_header_toc_batches_are_sequential_when_batch_toggle_is_off(
     assert maximum_active_calls == 1
 
 
+@pytest.mark.parametrize(
+    "context", ("batch_header_translation", "batch_toc_translation")
+)
+def test_sequential_metadata_chunks_are_isolated_without_bypassing_lock(
+    monkeypatch, context
+):
+    """Two sequential chunks get fresh clients while retaining serialization."""
+    import unified_api_client as unified_module
+    from TransateKRtoEN import send_with_interrupt
+    from unified_api_client import UnifiedClient
+
+    monkeypatch.setattr(
+        UnifiedClient,
+        "_setup_client",
+        lambda self: setattr(self, "client_type", "test"),
+    )
+    client = UnifiedClient(api_key="main-key", model="gpt-test")
+
+    class RecordingLock:
+        def __init__(self):
+            self.events = []
+
+        def acquire(self):
+            self.events.append("acquire")
+            return True
+
+        def release(self):
+            self.events.append("release")
+
+    send_lock = RecordingLock()
+    internal_calls = []
+    client._sequential_send_lock = send_lock
+    monkeypatch.setenv("BATCH_TRANSLATION", "0")
+    monkeypatch.setenv("THREAD_SUBMISSION_DELAY_SECONDS", "0")
+    monkeypatch.setenv("SEND_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("USE_METADATA_KEYS", "1")
+    monkeypatch.setenv(
+        "METADATA_API_KEYS",
+        json.dumps([{"api_key": "metadata-key", "model": "metadata-model"}]),
+    )
+    monkeypatch.setattr(UnifiedClient, "_metadata_key_pool", None)
+    monkeypatch.setattr(client, "reset_cleanup_state", lambda: None)
+    monkeypatch.setattr(client, "_log_pre_stagger", lambda *_args: None)
+    monkeypatch.setattr(client, "_apply_thread_submission_delay", lambda: None)
+    monkeypatch.setattr(client, "_should_abort_retry", lambda: False)
+    monkeypatch.setattr(client, "_extract_chapter_label", lambda _messages: None)
+    monkeypatch.setattr(
+        client,
+        "_apply_dedicated_key_pool_override",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata chunk mutated the shared client")
+        ),
+    )
+
+    def fake_send_internal(temp_client, *_args, **_kwargs):
+        internal_calls.append(temp_client)
+        temp_client.last_actual_request_model = temp_client.model
+        return "ok", "stop"
+
+    monkeypatch.setattr(UnifiedClient, "_send_internal", fake_send_internal)
+    monkeypatch.setattr(unified_module, "_api_watchdog_started", lambda *_a, **_k: None)
+    monkeypatch.setattr(unified_module, "_api_watchdog_finished", lambda *_a, **_k: None)
+
+    for _ in range(2):
+        response = send_with_interrupt(
+            messages=[{"role": "user", "content": "test"}],
+            client=client,
+            temperature=0.0,
+            max_tokens=100,
+            stop_check_fn=lambda: False,
+            context=context,
+        )
+        assert response[0] == "ok"
+
+    assert len(internal_calls) == 2
+    assert all(temp_client is not client for temp_client in internal_calls)
+    assert send_lock.events == ["acquire", "release", "acquire", "release"]
+
+
 def test_batch_header_progress_uses_actual_metadata_key_model(tmp_path, monkeypatch):
     from metadata_batch_translator import BatchHeaderTranslator
     from unified_api_client import set_current_thread_actual_request_model
