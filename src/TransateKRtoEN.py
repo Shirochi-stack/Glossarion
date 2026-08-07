@@ -163,7 +163,7 @@ import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
-from html_output_utils import normalize_br_terminated_paragraphs, write_utf8_html_file
+from html_output_utils import write_utf8_html_file
 from metadata_progress import (
     METADATA_PROGRESS_KEY,
     build_metadata_progress_plan,
@@ -20587,16 +20587,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
-    enable_newline_to_break = (
-        os.getenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0') == '1'
-    )
-    add_br_after_break = (
-        os.getenv(
-            'ADD_BR_AFTER_CONVERTED_BREAK',
-            os.getenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1'),
-        ) == '1'
-    )
-
+    
     if use_markdown2:
     # Use markdown2 for conversion (legacy behavior)
         try:
@@ -20623,17 +20614,13 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     if _atx:
                         atx_heading_counts[(len(_atx.group(1)), _atx.group(2).strip())] += 1
 
-                markdown2_extras = [
+                html = markdown2.markdown(plain_text, extras=[
                     'cuddled-lists',
                     'fenced-code-blocks',
                     'break-on-newline',
                     'smarty-pants',
                     'tables',
-                ]
-                html = markdown2.markdown(
-                    plain_text,
-                    extras=markdown2_extras,
-                )
+                ])
 
                 # Post-process: Fix setext headers that were created from separator lines.
                 # These are NOT real headers—just text followed by ==== or ----.
@@ -20692,11 +20679,6 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # Post-process: strip <p> wrappers around <img> and flatten
                 # nested <p> that markdown2 creates from pre-existing <p><img/></p>.
                 html = _fix_img_p_nesting(html)
-                if not enable_newline_to_break:
-                    html = normalize_br_terminated_paragraphs(
-                        html,
-                        add_br_after_break=add_br_after_break,
-                    )
 
                 return html
         except ImportError:
@@ -20729,14 +20711,13 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         if has_markdown or preserve_structure:
             # Use markdown with setext headers disabled
             # Don't use 'extra' as it escapes parentheses and brackets
-            markdown_extensions = [
+            md = markdown.Markdown(extensions=[
                 'nl2br',
                 'sane_lists',
                 'fenced_code',
                 'tables',
                 NoSetextHeadersExtension()
-            ]
-            md = markdown.Markdown(extensions=markdown_extensions)
+            ])
             html = md.convert(plain_text)
             
             # Post-process to ensure proper paragraph structure
@@ -20775,11 +20756,6 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # Post-process: strip <p> wrappers around <img> and flatten
             # nested <p> that markdown creates from pre-existing <p><img/></p>.
             html = _fix_img_p_nesting(html)
-            if not enable_newline_to_break:
-                html = normalize_br_terminated_paragraphs(
-                    html,
-                    add_br_after_break=add_br_after_break,
-                )
 
             return html
             

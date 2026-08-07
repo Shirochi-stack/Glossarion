@@ -9601,17 +9601,6 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'enhanced_single_line_break_var'):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
 
-    if not hasattr(self, 'enable_newline_to_break_conversion_var'):
-        self.enable_newline_to_break_conversion_var = self.config.get(
-            'enable_newline_to_break_conversion', False
-        )
-
-    if not hasattr(self, 'add_br_after_converted_break_var'):
-        self.add_br_after_converted_break_var = self.config.get(
-            'add_br_after_converted_break',
-            self.config.get('add_empty_paragraph_after_converted_break', True),
-        )
-
     if not hasattr(self, 'html2text_escape_snob_var'):
         self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
     
@@ -9846,94 +9835,6 @@ def _create_processing_options_section(self, parent):
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
 
-    # Markdown -> HTML single-newline conversion option
-    newline_to_break_cb = self._create_styled_checkbox(
-        "Enable newline to break conversion <br>"
-    )
-    newline_to_break_cb.setToolTip(
-        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Keep single Markdown newlines as &lt;br&gt; tags. When disabled, "
-        "those breaks are converted into separate &lt;p&gt;...&lt;/p&gt; "
-        "paragraphs. Applies to both Markdown converters."
-        "</p></qt>"
-    )
-    try:
-        newline_to_break_cb.setChecked(
-            bool(self.enable_newline_to_break_conversion_var)
-        )
-    except Exception:
-        pass
-
-    def _on_newline_to_break_toggle(checked):
-        try:
-            self.enable_newline_to_break_conversion_var = bool(checked)
-            self.config['enable_newline_to_break_conversion'] = bool(checked)
-            os.environ['ENABLE_NEWLINE_TO_BREAK_CONVERSION'] = (
-                '1' if checked else '0'
-            )
-        except Exception:
-            pass
-
-    newline_to_break_cb.toggled.connect(_on_newline_to_break_toggle)
-    newline_to_break_cb.setContentsMargins(0, 2, 0, 0)
-    enhanced_opts_v.addWidget(newline_to_break_cb)
-
-    newline_to_break_desc = QLabel(
-        "Off: each single newline becomes a separate <p>...</p> paragraph.\n"
-        "On: each single newline remains a <br> tag inside its paragraph."
-    )
-    newline_to_break_desc.setTextFormat(Qt.PlainText)
-    newline_to_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
-    newline_to_break_desc.setContentsMargins(20, 0, 0, 3)
-    enhanced_opts_v.addWidget(newline_to_break_desc)
-
-    br_after_break_cb = self._create_styled_checkbox(
-        "Add <br/> outside paragraphs after converted breaks"
-    )
-    br_after_break_cb.setToolTip(
-        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "When newline-to-break conversion is off, close the paragraph at "
-        "each converted break and then insert &lt;br/&gt; outside the "
-        "&lt;p&gt; element. This option is enabled by default."
-        "</p></qt>"
-    )
-    try:
-        br_after_break_cb.setChecked(
-            bool(self.add_br_after_converted_break_var)
-        )
-    except Exception:
-        pass
-
-    def _on_br_after_break_toggle(checked):
-        try:
-            self.add_br_after_converted_break_var = bool(checked)
-            self.config['add_br_after_converted_break'] = bool(checked)
-            os.environ['ADD_BR_AFTER_CONVERTED_BREAK'] = (
-                '1' if checked else '0'
-            )
-        except Exception:
-            pass
-
-    br_after_break_cb.toggled.connect(_on_br_after_break_toggle)
-    br_after_break_cb.setContentsMargins(20, 2, 0, 0)
-    br_after_break_cb.setEnabled(not newline_to_break_cb.isChecked())
-    enhanced_opts_v.addWidget(br_after_break_cb)
-
-    br_after_break_desc = QLabel(
-        "Off: converted breaks only separate adjacent paragraphs.\n"
-        "On: each converted break also inserts <br/> outside the paragraph."
-    )
-    br_after_break_desc.setTextFormat(Qt.PlainText)
-    br_after_break_desc.setStyleSheet(
-        "color: gray; font-size: 8pt;"
-    )
-    br_after_break_desc.setContentsMargins(40, 0, 0, 3)
-    enhanced_opts_v.addWidget(br_after_break_desc)
-
-    newline_to_break_cb.toggled.connect(
-        lambda checked: br_after_break_cb.setEnabled(not checked)
-    )
-
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
     escape_snob_cb.setToolTip(
@@ -9971,8 +9872,6 @@ def _create_processing_options_section(self, parent):
     def _on_markdown2_toggle(checked):
         try:
             self.use_markdown2_converter_var = bool(checked)
-            self.config['use_markdown2_converter'] = bool(checked)
-            os.environ['USE_MARKDOWN2_CONVERTER'] = '1' if checked else '0'
         except Exception:
             pass
     markdown2_cb.toggled.connect(_on_markdown2_toggle)
