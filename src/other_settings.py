@@ -9601,6 +9601,11 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'enhanced_single_line_break_var'):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
 
+    if not hasattr(self, 'enable_newline_to_break_conversion_var'):
+        self.enable_newline_to_break_conversion_var = self.config.get(
+            'enable_newline_to_break_conversion', False
+        )
+
     if not hasattr(self, 'html2text_escape_snob_var'):
         self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
     
@@ -9835,6 +9840,45 @@ def _create_processing_options_section(self, parent):
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
 
+    # Markdown -> HTML single-newline conversion option
+    newline_to_break_cb = self._create_styled_checkbox(
+        "Enable newline to break conversion <br>"
+    )
+    newline_to_break_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Keep single Markdown newlines as &lt;br&gt; tags. When disabled, "
+        "those breaks are converted into separate &lt;p&gt;...&lt;/p&gt; "
+        "paragraphs. Applies to both Markdown converters."
+        "</p></qt>"
+    )
+    try:
+        newline_to_break_cb.setChecked(
+            bool(self.enable_newline_to_break_conversion_var)
+        )
+    except Exception:
+        pass
+
+    def _on_newline_to_break_toggle(checked):
+        try:
+            self.enable_newline_to_break_conversion_var = bool(checked)
+            self.config['enable_newline_to_break_conversion'] = bool(checked)
+            os.environ['ENABLE_NEWLINE_TO_BREAK_CONVERSION'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    newline_to_break_cb.toggled.connect(_on_newline_to_break_toggle)
+    newline_to_break_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(newline_to_break_cb)
+
+    newline_to_break_desc = QLabel(
+        "Off replaces newline <br> tags with separate <p>...</p> paragraphs."
+    )
+    newline_to_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    newline_to_break_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(newline_to_break_desc)
+
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")
     escape_snob_cb.setToolTip(
@@ -9872,6 +9916,8 @@ def _create_processing_options_section(self, parent):
     def _on_markdown2_toggle(checked):
         try:
             self.use_markdown2_converter_var = bool(checked)
+            self.config['use_markdown2_converter'] = bool(checked)
+            os.environ['USE_MARKDOWN2_CONVERTER'] = '1' if checked else '0'
         except Exception:
             pass
     markdown2_cb.toggled.connect(_on_markdown2_toggle)

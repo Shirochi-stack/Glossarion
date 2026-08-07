@@ -20587,6 +20587,74 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
+    enable_newline_to_break = (
+        os.getenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0') == '1'
+    )
+
+    def _replace_paragraph_breaks_with_paragraphs(rendered_html):
+        """Turn soft-line ``<br>`` output into valid sibling paragraphs."""
+        if '<br' not in rendered_html.lower():
+            return rendered_html
+        try:
+            from bs4 import BeautifulSoup, NavigableString, Tag
+            from copy import deepcopy
+        except Exception:
+            return rendered_html
+
+        soup = BeautifulSoup(rendered_html, 'html.parser')
+
+        def _split_contents(parent):
+            segments = [[]]
+            for child in parent.contents:
+                if isinstance(child, Tag) and child.name.lower() == 'br':
+                    segments.append([])
+                    continue
+
+                if isinstance(child, Tag) and child.find('br') is not None:
+                    child_segments = _split_contents(child)
+                    for index, child_segment in enumerate(child_segments):
+                        if child_segment:
+                            clone = soup.new_tag(child.name)
+                            clone.attrs = deepcopy(child.attrs)
+                            for node in child_segment:
+                                clone.append(node)
+                            segments[-1].append(clone)
+                        if index < len(child_segments) - 1:
+                            segments.append([])
+                    continue
+
+                if isinstance(child, NavigableString) and not segments[-1]:
+                    child_text = str(child).lstrip('\r\n')
+                    if not child_text:
+                        continue
+                    segments[-1].append(NavigableString(child_text))
+                else:
+                    segments[-1].append(deepcopy(child))
+            return segments
+
+        def _has_content(nodes):
+            for node in nodes:
+                if isinstance(node, NavigableString):
+                    if node.strip():
+                        return True
+                elif str(node).strip():
+                    return True
+            return False
+
+        for paragraph in list(soup.find_all('p')):
+            if paragraph.find('br') is None:
+                continue
+            for segment in _split_contents(paragraph):
+                if not _has_content(segment):
+                    continue
+                replacement = soup.new_tag('p')
+                replacement.attrs = deepcopy(paragraph.attrs)
+                for node in segment:
+                    replacement.append(node)
+                paragraph.insert_before(replacement)
+            paragraph.decompose()
+
+        return str(soup)
     
     if use_markdown2:
     # Use markdown2 for conversion (legacy behavior)
@@ -20614,13 +20682,17 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                     if _atx:
                         atx_heading_counts[(len(_atx.group(1)), _atx.group(2).strip())] += 1
 
-                html = markdown2.markdown(plain_text, extras=[
+                markdown2_extras = [
                     'cuddled-lists',
                     'fenced-code-blocks',
                     'break-on-newline',
                     'smarty-pants',
                     'tables',
-                ])
+                ]
+                html = markdown2.markdown(
+                    plain_text,
+                    extras=markdown2_extras,
+                )
 
                 # Post-process: Fix setext headers that were created from separator lines.
                 # These are NOT real headers—just text followed by ==== or ----.
@@ -20679,6 +20751,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # Post-process: strip <p> wrappers around <img> and flatten
                 # nested <p> that markdown2 creates from pre-existing <p><img/></p>.
                 html = _fix_img_p_nesting(html)
+                if not enable_newline_to_break:
+                    html = _replace_paragraph_breaks_with_paragraphs(html)
 
                 return html
         except ImportError:
@@ -20711,13 +20785,14 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         if has_markdown or preserve_structure:
             # Use markdown with setext headers disabled
             # Don't use 'extra' as it escapes parentheses and brackets
-            md = markdown.Markdown(extensions=[
+            markdown_extensions = [
                 'nl2br',
                 'sane_lists',
                 'fenced_code',
                 'tables',
                 NoSetextHeadersExtension()
-            ])
+            ]
+            md = markdown.Markdown(extensions=markdown_extensions)
             html = md.convert(plain_text)
             
             # Post-process to ensure proper paragraph structure
@@ -20756,6 +20831,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # Post-process: strip <p> wrappers around <img> and flatten
             # nested <p> that markdown creates from pre-existing <p><img/></p>.
             html = _fix_img_p_nesting(html)
+            if not enable_newline_to_break:
+                html = _replace_paragraph_breaks_with_paragraphs(html)
 
             return html
             

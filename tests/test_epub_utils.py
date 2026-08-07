@@ -2575,3 +2575,55 @@ def test_async_remote_image_progress_keeps_label_and_one_percent_cadence():
     assert 'if prog_type == "remote_images":' in manager_source
     assert 'should_show = percent > last_percent' in manager_source
     assert 'formatted_message += f" {detail}"' in manager_source
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_markdown_newline_to_break_conversion_is_opt_in(
+    monkeypatch, use_markdown2
+):
+    """The toggle chooses <br> or sibling paragraphs for soft newlines."""
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.delenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', raising=False)
+    source = 'First translated line\nSecond translated line'
+
+    default_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert '<br' not in default_html.lower()
+    assert '<p>First translated line</p>' in default_html
+    assert '<p>Second translated line</p>' in default_html
+
+    monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '1')
+    enabled_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert enabled_html.lower().count('<br') == 1
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_newline_paragraph_conversion_preserves_inline_markup(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0')
+
+    html = convert_enhanced_text_to_html(
+        '*First translated line\nSecond translated line*',
+        {'preserve_structure': True},
+    )
+
+    assert '<br' not in html.lower()
+    assert '<p><em>First translated line</em></p>' in html
+    assert '<p><em>Second translated line</em></p>' in html
