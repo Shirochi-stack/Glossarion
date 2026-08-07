@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from copy import deepcopy
+import html as html_lib
 
 
 _CHARSET_META_RE = re.compile(
@@ -28,6 +28,28 @@ _PARAGRAPH_ELEMENT_RE = re.compile(
     r"(?:</p\s*>|(?=" + _PARAGRAPH_BOUNDARY_RE + r")|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+_PARAGRAPH_OPEN_TAG_RE = re.compile(
+    r"<(?P<name>p)\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_PARAGRAPH_CLOSE_TAG_RE = re.compile(r"</p\s*>\Z", re.IGNORECASE)
+_HTML_TOKEN_RE = re.compile(
+    r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>|<![^>]*>"
+    r"|</?[A-Za-z][\w:.-]*\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*/?\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_NAME_RE = re.compile(
+    r"<\s*(?P<closing>/)?\s*(?P<name>[A-Za-z][\w:.-]*)\b",
+    re.IGNORECASE,
+)
+_HTML_VOID_TAGS = frozenset({
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+    'meta', 'param', 'source', 'track', 'wbr',
+})
+_CONTENT_ONLY_TAG_RE = re.compile(
+    r"<(?:audio|canvas|embed|figure|iframe|img|math|object|picture|svg|video)\b",
+    re.IGNORECASE,
+)
 
 
 def normalize_br_terminated_paragraphs(
@@ -49,80 +71,97 @@ def normalize_br_terminated_paragraphs(
     text = "" if content is None else str(content)
     if '<br' not in text.lower() or '<p' not in text.lower():
         return text
-    try:
-        from bs4 import BeautifulSoup, NavigableString, Tag
-    except Exception:
-        return text
 
-    def _split_contents(parent, soup):
-        segments = [[]]
-        for child in parent.contents:
-            if isinstance(child, Tag) and child.name.lower() == 'br':
-                segments.append([])
-                # html.parser can represent ``<br /> text`` as a br node
-                # containing that following text. Keep it as the first
-                # content of the new logical paragraph instead of dropping it.
-                if child.contents:
-                    trailing_segments = _split_contents(child, soup)
-                    for index, trailing_segment in enumerate(trailing_segments):
-                        segments[-1].extend(trailing_segment)
-                        if index < len(trailing_segments) - 1:
-                            segments.append([])
+    def _split_inner_html(inner_html):
+        segments = []
+        current = []
+        open_inline_tags = []
+        cursor = 0
+        strip_leading_linebreaks = False
+
+        for token_match in _HTML_TOKEN_RE.finditer(inner_html):
+            raw_text = inner_html[cursor:token_match.start()]
+            if strip_leading_linebreaks:
+                raw_text = raw_text.lstrip('\r\n')
+                if raw_text:
+                    strip_leading_linebreaks = False
+            current.append(raw_text)
+            token = token_match.group(0)
+            cursor = token_match.end()
+            tag_match = _HTML_TAG_NAME_RE.match(token)
+            if tag_match is None:
+                current.append(token)
                 continue
 
-            if isinstance(child, Tag) and child.find('br') is not None:
-                child_segments = _split_contents(child, soup)
-                for index, child_segment in enumerate(child_segments):
-                    if child_segment:
-                        clone = soup.new_tag(child.name)
-                        clone.attrs = deepcopy(child.attrs)
-                        for node in child_segment:
-                            clone.append(node)
-                        segments[-1].append(clone)
-                    if index < len(child_segments) - 1:
-                        segments.append([])
+            tag_name = tag_match.group('name').lower()
+            is_closing = bool(tag_match.group('closing'))
+            is_self_closing = token.rstrip().endswith('/>')
+
+            if tag_name == 'br' and not is_closing:
+                current.extend(
+                    f'</{open_name}>'
+                    for open_name, _open_token in reversed(open_inline_tags)
+                )
+                segments.append(''.join(current))
+                current = [
+                    open_token for _open_name, open_token in open_inline_tags
+                ]
+                strip_leading_linebreaks = True
                 continue
 
-            if isinstance(child, NavigableString) and not segments[-1]:
-                child_text = str(child).lstrip('\r\n')
-                if not child_text:
-                    continue
-                segments[-1].append(NavigableString(child_text))
-            else:
-                segments[-1].append(deepcopy(child))
+            current.append(token)
+            if is_closing:
+                for index in range(len(open_inline_tags) - 1, -1, -1):
+                    if open_inline_tags[index][0] == tag_name:
+                        del open_inline_tags[index:]
+                        break
+            elif tag_name not in _HTML_VOID_TAGS and not is_self_closing:
+                open_inline_tags.append((tag_name, token))
+
+        remaining_text = inner_html[cursor:]
+        if strip_leading_linebreaks:
+            remaining_text = remaining_text.lstrip('\r\n')
+        current.append(remaining_text)
+        current.extend(
+            f'</{open_name}>'
+            for open_name, _open_token in reversed(open_inline_tags)
+        )
+        segments.append(''.join(current))
         return segments
 
-    def _has_content(nodes):
-        for node in nodes:
-            if isinstance(node, NavigableString):
-                if node.strip():
-                    return True
-            elif str(node).strip():
-                return True
-        return False
+    def _has_content(segment):
+        if _CONTENT_ONLY_TAG_RE.search(segment):
+            return True
+        visible_text = _HTML_TOKEN_RE.sub('', segment)
+        visible_text = html_lib.unescape(visible_text).replace('\xa0', ' ')
+        return bool(visible_text.strip())
 
     def _normalize_paragraph_match(match):
         fragment = match.group(0)
         if '<br' not in fragment.lower():
             return fragment
 
-        # Parse only the paragraph being changed. Parsing the entire document
-        # lets HTML parsers repair and reserialize unrelated markup such as
-        # surrounding <ul>/<li> lists, which this postprocessor must not touch.
-        soup = BeautifulSoup(fragment, 'html.parser')
-        paragraph = soup.find('p')
-        if paragraph is None or paragraph.find('br') is None:
+        opening_match = _PARAGRAPH_OPEN_TAG_RE.match(fragment)
+        if opening_match is None:
             return fragment
 
+        opening_tag = opening_match.group(0)
+        closing_match = _PARAGRAPH_CLOSE_TAG_RE.search(fragment)
+        closing_tag = (
+            closing_match.group(0)
+            if closing_match is not None
+            else f"</{opening_match.group('name')}>"
+        )
+        inner_end = (
+            closing_match.start() if closing_match is not None else len(fragment)
+        )
+        inner_html = fragment[opening_match.end():inner_end]
+
         replacements = []
-        segments = _split_contents(paragraph, soup)
+        segments = _split_inner_html(inner_html)
         for index, segment in enumerate(segments):
             if _has_content(segment):
-                replacement = soup.new_tag('p')
-                replacement.attrs = deepcopy(paragraph.attrs)
-                for node in segment:
-                    replacement.append(node)
-                replacements.append(str(replacement))
+                replacements.append(f'{opening_tag}{segment}{closing_tag}')
             if add_empty_paragraph_after_break and index < len(segments) - 1:
                 replacements.append('<p> </p>')
         return ''.join(replacements)

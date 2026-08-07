@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import zipfile
 from pathlib import Path
 
@@ -2633,6 +2634,39 @@ def test_empty_paragraph_after_converted_break_can_be_disabled(
     assert '<br' not in html.lower()
     assert '<p> </p>' not in html
     assert '<p>First translated line</p><p>Second translated line</p>' in html
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_newline_toggle_does_not_reparse_or_change_list_markup(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.setenv('ADD_EMPTY_PARAGRAPH_AFTER_CONVERTED_BREAK', '1')
+    source = (
+        'Opening first line\nOpening second line\n\n'
+        '- First bullet\n- Second bullet'
+    )
+
+    monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '1')
+    break_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+    monkeypatch.setenv('ENABLE_NEWLINE_TO_BREAK_CONVERSION', '0')
+    paragraph_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    break_list = re.search(r'<ul\b.*?</ul>', break_html, re.DOTALL)
+    paragraph_list = re.search(r'<ul\b.*?</ul>', paragraph_html, re.DOTALL)
+    assert break_list is not None
+    assert paragraph_list is not None
+    assert paragraph_list.group(0) == break_list.group(0)
+    assert paragraph_list.group(0).count('<li>') == 2
 
 
 @pytest.mark.parametrize('use_markdown2', [False, True])
