@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QLineEdit, QProgressBar, QGraphicsOpacityEffect,
                                 QApplication)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel, QSize, QPoint, QEvent, QObject
-from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QFontMetricsF, QColor, QTransform, QIcon, QPixmap, QDesktopServices, QPalette, QKeySequence, QShortcut
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -777,7 +777,9 @@ class SDLXLIFFReviewDialog(QDialog):
     _review_piece_reload_finished = Signal(int, object)
     _review_generation_progress = Signal(object)
 
-    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p")
+    # List containers are excluded so their child text is not counted twice;
+    # each <li> is a standalone review text unit alongside paragraphs/headings.
+    TEXT_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li")
     THEME = {
         "bg": "#1e1e1e",
         "panel": "#2d2d2d",
@@ -794,6 +796,9 @@ class SDLXLIFFReviewDialog(QDialog):
     }
     REVIEW_ROW_MIN_HEIGHT = 96
     REVIEW_ROW_MAX_HEIGHT = 1600
+    REVIEW_TAG_LABEL_WIDTH = 96
+    REVIEW_TAG_LABEL_MAX_FONT_PT = 11.0
+    REVIEW_TAG_LABEL_MIN_FONT_PT = 4.0
     # Minimum height of the editable output entry in the two-column layout
     # (2nd column). 72px ≈ two text lines (2*22 + 28 padding) so short
     # entries get a comfortable click/edit target instead of the old
@@ -4913,9 +4918,21 @@ class SDLXLIFFReviewDialog(QDialog):
             return False
         source_heading = bool(re.fullmatch(r"h[1-6]", source_tag))
         target_heading = bool(re.fullmatch(r"h[1-6]", target_tag))
-        return (source_heading and target_tag == "p") or (source_tag == "p" and target_heading)
+        text_block_tags = {"p", "li"}
+        return (
+            (source_heading and target_tag in text_block_tags)
+            or (source_tag in text_block_tags and target_heading)
+        )
+
+    @staticmethod
+    def _paragraph_list_item_tag_changed(source_tag, target_tag):
+        source_tag = str(source_tag or "").strip().lower()
+        target_tag = str(target_tag or "").strip().lower()
+        return {source_tag, target_tag} == {"p", "li"}
 
     def _tag_mismatch_status(self, source_tag, target_tag):
+        if self._paragraph_list_item_tag_changed(source_tag, target_tag):
+            return "green", "paragraph/list-item text unit"
         if self._heading_tag_level_changed(source_tag, target_tag):
             return "yellow", "heading level changed"
         if self._heading_paragraph_tag_changed(source_tag, target_tag):
@@ -4929,7 +4946,7 @@ class SDLXLIFFReviewDialog(QDialog):
 
     @staticmethod
     def _review_unit_is_paragraph(unit):
-        return str((unit or {}).get("tag", "") or "").strip().lower() == "p"
+        return str((unit or {}).get("tag", "") or "").strip().lower() in {"p", "li"}
 
     def _review_units_are_compatible(self, source_unit, target_unit):
         source_tag = str((source_unit or {}).get("tag", "") or "").strip().lower()
@@ -4937,7 +4954,8 @@ class SDLXLIFFReviewDialog(QDialog):
         if source_tag == target_tag:
             return True
         return (
-            self._heading_tag_level_changed(source_tag, target_tag)
+            self._paragraph_list_item_tag_changed(source_tag, target_tag)
+            or self._heading_tag_level_changed(source_tag, target_tag)
             or self._heading_paragraph_tag_changed(source_tag, target_tag)
         )
 
@@ -6936,22 +6954,71 @@ class SDLXLIFFReviewDialog(QDialog):
             return f"Added({target_ordinal.group(1)})" if target_ordinal else f"+ {target_label}"
         return "-"
 
+    @classmethod
+    def _tag_label_font_point_size(cls, text, label_width=None):
+        text = str(text or "")
+        maximum = float(cls.REVIEW_TAG_LABEL_MAX_FONT_PT)
+        minimum = float(cls.REVIEW_TAG_LABEL_MIN_FONT_PT)
+        available_width = max(
+            12.0,
+            float(label_width or cls.REVIEW_TAG_LABEL_WIDTH) - 6.0,
+        )
+        if not text:
+            return maximum
+
+        if QApplication.instance() is not None:
+            font = QFont("Consolas")
+            font.setStyleHint(QFont.Monospace)
+            ordinal_font = QFont(font)
+            ordinal_parts = re.findall(r"\(\d+\)", text)
+            base_text = re.sub(r"\(\d+\)", "", text)
+            half_steps = int(round((maximum - minimum) * 2))
+            for step in range(half_steps + 1):
+                point_size = maximum - (step * 0.5)
+                font.setPointSizeF(point_size)
+                ordinal_font.setPointSizeF(
+                    cls._tag_label_ordinal_font_point_size(point_size)
+                )
+                rendered_width = QFontMetricsF(font).horizontalAdvance(base_text)
+                rendered_width += sum(
+                    QFontMetricsF(ordinal_font).horizontalAdvance(part)
+                    for part in ordinal_parts
+                )
+                if rendered_width <= available_width:
+                    return point_size
+            return minimum
+
+        estimated_width = max(1.0, len(text) * maximum * 0.62)
+        fitted = min(maximum, maximum * available_width / estimated_width)
+        fitted = int(fitted * 2) / 2.0
+        return max(minimum, fitted)
+
     @staticmethod
-    def _tag_label_rich_text(text):
+    def _tag_label_ordinal_font_point_size(font_point_size):
+        return max(3.0, min(8.0, float(font_point_size) - 2.0))
+
+    @classmethod
+    def _tag_label_rich_text(cls, text, font_point_size=11.0):
         escaped = html_lib.escape(str(text or ""))
+        ordinal_point_size = cls._tag_label_ordinal_font_point_size(
+            font_point_size
+        )
         return re.sub(
             r"\((\d+)\)",
-            r'<span style="font-size: 8pt;">(\1)</span>',
+            lambda match: (
+                f'<span style="font-size: {ordinal_point_size:g}pt;">'
+                f'({match.group(1)})</span>'
+            ),
             escaped,
         )
 
-    def _tag_label(self, source_tag, target_tag, status, source_label=None, target_label=None):
-        text = self._tag_label_text(source_tag, target_tag, source_label, target_label)
-        label = QLabel(self._tag_label_rich_text(text))
-        label.setObjectName("SdlReviewTagLabel")
-        label.setTextFormat(Qt.RichText)
-        label.setAlignment(Qt.AlignCenter)
-        label.setFixedWidth(96)
+    def _apply_tag_label_display(self, label, text, status):
+        font_point_size = self._tag_label_font_point_size(
+            text,
+            label.width() or self.REVIEW_TAG_LABEL_WIDTH,
+        )
+        label.setText(self._tag_label_rich_text(text, font_point_size))
+        label.setProperty("sdl_tag_font_point_size", font_point_size)
         color = {
             "green": self.THEME["success"],
             "yellow": self.THEME["warning"],
@@ -6959,8 +7026,19 @@ class SDLXLIFFReviewDialog(QDialog):
             "red": self.THEME["danger"],
         }.get(status, self.THEME["muted"])
         label.setStyleSheet(
-            f"color: {color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace; padding: 0px 2px;"
+            f"color: {color}; background: transparent; "
+            f"font: {font_point_size:g}pt Consolas, 'Courier New', monospace; "
+            "padding: 0px 2px;"
         )
+
+    def _tag_label(self, source_tag, target_tag, status, source_label=None, target_label=None):
+        text = self._tag_label_text(source_tag, target_tag, source_label, target_label)
+        label = QLabel()
+        label.setObjectName("SdlReviewTagLabel")
+        label.setTextFormat(Qt.RichText)
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedWidth(self.REVIEW_TAG_LABEL_WIDTH)
+        self._apply_tag_label_display(label, text, status)
         return label
 
     @staticmethod
@@ -7016,20 +7094,14 @@ class SDLXLIFFReviewDialog(QDialog):
                 # creates the target node (row_data["target_tag"] is set in
                 # _target_html_with_edit), so the stale "Empty" caption must
                 # be replaced, not just recolored.
-                tag_label.setText(self._tag_label_rich_text(self._tag_label_text(
+                tag_text = self._tag_label_text(
                     row_data.get("source_tag"),
                     row_data.get("target_tag"),
                     row_data.get("source_tag_label"),
                     row_data.get("target_tag_label"),
-                )))
-                tag_color = {
-                    "green": self.THEME["success"],
-                    "yellow": self.THEME["warning"],
-                    "purple": self.THEME["purple"],
-                    "red": self.THEME["danger"],
-                }.get(row_data["status"], self.THEME["muted"])
-                tag_label.setStyleSheet(
-                    f"color: {tag_color}; background: transparent; font: 11pt Consolas, 'Courier New', monospace; padding: 0px 2px;"
+                )
+                self._apply_tag_label_display(
+                    tag_label, tag_text, row_data["status"]
                 )
                 tag_label.setToolTip(row_data.get("reason", ""))
 
@@ -7679,7 +7751,7 @@ class SDLXLIFFReviewDialog(QDialog):
     @staticmethod
     def _tooltip_batch_tag_name(tag_name):
         tag_name = str(tag_name or "").strip().lower()
-        if re.fullmatch(r"h[1-6]", tag_name) or tag_name == "p":
+        if re.fullmatch(r"h[1-6]", tag_name) or tag_name in {"p", "li"}:
             return tag_name
         return "p"
 

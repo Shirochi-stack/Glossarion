@@ -688,14 +688,14 @@ class GoogleFreeTranslateNew:
         if not translated:
             return translated
         source = str(source_text or "")
-        if not re.search(r'(?i)(?:</?\s*(?:p|h[1-6])\b|/?\s*(?:p|h[1-6])\s*>)', translated):
+        if not re.search(r'(?i)(?:</?\s*(?:p|li|h[1-6])\b|/?\s*(?:p|li|h[1-6])\s*>)', translated):
             return translated
 
         # Argos can leak HTML-ish batch delimiters into plain text as "p>", "/p>",
         # "<p>", or "</p>". Strip only text-unit tag fragments, then normalize gaps.
-        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|h[1-6])(?:\s+[^>]*)?\s*>', ' ', translated)
-        cleaned = re.sub(r'(?i)(?<![\w/])/?\s*(?:p|h[1-6])\s*>', ' ', cleaned)
-        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|h[1-6])\b[^<\s]*$', ' ', cleaned)
+        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|li|h[1-6])(?:\s+[^>]*)?\s*>', ' ', translated)
+        cleaned = re.sub(r'(?i)(?<![\w/])/?\s*(?:p|li|h[1-6])\s*>', ' ', cleaned)
+        cleaned = re.sub(r'(?i)<\s*/?\s*(?:p|li|h[1-6])\b[^<\s]*$', ' ', cleaned)
         cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
         cleaned = re.sub(r' *\n *', '\n', cleaned)
         cleaned = cleaned.strip()

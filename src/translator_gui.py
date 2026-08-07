@@ -13874,6 +13874,15 @@ Text to analyze:
         if not hasattr(self, 'enhanced_single_line_break_var'):
             self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
 
+        # Convert Markdown-generated <br> boundaries to sibling paragraphs.
+        if not hasattr(self, 'convert_br_to_paragraphs_var'):
+            self.convert_br_to_paragraphs_var = self.config.get(
+                'convert_br_to_paragraphs', True
+            )
+        os.environ['CONVERT_BR_TO_PARAGRAPHS'] = (
+            '1' if self.convert_br_to_paragraphs_var else '0'
+        )
+
         # Skip markdown -> HTML tag conversion toggle (default OFF)
         if not hasattr(self, 'skip_markdown_to_html_var'):
             self.skip_markdown_to_html_var = self.config.get('skip_markdown_to_html', False)
@@ -32898,6 +32907,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', True) else "0",
             "ENHANCED_SINGLE_LINE_BREAK": "1" if getattr(self, 'enhanced_single_line_break_var', False) else "0",
+            "CONVERT_BR_TO_PARAGRAPHS": "1" if getattr(self, 'convert_br_to_paragraphs_var', True) else "0",
             "SKIP_MARKDOWN_TO_HTML": "1" if getattr(self, 'skip_markdown_to_html_var', False) else "0",
             "USE_MARKDOWN2_CONVERTER": "1" if getattr(self, 'use_markdown2_converter_var', False) else "0",
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
@@ -43133,6 +43143,7 @@ Important rules:
                 ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
                 ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
                 ('enhanced_single_line_break', ['enhanced_single_line_break_var'], False, bool),
+                ('convert_br_to_paragraphs', ['convert_br_to_paragraphs_var'], True, bool),
                 ('skip_markdown_to_html', ['skip_markdown_to_html_var'], False, bool),
                 ('html2text_escape_snob', ['html2text_escape_snob_var'], False, bool),
                 ('use_markdown2_converter', ['use_markdown2_converter_var'], False, bool),
@@ -44037,6 +44048,7 @@ Important rules:
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
                 ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
+                ('CONVERT_BR_TO_PARAGRAPHS', '1' if self.config.get('convert_br_to_paragraphs', True) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),

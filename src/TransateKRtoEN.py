@@ -163,7 +163,7 @@ import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 from html_duplicate_cleanup import remove_duplicate_heading_paragraph_pairs
 from html_tag_entities import fix_stray_p_gt_artifacts as _fix_stray_p_gt_artifacts
-from html_output_utils import write_utf8_html_file
+from html_output_utils import convert_br_to_paragraphs, write_utf8_html_file
 from metadata_progress import (
     METADATA_PROGRESS_KEY,
     build_metadata_progress_plan,
@@ -20587,6 +20587,9 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
+    convert_breaks_to_paragraphs = (
+        os.getenv('CONVERT_BR_TO_PARAGRAPHS', '1') == '1'
+    )
     
     if use_markdown2:
     # Use markdown2 for conversion (legacy behavior)
@@ -20679,6 +20682,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # Post-process: strip <p> wrappers around <img> and flatten
                 # nested <p> that markdown2 creates from pre-existing <p><img/></p>.
                 html = _fix_img_p_nesting(html)
+                if convert_breaks_to_paragraphs:
+                    html = convert_br_to_paragraphs(html)
 
                 return html
         except ImportError:
@@ -20756,6 +20761,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # Post-process: strip <p> wrappers around <img> and flatten
             # nested <p> that markdown creates from pre-existing <p><img/></p>.
             html = _fix_img_p_nesting(html)
+            if convert_breaks_to_paragraphs:
+                html = convert_br_to_paragraphs(html)
 
             return html
             

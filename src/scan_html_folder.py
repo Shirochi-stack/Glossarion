@@ -2225,7 +2225,9 @@ def _missing_ending_quotation_paragraphs(
     for tag in soup(['title', 'head', 'script', 'style', 'meta', 'link']):
         tag.decompose()
 
-    paragraph_texts = [paragraph.get_text() for paragraph in soup.find_all('p')]
+    paragraph_texts = [
+        unit.get_text() for unit in soup.find_all(['p', 'li'])
+    ]
     if not paragraph_texts and allow_plain_text and soup.find() is None:
         paragraph_texts = [soup.get_text()]
 
@@ -5793,11 +5795,11 @@ _AI_TRUNCATION_PARSE_GATE = threading.Semaphore(2)
 
 
 def _extract_paragraphs(html, *, return_last_html_p=False):
-    """Extract paragraph texts and optionally the final non-empty ``<p>`` text."""
+    """Extract paragraph/list-item texts and optionally the final text unit."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "head", "title", "meta", "link"]):
         tag.decompose()
-    paragraph_tags = soup.find_all("p")
+    paragraph_tags = soup.find_all(["p", "li"])
     last_html_p = None
     if paragraph_tags:
         # Preserve the distinction between a document containing only empty
@@ -6492,7 +6494,9 @@ STANDARD_HTML_TAGS = frozenset([
 ])
 
 _HTML_LIKE_EXTENSIONS = ('.html', '.xhtml', '.htm')
-_BEAUTIFULSOUP_REVIEW_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p')
+_BEAUTIFULSOUP_REVIEW_TAGS = (
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li'
+)
 
 
 def _strip_html_like_extensions(name):
@@ -6604,7 +6608,10 @@ def _missing_beautifulsoup_tags_issue(
     except (TypeError, ValueError):
         min_paragraphs = 0
     min_paragraphs = max(0, min_paragraphs)
-    source_paragraphs = _safe_int(source_counts.get('p'), 0)
+    source_paragraphs = (
+        _safe_int(source_counts.get('p'), 0)
+        + _safe_int(source_counts.get('li'), 0)
+    )
     if source_paragraphs < min_paragraphs:
         return None
     total_source = 0
@@ -9453,7 +9460,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             )
         except (TypeError, ValueError):
             min_source_paragraphs = 20
-        log(f"      → Minimum source <p> tags to check: {min_source_paragraphs}")
+        log(
+            "      → Minimum source <p> + <li> text-unit tags to check: "
+            f"{min_source_paragraphs}"
+        )
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
     log(f"   ✓ Potential truncation check: {'ENABLED' if qa_settings.get('check_potential_truncation', False) else 'DISABLED'}")
@@ -10749,7 +10759,7 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
         
         # Check for unclosed HTML tags - Check common tags with simple logic
         # Note: Excluding 'head' since it's metadata and often missing in translated content
-        tags_to_check = ['html', 'p', 'div', 'span']
+        tags_to_check = ['html', 'p', 'div', 'span', 'ul', 'ol', 'li']
         if check_body_tag:
             tags_to_check.insert(1, 'body')  # Add body after html if enabled
         problematic_tags = []
@@ -10765,7 +10775,8 @@ def check_html_structure_issues(file_path, log, check_body_tag=False, check_head
             diff = abs(open_count - close_count)
             
             if open_count > 0 or close_count > 0:  # Tag exists in file
-                if diff > 2:  # Significant mismatch
+                allowed_difference = 0 if tag in {'ul', 'ol', 'li'} else 2
+                if diff > allowed_difference:
                     problematic_tags.append(f"{tag} (open: {open_count}, close: {close_count})")
         
         if problematic_tags:

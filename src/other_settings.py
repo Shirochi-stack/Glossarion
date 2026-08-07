@@ -9601,6 +9601,11 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'enhanced_single_line_break_var'):
         self.enhanced_single_line_break_var = self.config.get('enhanced_single_line_break', False)
 
+    if not hasattr(self, 'convert_br_to_paragraphs_var'):
+        self.convert_br_to_paragraphs_var = self.config.get(
+            'convert_br_to_paragraphs', True
+        )
+
     if not hasattr(self, 'html2text_escape_snob_var'):
         self.html2text_escape_snob_var = self.config.get('html2text_escape_snob', False)
     
@@ -9834,6 +9839,45 @@ def _create_processing_options_section(self, parent):
     single_break_desc.setStyleSheet("color: gray; font-size: 8pt;")
     single_break_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(single_break_desc)
+
+    convert_br_cb = self._create_styled_checkbox(
+        "Convert <br> tags to <p> paragraphs"
+    )
+    convert_br_cb.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "When enabled, &lt;p&gt;First&lt;br/&gt;Second&lt;/p&gt; becomes "
+        "&lt;p&gt;First&lt;/p&gt;&lt;p&gt;Second&lt;/p&gt;. When disabled, the "
+        "&lt;br/&gt; remains inside its original paragraph. Applies to both "
+        "Markdown converters."
+        "</p></qt>"
+    )
+    try:
+        convert_br_cb.setChecked(bool(self.convert_br_to_paragraphs_var))
+    except Exception:
+        pass
+
+    def _on_convert_br_toggle(checked):
+        try:
+            self.convert_br_to_paragraphs_var = bool(checked)
+            self.config['convert_br_to_paragraphs'] = bool(checked)
+            os.environ['CONVERT_BR_TO_PARAGRAPHS'] = (
+                '1' if checked else '0'
+            )
+        except Exception:
+            pass
+
+    convert_br_cb.toggled.connect(_on_convert_br_toggle)
+    convert_br_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(convert_br_cb)
+
+    convert_br_desc = QLabel(
+        "On: replace <br> boundaries with separate <p>...</p> paragraphs.\n"
+        "Off: keep <br> tags inside their original paragraphs."
+    )
+    convert_br_desc.setTextFormat(Qt.PlainText)
+    convert_br_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    convert_br_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(convert_br_desc)
 
     # Escape snob option
     escape_snob_cb = self._create_styled_checkbox("Escape Markdown specials (escape_snob)")

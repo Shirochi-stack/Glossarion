@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import zipfile
 from pathlib import Path
 
@@ -2575,3 +2576,83 @@ def test_async_remote_image_progress_keeps_label_and_one_percent_cadence():
     assert 'if prog_type == "remote_images":' in manager_source
     assert 'should_show = percent > last_percent' in manager_source
     assert 'formatted_message += f" {detail}"' in manager_source
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_convert_br_to_paragraphs_toggle_is_on_by_default(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    monkeypatch.delenv('CONVERT_BR_TO_PARAGRAPHS', raising=False)
+    source = 'First translated line\nSecond translated line'
+
+    default_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert '<br' not in default_html.lower()
+    assert '<p>First translated line</p>' in default_html
+    assert '<p>Second translated line</p>' in default_html
+
+    monkeypatch.setenv('CONVERT_BR_TO_PARAGRAPHS', '0')
+    retained_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    assert retained_html.lower().count('<br') == 1
+    assert 'First translated line' in retained_html
+    assert 'Second translated line' in retained_html
+
+
+@pytest.mark.parametrize('use_markdown2', [False, True])
+def test_convert_br_to_paragraphs_does_not_change_list_markup(
+    monkeypatch, use_markdown2
+):
+    from TransateKRtoEN import convert_enhanced_text_to_html
+
+    monkeypatch.setenv('SKIP_MARKDOWN_TO_HTML', '0')
+    monkeypatch.setenv(
+        'USE_MARKDOWN2_CONVERTER', '1' if use_markdown2 else '0'
+    )
+    source = (
+        'Opening first line\nOpening second line\n\n'
+        '- First bullet\n- Second bullet'
+    )
+
+    monkeypatch.setenv('CONVERT_BR_TO_PARAGRAPHS', '0')
+    retained_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+    monkeypatch.setenv('CONVERT_BR_TO_PARAGRAPHS', '1')
+    converted_html = convert_enhanced_text_to_html(
+        source, {'preserve_structure': True}
+    )
+
+    retained_list = re.search(r'<ul\b.*?</ul>', retained_html, re.DOTALL)
+    converted_list = re.search(r'<ul\b.*?</ul>', converted_html, re.DOTALL)
+    assert retained_list is not None
+    assert converted_list is not None
+    assert converted_list.group(0) == retained_list.group(0)
+    assert converted_list.group(0).count('<li>') == 2
+
+
+def test_convert_br_to_paragraphs_preserves_inline_and_surrounding_markup():
+    from html_output_utils import convert_br_to_paragraphs
+
+    prefix = "<UL class='original'><LI>Keep list bytes.</LI></UL>"
+    paragraph = '<p class="body"><em>First<br/>Second</em></p>'
+    suffix = '<OL><LI>Keep this too.</LI></OL>'
+
+    converted = convert_br_to_paragraphs(prefix + paragraph + suffix)
+
+    assert converted == (
+        prefix
+        + '<p class="body"><em>First</em></p>'
+        + '<p class="body"><em>Second</em></p>'
+        + suffix
+    )

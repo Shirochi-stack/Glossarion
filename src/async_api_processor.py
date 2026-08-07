@@ -3476,6 +3476,14 @@ class AsyncProcessingDialog:
         env_vars['TEXT_EXTRACTION_METHOD'] = text_extraction_method
         env_vars['ENHANCED_FILTERING'] = enhanced_filtering
         env_vars['USE_HTML2TEXT'] = "1" if output_mode == "vision" or text_extraction_method in ('enhanced', 'html2text', 'markdown') or extraction_mode == 'enhanced' else "0"
+        env_vars['CONVERT_BR_TO_PARAGRAPHS'] = (
+            "1"
+            if _bool_val(
+                getattr(self.gui, 'convert_br_to_paragraphs_var', None),
+                self.gui.config.get('convert_br_to_paragraphs', True),
+            )
+            else "0"
+        )
         env_vars['FIX_STRAY_P_GT_EPUB'] = "1" if _bool_val(getattr(self.gui, 'fix_stray_p_gt_epub_var', None), self.gui.config.get('fix_stray_p_gt_epub', False)) else "0"
         env_vars['FIX_STRAY_P_GT_BS'] = "1" if _bool_val(getattr(self.gui, 'fix_stray_p_gt_bs_var', None), self.gui.config.get('fix_stray_p_gt_bs', False)) else "0"
         env_vars['DISABLE_ZERO_DETECTION'] = "1" if _val(self.gui.disable_zero_detection_var, False) else "0"

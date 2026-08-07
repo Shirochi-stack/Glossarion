@@ -12,6 +12,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from lxml import etree
+from bs4 import BeautifulSoup
 from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 
 from sdlxliff_converter import convert_sdlxliff
@@ -27,8 +28,11 @@ from Retranslation_GUI import RetranslationMixin, SDLXLIFFReviewDialog, _sdlxlif
 from qa_scan_runtime import default_qa_scan_settings
 from scan_html_folder import (
     _count_beautifulsoup_review_tags,
+    _extract_paragraphs,
+    _missing_ending_quotation_paragraphs,
     _missing_beautifulsoup_tags_issue,
     _sdlxliff_review_tag_counts,
+    check_html_structure_issues,
     process_html_file_batch,
 )
 
@@ -793,6 +797,132 @@ def test_sdlxliff_review_ignores_invisible_empty_html_tags(tmp_path):
     assert piece["rows"][0]["target_tag_label"] == "p"
     assert piece["rows"][0]["source"] == "Real source text."
     assert piece["rows"][0]["target"] == "Real target text."
+
+
+def test_sdlxliff_review_treats_list_items_as_rows_not_list_containers(tmp_path):
+    sidecar = tmp_path / "response_chapter_list_items.html.sdlxliff"
+    source_html = (
+        "<html><body><ul>"
+        "<li>Source list item one.</li>"
+        "<li>Source list item two.</li>"
+        "</ul></body></html>"
+    )
+    target_html = (
+        "<html><body><ul>"
+        "<li>Target list item one.</li>"
+        "<li>Target list item two.</li>"
+        "</ul></body></html>"
+    )
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_list_items.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_list_items.html"}
+    )
+
+    assert piece["source_count"] == 2
+    assert piece["target_count"] == 2
+    assert piece["mismatch"] is False
+    assert [row["source_tag"] for row in piece["rows"]] == ["li", "li"]
+    assert [row["target_tag"] for row in piece["rows"]] == ["li", "li"]
+    assert dialog._tooltip_batch_tag_name("li") == "li"
+
+    edited_html = dialog._target_html_with_edit(
+        piece, piece["rows"][1], "Edited target list item two."
+    )
+    edited_soup = BeautifulSoup(edited_html, "html.parser")
+    assert len(edited_soup.find_all("ul")) == 1
+    assert [item.get_text(" ", strip=True) for item in edited_soup.find_all("li")] == [
+        "Target list item one.",
+        "Edited target list item two.",
+    ]
+
+
+def test_sdlxliff_review_treats_paragraph_and_list_item_as_equivalent_text_units(tmp_path):
+    sidecar = tmp_path / "response_chapter_p_to_li.html.sdlxliff"
+    source_html = "<html><body><p>Source sentence.</p></body></html>"
+    target_html = "<html><body><ul><li>Translated sentence.</li></ul></body></html>"
+    sidecar.write_text(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">
+  <file original="chapter_p_to_li.xhtml" source-language="ko-KR" target-language="en-US">
+    <body><trans-unit id="html">
+      <source><![CDATA[{source_html}]]></source>
+      <target><![CDATA[{target_html}]]></target>
+    </trans-unit></body>
+  </file>
+</xliff>
+""",
+        encoding="utf-8",
+    )
+    dialog = SDLXLIFFReviewDialog.__new__(SDLXLIFFReviewDialog)
+
+    piece = dialog._build_piece(
+        str(sidecar), 0, {"output_name": "response_chapter_p_to_li.html"}
+    )
+
+    assert piece["source_count"] == 1
+    assert piece["target_count"] == 1
+    assert piece["mismatch"] is False
+    assert piece["red_count"] == 0
+    assert piece["rows"][0]["source_tag"] == "p"
+    assert piece["rows"][0]["target_tag"] == "li"
+    assert piece["rows"][0]["status"] == "green"
+
+
+def test_qa_counts_and_text_checks_include_list_items():
+    list_html = "<ul><li>First list unit.</li><li>Second list unit.</li></ul>"
+
+    assert _count_beautifulsoup_review_tags(list_html) == {"li": 2}
+    assert _missing_beautifulsoup_tags_issue(
+        {"li": 20},
+        {"li": 19},
+        min_source_paragraph_tags=20,
+    ) == "missing_tags: 20/19 (-1)"
+    assert _extract_paragraphs(list_html) == [
+        "First list unit.",
+        "Second list unit.",
+    ]
+    assert len(_missing_ending_quotation_paragraphs(
+        '<ul><li>"Missing closing quotation.</li></ul>'
+    )) == 1
+
+
+def test_qa_structure_checks_list_tag_balance(tmp_path):
+    valid_path = tmp_path / "valid_list.html"
+    valid_path.write_text(
+        "<html><body><ul><li>One</li><li>Two</li></ul></body></html>",
+        encoding="utf-8",
+    )
+    invalid_path = tmp_path / "invalid_list.html"
+    invalid_path.write_text(
+        "<html><body><ul><li>One</li><li>Two</ul></body></html>",
+        encoding="utf-8",
+    )
+
+    valid_has_issues, valid_issues = check_html_structure_issues(
+        str(valid_path), lambda _message: None, check_header_tags=False
+    )
+    invalid_has_issues, invalid_issues = check_html_structure_issues(
+        str(invalid_path), lambda _message: None, check_header_tags=False
+    )
+
+    assert valid_has_issues is False
+    assert "unclosed_html_tags" not in valid_issues
+    assert invalid_has_issues is True
+    assert "unclosed_html_tags" in invalid_issues
 
 
 def test_sdlxliff_review_heading_level_change_is_yellow(tmp_path):
@@ -2754,6 +2884,17 @@ def test_sdlxliff_review_numbered_tag_label_text_uses_compact_empty_labels():
     assert SDLXLIFFReviewDialog._tag_label_text("", "p", "", "p(4)") == "Added(4)"
     assert SDLXLIFFReviewDialog._tag_label_rich_text("p(2)") == 'p<span style="font-size: 8pt;">(2)</span>'
     assert SDLXLIFFReviewDialog._tag_label_rich_text("Empty(33)") == 'Empty<span style="font-size: 8pt;">(33)</span>'
+
+
+def test_sdlxliff_review_tag_label_font_shrinks_for_numbered_p_to_li_pair():
+    short_size = SDLXLIFFReviewDialog._tag_label_font_point_size("p(2)")
+    converted_size = SDLXLIFFReviewDialog._tag_label_font_point_size(
+        "p(11) -> li(11)"
+    )
+
+    assert short_size == SDLXLIFFReviewDialog.REVIEW_TAG_LABEL_MAX_FONT_PT
+    assert converted_size < short_size
+    assert converted_size >= SDLXLIFFReviewDialog.REVIEW_TAG_LABEL_MIN_FONT_PT
 
 
 def test_sdlxliff_review_regenerates_sidecar_when_source_column_is_empty(tmp_path, monkeypatch):
