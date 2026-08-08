@@ -10087,9 +10087,11 @@ def _create_processing_options_section(self, parent):
     manual_br_button = QPushButton(manual_br_button_text)
     manual_br_button.setMinimumWidth(175)
     manual_br_button.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Manually apply BR-to-paragraph conversion to root HTML files in "
         "the currently selected inputs' output folders. Confirmation is "
         "required before any file is changed."
+        "</p></qt>"
     )
     manual_br_button.setStyleSheet(
         "QPushButton { background-color: #b45309; color: white; "
