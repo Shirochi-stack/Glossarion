@@ -2833,6 +2833,52 @@ def test_convert_br_to_paragraphs_preserves_inline_and_surrounding_markup():
     )
 
 
+def test_manual_br_conversion_only_changes_root_html_outputs(tmp_path):
+    from html_output_utils import convert_br_in_output_folder
+
+    root_html = tmp_path / 'response_001.html'
+    original_list = '<ul class="keep"><li>Bullet</li></ul>'
+    root_html.write_text(
+        '<p>First<br/>Second</p>' + original_list,
+        encoding='utf-8',
+    )
+    unchanged_html = tmp_path / 'response_002.xhtml'
+    unchanged_html.write_text('<p>Already separate.</p>', encoding='utf-8')
+    extracted_html = tmp_path / 'EPUB' / 'Text' / 'chapter.xhtml'
+    extracted_html.parent.mkdir(parents=True)
+    extracted_source = '<p>Do not<br/>touch extracted EPUB content.</p>'
+    extracted_html.write_text(extracted_source, encoding='utf-8')
+
+    audit = convert_br_in_output_folder(str(tmp_path))
+
+    assert audit['scanned'] == 2
+    assert audit['changed'] == 1
+    assert audit['unchanged'] == 1
+    assert audit['failed'] == 0
+    assert root_html.read_text(encoding='utf-8') == (
+        '<p>First</p><p>Second</p>' + original_list
+    )
+    assert extracted_html.read_text(encoding='utf-8') == extracted_source
+
+
+def test_manual_br_conversion_preserves_utf8_bom(tmp_path):
+    from html_output_utils import convert_br_in_output_folder
+
+    html_path = tmp_path / 'response_bom.html'
+    html_path.write_bytes(
+        b'\xef\xbb\xbf' + '<p>First<br>Second</p>'.encode('utf-8')
+    )
+
+    audit = convert_br_in_output_folder(str(tmp_path))
+
+    converted_bytes = html_path.read_bytes()
+    assert audit['changed'] == 1
+    assert converted_bytes.startswith(b'\xef\xbb\xbf')
+    assert converted_bytes[3:].decode('utf-8') == (
+        '<p>First</p><p>Second</p>'
+    )
+
+
 @pytest.mark.parametrize('use_markdown2', [False, True])
 def test_preserve_asterisk_separator_lines_toggle_defaults_on(
     monkeypatch, use_markdown2

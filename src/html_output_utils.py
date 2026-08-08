@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import html as html_lib
+import shutil
+import tempfile
 
 
 _CHARSET_META_RE = re.compile(
@@ -50,6 +52,11 @@ _CONTENT_ONLY_TAG_RE = re.compile(
     r"<(?:audio|canvas|embed|figure|iframe|img|math|object|picture|svg|video)\b",
     re.IGNORECASE,
 )
+_BR_ELEMENT_RE = re.compile(
+    r"<br\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*/?\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_OUTPUT_EXTENSIONS = ('.html', '.htm', '.xhtml')
 
 
 def convert_br_to_paragraphs(content: str) -> str:
@@ -153,6 +160,98 @@ def convert_br_to_paragraphs(content: str) -> str:
         )
 
     return _PARAGRAPH_ELEMENT_RE.sub(_convert_paragraph, text)
+
+
+def convert_br_in_output_folder(output_dir: str) -> dict:
+    """Apply :func:`convert_br_to_paragraphs` to root HTML output files.
+
+    Translation outputs live at the output-folder root. Deliberately avoiding
+    recursion keeps extracted EPUB trees, backups, reports, and sidecars
+    untouched. Files are replaced atomically and an existing UTF-8 BOM is
+    preserved. The returned dictionary contains a full per-file audit suitable
+    for a GUI summary and a detailed text log.
+    """
+    root = os.path.abspath(os.fspath(output_dir))
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"Output folder not found: {root}")
+
+    html_files = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            try:
+                is_file = entry.is_file()
+            except OSError:
+                is_file = False
+            if is_file and entry.name.lower().endswith(_HTML_OUTPUT_EXTENSIONS):
+                html_files.append(entry.path)
+    html_files.sort(key=lambda path: os.path.basename(path).casefold())
+
+    audit = {
+        'output_dir': root,
+        'scanned': len(html_files),
+        'changed': 0,
+        'unchanged': 0,
+        'failed': 0,
+        'files': [],
+    }
+    utf8_bom = b'\xef\xbb\xbf'
+
+    for path in html_files:
+        record = {
+            'path': path,
+            'status': 'unchanged',
+            'breaks_before': 0,
+            'breaks_after': 0,
+        }
+        temp_path = None
+        try:
+            with open(path, 'rb') as handle:
+                original_bytes = handle.read()
+            had_bom = original_bytes.startswith(utf8_bom)
+            original = original_bytes[len(utf8_bom):].decode('utf-8') if had_bom else original_bytes.decode('utf-8')
+            record['breaks_before'] = len(_BR_ELEMENT_RE.findall(original))
+            converted = convert_br_to_paragraphs(original)
+            record['breaks_after'] = len(_BR_ELEMENT_RE.findall(converted))
+
+            if converted == original:
+                audit['unchanged'] += 1
+                audit['files'].append(record)
+                continue
+
+            encoded = converted.encode('utf-8')
+            if had_bom:
+                encoded = utf8_bom + encoded
+            descriptor, temp_path = tempfile.mkstemp(
+                prefix=f'.{os.path.basename(path)}.',
+                suffix='.tmp',
+                dir=os.path.dirname(path),
+            )
+            with os.fdopen(descriptor, 'wb') as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                shutil.copymode(path, temp_path)
+            except OSError:
+                pass
+            os.replace(temp_path, path)
+            temp_path = None
+
+            record['status'] = 'converted'
+            audit['changed'] += 1
+        except Exception as exc:
+            record['status'] = 'failed'
+            record['error'] = str(exc)
+            audit['failed'] += 1
+        finally:
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        audit['files'].append(record)
+
+    return audit
 
 
 def ensure_utf8_html_document(content: str) -> str:

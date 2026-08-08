@@ -9873,7 +9873,233 @@ def _create_processing_options_section(self, parent):
 
     convert_br_cb.toggled.connect(_on_convert_br_toggle)
     convert_br_cb.setContentsMargins(0, 2, 0, 0)
-    enhanced_opts_v.addWidget(convert_br_cb)
+
+    def _start_manual_br_conversion(button, default_text):
+        """Apply the BR-to-paragraph transform to selected outputs now."""
+        import threading
+        from datetime import datetime
+        from PySide6.QtCore import QObject, Signal, QTimer
+
+        if getattr(self, '_manual_br_conversion_running', False):
+            return
+
+        files = list(getattr(self, 'selected_files', None) or [])
+        if not files:
+            try:
+                selected_path = (
+                    self.entry_epub.text().strip()
+                    if hasattr(self, 'entry_epub') else ''
+                )
+            except Exception:
+                selected_path = ''
+            if (
+                selected_path
+                and selected_path.lower() != 'no file selected'
+                and os.path.isfile(selected_path)
+            ):
+                files = [selected_path]
+
+        # Keep the on-screen order while avoiding duplicate input entries.
+        unique_files = []
+        seen_files = set()
+        for selected_file in files:
+            if not selected_file or selected_file == '__generative_mode__':
+                continue
+            key = os.path.normcase(os.path.abspath(str(selected_file)))
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            unique_files.append(str(selected_file))
+        files = unique_files
+
+        if not files:
+            button.setText("⚠️ No input files")
+            QTimer.singleShot(2500, lambda: button.setText(default_text))
+            try:
+                self.append_log(
+                    "⚠️ Manual BR→P conversion: no input files selected."
+                )
+            except Exception:
+                pass
+            return
+
+        warning = QMessageBox(
+            getattr(self, '_other_settings_dialog', None) or button.window()
+        )
+        warning.setIcon(QMessageBox.Warning)
+        warning.setWindowTitle("Confirm Manual BR→P Conversion")
+        warning.setText(
+            f"Modify existing HTML outputs for {len(files)} selected input "
+            f"file(s)?"
+        )
+        warning.setInformativeText(
+            "This immediately replaces <br> boundaries inside paragraphs "
+            "with separate <p>...</p> paragraphs in each selected input's "
+            "output folder. It runs even when the checkbox is off and does "
+            "not create an automatic backup. Detailed logs will be written "
+            "to each output folder's logs subfolder."
+        )
+        warning.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        warning.setDefaultButton(QMessageBox.Cancel)
+        if warning.exec() != QMessageBox.Yes:
+            return
+
+        class _ManualBrSignals(QObject):
+            done = Signal(int, int)
+
+        signals = _ManualBrSignals()
+        self._manual_br_conversion_running = True
+        button.setEnabled(False)
+        button.setText("⏳ Converting…")
+
+        def _finish(ok_count, fail_count):
+            self._manual_br_conversion_running = False
+            button.setEnabled(True)
+            if fail_count:
+                button.setText(f"✅ {ok_count} / ⚠️ {fail_count}")
+            else:
+                button.setText(f"✅ {ok_count} done")
+            QTimer.singleShot(4000, lambda: button.setText(default_text))
+            try:
+                import winsound
+                sound = (
+                    winsound.MB_ICONEXCLAMATION
+                    if fail_count else winsound.MB_OK
+                )
+                winsound.MessageBeep(sound)
+            except Exception:
+                pass
+
+        signals.done.connect(_finish)
+        button._manual_br_signals = signals  # Keep Qt signals alive.
+
+        def _safe_log_stem(input_path):
+            stem = os.path.splitext(os.path.basename(input_path))[0]
+            stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', stem)
+            return stem.strip(' .') or 'input'
+
+        def _write_full_log(input_path, output_dir, audit, reused=False):
+            logs_dir = os.path.join(output_dir, 'logs')
+            os.makedirs(logs_dir, exist_ok=True)
+            log_path = os.path.join(
+                logs_dir,
+                f"{_safe_log_stem(input_path)}_br_conversion_log.txt",
+            )
+            lines = [
+                "Glossarion manual BR-to-paragraph conversion",
+                f"Timestamp: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+                f"Input file: {os.path.abspath(input_path)}",
+                f"Output folder: {output_dir}",
+                "Action: replace <br> boundaries inside <p> elements with sibling <p> elements",
+                f"Reused scan result for duplicate output folder: {'yes' if reused else 'no'}",
+                "",
+                (
+                    f"Summary: {audit['scanned']} scanned; "
+                    f"{audit['changed']} converted; "
+                    f"{audit['unchanged']} unchanged; "
+                    f"{audit['failed']} failed"
+                ),
+                "",
+                "Files:",
+            ]
+            if not audit['files']:
+                lines.append("[NONE] No root-level HTML output files found.")
+            for record in audit['files']:
+                relative_path = os.path.relpath(record['path'], output_dir)
+                detail = (
+                    f"<br> {record['breaks_before']} -> "
+                    f"{record['breaks_after']}"
+                )
+                if record['status'] == 'failed':
+                    detail += f"; error: {record.get('error', 'unknown error')}"
+                lines.append(
+                    f"[{record['status'].upper()}] {relative_path} | {detail}"
+                )
+            with open(log_path, 'w', encoding='utf-8', newline='') as handle:
+                handle.write('\n'.join(lines) + '\n')
+            return os.path.abspath(log_path)
+
+        def _worker():
+            ok_inputs = 0
+            failed_inputs = 0
+            audit_cache = {}
+            try:
+                from html_output_utils import convert_br_in_output_folder
+
+                for input_path in files:
+                    input_name = os.path.basename(input_path)
+                    try:
+                        output_dir = os.path.abspath(
+                            self._resolve_translation_output_dir(input_path)
+                        )
+                        cache_key = os.path.normcase(output_dir)
+                        reused = cache_key in audit_cache
+                        if reused:
+                            audit = audit_cache[cache_key]
+                        else:
+                            audit = convert_br_in_output_folder(output_dir)
+                            audit_cache[cache_key] = audit
+                        log_path = _write_full_log(
+                            input_path, output_dir, audit, reused=reused
+                        )
+                        failed = int(audit['failed'])
+                        if failed:
+                            failed_inputs += 1
+                            icon = '⚠️'
+                        else:
+                            ok_inputs += 1
+                            icon = '✅'
+                        self.append_log(
+                            f"{icon} [BR→P] {input_name}: "
+                            f"{audit['changed']} updated, "
+                            f"{audit['unchanged']} unchanged, "
+                            f"{failed} failed ({audit['scanned']} scanned) | "
+                            f"Full log: {log_path}"
+                        )
+                    except Exception as exc:
+                        failed_inputs += 1
+                        try:
+                            self.append_log(
+                                f"⚠️ [BR→P] {input_name}: {exc} | "
+                                "Full log not written."
+                            )
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    signals.done.emit(ok_inputs, failed_inputs)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    manual_br_button_text = "Apply to Existing Outputs"
+    manual_br_button = QPushButton(manual_br_button_text)
+    manual_br_button.setMinimumWidth(175)
+    manual_br_button.setToolTip(
+        "Manually apply BR-to-paragraph conversion to root HTML files in "
+        "the currently selected inputs' output folders. Confirmation is "
+        "required before any file is changed."
+    )
+    manual_br_button.setStyleSheet(
+        "QPushButton { background-color: #b45309; color: white; "
+        "padding: 3px 10px; border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #92400e; } "
+        "QPushButton:disabled { background-color: #555; color: #999; }"
+    )
+    manual_br_button.clicked.connect(
+        lambda: _start_manual_br_conversion(
+            manual_br_button, manual_br_button_text
+        )
+    )
+
+    convert_br_row = QWidget()
+    convert_br_row_h = QHBoxLayout(convert_br_row)
+    convert_br_row_h.setContentsMargins(0, 2, 0, 0)
+    convert_br_row_h.addWidget(convert_br_cb)
+    convert_br_row_h.addStretch()
+    convert_br_row_h.addWidget(manual_br_button)
+    enhanced_opts_v.addWidget(convert_br_row)
 
     convert_br_desc = QLabel(
         "On: replace <br> boundaries with separate <p>...</p> paragraphs.\n"
