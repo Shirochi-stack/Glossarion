@@ -9927,6 +9927,7 @@ def _create_processing_options_section(self, parent):
             getattr(self, '_other_settings_dialog', None) or button.window()
         )
         warning.setIcon(QMessageBox.Warning)
+        warning.setTextFormat(Qt.PlainText)
         warning.setWindowTitle("Confirm Manual BR→P Conversion")
         warning.setText(
             f"Modify existing HTML outputs for {len(files)} selected input "
@@ -9934,10 +9935,14 @@ def _create_processing_options_section(self, parent):
         )
         warning.setInformativeText(
             "This immediately replaces <br> boundaries inside paragraphs "
-            "with separate <p>...</p> paragraphs in each selected input's "
-            "output folder. It runs even when the checkbox is off and does "
-            "not create an automatic backup. Detailed logs will be written "
-            "to each output folder's logs subfolder."
+            "with separate <p> paragraphs in each selected input's output "
+            "folder.\n\n"
+            "Example:\n"
+            "<p>First<br/>Second</p>  →  "
+            "<p>First</p><p>Second</p>\n\n"
+            "It runs even when the checkbox is off and does not create an "
+            "automatic backup. Detailed logs will be written to each output "
+            "folder's logs subfolder."
         )
         warning.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         warning.setDefaultButton(QMessageBox.Cancel)
@@ -10096,9 +10101,10 @@ def _create_processing_options_section(self, parent):
     convert_br_row = QWidget()
     convert_br_row_h = QHBoxLayout(convert_br_row)
     convert_br_row_h.setContentsMargins(0, 2, 0, 0)
+    convert_br_row_h.setSpacing(10)
     convert_br_row_h.addWidget(convert_br_cb)
-    convert_br_row_h.addStretch()
     convert_br_row_h.addWidget(manual_br_button)
+    convert_br_row_h.addStretch()
     enhanced_opts_v.addWidget(convert_br_row)
 
     convert_br_desc = QLabel(
