@@ -9946,6 +9946,11 @@ def _create_processing_options_section(self, parent):
         )
         warning.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         warning.setDefaultButton(QMessageBox.Cancel)
+        _center_messagebox_buttons(
+            warning,
+            min_button_width=150,
+            min_button_height=48,
+        )
         if warning.exec() != QMessageBox.Yes:
             return
 
