@@ -235,10 +235,42 @@ class TextFileProcessor:
         
         cached = self._load_split_cache(cache_path, source_hash, word_count_dir)
         if cached is not None:
+            # Split caches created before stable PDF bookmark identities were
+            # persisted only contain the display number (pdf_section_1, ...).
+            # Rehydrate the identity from the freshly-read outline so an old
+            # cache cannot turn bookmark sections back into numeric chapters
+            # and bypass their completed ``pdf:<section_id>`` progress rows.
+            if self.file_path.lower().endswith('.pdf'):
+                raw_pdf_sections = {
+                    str(chapter.get('num')): chapter
+                    for chapter in raw_chapters
+                    if chapter.get('pdf_toc_section')
+                }
+                for chapter in cached:
+                    source_num = chapter.get('num')
+                    chunk_info = chapter.get('chunk_info') or {}
+                    if chapter.get('is_chunk'):
+                        source_num = chunk_info.get(
+                            'original_chapter', source_num
+                        )
+                    raw_section = raw_pdf_sections.get(str(source_num))
+                    if not raw_section:
+                        continue
+                    for key in (
+                        'pdf_toc_section', 'pdf_toc_level',
+                        'pdf_start_page', 'pdf_end_page',
+                        'pdf_section_id', 'pdf_section_title',
+                    ):
+                        if raw_section.get(key) is not None:
+                            chapter[key] = raw_section[key]
             print(f"📊 Loaded split cache ({len(cached)} chunks) — token limit changes won't alter chunk count")
             if (
                 self.file_path.lower().endswith('.pdf')
-                and self.pdf_render_mode in ('fast_semantic', 'fast_layout')
+                and getattr(
+                    self,
+                    'pdf_render_mode',
+                    os.getenv('PDF_RENDER_MODE', 'fast_semantic').lower(),
+                ) in ('fast_semantic', 'fast_layout')
             ):
                 from pdf_fast_extractor import apply_pdf_image_rename_logic
                 cached = apply_pdf_image_rename_logic(
@@ -455,7 +487,11 @@ class TextFileProcessor:
         
         if (
             self.file_path.lower().endswith('.pdf')
-            and self.pdf_render_mode in ('fast_semantic', 'fast_layout')
+            and getattr(
+                self,
+                'pdf_render_mode',
+                os.getenv('PDF_RENDER_MODE', 'fast_semantic').lower(),
+            ) in ('fast_semantic', 'fast_layout')
         ):
             from pdf_fast_extractor import apply_pdf_image_rename_logic
             final_chapters = apply_pdf_image_rename_logic(
@@ -555,6 +591,7 @@ class TextFileProcessor:
                 for key in (
                     'pdf_toc_section', 'pdf_toc_level',
                     'pdf_start_page', 'pdf_end_page',
+                    'pdf_section_id', 'pdf_section_title',
                 ):
                     if ch.get(key) is not None:
                         meta[key] = ch[key]

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -120,6 +121,11 @@ def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
     assert image_names == ["pdf_section_1_img_1.png"]
     assert all("pdfimg_" not in chapter["body"] for chapter in chapters)
     assert all("pdf_section_1_img_1.png" in chapter["body"] for chapter in chapters)
+    assert all(
+        chapter["content_hash"]
+        == hashlib.sha256(chapter["body"].encode("utf-8")).hexdigest()
+        for chapter in chapters
+    )
     rename_map = json.loads(
         (output_dir / "image_rename_map.json").read_text(encoding="utf-8")
     )
@@ -586,6 +592,48 @@ def test_pdf_progress_uses_stable_section_id_across_display_number_changes(tmp_p
     assert manager.prog["chapters"][f"pdf:{section_id}"]["actual_num"] == 3
     manager.migrate_to_content_hash([current_chapter])
     assert f"pdf:{section_id}" in manager.prog["chapters"]
+
+
+def test_legacy_pdf_progress_hash_migrates_once_then_detects_source_changes(
+        tmp_path):
+    payloads = tmp_path / "Payloads"
+    payloads.mkdir()
+    manager = ProgressManager(str(payloads))
+    section_id = "legacy-stable-id"
+    manager.prog["chapters"] = {
+        f"pdf:{section_id}": {
+            "actual_num": 1,
+            "content_hash": "pre-image-rename-hash",
+            "output_file": f"response_pdf_section_{section_id}.html",
+            "status": "completed",
+        },
+        "pdf:outline:1": {
+            "actual_num": 1,
+            "content_hash": "",
+            "output_file": "response_pdf_section_1.html",
+            "status": "not_translated",
+            "pdf_toc_section": True,
+            "pdf_outline_seed": True,
+        },
+    }
+    current = {
+        "num": 1,
+        "title": "Opening",
+        "filename": "pdf_section_1.html",
+        "content_hash": "canonical-payload-hash",
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+    }
+
+    assert manager.reconcile_pdf_chapter_entries([current]) == 1
+    migrated = manager.prog["chapters"][f"pdf:{section_id}"]
+    assert migrated["content_hash"] == "canonical-payload-hash"
+    assert migrated["pdf_section_id"] == section_id
+    assert migrated["pdf_content_hash_version"] == 2
+
+    changed = dict(current, content_hash="genuinely-updated-source")
+    assert manager.reconcile_pdf_chapter_entries([changed]) == 1
+    assert manager.prog["chapters"] == {}
 
 
 def test_workspace_reader_manifest_orders_pdf_entries_and_hides_sidecars(tmp_path):

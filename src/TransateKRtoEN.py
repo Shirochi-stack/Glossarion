@@ -4737,6 +4737,8 @@ class ProgressManager:
                         chapter_info[pdf_key] = chapter_obj[pdf_key]
                 if chapter_obj.get('pdf_section_id'):
                     chapter_info['pdf_progress_key'] = chapter_key
+                    chapter_info['pdf_content_hash_version'] = 2
+                    chapter_info.pop('pdf_hash_migration_pending', None)
             if chapter_obj.get("subtitle_batch"):
                 chapter_info["subtitle_progress_key"] = chapter_key
                 subtitle_source = (
@@ -5261,6 +5263,8 @@ class ProgressManager:
                     merged_info[pdf_key] = chapter_obj[pdf_key]
             if chapter_obj.get('pdf_section_id'):
                 merged_info['pdf_progress_key'] = chapter_key
+                merged_info['pdf_content_hash_version'] = 2
+                merged_info.pop('pdf_hash_migration_pending', None)
         
         self.prog["chapters"][chapter_key] = merged_info
     
@@ -5482,7 +5486,7 @@ class ProgressManager:
                     self._auto_discovered_count = 0
                 self._auto_discovered_count += 1
                 
-                self.prog["chapters"][chapter_key] = {
+                discovered_info = {
                     "actual_num": actual_num,
                     "content_hash": content_hash,
                     "output_file": output_filename,
@@ -5490,6 +5494,22 @@ class ProgressManager:
                     "last_updated": os.path.getmtime(output_path),
                     "auto_discovered": True
                 }
+                if chapter_obj.get("pdf_toc_section"):
+                    discovered_info["pdf_toc_section"] = True
+                    discovered_info["pdf_toc_title"] = str(
+                        chapter_obj.get("title") or f"Section {actual_num}"
+                    )
+                    discovered_info["title"] = discovered_info["pdf_toc_title"]
+                    for pdf_key in (
+                        "pdf_toc_level", "pdf_start_page", "pdf_end_page",
+                        "pdf_section_id", "pdf_section_title",
+                    ):
+                        if chapter_obj.get(pdf_key) is not None:
+                            discovered_info[pdf_key] = chapter_obj[pdf_key]
+                    if chapter_obj.get("pdf_section_id"):
+                        discovered_info["pdf_progress_key"] = chapter_key
+                        discovered_info["pdf_content_hash_version"] = 2
+                self.prog["chapters"][chapter_key] = discovered_info
                 self._apply_model_info(self.prog["chapters"][chapter_key])
                 
                 self.save()
@@ -5658,6 +5678,7 @@ class ProgressManager:
         expected_hashes_by_output = {}
         expected_hashes_by_number = {}
         expected_pdf_sections = {}
+        expected_pdf_section_ids_by_number = {}
         for chapter in chapters or []:
             try:
                 actual_num = (
@@ -5691,10 +5712,57 @@ class ProgressManager:
                     "pdf_end_page": chapter.get("pdf_end_page"),
                     "pdf_section_title": chapter.get("pdf_section_title") or chapter.get("title"),
                 }
+                if actual_num is not None:
+                    expected_pdf_section_ids_by_number.setdefault(
+                        str(actual_num), set()
+                    ).add(section_id)
 
         removed = 0
         removed_number_keys = set()
         progress_chapters = self.prog.setdefault("chapters", {})
+
+        def _progress_section_id(progress_key, entry, normalized_output=""):
+            entry_section_id = str(
+                entry.get("pdf_section_id") or ""
+            ).strip()
+            if not entry_section_id:
+                stored_progress_key = str(
+                    entry.get("pdf_progress_key") or progress_key or ""
+                )
+                if (
+                    stored_progress_key.startswith("pdf:")
+                    and not stored_progress_key.startswith("pdf:outline:")
+                ):
+                    entry_section_id = stored_progress_key.split(
+                        ":", 2
+                    )[1].strip()
+            if not entry_section_id and normalized_output:
+                entry_section_id = next(
+                    (
+                        section_id
+                        for section_id in expected_pdf_sections
+                        if normalized_output == f"pdf_section_{section_id}"
+                        or normalized_output.startswith(
+                            f"pdf_section_{section_id}_"
+                        )
+                    ),
+                    "",
+                )
+            return entry_section_id
+
+        tracked_pdf_section_ids = {
+            section_id
+            for progress_key, entry in progress_chapters.items()
+            if isinstance(entry, dict) and not entry.get("pdf_outline_seed")
+            for section_id in [
+                _progress_section_id(
+                    progress_key,
+                    entry,
+                    _normalize_output_filename_stem(entry.get("output_file")),
+                )
+            ]
+            if section_id
+        }
         for progress_key, entry in list(progress_chapters.items()):
             if not isinstance(entry, dict):
                 continue
@@ -5705,7 +5773,17 @@ class ProgressManager:
             number_key = str(actual_num) if actual_num is not None else ""
             number_matches = bool(number_key and number_key in expected_numbers)
             output_matches = bool(normalized_output and normalized_output in expected_outputs)
-            entry_section_id = str(entry.get("pdf_section_id") or "").strip()
+            if (
+                entry.get("pdf_outline_seed")
+                and expected_pdf_section_ids_by_number.get(number_key, set())
+                & tracked_pdf_section_ids
+            ):
+                progress_chapters.pop(progress_key, None)
+                removed += 1
+                continue
+            entry_section_id = _progress_section_id(
+                progress_key, entry, normalized_output
+            )
             current_section = expected_pdf_sections.get(entry_section_id)
             stable_section_matches = bool(current_section)
             expected_hashes = set()
@@ -5722,9 +5800,26 @@ class ProgressManager:
                 or not expected_hashes
                 or stored_hash in expected_hashes
             )
+            try:
+                pdf_hash_version = int(
+                    entry.get("pdf_content_hash_version") or 0
+                )
+            except (TypeError, ValueError):
+                pdf_hash_version = 0
+            migrate_legacy_pdf_hash = bool(
+                stable_section_matches
+                and (
+                    entry.get("pdf_hash_migration_pending")
+                    or pdf_hash_version < 2
+                )
+            )
+            if migrate_legacy_pdf_hash:
+                hash_matches = True
             if stable_section_matches and hash_matches:
                 entry["actual_num"] = current_section.get("actual_num")
                 entry["chapter_num"] = current_section.get("actual_num")
+                entry["pdf_toc_section"] = True
+                entry["pdf_section_id"] = entry_section_id
                 for pdf_key in (
                     "pdf_toc_level", "pdf_start_page", "pdf_end_page",
                     "pdf_section_title",
@@ -5732,6 +5827,14 @@ class ProgressManager:
                     if current_section.get(pdf_key) is not None:
                         entry[pdf_key] = current_section[pdf_key]
                 entry["pdf_progress_key"] = f"pdf:{entry_section_id}"
+                if migrate_legacy_pdf_hash:
+                    current_hash = str(
+                        current_section.get("content_hash") or ""
+                    )
+                    if current_hash:
+                        entry["content_hash"] = current_hash
+                    entry["pdf_content_hash_version"] = 2
+                    entry.pop("pdf_hash_migration_pending", None)
                 continue
             if (not number_matches and not output_matches and not stable_section_matches) or not hash_matches:
                 progress_chapters.pop(progress_key, None)

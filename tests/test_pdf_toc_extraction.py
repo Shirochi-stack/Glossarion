@@ -556,7 +556,6 @@ def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path)
         row["output_file"] != "source_epub.txt"
         for row in data["chapter_display_info"]
     )
-
     display, status = mixin._progress_list_display_text(
         data["chapter_display_info"][0],
         {"show_model_info_state": False},
@@ -567,3 +566,95 @@ def test_progress_manager_seeds_bookmark_rows_and_hides_source_sidecar(tmp_path)
     assert "Opening" in display
     assert "Pages 1-2" in display
     assert "Chapter" not in display
+
+
+def test_progress_manager_merges_stable_pdf_rows_with_outline_seeds(tmp_path):
+    from Retranslation_GUI import RetranslationMixin
+
+    pdf_path = tmp_path / "outlined.pdf"
+    pdf_path.write_bytes(b"%PDF synthetic outline fixture")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    section_id = "stable-bookmark-id"
+    output_name = f"response_pdf_section_{section_id}.html"
+    (output_dir / output_name).write_text("translated", encoding="utf-8")
+    prog = {
+        "chapters": {
+            f"pdf:{section_id}": {
+                "actual_num": 1,
+                "content_hash": "old-hash",
+                "output_file": output_name,
+                "status": "completed",
+            },
+            "pdf:outline:1": {
+                "actual_num": 1,
+                "content_hash": "",
+                "output_file": "response_pdf_section_1.html",
+                "status": "not_translated",
+                "pdf_outline_seed": True,
+                "pdf_toc_section": True,
+            },
+        },
+        "chapter_chunks": {},
+    }
+
+    mixin = object.__new__(RetranslationMixin)
+    mixin.config = {"pdf_use_toc_sections": True}
+    mixin.pdf_use_toc_sections_var = True
+    mixin._pdf_outline_progress_plan = lambda _path: [{
+        "num": 1,
+        "title": "Opening",
+        "level": 1,
+        "start_page": 1,
+        "end_page": 3,
+        "section_id": section_id,
+    }]
+
+    assert mixin._seed_pdf_outline_progress_entries(
+        str(pdf_path), str(output_dir), prog
+    )
+    assert set(prog["chapters"]) == {f"pdf:{section_id}"}
+    entry = prog["chapters"][f"pdf:{section_id}"]
+    assert entry["status"] == "completed"
+    assert entry["pdf_section_id"] == section_id
+    assert entry["pdf_progress_key"] == f"pdf:{section_id}"
+    assert entry["pdf_hash_migration_pending"] is True
+
+
+def test_old_pdf_split_cache_rehydrates_stable_bookmark_identity(
+        tmp_path, monkeypatch):
+    from txt_processor import TextFileProcessor
+
+    pdf_path = tmp_path / "book.pdf"
+    pdf_path.write_bytes(b"pdf")
+    output_dir = tmp_path / "out"
+    processor = TextFileProcessor(str(pdf_path), str(output_dir))
+    processor.pdf_render_mode = "legacy_layout"
+    monkeypatch.setattr(
+        processor,
+        "_load_split_cache",
+        lambda *_args: [{
+            "num": 1,
+            "title": "Opening",
+            "filename": "pdf_section_1.html",
+            "body": "<p>opening</p>",
+            "content_hash": "cached-hash",
+            "is_chunk": False,
+            "pdf_toc_section": True,
+        }],
+    )
+    section_id = "stable-bookmark-id"
+    chapters = processor._process_chapters_for_splitting([{
+        "num": 1,
+        "title": "Opening",
+        "content": "<p>opening</p>",
+        "is_html": True,
+        "pdf_toc_section": True,
+        "pdf_section_id": section_id,
+        "pdf_section_title": "Opening",
+        "pdf_start_page": 1,
+        "pdf_end_page": 3,
+    }])
+
+    assert chapters[0]["pdf_section_id"] == section_id
+    assert chapters[0]["pdf_section_title"] == "Opening"

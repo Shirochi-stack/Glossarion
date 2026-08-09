@@ -1156,7 +1156,17 @@ def apply_pdf_image_rename_logic(
 
     for chapter in chapters:
         body = str(chapter.get("body") or "")
-        chapter["body"] = _rewrite_pdf_image_references(body, assignments)
+        rewritten_body = _rewrite_pdf_image_references(body, assignments)
+        chapter["body"] = rewritten_body
+        # Progress hashes must describe the final translation payload.  The
+        # old code hashed the internal pdfimg_<hash> references and then
+        # renamed those references afterwards, so loading the same split cache
+        # produced a different hash and incorrectly invalidated every
+        # completed bookmark on the next run.
+        chapter["content_hash"] = hashlib.sha256(
+            rewritten_body.encode("utf-8")
+        ).hexdigest()
+        chapter["file_size"] = len(rewritten_body)
 
     disk_updates = 0
     html_roots = [output_path]

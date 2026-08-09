@@ -10790,6 +10790,15 @@ class RetranslationMixin:
                 entry[key] = value
                 changed = True
 
+        def _entry_section_id(progress_key, entry):
+            section_id = str(entry.get('pdf_section_id') or '').strip()
+            if section_id:
+                return section_id
+            stored_key = str(entry.get('pdf_progress_key') or progress_key or '')
+            if stored_key.startswith('pdf:') and not stored_key.startswith('pdf:outline:'):
+                return stored_key.split(':', 2)[1].strip()
+            return ''
+
         for section in sections:
             try:
                 section_num = int(section.get('num'))
@@ -10799,19 +10808,41 @@ class RetranslationMixin:
                 continue
             title = str(section.get('title') or f'Section {section_num}').strip()
             level = int(section.get('level') or 0)
+            section_id = str(section.get('section_id') or '').strip()
             section_stem = f'pdf_section_{section_num}'
+            stable_stem = (
+                f'pdf_section_{section_id}' if section_id else section_stem
+            )
             expected_output = (
-                f'{section_stem}.html'
+                f'{stable_stem}.html'
                 if retain
-                else f'response_{section_stem}.html'
+                else f'response_{stable_stem}.html'
             )
 
             exact = []
             chunks = []
+            stable_exact = []
+            stable_chunks = []
+            stale_seeds = []
             for key, entry in list(chapters.items()):
                 if not isinstance(entry, dict):
                     continue
                 normalized_output = _norm(entry.get('output_file'))
+                entry_num = entry.get('actual_num', entry.get('chapter_num'))
+                if (
+                    entry.get('pdf_outline_seed')
+                    and str(entry_num) == str(section_num)
+                ):
+                    stale_seeds.append((key, entry))
+                if section_id and _entry_section_id(key, entry) == section_id:
+                    if (
+                        str(key).startswith(f'pdf:{section_id}:')
+                        or normalized_output.startswith(f'{stable_stem}_')
+                    ):
+                        stable_chunks.append((key, entry))
+                    else:
+                        stable_exact.append((key, entry))
+                    continue
                 if normalized_output == section_stem:
                     exact.append((key, entry))
                 elif normalized_output.startswith(f'{section_stem}_'):
@@ -10819,7 +10850,14 @@ class RetranslationMixin:
 
             # Once a large bookmark section has real chunk rows, retire its
             # provisional one-row outline seed instead of displaying both.
-            if chunks:
+            if stable_chunks or stable_exact:
+                matching = stable_chunks or stable_exact
+                matching_keys = {key for key, _entry in matching}
+                for key, entry in stale_seeds:
+                    if key not in matching_keys and entry.get('pdf_outline_seed'):
+                        chapters.pop(key, None)
+                        changed = True
+            elif chunks:
                 for key, entry in exact:
                     if entry.get('pdf_outline_seed'):
                         chapters.pop(key, None)
@@ -10829,9 +10867,17 @@ class RetranslationMixin:
                 matching = exact
 
             if not matching:
-                progress_key = f'pdf:outline:{section_num}'
+                for key, entry in stale_seeds:
+                    if entry.get('pdf_outline_seed'):
+                        chapters.pop(key, None)
+                        changed = True
+                progress_key = (
+                    f'pdf:{section_id}'
+                    if section_id
+                    else f'pdf:outline:{section_num}'
+                )
                 output_path = os.path.join(output_dir, expected_output)
-                chapters[progress_key] = {
+                seeded_entry = {
                     'actual_num': section_num,
                     'chapter_num': section_num,
                     'content_hash': '',
@@ -10848,10 +10894,14 @@ class RetranslationMixin:
                     'pdf_end_page': end_page,
                     'pdf_outline_seed': True,
                 }
+                if section_id:
+                    seeded_entry['pdf_section_id'] = section_id
+                    seeded_entry['pdf_progress_key'] = progress_key
+                chapters[progress_key] = seeded_entry
                 changed = True
                 continue
 
-            for _key, entry in matching:
+            for progress_key, entry in matching:
                 _set(entry, 'pdf_toc_section', True)
                 _set(entry, 'pdf_toc_title', title)
                 if not str(entry.get('title') or '').strip():
@@ -10859,6 +10909,33 @@ class RetranslationMixin:
                 _set(entry, 'pdf_toc_level', level)
                 _set(entry, 'pdf_start_page', start_page)
                 _set(entry, 'pdf_end_page', end_page)
+                if section_id:
+                    had_stable_metadata = bool(
+                        entry.get('pdf_section_id')
+                        and entry.get('pdf_progress_key')
+                    )
+                    _set(entry, 'pdf_section_id', section_id)
+                    stable_progress_key = f'pdf:{section_id}'
+                    existing_progress_key = str(
+                        entry.get('pdf_progress_key') or progress_key or ''
+                    )
+                    desired_progress_key = (
+                        existing_progress_key
+                        if existing_progress_key.startswith(
+                            f'{stable_progress_key}:'
+                        )
+                        else stable_progress_key
+                    )
+                    _set(entry, 'pdf_progress_key', desired_progress_key)
+                    # Existing completed rows from the old cache schema have
+                    # hashes from before PDF image-reference canonicalization.
+                    # Let runtime reconciliation migrate that hash once rather
+                    # than treating all bookmarks as changed source content.
+                    if (
+                        not had_stable_metadata
+                        and not entry.get('pdf_outline_seed')
+                    ):
+                        _set(entry, 'pdf_hash_migration_pending', True)
                 if entry.get('pdf_outline_seed'):
                     output_value = entry.get('output_file') or expected_output
                     output_path = (
