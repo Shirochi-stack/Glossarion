@@ -7200,6 +7200,8 @@ class EpubLibraryDialog(QDialog):
         # still present in the scan result.
         self._selected_paths_ip: set[str] = set()
         self._selected_paths_comp: set[str] = set()
+        self._library_pages: dict[str, int] = {"ip": 0, "comp": 0}
+        self._library_pagers: dict[str, dict] = {}
         self._cover_threads: list[_CoverLoader] = []
         # Cover-path cache: maps ``book_path \u2192 resolved_cover_path``.
         # Populated by :meth:`_on_cover_loaded` the first time a
@@ -7677,6 +7679,128 @@ class EpubLibraryDialog(QDialog):
         btn.clicked.connect(lambda: self._set_card_size(size_key))
         return btn
 
+    def _make_library_pager(self, tab_key: str) -> QWidget:
+        """Create Book-Details-style pagination controls for one card grid."""
+        pager = QWidget()
+        pager.setObjectName("library-pager")
+        layout = QHBoxLayout(pager)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(10)
+        layout.addStretch()
+
+        def _button(text: str, role: str, tooltip: str, action: str):
+            button = QPushButton(text)
+            button.setObjectName(f"library-page-{role}")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setToolTip(tooltip)
+            button.clicked.connect(
+                lambda _checked=False, key=tab_key, act=action:
+                    self._on_library_page_action(key, act))
+            layout.addWidget(button)
+            return button
+
+        first = _button("\u00ab", "first", "First library page", "first")
+        previous = _button(
+            "\u2039", "prev", "Previous library page", "previous")
+        page_label = QLabel("Page 1 / 1 \u00b7 0 of 0")
+        page_label.setObjectName("library-page-label")
+        layout.addWidget(page_label)
+        next_button = _button(
+            "\u203a", "next", "Next library page", "next")
+        last = _button("\u00bb", "last", "Last library page", "last")
+
+        page_size = _NoWheelComboBox()
+        page_size.setObjectName("library-page-size")
+        page_size.setToolTip("Library cards per page")
+        for label, value in (
+            ("20 / page", 20),
+            ("50 / page", 50),
+            ("100 / page", 100),
+            ("250 / page", 250),
+            ("500 / page", 500),
+            ("All", "all"),
+        ):
+            page_size.addItem(label, value)
+        stored_page_size = self._config.get("epub_library_page_size", 20)
+        if str(stored_page_size).strip().lower() == "all":
+            page_size_index = page_size.findData("all")
+        else:
+            try:
+                page_size_index = page_size.findData(int(stored_page_size))
+            except (TypeError, ValueError):
+                page_size_index = page_size.findData(20)
+        page_size.setCurrentIndex(
+            page_size_index if page_size_index >= 0 else 0)
+        page_size.currentIndexChanged.connect(
+            lambda _index, key=tab_key:
+                self._on_library_page_size_changed(key))
+        layout.addWidget(page_size)
+        layout.addStretch()
+
+        icon_path = _find_halgakos_icon()
+        icon_rule = ""
+        if icon_path:
+            icon_rule = (
+                'QComboBox#library-page-size::down-arrow {'
+                f' image: url("{icon_path.replace(chr(92), "/")}");'
+                ' width: 16px; height: 16px; }'
+            )
+        pager.setStyleSheet("""
+            QLabel#library-page-label {
+                color: #9aa2b8; font-size: 9pt;
+            }
+            QPushButton#library-page-first, QPushButton#library-page-prev,
+            QPushButton#library-page-next, QPushButton#library-page-last {
+                background: #202036; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 0px 10px; font-size: 11pt; font-weight: bold;
+                min-width: 28px; min-height: 34px; max-height: 34px;
+            }
+            QPushButton#library-page-first:hover,
+            QPushButton#library-page-prev:hover,
+            QPushButton#library-page-next:hover,
+            QPushButton#library-page-last:hover {
+                border-color: #6c63ff; background: #282848;
+            }
+            QPushButton#library-page-first:disabled,
+            QPushButton#library-page-prev:disabled,
+            QPushButton#library-page-next:disabled,
+            QPushButton#library-page-last:disabled {
+                color: #555a70; background: #171724; border-color: #28283d;
+            }
+            QComboBox#library-page-size {
+                background: #1e1e2e; color: #e0e0e0;
+                border: 1px solid #3a3a5e; border-radius: 6px;
+                padding: 5px 30px 5px 9px; font-size: 9pt;
+                min-height: 24px; min-width: 112px;
+            }
+            QComboBox#library-page-size:hover {
+                border-color: #6c63ff; background: #24243a;
+            }
+            QComboBox#library-page-size::drop-down {
+                subcontrol-origin: padding; subcontrol-position: top right;
+                width: 28px; border-left: 1px solid #3a3a5e;
+                border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+                background: #202036;
+            }
+            QComboBox#library-page-size QAbstractItemView {
+                background: #1e1e2e; color: #e0e0e0;
+                border: 1px solid #3a3a5e;
+                selection-background-color: #2a2d5a;
+                selection-color: #ffffff;
+            }
+        """ + icon_rule)
+        self._library_pagers[tab_key] = {
+            "widget": pager,
+            "first": first,
+            "previous": previous,
+            "label": page_label,
+            "next": next_button,
+            "last": last,
+            "page_size": page_size,
+        }
+        return pager
+
     def _setup_ui(self):
         from PySide6.QtWidgets import QTabWidget
         root = QVBoxLayout(self)
@@ -7993,6 +8117,8 @@ class EpubLibraryDialog(QDialog):
         self._ip_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._ip_scroll.setWidget(self._ip_grid_container)
         ip_layout.addWidget(self._ip_scroll, 1)
+        self._ip_pager = self._make_library_pager("ip")
+        ip_layout.addWidget(self._ip_pager)
         # QScrollArea eats wheel events for its own scrolling, so the
         # dialog-level :meth:`wheelEvent` never fires when the cursor is
         # over the grid. Installing this event filter on the scroll
@@ -8068,6 +8194,8 @@ class EpubLibraryDialog(QDialog):
         self._comp_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self._comp_scroll.setWidget(self._comp_grid_container)
         comp_layout.addWidget(self._comp_scroll, 1)
+        self._comp_pager = self._make_library_pager("comp")
+        comp_layout.addWidget(self._comp_pager)
         # Same Ctrl+Wheel interception as the In Progress scroll area.
         self._comp_scroll.installEventFilter(self)
         self._comp_scroll.viewport().installEventFilter(self)
@@ -8437,11 +8565,138 @@ class EpubLibraryDialog(QDialog):
                 pass
         self._refresh_view()
 
-    def _populate_tab(self, tab_key: str) -> None:
-        if tab_key == "comp":
-            self._populate_completed(self._filtered(self._completed_books))
+    def _books_for_tab_key(self, tab_key: str) -> list[dict]:
+        return self._completed_books if tab_key == "comp" else self._in_progress_books
+
+    def _library_page_size(self, tab_key: str) -> int:
+        pager = self._library_pagers.get(tab_key, {})
+        combo = pager.get("page_size")
+        value = combo.currentData() if combo is not None else 20
+        if value == "all":
+            return 0
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 20
+
+    def _library_page_bounds(
+        self, tab_key: str, total: int
+    ) -> tuple[int, int, int]:
+        total = max(0, int(total or 0))
+        page_size = self._library_page_size(tab_key)
+        if total <= 0:
+            self._library_pages[tab_key] = 0
+            return 0, 0, 1
+        if page_size <= 0:
+            self._library_pages[tab_key] = 0
+            return 0, total, 1
+        page_count = max(1, (total + page_size - 1) // page_size)
+        page = max(0, min(
+            int(self._library_pages.get(tab_key, 0) or 0),
+            page_count - 1,
+        ))
+        self._library_pages[tab_key] = page
+        start = page * page_size
+        return start, min(total, start + page_size), page_count
+
+    def _update_library_pagination_controls(
+        self, tab_key: str, filtered_count: int
+    ) -> tuple[int, int]:
+        pager = self._library_pagers.get(tab_key, {})
+        start, end, page_count = self._library_page_bounds(
+            tab_key, filtered_count)
+        page = int(self._library_pages.get(tab_key, 0) or 0)
+        if filtered_count <= 0:
+            detail = "0 of 0"
+        elif self._library_page_size(tab_key) <= 0:
+            detail = f"All {filtered_count}"
         else:
-            self._populate_in_progress(self._filtered(self._in_progress_books))
+            detail = f"{start + 1}-{end} of {filtered_count}"
+        label = pager.get("label")
+        if label is not None:
+            label.setText(f"Page {page + 1} / {page_count} \u00b7 {detail}")
+        can_go_back = filtered_count > 0 and page > 0
+        can_go_forward = filtered_count > 0 and page < page_count - 1
+        for name in ("first", "previous"):
+            button = pager.get(name)
+            if button is not None:
+                button.setEnabled(can_go_back)
+        for name in ("next", "last"):
+            button = pager.get(name)
+            if button is not None:
+                button.setEnabled(can_go_forward)
+        widget = pager.get("widget")
+        if widget is not None:
+            widget.setVisible(filtered_count > 0)
+        return start, end
+
+    def _reset_library_scroll_position(self, tab_key: str) -> None:
+        animation = self._library_scroll_animations.get(tab_key)
+        if animation is not None:
+            animation.stop()
+        area = (
+            getattr(self, "_comp_scroll", None)
+            if tab_key == "comp" else getattr(self, "_ip_scroll", None)
+        )
+        if area is not None:
+            area.verticalScrollBar().setValue(0)
+        self._library_scroll_targets[tab_key] = 0
+
+    def _reset_library_pages(self) -> None:
+        self._library_pages["ip"] = 0
+        self._library_pages["comp"] = 0
+
+    def _on_library_page_action(self, tab_key: str, action: str) -> None:
+        filtered_count = len(self._filtered(self._books_for_tab_key(tab_key)))
+        _, _, page_count = self._library_page_bounds(tab_key, filtered_count)
+        current = int(self._library_pages.get(tab_key, 0) or 0)
+        if action == "first":
+            target = 0
+        elif action == "previous":
+            target = max(0, current - 1)
+        elif action == "next":
+            target = min(page_count - 1, current + 1)
+        else:
+            target = max(0, page_count - 1)
+        if target == current:
+            return
+        self._library_pages[tab_key] = target
+        self._reset_library_scroll_position(tab_key)
+        self._populate_tab(tab_key)
+
+    def _on_library_page_size_changed(self, tab_key: str) -> None:
+        pager = self._library_pagers.get(tab_key, {})
+        combo = pager.get("page_size")
+        if combo is None:
+            return
+        value = combo.currentData()
+        self._config["epub_library_page_size"] = value
+        # Both tabs intentionally share one Library page-size preference.
+        for other_key, other_pager in self._library_pagers.items():
+            other_combo = other_pager.get("page_size")
+            if other_key == tab_key or other_combo is None:
+                continue
+            index = other_combo.findData(value)
+            if index >= 0 and other_combo.currentIndex() != index:
+                other_combo.blockSignals(True)
+                other_combo.setCurrentIndex(index)
+                other_combo.blockSignals(False)
+        self._reset_library_pages()
+        self._reset_library_scroll_position("ip")
+        self._reset_library_scroll_position("comp")
+        self._refresh_view()
+
+    def _populate_tab(self, tab_key: str) -> None:
+        filtered = self._filtered(self._books_for_tab_key(tab_key))
+        start, end = self._update_library_pagination_controls(
+            tab_key, len(filtered))
+        page_books = filtered[start:end]
+        if tab_key == "comp":
+            self._populate_completed(
+                page_books, filtered_count=len(filtered))
+        else:
+            self._populate_in_progress(
+                page_books, filtered_count=len(filtered))
             tab_key = "ip"
         self._dirty_card_tabs.discard(tab_key)
 
@@ -8536,6 +8791,9 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = mode
         for k, btn in self._sort_btns.items():
             btn.setChecked(k == mode)
+        self._reset_library_pages()
+        self._reset_library_scroll_position("ip")
+        self._reset_library_scroll_position("comp")
         self._refresh_view()
 
     def _set_format_filter(self, fmt_key: str):
@@ -8549,6 +8807,9 @@ class EpubLibraryDialog(QDialog):
         if not fmt_key or fmt_key == self._format_filter:
             return
         self._format_filter = fmt_key
+        self._reset_library_pages()
+        self._reset_library_scroll_position("ip")
+        self._reset_library_scroll_position("comp")
         try:
             self._config["epub_library_format_filter"] = fmt_key
         except Exception:
@@ -10904,6 +11165,27 @@ class EpubLibraryDialog(QDialog):
         self._cover_active_loaders.clear()
         self._cover_active_paths.clear()
 
+    def _prune_pending_cover_work(self, allowed_paths: set[str]) -> None:
+        """Drop queued cover work for cards no longer on either visible page."""
+        allowed_paths = {path for path in allowed_paths if path}
+        self._cover_queue = deque(
+            job for job in self._cover_queue
+            if job.get("path", "") in allowed_paths
+        )
+        self._cover_queued_paths = {
+            job.get("path", "") for job in self._cover_queue
+            if job.get("path", "")
+        }
+        self._cover_apply_queue = deque(
+            item for item in self._cover_apply_queue
+            if item[0] in allowed_paths
+        )
+        self._cover_apply_pending_paths = {
+            item[0] for item in self._cover_apply_queue
+        }
+        if not self._cover_apply_queue and self._cover_apply_timer.isActive():
+            self._cover_apply_timer.stop()
+
     def _add_streamed_card(self, state: dict, idx: int, book: dict) -> None:
         path = book.get("path", "") or ""
         card_cache = state["card_cache"]
@@ -11070,6 +11352,8 @@ class EpubLibraryDialog(QDialog):
         full_books: list[dict] | None = None,
         scroll_area: QScrollArea | None = None,
         stream_key: str = "grid",
+        displayed_count: int | None = None,
+        retain_only_visible_cache: bool = False,
     ):
         """Shared render pipeline used by both tabs.
 
@@ -11124,6 +11408,16 @@ class EpubLibraryDialog(QDialog):
         full_paths = (
             {b.get("path", "") for b in full_books}
             if full_books is not None else visible_paths)
+        cache_keep_paths = (
+            visible_paths if retain_only_visible_cache else full_paths)
+        if retain_only_visible_cache:
+            other_visible_paths = {
+                card.book.get("path", "")
+                for card in self._cards_for_tab_key(
+                    self._other_card_tab_key(stream_key))
+            }
+            self._prune_pending_cover_work(
+                visible_paths | other_visible_paths)
         # Prune the selection set of paths that no longer exist in
         # the scan result (NOT the filtered view) so switching
         # Format chips doesn't silently wipe a multi-selection that
@@ -11146,7 +11440,7 @@ class EpubLibraryDialog(QDialog):
             except Exception:
                 pass
 
-        for stale_path in [p for p in card_cache if p not in full_paths]:
+        for stale_path in [p for p in card_cache if p not in cache_keep_paths]:
             try:
                 cached_card = card_cache[stale_path][0]
                 cached_card.setParent(None)
@@ -11180,8 +11474,11 @@ class EpubLibraryDialog(QDialog):
             return
 
         empty_label.hide()
+        total_for_label = (
+            len(books) if displayed_count is None else int(displayed_count))
         count_label.setText(
-            f"{len(books)} {count_word}{'s' if len(books) != 1 else ''}"
+            f"{total_for_label} {count_word}"
+            f"{'s' if total_for_label != 1 else ''}"
         )
 
         preset = _SIZE_PRESETS[self._card_size]
@@ -11249,7 +11546,9 @@ class EpubLibraryDialog(QDialog):
         if loading_visible:
             self._pump_loading_events()
 
-    def _populate_in_progress(self, books: list[dict]):
+    def _populate_in_progress(
+        self, books: list[dict], filtered_count: int | None = None
+    ):
         if not hasattr(self, "_ip_card_cache"):
             self._ip_card_cache: dict = {}
         self._populate_grid_common(
@@ -11265,9 +11564,13 @@ class EpubLibraryDialog(QDialog):
             # detach + re-add pass instead of a full rebuild.
             full_books=self._in_progress_books,
             stream_key="ip",
+            displayed_count=filtered_count,
+            retain_only_visible_cache=True,
         )
 
-    def _populate_completed(self, books: list[dict]):
+    def _populate_completed(
+        self, books: list[dict], filtered_count: int | None = None
+    ):
         if not hasattr(self, "_comp_card_cache"):
             self._comp_card_cache: dict = {}
         self._populate_grid_common(
@@ -11278,6 +11581,8 @@ class EpubLibraryDialog(QDialog):
             full_books=self._completed_books,
             scroll_area=self._comp_scroll,
             stream_key="comp",
+            displayed_count=filtered_count,
+            retain_only_visible_cache=True,
         )
 
     def _active_selection(self) -> tuple[set[str], list[_BookCard]]:
@@ -11390,6 +11695,9 @@ class EpubLibraryDialog(QDialog):
         self._schedule_cover_pump(self._COVER_PUMP_BUSY_MS)
 
     def _apply_filter(self, text):
+        self._reset_library_pages()
+        self._reset_library_scroll_position("ip")
+        self._reset_library_scroll_position("comp")
         self._refresh_view()
 
     def _on_card_clicked(self, book):
