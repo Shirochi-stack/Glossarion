@@ -3244,6 +3244,24 @@ class FileUtilities:
         # Respect toggle: retain source extension and remove 'response_' prefix
         retain = should_retain_source_extension()
 
+        # TOC-grouped PDF sections use their own namespace.  This prevents an
+        # old page translation such as response_001.html from being mistaken
+        # for the new outline section that also happens to be numbered 1.
+        if chapter.get("pdf_toc_section"):
+            if actual_num is None:
+                actual_num = chapter.get("actual_chapter_num", chapter.get("num", 0))
+            if isinstance(actual_num, float):
+                major = int(actual_num)
+                minor = int(round((actual_num - major) * 10))
+                section_stem = f"pdf_section_{major}_{minor}"
+            else:
+                section_stem = f"pdf_section_{actual_num}"
+            return (
+                f"{section_stem}.html"
+                if retain
+                else f"response_{section_stem}.html"
+            )
+
         if chapter.get("subtitle_batch") and chapter.get("original_basename"):
             subtitle_stem = os.path.splitext(
                 os.path.basename(str(chapter["original_basename"]))
@@ -5579,6 +5597,82 @@ class ProgressManager:
         if cleaned_count > 0:
             print(f"🔄 Removed {cleaned_count} missing file entries")
     
+    def reconcile_pdf_chapter_entries(self, chapters):
+        """Remove progress rows that no longer exist in the current PDF layout.
+
+        Switching between legacy page entries and outline sections changes the
+        extraction inventory.  Without reconciliation, old page rows (for
+        example 61..730) would remain visible after a 60-section TOC extraction.
+        """
+        expected_outputs = set()
+        expected_numbers = set()
+        expected_hashes_by_output = {}
+        expected_hashes_by_number = {}
+        for chapter in chapters or []:
+            try:
+                actual_num = (
+                    chapter.get("num")
+                    if chapter.get("is_chunk")
+                    else FileUtilities.extract_actual_chapter_number(chapter)
+                )
+                output_file = FileUtilities.create_chapter_filename(chapter, actual_num)
+            except Exception:
+                actual_num = chapter.get("num") if isinstance(chapter, dict) else None
+                output_file = chapter.get("filename", "") if isinstance(chapter, dict) else ""
+            if actual_num is not None:
+                number_key = str(actual_num)
+                expected_numbers.add(number_key)
+                expected_hashes_by_number.setdefault(number_key, set()).add(
+                    str(chapter.get("content_hash") or "")
+                )
+            normalized_output = _normalize_output_filename_stem(output_file)
+            if normalized_output:
+                expected_outputs.add(normalized_output)
+                expected_hashes_by_output.setdefault(normalized_output, set()).add(
+                    str(chapter.get("content_hash") or "")
+                )
+
+        removed = 0
+        removed_number_keys = set()
+        progress_chapters = self.prog.setdefault("chapters", {})
+        for progress_key, entry in list(progress_chapters.items()):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("special_type") or entry.get("translation_artifact_progress_key"):
+                continue
+            normalized_output = _normalize_output_filename_stem(entry.get("output_file"))
+            actual_num = entry.get("actual_num", entry.get("chapter_num"))
+            number_key = str(actual_num) if actual_num is not None else ""
+            number_matches = bool(number_key and number_key in expected_numbers)
+            output_matches = bool(normalized_output and normalized_output in expected_outputs)
+            expected_hashes = set()
+            if number_matches:
+                expected_hashes.update(expected_hashes_by_number.get(number_key, set()))
+            if output_matches:
+                expected_hashes.update(expected_hashes_by_output.get(normalized_output, set()))
+            expected_hashes.discard("")
+            stored_hash = str(entry.get("content_hash") or "")
+            hash_matches = not expected_hashes or stored_hash in expected_hashes
+            if (not number_matches and not output_matches) or not hash_matches:
+                progress_chapters.pop(progress_key, None)
+                removed += 1
+                if number_key:
+                    removed_number_keys.add(number_key)
+
+        if removed:
+            valid_chunk_keys = set(expected_numbers)
+            for chunk_key in list(self.prog.get("chapter_chunks", {})):
+                if (
+                    str(chunk_key) not in valid_chunk_keys
+                    or str(chunk_key) in removed_number_keys
+                ):
+                    self.prog["chapter_chunks"].pop(chunk_key, None)
+            print(
+                f"Removed {removed} stale PDF progress entr"
+                f"{'y' if removed == 1 else 'ies'} after extraction layout changed"
+            )
+        return removed
+
     def migrate_to_content_hash(self, chapters):
         """Change keys to match actual_num values for proper mapping and sort by chapter number"""
         
@@ -21450,6 +21544,7 @@ def main(log_callback=None, stop_callback=None):
                     "pdf_path": input_path,
                     "output_dir": out,
                     "render_mode": os.getenv("PDF_RENDER_MODE", "xhtml").lower(),
+                    "use_toc_sections": os.getenv("PDF_USE_TOC_SECTIONS", "1") == "1",
                     "extract_images": os.getenv("PDF_EXTRACT_IMAGES", "1") == "1",
                     "generate_css": os.getenv("PDF_GENERATE_CSS", "1") == "1",
                     "html2text": os.getenv("USE_HTML2TEXT", "0") == "1",
@@ -21580,6 +21675,13 @@ def main(log_callback=None, stop_callback=None):
                     # Convert results back to the format txt_processor expects
                     _content = _ext_data.get("content", [])
                     _is_page_list = _ext_data.get("is_page_list", False)
+                    _separation_mode = _ext_data.get("separation_mode", "pages")
+                    _section_info = _ext_data.get("section_info", [])
+                    _section_by_num = {
+                        int(section.get("num")): section
+                        for section in _section_info
+                        if isinstance(section, dict) and section.get("num") is not None
+                    }
                     
                     # Build chapters from extracted content
                     file_base = os.path.splitext(os.path.basename(input_path))[0]
@@ -21592,14 +21694,21 @@ def main(log_callback=None, stop_callback=None):
                         for item in _content:
                             page_num = item[0] if isinstance(item, list) else item
                             page_html = item[1] if isinstance(item, list) else ""
+                            section = _section_by_num.get(int(page_num), {}) if _separation_mode == "toc" else {}
+                            is_toc_section = bool(section)
                             raw_chapters.append({
                                 'num': page_num,
-                                'title': f"{file_base} - Page {page_num}",
+                                'title': section.get('title') or f"{file_base} - Page {page_num}",
                                 'content': page_html,
                                 'is_html': True,
                                 'images_info': {},
                                 'has_images': True if render_mode == 'image' else False,
-                                'image_count': 1 if render_mode == 'image' else 0
+                                'image_count': 1 if render_mode == 'image' else 0,
+                                'pdf_toc_section': is_toc_section,
+                                'pdf_toc_level': section.get('level'),
+                                'pdf_start_page': section.get('start_page'),
+                                'pdf_end_page': section.get('end_page'),
+                                'allow_token_splitting': is_toc_section,
                             })
                         # Process chapters for splitting (reuse txt_processor's logic)
                         chapters = txt_processor._process_chapters_for_splitting(raw_chapters)
@@ -21994,6 +22103,8 @@ def main(log_callback=None, stop_callback=None):
         print("="*50 + "\n")
     
     if not metadata_only:
+        if is_pdf_file:
+            progress_manager.reconcile_pdf_chapter_entries(chapters)
         progress_manager.migrate_to_content_hash(chapters)
         progress_manager.save()
 
@@ -24719,7 +24830,7 @@ def main(log_callback=None, stop_callback=None):
         zero_phase = True
         for idx, c in enumerate(chapters):
             # PDF/TEXT CHUNK FIX: Skip extract_actual_chapter_number for chunks - preserve decimal from c['num']
-            if is_text_file and c.get('is_chunk', False):
+            if (is_text_file or is_pdf_file) and c.get('is_chunk', False):
                 # For text/PDF chunks, use the decimal number directly (1.0, 1.1, etc.)
                 c['actual_chapter_num'] = c['num']
                 c['raw_chapter_num'] = c['num']
@@ -24762,7 +24873,7 @@ def main(log_callback=None, stop_callback=None):
             # Check if this is a pre-split text chunk with decimal number
             # IMPORTANT: Check is_chunk FIRST, then use c['num'] regardless of float value
             # This handles cases like 1.0 where float equals integer but should still be preserved
-            if is_text_file and c.get('is_chunk', False):
+            if (is_text_file or is_pdf_file) and c.get('is_chunk', False):
                 actual_num = c['num']  # Preserve the decimal for text/PDF chunks
                 c['actual_chapter_num'] = actual_num  # UPDATE THE CHAPTER DICT!
             else:
@@ -25535,7 +25646,7 @@ def main(log_callback=None, stop_callback=None):
         
         for idx, c in enumerate(chapters):
             # Get the chapter's actual number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+            if ((is_text_file or is_pdf_file) and c.get('is_chunk', False) and isinstance(c['num'], float)):
                 actual_num = c['num']
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])
@@ -25572,7 +25683,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"\n⚠️ {qa_failed_count} chapters failed due to content policy violations:")
             qa_failed_chapters = []
             for idx, c in enumerate(chapters):
-                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                if ((is_text_file or is_pdf_file) and c.get('is_chunk', False) and isinstance(c['num'], float)):
                     actual_num = c['num']
                 else:
                     actual_num = c.get('actual_chapter_num', c['num'])
@@ -25721,7 +25832,7 @@ def main(log_callback=None, stop_callback=None):
             # Collect chapters that need translation
             chapters_needing_translation = []
             for idx, c in enumerate(chapters):
-                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                if ((is_text_file or is_pdf_file) and c.get('is_chunk', False) and isinstance(c['num'], float)):
                     actual_num = c['num']
                 else:
                     actual_num = c.get('actual_chapter_num', c['num'])
@@ -25860,8 +25971,8 @@ def main(log_callback=None, stop_callback=None):
                 continue
             
             # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                actual_num = c['num']  # Preserve the decimal for text files only
+            if ((is_text_file or is_pdf_file) and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                actual_num = c['num']  # Preserve the decimal for text/PDF chunks
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -27335,10 +27446,10 @@ def main(log_callback=None, stop_callback=None):
 
             chunk_context_manager.clear()
 
-            # For text file chunks, ensure we pass the decimal number
-            if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
+            # For text/PDF chunks, ensure we pass the decimal number
+            if (is_text_file or is_pdf_file) and c.get('is_chunk', False) and isinstance(c.get('num'), float):
                 fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
-                print(f"[DEBUG] Text file chunk - using decimal num {c['num']} -> filename: {fname}")
+                print(f"[DEBUG] Text/PDF chunk - using decimal num {c['num']} -> filename: {fname}")
             else:
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                 if is_text_file:

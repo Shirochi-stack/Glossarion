@@ -119,5 +119,6 @@ tests/**
 !tests/test_epub_library_layout.py
 !tests/test_metadata_subjects.py
 !tests/test_epub_library_search.py
+!tests/test_pdf_toc_extraction.py
 junktests/
 warp.md

@@ -13,6 +13,7 @@ import base64
 import subprocess
 import shutil
 import glob
+import html as html_module
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
@@ -1023,6 +1024,261 @@ def _extract_toc_from_outline(doc) -> str:
     except Exception as e:
         print(f"⚠️ Could not extract TOC from outline: {e}")
         return ""
+
+
+def build_pdf_toc_section_plan(toc_entries, total_pages: int) -> List[Dict]:
+    """Build non-overlapping PDF section ranges from outline/bookmark entries.
+
+    PyMuPDF reports outline destinations as 1-based page numbers.  A PDF may
+    contain parent and child bookmarks that point to the same page; those
+    cannot form separate non-empty ranges, so the most specific (deepest)
+    bookmark is used for that page.
+    """
+    try:
+        total_pages = int(total_pages)
+    except (TypeError, ValueError):
+        return []
+    if total_pages <= 0 or not toc_entries:
+        return []
+
+    starts_by_page = {}
+    for toc_index, entry in enumerate(toc_entries):
+        if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+            continue
+        try:
+            level = max(1, int(entry[0]))
+            page = int(entry[2])
+        except (TypeError, ValueError):
+            continue
+        title = " ".join(str(entry[1] or "").split()).strip()
+        if not title or page < 1 or page > total_pages:
+            continue
+
+        candidate = {
+            "title": title,
+            "level": level,
+            "start_page": page,
+            "toc_index": toc_index,
+            "source": "outline",
+        }
+        existing = starts_by_page.get(page)
+        if existing is None or level > existing["level"]:
+            starts_by_page[page] = candidate
+
+    if not starts_by_page:
+        return []
+
+    ordered = [starts_by_page[page] for page in sorted(starts_by_page)]
+    plan = []
+    if ordered[0]["start_page"] > 1:
+        plan.append({
+            "title": "Front Matter",
+            "level": 0,
+            "start_page": 1,
+            "end_page": ordered[0]["start_page"] - 1,
+            "toc_index": -1,
+            "source": "front_matter",
+        })
+
+    for index, section in enumerate(ordered):
+        end_page = (
+            ordered[index + 1]["start_page"] - 1
+            if index + 1 < len(ordered)
+            else total_pages
+        )
+        if end_page < section["start_page"]:
+            continue
+        planned = dict(section)
+        planned["end_page"] = end_page
+        plan.append(planned)
+
+    for section_num, section in enumerate(plan, start=1):
+        section["num"] = section_num
+        section["page_count"] = section["end_page"] - section["start_page"] + 1
+    return plan
+
+
+def extract_pdf_toc_section_plan(pdf_path: str, total_pages: Optional[int] = None) -> List[Dict]:
+    """Read a PDF outline and return a normalized section plan."""
+    try:
+        import fitz
+
+        with fitz.open(pdf_path) as doc:
+            page_count = len(doc) if total_pages is None else int(total_pages)
+            toc_entries = doc.get_toc(simple=True) or []
+        return build_pdf_toc_section_plan(toc_entries, page_count)
+    except Exception as exc:
+        print(f"Warning: could not read PDF outline for section grouping: {exc}")
+        return []
+
+
+def _combine_pdf_section_html(page_items, section: Dict) -> str:
+    """Combine extracted page documents into one translatable section document."""
+    title = str(section.get("title") or f"Section {section.get('num', 1)}")
+    try:
+        from bs4 import BeautifulSoup
+
+        combined = BeautifulSoup(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body></body></html>",
+            "html.parser",
+        )
+        meta = combined.new_tag("meta")
+        meta["name"] = "glossarion-pdf-section"
+        meta["content"] = title
+        combined.head.append(meta)
+
+        marker_style = combined.new_tag("style")
+        marker_style.string = (
+            ".pdf-toc-source-page{display:block;}"
+            ".pdf-toc-page-break{break-before:page;page-break-before:always;"
+            "height:0;margin:0;padding:0;}"
+        )
+        combined.head.append(marker_style)
+
+        seen_head_nodes = set()
+        appended = 0
+        for page_num, raw_html in page_items:
+            page_soup = BeautifulSoup(str(raw_html or ""), "html.parser")
+            if page_soup.head:
+                for node in page_soup.head.find_all(["style", "link"]):
+                    rendered = str(node)
+                    if rendered in seen_head_nodes:
+                        continue
+                    seen_head_nodes.add(rendered)
+                    copied = BeautifulSoup(rendered, "html.parser")
+                    if copied.contents:
+                        combined.head.append(copied.contents[0])
+
+            source = page_soup.body if page_soup.body else page_soup
+            fragment_html = source.decode_contents() if hasattr(source, "decode_contents") else str(source)
+            fragment = BeautifulSoup(fragment_html, "html.parser")
+
+            if appended:
+                page_break = combined.new_tag("div")
+                page_break["class"] = ["page-break", "pdf-toc-page-break"]
+                page_break["data-next-pdf-page"] = str(page_num)
+                combined.body.append(page_break)
+
+            wrapper = combined.new_tag("div")
+            wrapper["class"] = ["pdf-toc-source-page"]
+            wrapper["data-pdf-page"] = str(page_num)
+            for child in list(fragment.contents):
+                wrapper.append(child)
+            combined.body.append(wrapper)
+            appended += 1
+
+        return str(combined)
+    except Exception:
+        escaped_title = html_module.escape(title, quote=True)
+        pieces = [
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\">",
+            f'<meta name="glossarion-pdf-section" content="{escaped_title}">',
+            "</head><body>",
+        ]
+        for index, (page_num, raw_html) in enumerate(page_items):
+            if index:
+                pieces.append('<div class="page-break pdf-toc-page-break"></div>')
+            pieces.append(f'<div class="pdf-toc-source-page" data-pdf-page="{page_num}">')
+            pieces.append(str(raw_html or ""))
+            pieces.append("</div>")
+        pieces.append("</body></html>")
+        return "\n".join(pieces)
+
+
+def group_pdf_pages_by_toc(
+    pdf_path: str,
+    page_list,
+    *,
+    toc_entries=None,
+    total_pages: Optional[int] = None,
+) -> List[Dict]:
+    """Group ``(page_number, html)`` items into outline-defined sections.
+
+    An empty list means the PDF has no usable outline and callers should keep
+    the legacy page-by-page entries.
+    """
+    normalized_pages = []
+    for item in page_list or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        try:
+            page_num = int(item[0])
+        except (TypeError, ValueError):
+            continue
+        normalized_pages.append((page_num, item[1]))
+    if not normalized_pages:
+        return []
+
+    if toc_entries is not None:
+        if total_pages is None:
+            total_pages = max(page_num for page_num, _html in normalized_pages)
+        plan = build_pdf_toc_section_plan(toc_entries, total_pages)
+    else:
+        plan = extract_pdf_toc_section_plan(pdf_path, total_pages)
+    if not plan:
+        return []
+
+    pages_by_number = {page_num: html for page_num, html in normalized_pages}
+    grouped = []
+    for section in plan:
+        page_items = [
+            (page_num, pages_by_number[page_num])
+            for page_num in range(section["start_page"], section["end_page"] + 1)
+            if page_num in pages_by_number
+        ]
+        if not page_items:
+            continue
+        grouped_section = dict(section)
+        grouped_section["html"] = _combine_pdf_section_html(page_items, section)
+        grouped.append(grouped_section)
+
+    for section_num, section in enumerate(grouped, start=1):
+        section["num"] = section_num
+    return grouped
+
+
+def group_pdf_page_texts_by_toc(
+    pdf_path: str,
+    page_texts,
+    *,
+    toc_entries=None,
+    total_pages: Optional[int] = None,
+) -> List[Dict]:
+    """Group plain page text for the glossary path using the same outline plan."""
+    normalized = []
+    for item in page_texts or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            try:
+                normalized.append((int(item[0]), str(item[1] or "")))
+            except (TypeError, ValueError):
+                continue
+    if not normalized:
+        return []
+    if toc_entries is not None:
+        if total_pages is None:
+            total_pages = max(page_num for page_num, _text in normalized)
+        plan = build_pdf_toc_section_plan(toc_entries, total_pages)
+    else:
+        plan = extract_pdf_toc_section_plan(pdf_path, total_pages)
+    if not plan:
+        return []
+
+    text_by_page = {page_num: text for page_num, text in normalized}
+    grouped = []
+    for section in plan:
+        texts = [
+            text_by_page[page_num].strip()
+            for page_num in range(section["start_page"], section["end_page"] + 1)
+            if text_by_page.get(page_num, "").strip()
+        ]
+        if not texts:
+            continue
+        grouped_section = dict(section)
+        grouped_section["text"] = "\n\n".join(texts)
+        grouped.append(grouped_section)
+    for section_num, section in enumerate(grouped, start=1):
+        section["num"] = section_num
+    return grouped
 
 
 def _detect_block_alignment(block: Dict, page_width: float) -> str:

@@ -13860,6 +13860,7 @@ Text to analyze:
         # PDF settings
         self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
         self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
+        self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)
         self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
         
          # Enhanced filtering level
@@ -27334,6 +27335,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         toolbar_gap_px = 2
         toolbar_icon_box = 32
+        toolbar_icon_size = 26
         toolbar_button_count = 0
 
         def _add_toolbar_button(widget, stretch=0):
@@ -27401,9 +27403,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 dpr = self.devicePixelRatioF()
             except Exception:
                 dpr = 1.0
-            logical_px = 20
+            logical_px = toolbar_icon_size
             dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
+            # QSize is device-independent here; QIcon applies DPR itself.
+            # Passing dev_px makes the idle icon scale twice on HiDPI screens.
+            pm = icon.pixmap(QSize(logical_px, logical_px), dpr)
             if pm.isNull():
                 raw = QPixmap(icon_path)
                 img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -27663,9 +27667,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 20
+                    logical_px = toolbar_icon_size
                     dev_px = int(logical_px * max(1.0, dpr))
-                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    pm = icon.pixmap(QSize(logical_px, logical_px), dpr)
                     if pm.isNull():
                         raw = QPixmap(icon_path)
                         img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -27769,9 +27773,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 20
+                    logical_px = toolbar_icon_size
                     dev_px = int(logical_px * max(1.0, dpr))
-                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    pm = icon.pixmap(QSize(logical_px, logical_px), dpr)
                     if pm.isNull():
                         raw = QPixmap(icon_path)
                         img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -27865,9 +27869,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         dpr = self.devicePixelRatioF()
                     except Exception:
                         dpr = 1.0
-                    logical_px = 20
+                    logical_px = toolbar_icon_size
                     dev_px = int(logical_px * max(1.0, dpr))
-                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    pm = icon.pixmap(QSize(logical_px, logical_px), dpr)
                     if pm.isNull():
                         raw = QPixmap(icon_path)
                         img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -33022,6 +33026,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_PAGE_NUMBER_ALIGNMENT': self.config.get('pdf_page_number_alignment', 'center'),
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
             'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'xhtml',
+            'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
             'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
             'PDF_FAST_RENDERING': '1' if self.config.get('pdf_fast_rendering', True) else '0',
@@ -34593,6 +34598,7 @@ Important rules:
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
                     'USE_ASYNC_CHAPTER_EXTRACTION': '1',
+                    'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
                     # Custom API endpoints (must be propagated so UnifiedClient routes
                     # Gemini / OpenAI / Anthropic requests through the user's custom endpoint
                     # during glossary extraction, especially when using glossary keys pool).
@@ -43269,6 +43275,7 @@ Important rules:
                 # PDF settings
                 ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
                 ('pdf_render_mode', ['pdf_render_mode_var'], 'xhtml', str),
+                ('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool),
                 ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
             ]
             

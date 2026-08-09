@@ -13,6 +13,7 @@ Config JSON:
         "pdf_path": "/path/to/file.pdf",
         "output_dir": "/path/to/output",
         "render_mode": "xhtml",
+        "use_toc_sections": true,
         "extract_images": true,
         "generate_css": true,
         "html2text": false,
@@ -104,6 +105,10 @@ def _run_pdf_extraction_inner(config_path):
     html2text_enabled = config.get("html2text", False)
     css_override_path = config.get("css_override_path", "").strip()
     attach_css_enabled = config.get("attach_css_enabled", False)
+    use_toc_sections = config.get(
+        "use_toc_sections",
+        os.environ.get("PDF_USE_TOC_SECTIONS", "1") == "1",
+    )
     stop_file = config.get("stop_file", "")
 
     # Make stop file path available to pdf_extractor via env var
@@ -126,7 +131,11 @@ def _run_pdf_extraction_inner(config_path):
 
     # Import pdf_extractor
     try:
-        from pdf_extractor import extract_pdf_with_formatting, generate_css_from_pdf
+        from pdf_extractor import (
+            extract_pdf_with_formatting,
+            generate_css_from_pdf,
+            group_pdf_pages_by_toc,
+        )
     except ImportError as e:
         log(f"❌ Could not import pdf_extractor: {e}")
         return {"success": False, "error": f"Import failed: {e}"}
@@ -149,6 +158,32 @@ def _run_pdf_extraction_inner(config_path):
         log(f"❌ PDF extraction failed: {e}")
         traceback.print_exc()
         return {"success": False, "error": f"Extraction failed: {e}"}
+
+    source_page_count = len(content) if isinstance(content, list) else 1
+    section_info = []
+    separation_mode = "pages"
+    if use_toc_sections and render_mode != "image" and isinstance(content, list):
+        grouped_sections = group_pdf_pages_by_toc(pdf_path, content)
+        if grouped_sections:
+            content = [
+                (section["num"], section["html"])
+                for section in grouped_sections
+            ]
+            section_info = [
+                {key: value for key, value in section.items() if key != "html"}
+                for section in grouped_sections
+            ]
+            separation_mode = "toc"
+            log(
+                f"Grouped {source_page_count} PDF pages into "
+                f"{len(grouped_sections)} outline section(s)"
+            )
+        else:
+            log("No usable PDF outline found; using legacy page-by-page extraction")
+    elif use_toc_sections and render_mode == "image":
+        log("PDF image render mode remains page-by-page")
+    elif isinstance(content, list):
+        log("Using legacy page-by-page PDF extraction (user setting)")
 
     # Phase 2: Generate CSS if enabled
     if _is_stopped():
@@ -246,20 +281,29 @@ def _run_pdf_extraction_inner(config_path):
         "images_info": serialized_images,
         "css_generated": css_generated,
         "is_page_list": isinstance(content, list),
-        "page_count": len(serialized_content) if isinstance(serialized_content, list) else 1,
+        "separation_mode": separation_mode,
+        "section_info": section_info,
+        "page_count": source_page_count,
+        "entry_count": len(serialized_content) if isinstance(serialized_content, list) else 1,
         "elapsed": round(elapsed, 1)
     }
 
     try:
         with open(result_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False)
-        log(f"✅ PDF extraction complete: {result['page_count']} pages in {elapsed:.1f}s")
+        if separation_mode == "toc":
+            log(
+                f"PDF extraction complete: {result['page_count']} pages -> "
+                f"{result['entry_count']} TOC sections in {elapsed:.1f}s"
+            )
+        else:
+            log(f"PDF extraction complete: {result['page_count']} pages in {elapsed:.1f}s")
     except Exception as e:
         log(f"❌ Failed to write result: {e}")
         return {"success": False, "error": f"Failed to write result: {e}"}
 
     # Also print the result path so the manager knows where to find it
-    print(f"[RESULT] {json.dumps({'success': True, 'result_path': result_path, 'page_count': result['page_count'], 'elapsed': result['elapsed']})}", flush=True)
+    print(f"[RESULT] {json.dumps({'success': True, 'result_path': result_path, 'page_count': result['page_count'], 'entry_count': result['entry_count'], 'elapsed': result['elapsed']})}", flush=True)
 
     return result
 

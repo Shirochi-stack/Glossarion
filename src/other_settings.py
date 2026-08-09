@@ -11055,6 +11055,35 @@ def _create_processing_options_section(self, parent):
     pdf_threshold_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_threshold_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(pdf_threshold_desc)
+
+    # PDF section separation: outline/bookmarks by default, legacy pages on demand.
+    if not hasattr(self, 'pdf_use_toc_sections_var'):
+        self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)
+
+    pdf_toc_sections_cb = self._create_styled_checkbox(
+        "Use PDF table of contents for sections"
+    )
+    pdf_toc_sections_cb.setChecked(bool(self.pdf_use_toc_sections_var))
+
+    def _on_pdf_toc_sections_toggle(checked):
+        enabled = bool(checked)
+        self.pdf_use_toc_sections_var = enabled
+        self.config['pdf_use_toc_sections'] = enabled
+        os.environ['PDF_USE_TOC_SECTIONS'] = '1' if enabled else '0'
+
+    pdf_toc_sections_cb.toggled.connect(_on_pdf_toc_sections_toggle)
+    pdf_toc_sections_cb.setContentsMargins(20, 2, 0, 0)
+    section_v.addWidget(pdf_toc_sections_cb)
+
+    pdf_toc_sections_desc = QLabel(
+        "Groups pages using the PDF sidebar outline/bookmarks (default).\n"
+        "PDFs without a usable outline automatically fall back to one entry per page.\n"
+        "Turn this off to always use the legacy page-by-page extraction.\n"
+        "Image render mode remains page-by-page so each image is translated separately."
+    )
+    pdf_toc_sections_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_toc_sections_desc.setContentsMargins(40, 0, 0, 10)
+    section_v.addWidget(pdf_toc_sections_desc)
     
     # Initialize PDF render mode variable
     if not hasattr(self, 'pdf_render_mode_var'):

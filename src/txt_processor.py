@@ -7,7 +7,12 @@ from bs4 import BeautifulSoup
 from chapter_splitter import ChapterSplitter
 from decimal import Decimal
 import hashlib
-from pdf_extractor import extract_text_from_pdf, extract_pdf_with_formatting, generate_css_from_pdf
+from pdf_extractor import (
+    extract_text_from_pdf,
+    extract_pdf_with_formatting,
+    generate_css_from_pdf,
+    group_pdf_pages_by_toc,
+)
 import shutil
 
 class TextFileProcessor:
@@ -27,6 +32,7 @@ class TextFileProcessor:
         self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()  # absolute, semantic, xhtml, html
         self.pdf_extract_images = os.getenv("PDF_EXTRACT_IMAGES", "1") == "1"
         self.pdf_generate_css = os.getenv("PDF_GENERATE_CSS", "1") == "1"
+        self.pdf_use_toc_sections = os.getenv("PDF_USE_TOC_SECTIONS", "1") == "1"
         self.html2text_enabled = os.getenv("USE_HTML2TEXT", "0") == "1"
         
     def extract_chapters(self) -> List[Dict]:
@@ -34,6 +40,7 @@ class TextFileProcessor:
         content = ""
         images_info = {}
         is_html_content = False
+        toc_sections_by_num = {}
         
         if self.file_path.lower().endswith('.pdf'):
             try:
@@ -47,6 +54,38 @@ class TextFileProcessor:
                         page_by_page=True  # Get pages separately
                     )
                     is_html_content = True
+
+                    if (
+                        self.pdf_use_toc_sections
+                        and self.pdf_render_mode != "image"
+                        and isinstance(content, list)
+                    ):
+                        grouped_sections = group_pdf_pages_by_toc(
+                            self.file_path,
+                            content,
+                        )
+                        if grouped_sections:
+                            content = [
+                                (section["num"], section["html"])
+                                for section in grouped_sections
+                            ]
+                            toc_sections_by_num = {
+                                section["num"]: section
+                                for section in grouped_sections
+                            }
+                            print(
+                                f"PDF outline grouped pages into "
+                                f"{len(grouped_sections)} translation section(s)"
+                            )
+                        else:
+                            print(
+                                "No usable PDF outline found; using legacy "
+                                "page-by-page extraction"
+                            )
+                    elif self.pdf_use_toc_sections and self.pdf_render_mode == "image":
+                        print("PDF image render mode remains page-by-page")
+                    elif isinstance(content, list):
+                        print("Using legacy page-by-page PDF extraction (user setting)")
                     
                     # Generate CSS if enabled (unless overridden by user-loaded CSS)
                     if self.pdf_generate_css:
@@ -84,7 +123,13 @@ class TextFileProcessor:
                     
                     # Convert to markdown if html2text is enabled
                     if self.html2text_enabled:
-                        content = self._html_to_markdown(content)
+                        if isinstance(content, list):
+                            content = [
+                                (entry_num, self._html_to_markdown(entry_html))
+                                for entry_num, entry_html in content
+                            ]
+                        else:
+                            content = self._html_to_markdown(content)
                         print(f"✅ Converted HTML to Markdown")
             except Exception as e:
                 print(f"❌ Failed to extract text from PDF: {e}")
@@ -100,14 +145,21 @@ class TextFileProcessor:
             raw_chapters = []
             render_mode = self.pdf_render_mode
             for page_num, page_html in content:
+                section = toc_sections_by_num.get(page_num, {})
+                is_toc_section = bool(section)
                 raw_chapters.append({
                     'num': page_num,  # Already 1-indexed
-                    'title': f"{self.file_base} - Page {page_num}",
+                    'title': section.get('title') or f"{self.file_base} - Page {page_num}",
                     'content': page_html,
                     'is_html': is_html_content,
                     'images_info': {},
                     'has_images': True if render_mode == 'image' else False,
-                    'image_count': 1 if render_mode == 'image' else 0
+                    'image_count': 1 if render_mode == 'image' else 0,
+                    'pdf_toc_section': is_toc_section,
+                    'pdf_toc_level': section.get('level'),
+                    'pdf_start_page': section.get('start_page'),
+                    'pdf_end_page': section.get('end_page'),
+                    'allow_token_splitting': is_toc_section,
                 })
         else:
             # Treat entire file as single document - no chapter detection
@@ -198,8 +250,14 @@ class TextFileProcessor:
             is_html = chapter_data.get('is_html', False)
             images_info = chapter_data.get('images_info', {})
             
-            # Skip token splitting for PDF pages - they're already split by page
-            is_pdf_page = self.file_path.lower().endswith('.pdf') and is_html
+            # Legacy PDF entries are already bounded to one page.  TOC sections
+            # can span many pages, so they still need the normal token safety
+            # split when a section is larger than the configured model budget.
+            is_pdf_page = (
+                self.file_path.lower().endswith('.pdf')
+                and is_html
+                and not chapter_data.get('allow_token_splitting', False)
+            )
             
             chapter_tokens = self.chapter_splitter.count_tokens(chapter_content)
             
@@ -226,7 +284,10 @@ class TextFileProcessor:
                         file_ext = '.txt'
                     
                     # Generate filename for this chunk
-                    chunk_filename = f"section_{int(chapter_data['num'])}_{chunk_idx - 1}{file_ext}"
+                    filename_prefix = (
+                        "pdf_section" if chapter_data.get('pdf_toc_section') else "section"
+                    )
+                    chunk_filename = f"{filename_prefix}_{int(chapter_data['num'])}_{chunk_idx - 1}{file_ext}"
                     
                     # Save original chunk content to word_count folder (only if it doesn't exist)
                     original_chunk_path = os.path.join(word_count_dir, chunk_filename)
@@ -255,7 +316,7 @@ class TextFileProcessor:
                         with open(original_chunk_path, 'w', encoding='utf-8') as f:
                             f.write(content_to_write)
                     
-                    final_chapters.append({
+                    chunk_dict = {
                         'num': chunk_num,
                         'title': chunk_title,
                         'body': chunk_content,
@@ -272,7 +333,14 @@ class TextFileProcessor:
                             'total_chunks': total_chunks,
                             'original_chapter': chapter_data['num']
                         }
-                    })
+                    }
+                    for key in (
+                        'pdf_toc_section', 'pdf_toc_level',
+                        'pdf_start_page', 'pdf_end_page',
+                    ):
+                        if chapter_data.get(key) is not None:
+                            chunk_dict[key] = chapter_data[key]
+                    final_chapters.append(chunk_dict)
             else:
                 # Chapter is small enough, add as-is
                 # Determine file extension based on format
@@ -281,7 +349,10 @@ class TextFileProcessor:
                 else:
                     file_ext = '.txt'
                 
-                chapter_filename = f"section_{chapter_data['num']}{file_ext}"
+                filename_prefix = (
+                    "pdf_section" if chapter_data.get('pdf_toc_section') else "section"
+                )
+                chapter_filename = f"{filename_prefix}_{chapter_data['num']}{file_ext}"
                 
                 # Save original content to word_count folder (only if it doesn't exist)
                 original_chunk_path = os.path.join(word_count_dir, chapter_filename)
@@ -322,9 +393,15 @@ class TextFileProcessor:
                     'image_count': chapter_data.get('image_count', 0),
                     'is_chunk': False
                 }
+                for key in (
+                    'pdf_toc_section', 'pdf_toc_level',
+                    'pdf_start_page', 'pdf_end_page',
+                ):
+                    if chapter_data.get(key) is not None:
+                        chapter_dict[key] = chapter_data[key]
                 # Only set original_basename for non-PDF files
                 # PDF pages should use num-based naming, not original filename
-                if not is_pdf_page:
+                if not self.file_path.lower().endswith('.pdf'):
                     chapter_dict['original_basename'] = os.path.basename(self.file_path)
                 final_chapters.append(chapter_dict)
         
@@ -446,6 +523,12 @@ class TextFileProcessor:
                     meta['source_file'] = ch['source_file']
                 if ch.get('chunk_info'):
                     meta['chunk_info'] = ch['chunk_info']
+                for key in (
+                    'pdf_toc_section', 'pdf_toc_level',
+                    'pdf_start_page', 'pdf_end_page',
+                ):
+                    if ch.get(key) is not None:
+                        meta[key] = ch[key]
                 cache_data['chapters'].append(meta)
             
             with open(cache_path, 'w', encoding='utf-8') as f:

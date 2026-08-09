@@ -6696,6 +6696,35 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
     Falls back to extract_pdf_with_formatting only if PyMuPDF is unavailable.
     """
     chapters = []
+    use_toc_sections = os.getenv("PDF_USE_TOC_SECTIONS", "1") == "1"
+
+    def _finalize_page_texts(page_texts, total_pages):
+        fallback = [
+            text.strip()
+            for _page_num, text in page_texts
+            if text and text.strip()
+        ]
+        if not use_toc_sections:
+            print("Using legacy page-by-page PDF extraction (user setting)")
+            return fallback
+        try:
+            from pdf_extractor import group_pdf_page_texts_by_toc
+
+            grouped = group_pdf_page_texts_by_toc(
+                pdf_path,
+                page_texts,
+                total_pages=total_pages,
+            )
+            if grouped:
+                print(
+                    f"PDF outline grouped {total_pages} pages into "
+                    f"{len(grouped)} glossary section(s)"
+                )
+                return [section["text"] for section in grouped]
+        except Exception as exc:
+            print(f"PDF outline grouping failed; using page-by-page fallback: {exc}")
+        print("No usable PDF outline found; using legacy page-by-page extraction")
+        return fallback
 
     # ── Fast path: fitz.get_text() (same as review_generator) ──
     try:
@@ -6703,21 +6732,22 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
         print(f"📄 Extracting PDF with formatting: {os.path.basename(pdf_path)}")
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
+        page_texts = []
         print(f"📄 Extracting text from {total_pages} pages via PyMuPDF (fast mode)...")
 
         for i, page in enumerate(doc):
             if check_stop and check_stop():
                 print(f"🛑 PDF extraction stopped at page {i+1}/{total_pages}")
                 doc.close()
-                return chapters
+                return _finalize_page_texts(page_texts, total_pages)
 
             text = page.get_text()
             if text and text.strip():
-                chapters.append(text.strip())
+                page_texts.append((i + 1, text.strip()))
 
         doc.close()
-        print(f"✅ PDF text extracted: {len(chapters)} pages with content (from {total_pages} total)")
-        return chapters
+        print(f"✅ PDF text extracted: {len(page_texts)} pages with content (from {total_pages} total)")
+        return _finalize_page_texts(page_texts, total_pages)
 
     except ImportError:
         print("⚠️ PyMuPDF not available, falling back to extract_pdf_with_formatting...")
@@ -6739,15 +6769,17 @@ def _extract_pdf_chapters_for_glossary(pdf_path, check_stop=None):
             extract_images=False,
             page_by_page=True
         )
+        page_texts = []
         for page_num, page_html in (page_list or []):
             if check_stop and check_stop():
-                return chapters
+                return _finalize_page_texts(page_texts, len(page_list or []))
             try:
                 page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
             except Exception:
                 page_text = str(page_html)
             if page_text and page_text.strip():
-                chapters.append(page_text)
+                page_texts.append((page_num, page_text))
+        chapters = _finalize_page_texts(page_texts, len(page_list or []))
     finally:
         if not previous_render_mode:
             os.environ.pop("PDF_RENDER_MODE", None)
