@@ -130,6 +130,83 @@ def test_library_angle_wheel_scroll_uses_accumulated_animation(qapp):
         qapp.processEvents()
 
 
+def test_library_pagination_only_builds_current_card_page(qapp):
+    dialog = _make_dialog(qapp, 1100, 700)
+    try:
+        books = _books("paged", 2006)
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+        pager = dialog._library_pagers["ip"]
+        assert len(dialog._ip_cards) == 20
+        assert len(dialog._ip_card_cache) == 20
+        assert pager["label"].text() == "Page 1 / 101 · 1-20 of 2006"
+        assert dialog._ip_count_label.text() == "2006 novels"
+        first_page_paths = {card.book["path"] for card in dialog._ip_cards}
+
+        dialog._on_library_page_action("ip", "next")
+        _pump_events(qapp)
+        second_page_paths = {card.book["path"] for card in dialog._ip_cards}
+        assert len(second_page_paths) == 20
+        assert first_page_paths.isdisjoint(second_page_paths)
+        # Off-page widgets are deleted instead of accumulating in the cache.
+        assert set(dialog._ip_card_cache) == second_page_paths
+        assert pager["label"].text() == "Page 2 / 101 · 21-40 of 2006"
+
+        dialog._on_library_page_action("ip", "last")
+        _pump_events(qapp)
+        assert len(dialog._ip_cards) == 6
+        assert len(dialog._ip_card_cache) == 6
+        assert pager["label"].text() == (
+            "Page 101 / 101 · 2001-2006 of 2006")
+        assert not pager["next"].isEnabled()
+        assert not pager["last"].isEnabled()
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_library_page_size_is_shared_and_filter_resets_page(qapp):
+    dialog = _make_dialog(qapp, 1100, 700)
+    try:
+        books = _books("shared-page-size", 66)
+        dialog._in_progress_books = books
+        dialog._completed_books = list(books)
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+        dialog._on_library_page_action("ip", "last")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 3
+
+        ip_combo = dialog._library_pagers["ip"]["page_size"]
+        comp_combo = dialog._library_pagers["comp"]["page_size"]
+        ip_combo.setCurrentIndex(ip_combo.findData(50))
+        _pump_events(qapp)
+        assert comp_combo.currentData() == 50
+        assert dialog._config["epub_library_page_size"] == 50
+        assert dialog._library_pages == {"ip": 0, "comp": 0}
+        assert len(dialog._ip_cards) == 50
+
+        dialog._on_library_page_action("ip", "next")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 1
+        dialog._search.setText("Book 1")
+        _pump_events(qapp)
+        assert dialog._library_pages["ip"] == 0
+        assert dialog._library_pagers["ip"]["label"].text().startswith(
+            "Page 1 / 1 · ")
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
 def test_hidden_tab_uses_settled_visible_width(qapp):
     """Inactive-tab preloading must not trust Qt's default ~640 px width."""
     dialog = _make_dialog(qapp, 1200)
