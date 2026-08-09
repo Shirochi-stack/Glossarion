@@ -12224,6 +12224,21 @@ def retroactive_update_image_references(output_dir, source_dir=None):
         print("ℹ️ Skipping image reference repair in image EPUB passthrough mode")
         return
 
+    # Fast-PDF extraction already assigns and caches canonical
+    # ``pdf_section_N_img_M`` names. The repair below is EPUB-specific: it
+    # derives new names from translated response filenames, whose PDF form
+    # contains stable outline IDs. Running it for PDFs would rename the same
+    # resource twice and invalidate the page cache.
+    try:
+        from output_workspace import read_workspace_source_path
+
+        workspace_source = read_workspace_source_path(output_dir)
+        if str(workspace_source or "").lower().endswith(".pdf"):
+            print("PDF workspace: keeping canonical extracted image names")
+            return
+    except Exception:
+        pass
+
     if source_dir is None:
         source_dir = output_dir
     
@@ -21705,6 +21720,9 @@ def main(log_callback=None, stop_callback=None):
                     "html2text": os.getenv("USE_HTML2TEXT", "0") == "1",
                     "css_override_path": os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip(),
                     "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1",
+                    "pdf_extraction_workers": os.getenv(
+                        "PDF_EXTRACTION_WORKERS", "auto"
+                    ),
                     "result_path": _pdf_ext_result_path,
                 }
                 _pdf_ext_config['stop_file'] = _pdf_stop_file
@@ -21731,8 +21749,10 @@ def main(log_callback=None, stop_callback=None):
                     return drained
                 
                 # Run extraction in a worker process (no timeout)
-                _num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
-                _executor = ProcessPoolExecutor(max_workers=_num_workers)
+                # Only one coordinator job is submitted here. Page-range
+                # parallelism is controlled inside the PDF extractor by the
+                # dedicated PDF_EXTRACTION_WORKERS setting.
+                _executor = ProcessPoolExecutor(max_workers=1)
                 try:
                     future = _executor.submit(run_pdf_extraction, _pdf_ext_config_path, _log_queue)
                     

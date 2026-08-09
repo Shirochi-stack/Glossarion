@@ -109,6 +109,13 @@ def _run_pdf_extraction_inner(config_path):
         "use_toc_sections",
         os.environ.get("PDF_USE_TOC_SECTIONS", "1") == "1",
     )
+    pdf_extraction_workers = str(
+        config.get(
+            "pdf_extraction_workers",
+            os.environ.get("PDF_EXTRACTION_WORKERS", "auto"),
+        )
+        or "auto"
+    )
     stop_file = config.get("stop_file", "")
 
     # Make stop file path available to pdf_extractor via env var
@@ -128,6 +135,7 @@ def _run_pdf_extraction_inner(config_path):
     os.environ["PDF_RENDER_MODE"] = render_mode
     os.environ["PDF_EXTRACT_IMAGES"] = "1" if extract_images else "0"
     os.environ["PDF_GENERATE_CSS"] = "1" if generate_css else "0"
+    os.environ["PDF_EXTRACTION_WORKERS"] = pdf_extraction_workers
 
     # Import pdf_extractor
     try:

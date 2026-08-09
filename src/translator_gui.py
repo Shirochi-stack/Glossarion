@@ -13876,6 +13876,10 @@ Text to analyze:
         self.pdf_render_mode_var = _stored_pdf_render_mode
         self.pdf_use_toc_sections_var = self.config.get('pdf_use_toc_sections', True)
         self.pdf_async_page_threshold_var = str(self.config.get('pdf_async_page_threshold', '100'))
+        self.pdf_extraction_workers_var = str(
+            self.config.get('pdf_extraction_workers', 'auto') or 'auto'
+        )
+        os.environ['PDF_EXTRACTION_WORKERS'] = self.pdf_extraction_workers_var
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
@@ -33044,6 +33048,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'fast_semantic',
             'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
             'PDF_ASYNC_PAGE_THRESHOLD': str(self.pdf_async_page_threshold_var) if hasattr(self, 'pdf_async_page_threshold_var') else '100',
+            'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
             'PDF_RENDER_BATCH_SIZE': str(self.config.get('pdf_render_batch_size', 50)),
             'PDF_FAST_RENDERING': '1' if self.config.get('pdf_fast_rendering', True) else '0',
             # Image compression quality sub-settings
@@ -34615,6 +34620,7 @@ Important rules:
                     # Subprocess PDF extraction to prevent GUI lag
                     'USE_ASYNC_CHAPTER_EXTRACTION': '1',
                     'PDF_USE_TOC_SECTIONS': '1' if getattr(self, 'pdf_use_toc_sections_var', True) else '0',
+                    'PDF_EXTRACTION_WORKERS': str(getattr(self, 'pdf_extraction_workers_var', 'auto') or 'auto'),
                     # Custom API endpoints (must be propagated so UnifiedClient routes
                     # Gemini / OpenAI / Anthropic requests through the user's custom endpoint
                     # during glossary extraction, especially when using glossary keys pool).
@@ -43378,6 +43384,7 @@ Important rules:
                 ('pdf_render_mode', ['pdf_render_mode_var'], 'fast_semantic', str),
                 ('pdf_use_toc_sections', ['pdf_use_toc_sections_var'], True, bool),
                 ('pdf_async_page_threshold', ['pdf_async_page_threshold_var'], '100', str),
+                ('pdf_extraction_workers', ['pdf_extraction_workers_var'], 'auto', str),
             ]
             
             # Process the settings map to populate self.config
@@ -43627,6 +43634,10 @@ Important rules:
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
             env_vars_set.append(_update_env('EXTRACTION_WORKERS', new_workers))
+            env_vars_set.append(_update_env(
+                'PDF_EXTRACTION_WORKERS',
+                str(self.config.get('pdf_extraction_workers', 'auto') or 'auto'),
+            ))
             env_vars_set.append(_update_env('USE_THREAD_POOL_EXTRACTION', self.config.get('use_thread_pool_extraction'), is_bool=True))
 
             # Wire debug payload saving to GUI debug mode
@@ -43748,6 +43759,7 @@ Important rules:
                     ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity') else '0'),
                     ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
+                    ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
                     ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls') else '0'),
@@ -43823,6 +43835,7 @@ Important rules:
             
             # General application settings
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
+            'PDF_EXTRACTION_WORKERS': 'PDF input extraction workers (or auto)',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
             'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
             'DOWNLOAD_REMOTE_IMAGE_URLS': 'Download remote EPUB image URLs',
@@ -44171,6 +44184,7 @@ Important rules:
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
+                ('PDF_EXTRACTION_WORKERS', str(self.config.get('pdf_extraction_workers', 'auto') or 'auto')),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
                 ('DOWNLOAD_REMOTE_IMAGE_URLS', '1' if self.config.get('download_remote_image_urls', False) else '0'),

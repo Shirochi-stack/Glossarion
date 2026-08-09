@@ -18,6 +18,19 @@ import hashlib
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
+
+def _pdf_extraction_worker_count() -> int:
+    """Return the dedicated PDF input worker limit."""
+    try:
+        from pdf_fast_extractor import resolve_pdf_extraction_workers
+
+        return resolve_pdf_extraction_workers()
+    except Exception:
+        try:
+            return max(1, int(os.environ.get("PDF_EXTRACTION_WORKERS", "1")))
+        except (TypeError, ValueError):
+            return max(1, (os.cpu_count() or 1) // 2)
+
 def _extract_chunk(args):
     """
     Worker function to extract text from a range of pages.
@@ -316,7 +329,7 @@ def extract_text_from_pdf(pdf_path):
         # This significantly speeds up extraction for large PDFs
         if total_pages > 50:
             # Determine optimal worker count
-            max_workers = min(os.cpu_count() or 4, 8)
+            max_workers = _pdf_extraction_worker_count()
             
             # Divide pages into chunks
             chunk_size = (total_pages + max_workers - 1) // max_workers
@@ -1714,7 +1727,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         # If user requests exact page rendering, use MuPDF's built-in XHTML/HTML renderer for near 1:1 output
         if render_mode in ("xhtml", "html"):
             total_pages = len(doc)
-            num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+            num_workers = _pdf_extraction_worker_count()
             
             # Serialize images_by_page keys to strings for cross-process compatibility
             _images_by_page_str = {}

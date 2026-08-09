@@ -236,6 +236,16 @@ class TextFileProcessor:
         cached = self._load_split_cache(cache_path, source_hash, word_count_dir)
         if cached is not None:
             print(f"📊 Loaded split cache ({len(cached)} chunks) — token limit changes won't alter chunk count")
+            if (
+                self.file_path.lower().endswith('.pdf')
+                and self.pdf_render_mode in ('fast_semantic', 'fast_layout')
+            ):
+                from pdf_fast_extractor import apply_pdf_image_rename_logic
+                cached = apply_pdf_image_rename_logic(
+                    cached,
+                    self.output_dir,
+                    word_count_dir=word_count_dir,
+                )
             return cached
         # ─────────────────────────────────────────────────────────────
         
@@ -443,6 +453,17 @@ class TextFileProcessor:
                 shutil.copytree(images_src, word_count_images)
                 print(f"📁 Copied images folder to word_count directory")
         
+        if (
+            self.file_path.lower().endswith('.pdf')
+            and self.pdf_render_mode in ('fast_semantic', 'fast_layout')
+        ):
+            from pdf_fast_extractor import apply_pdf_image_rename_logic
+            final_chapters = apply_pdf_image_rename_logic(
+                final_chapters,
+                self.output_dir,
+                word_count_dir=word_count_dir,
+            )
+
         # Save split cache for future runs
         self._save_split_cache(cache_path, source_hash, final_chapters)
         

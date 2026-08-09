@@ -23,6 +23,7 @@ import html
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -31,6 +32,17 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 FAST_EXTRACTOR_VERSION = 2
 FAST_MODES = {"fast_semantic", "fast_layout"}
+
+_PDF_HASH_IMAGE_RE = re.compile(
+    r"^pdfimg_[0-9a-f]{64}\.[a-z0-9]{1,8}$", re.IGNORECASE
+)
+_PDF_LEGACY_IMAGE_RE = re.compile(
+    r"^page_(\d+)_img_(\d+)\.[a-z0-9]{1,8}$", re.IGNORECASE
+)
+_PDF_FRIENDLY_IMAGE_RE = re.compile(
+    r"^(?:pdf_section_.+?_img_\d+|\d+_Cover)\.[a-z0-9]{1,8}$",
+    re.IGNORECASE,
+)
 
 
 class PDFExtractionCancelled(RuntimeError):
@@ -334,40 +346,55 @@ def _bookmark_jobs(toc_entries: Sequence[Sequence], total_pages: int, chunk_page
     return jobs, starts
 
 
-def _fast_pdf_worker_count(total_pages: int, job_count: int) -> int:
-    """Return the bounded number of bookmark jobs to run concurrently.
+def resolve_pdf_extraction_workers(
+    configured=None,
+    *,
+    cpu_count: Optional[int] = None,
+) -> int:
+    """Resolve the dedicated PDF worker setting to a safe numeric value.
 
-    ``EXTRACTION_WORKERS`` remains the user-facing control. When it is not
-    present, use half the available logical CPUs up to eight. The old engine
-    silently capped every request at four workers, which made a configured
-    8-worker pool still run only four jobs. ``PDF_FAST_MAX_WORKERS`` is an
-    optional expert safety cap; by default PDF extraction uses at most eight
-    processes to avoid excessive document/image memory duplication.
+    ``auto`` means half of the available logical CPUs.  The legacy
+    ``EXTRACTION_WORKERS`` value is only a compatibility fallback when the
+    dedicated ``PDF_EXTRACTION_WORKERS`` variable has not been initialized.
     """
+    try:
+        available_cpus = max(
+            1,
+            int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)),
+        )
+    except (TypeError, ValueError):
+        available_cpus = 1
+    automatic = max(1, available_cpus // 2)
+    raw_value = configured
+    if raw_value is None:
+        raw_value = os.environ.get(
+            "PDF_EXTRACTION_WORKERS",
+            os.environ.get("EXTRACTION_WORKERS", "auto"),
+        )
+    normalized = str(raw_value or "auto").strip().lower()
+    if normalized in {"", "auto", "automatic", "default", "0"}:
+        requested = automatic
+    else:
+        try:
+            requested = int(normalized)
+        except (TypeError, ValueError):
+            requested = automatic
+    return max(1, min(requested, available_cpus))
+
+
+def _fast_pdf_worker_count(total_pages: int, job_count: int) -> int:
+    """Return the bounded number of bookmark jobs to run concurrently."""
     if total_pages < 8 or job_count <= 1:
         return 1
     try:
         cpu_count = max(1, int(os.cpu_count() or 1))
     except (TypeError, ValueError):
         cpu_count = 1
-    automatic = min(8, max(2, cpu_count // 2))
+    requested = resolve_pdf_extraction_workers(cpu_count=cpu_count)
     try:
-        requested = int(
-            str(os.environ.get("EXTRACTION_WORKERS", automatic)).strip()
-        )
+        safety_cap = int(str(os.environ.get("PDF_FAST_MAX_WORKERS", cpu_count)).strip())
     except (TypeError, ValueError):
-        requested = automatic
-    try:
-        safety_cap = int(
-            str(
-                os.environ.get(
-                    "PDF_FAST_MAX_WORKERS",
-                    min(8, cpu_count),
-                )
-            ).strip()
-        )
-    except (TypeError, ValueError):
-        safety_cap = min(8, cpu_count)
+        safety_cap = cpu_count
     return max(
         1,
         min(
@@ -833,6 +860,360 @@ def _load_results(
         if page_images:
             images_by_page[page_number - 1] = page_images
     return pages, images_by_page
+
+
+def _legacy_image_slots(images: Sequence[Dict]) -> List[Dict]:
+    """Return the one-slot-per-PDF-resource order used by legacy filenames."""
+    slots: List[Dict] = []
+    seen = set()
+    for position, image_info in enumerate(images or []):
+        resource_index = image_info.get("resource_index")
+        xref = int(image_info.get("xref") or 0)
+        if resource_index is not None:
+            key = ("resource", int(resource_index))
+        elif xref:
+            key = ("xref", xref)
+        else:
+            key = ("placement", position)
+        if key in seen:
+            continue
+        seen.add(key)
+        slots.append(image_info)
+    return slots
+
+
+def _cached_pdf_page_image_slots(cache_root: Path) -> Dict[int, List[Dict]]:
+    """Index page image slots from normal and targeted fast-PDF caches."""
+    candidates: List[Path] = []
+    pages_root = cache_root / "pages"
+    if pages_root.is_dir():
+        candidates.extend(pages_root.glob("*/*.json"))
+    targeted_root = cache_root / "targeted_images"
+    if targeted_root.is_dir():
+        candidates.extend(targeted_root.glob("*.json"))
+
+    indexed: Dict[int, List[Dict]] = {}
+    for cache_path in sorted(candidates):
+        payload = _load_json(cache_path, {}) or {}
+        try:
+            page_number = int(payload.get("page_number") or 0)
+        except (TypeError, ValueError):
+            continue
+        images = payload.get("images") if isinstance(payload, dict) else None
+        if page_number <= 0 or not isinstance(images, list):
+            continue
+        slots = _legacy_image_slots(
+            [item for item in images if isinstance(item, dict)]
+        )
+        if slots and page_number not in indexed:
+            indexed[page_number] = slots
+    return indexed
+
+
+def _rewrite_pdf_image_references(markup: str, rename_map: Dict[str, str]) -> str:
+    """Rewrite local image basenames in HTML without changing path prefixes."""
+    if not markup or not rename_map:
+        return markup
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(markup, "html.parser")
+    changed = False
+    attributes = (("img", "src"), ("object", "data"), ("video", "poster"))
+    for tag_name, attribute in attributes:
+        for node in soup.find_all(tag_name):
+            original = str(node.get(attribute) or "")
+            if not original or original.startswith(("data:", "http://", "https://")):
+                continue
+            clean = original.split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+            basename = clean.rsplit("/", 1)[-1]
+            replacement = rename_map.get(basename)
+            if not replacement or replacement == basename:
+                continue
+            node[attribute] = re.sub(
+                re.escape(basename) + r"(?=([?#].*)?$)",
+                replacement,
+                original,
+                count=1,
+            )
+            changed = True
+    return str(soup) if changed else markup
+
+
+def _rewrite_pdf_image_cache(
+    cache_root: Path,
+    images_dir: Path,
+    rename_map: Dict[str, str],
+) -> int:
+    """Keep page/xref caches reusable after public image files are renamed."""
+    updated = 0
+    if not cache_root.is_dir() or not rename_map:
+        return updated
+
+    def rewrite(value):
+        nonlocal changed
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                if key == "filename" and isinstance(item, str):
+                    basename = os.path.basename(item)
+                    replacement = rename_map.get(basename)
+                    if replacement and replacement != basename:
+                        value[key] = replacement
+                        changed = True
+                elif key == "path" and isinstance(item, str):
+                    basename = os.path.basename(item)
+                    replacement = rename_map.get(basename)
+                    if replacement and replacement != basename:
+                        value[key] = str(images_dir / replacement)
+                        changed = True
+                elif key == "html" and isinstance(item, str):
+                    rewritten = _rewrite_pdf_image_references(item, rename_map)
+                    if rewritten != item:
+                        value[key] = rewritten
+                        changed = True
+                else:
+                    rewrite(item)
+        elif isinstance(value, list):
+            for item in value:
+                rewrite(item)
+
+    for cache_path in cache_root.rglob("*.json"):
+        payload = _load_json(cache_path, None)
+        if payload is None:
+            continue
+        changed = False
+        rewrite(payload)
+        if changed:
+            _atomic_write_json(cache_path, payload)
+            updated += 1
+    return updated
+
+
+def apply_pdf_image_rename_logic(
+    chapters: List[Dict],
+    output_dir: str,
+    *,
+    word_count_dir: Optional[str] = None,
+) -> List[Dict]:
+    """Apply the normal chapter-based image names to fast-PDF resources.
+
+    Fast extraction first uses content hashes so parallel workers can safely
+    deduplicate shared PDF resources.  This post-pass assigns the same public
+    ``<chapter>_img_N`` names used by EPUB extraction, rewrites every cached
+    reference, and only then removes the internal hash filenames.
+    """
+    output_path = Path(output_dir).resolve()
+    images_dir = output_path / "images"
+    if not chapters or not images_dir.is_dir():
+        return chapters
+
+    existing_files = {
+        item.name: item for item in images_dir.iterdir() if item.is_file()
+    }
+
+    cache_root = output_path / ".pdf_extraction_cache"
+    page_slots = _cached_pdf_page_image_slots(cache_root)
+    canonical_cache_names = {
+        os.path.basename(str(image_info.get("filename") or ""))
+        for slots in page_slots.values()
+        for image_info in slots
+        if image_info.get("filename")
+    }
+    if word_count_dir:
+        mirrored_images = Path(word_count_dir) / "images"
+        for canonical_name in canonical_cache_names:
+            if canonical_name in existing_files:
+                continue
+            mirrored_path = mirrored_images / canonical_name
+            target_path = images_dir / canonical_name
+            if mirrored_path.is_file():
+                shutil.copy2(mirrored_path, target_path)
+                existing_files[canonical_name] = target_path
+    if not existing_files:
+        return chapters
+
+    map_path = output_path / "image_rename_map.json"
+    saved_map = _load_json(map_path, {}) or {}
+    if not isinstance(saved_map, dict):
+        saved_map = {}
+    saved_map = {
+        os.path.basename(str(old_name)): os.path.basename(str(new_name))
+        for old_name, new_name in saved_map.items()
+        if old_name and new_name
+    }
+    assignments: Dict[str, str] = {}
+    source_targets: Dict[str, str] = {}
+    claimed_sources = set()
+
+    # Older EPUB-only response repair could rename a canonical PDF image a
+    # second time (canonical -> stable response ID). Reverse those chains when
+    # the page cache identifies the original canonical name.
+    for canonical_name, response_name in list(saved_map.items()):
+        if (
+            canonical_name in canonical_cache_names
+            and canonical_name != response_name
+            and _PDF_FRIENDLY_IMAGE_RE.fullmatch(canonical_name)
+            and _PDF_FRIENDLY_IMAGE_RE.fullmatch(response_name)
+            and response_name in existing_files
+            and canonical_name in existing_files
+        ):
+            assignments[response_name] = canonical_name
+            source_targets[response_name] = canonical_name
+            saved_map.pop(canonical_name, None)
+
+    from bs4 import BeautifulSoup
+
+    for chapter in chapters:
+        body = str(chapter.get("body") or "")
+        filename = str(chapter.get("filename") or "")
+        chapter_stem = Path(filename).stem or f"pdf_section_{chapter.get('num', 0)}"
+        if not body:
+            continue
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:
+            continue
+        image_number = 1
+        chapter_seen = set()
+        for node in soup.find_all("img"):
+            src = str(node.get("src") or "")
+            basename = (
+                src.split("?", 1)[0]
+                .split("#", 1)[0]
+                .replace("\\", "/")
+                .rsplit("/", 1)[-1]
+            )
+            if not basename or basename in chapter_seen:
+                continue
+            chapter_seen.add(basename)
+
+            source_name = basename if basename in existing_files else ""
+            legacy_match = _PDF_LEGACY_IMAGE_RE.fullmatch(basename)
+            if legacy_match:
+                page_number = int(legacy_match.group(1))
+                slot_number = int(legacy_match.group(2))
+                slots = page_slots.get(page_number) or []
+                if 1 <= slot_number <= len(slots):
+                    source_name = os.path.basename(
+                        str(slots[slot_number - 1].get("filename") or "")
+                    )
+            if not source_name or source_name not in existing_files:
+                continue
+            if _PDF_FRIENDLY_IMAGE_RE.fullmatch(source_name):
+                assignments[basename] = source_name
+                claimed_sources.add(source_name)
+                continue
+            preferred_name = saved_map.get(basename) or saved_map.get(source_name)
+            if preferred_name and _PDF_FRIENDLY_IMAGE_RE.fullmatch(preferred_name):
+                assignments[basename] = preferred_name
+                assignments[source_name] = preferred_name
+                if source_name != preferred_name:
+                    source_targets[source_name] = preferred_name
+                claimed_sources.add(source_name)
+                continue
+
+            target_name = source_targets.get(source_name)
+            if not target_name:
+                extension = Path(source_name).suffix
+                target_name = f"{chapter_stem}_img_{image_number}{extension}"
+                while target_name in source_targets.values() or (
+                    target_name in existing_files and target_name != source_name
+                ):
+                    image_number += 1
+                    target_name = f"{chapter_stem}_img_{image_number}{extension}"
+                source_targets[source_name] = target_name
+                image_number += 1
+            assignments[basename] = target_name
+            assignments[source_name] = target_name
+            claimed_sources.add(source_name)
+
+    cover_number = 0
+    for source_name in sorted(existing_files):
+        if source_name in claimed_sources or not _PDF_HASH_IMAGE_RE.fullmatch(source_name):
+            continue
+        extension = Path(source_name).suffix
+        target_name = f"{cover_number}_Cover{extension}"
+        while target_name in source_targets.values() or target_name in existing_files:
+            cover_number += 1
+            target_name = f"{cover_number}_Cover{extension}"
+        source_targets[source_name] = target_name
+        assignments[source_name] = target_name
+        cover_number += 1
+
+    if not source_targets and not any(
+        old_name != target_name for old_name, target_name in assignments.items()
+    ):
+        return chapters
+
+    # Create all friendly aliases first so no cache or HTML reference can be
+    # left pointing at a missing file if the operation is interrupted.
+    for source_name, target_name in source_targets.items():
+        source_path = existing_files.get(source_name)
+        target_path = images_dir / target_name
+        if source_path and source_path.is_file() and not target_path.is_file():
+            shutil.copy2(source_path, target_path)
+
+    cache_updates = _rewrite_pdf_image_cache(cache_root, images_dir, assignments)
+
+    for chapter in chapters:
+        body = str(chapter.get("body") or "")
+        chapter["body"] = _rewrite_pdf_image_references(body, assignments)
+
+    disk_updates = 0
+    html_roots = [output_path]
+    if word_count_dir:
+        html_roots.append(Path(word_count_dir))
+    seen_paths = set()
+    for html_root in html_roots:
+        if not html_root.is_dir():
+            continue
+        for html_path in html_root.rglob("*.htm*"):
+            if cache_root in html_path.parents or html_path in seen_paths:
+                continue
+            seen_paths.add(html_path)
+            try:
+                original = html_path.read_text(encoding="utf-8")
+                rewritten = _rewrite_pdf_image_references(original, assignments)
+                if rewritten != original:
+                    html_path.write_text(rewritten, encoding="utf-8")
+                    disk_updates += 1
+            except (OSError, UnicodeError):
+                continue
+
+    if word_count_dir:
+        mirrored_images = Path(word_count_dir) / "images"
+        mirrored_images.mkdir(parents=True, exist_ok=True)
+        for target_name in set(source_targets.values()):
+            source_path = images_dir / target_name
+            target_path = mirrored_images / target_name
+            if source_path.is_file() and not target_path.is_file():
+                shutil.copy2(source_path, target_path)
+
+    # Preserve any unrelated/older mapping entries and add both the legacy
+    # page aliases and the internal hash aliases used by fast extraction.
+    saved_map.update(assignments)
+    with map_path.open("w", encoding="utf-8") as stream:
+        json.dump(saved_map, stream, ensure_ascii=False, indent=2)
+
+    for old_name, target_name in assignments.items():
+        source_path = images_dir / old_name
+        if old_name != target_name and (images_dir / target_name).is_file():
+            try:
+                source_path.unlink()
+            except OSError:
+                pass
+        if word_count_dir:
+            mirrored_old = Path(word_count_dir) / "images" / old_name
+            if old_name != target_name and mirrored_old.is_file():
+                try:
+                    mirrored_old.unlink()
+                except OSError:
+                    pass
+
+    print(
+        f"PDF image rename: {len(source_targets)} asset(s) now use chapter names; "
+        f"updated {disk_updates} HTML file(s) and {cache_updates} cache file(s)"
+    )
+    return chapters
 
 
 def extract_pdf_page_range_for_reader(

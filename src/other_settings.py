@@ -10961,15 +10961,15 @@ def _create_processing_options_section(self, parent):
     cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(cover_desc)
     
-    # === PDF OUTPUT SETTINGS ===
+    # === PDF INPUT SETTINGS ===
     # Separator
     pdf_sep = QFrame()
     pdf_sep.setFrameShape(QFrame.HLine)
     pdf_sep.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(pdf_sep)
     
-    # PDF Output Format section title
-    pdf_title = QLabel("PDF Output Settings")
+    # PDF input settings section title
+    pdf_title = QLabel("PDF Input Settings")
     pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     pdf_title.setContentsMargins(0, 5, 0, 5)
     section_v.addWidget(pdf_title)
@@ -11055,6 +11055,109 @@ def _create_processing_options_section(self, parent):
     pdf_threshold_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_threshold_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(pdf_threshold_desc)
+
+    # Dedicated PDF extraction worker count. This intentionally does not use
+    # the general EPUB/glossary extraction worker setting above.
+    pdf_cpu_cores = max(1, int(os.cpu_count() or 1))
+    pdf_auto_workers = max(1, pdf_cpu_cores // 2)
+    if not hasattr(self, 'pdf_extraction_workers_var'):
+        self.pdf_extraction_workers_var = str(
+            self.config.get('pdf_extraction_workers', 'auto') or 'auto'
+        )
+
+    pdf_workers_row = QWidget()
+    pdf_workers_h = QHBoxLayout(pdf_workers_row)
+    pdf_workers_h.setContentsMargins(20, 2, 0, 0)
+    pdf_workers_h.addWidget(QLabel("Extraction workers:"))
+
+    self.pdf_extraction_workers_entry = QLineEdit()
+    self.pdf_extraction_workers_entry.setFixedWidth(60)
+    self.pdf_extraction_workers_entry.setPlaceholderText("auto")
+    self.pdf_extraction_workers_entry.setText(
+        str(self.pdf_extraction_workers_var or 'auto')
+    )
+    self.pdf_extraction_workers_entry.setToolTip(
+        "Number of parallel PDF page-range workers. Enter 1 through "
+        f"{pdf_cpu_cores}, or use Auto."
+    )
+    pdf_workers_h.addWidget(self.pdf_extraction_workers_entry)
+
+    pdf_workers_auto_button = QPushButton("Auto")
+    pdf_workers_auto_button.setFixedWidth(62)
+    pdf_workers_auto_button.setToolTip(
+        f"Use half of the {pdf_cpu_cores} available CPU cores "
+        f"({pdf_auto_workers} workers)."
+    )
+    pdf_workers_h.addWidget(pdf_workers_auto_button)
+
+    pdf_workers_cpu_label = QLabel(f"CPU cores: {pdf_cpu_cores}")
+    pdf_workers_cpu_label.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_workers_h.addWidget(pdf_workers_cpu_label)
+    pdf_workers_h.addStretch()
+    section_v.addWidget(pdf_workers_row)
+
+    pdf_workers_desc = QLabel(
+        f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
+        "This setting only affects PDF input extraction."
+    )
+    pdf_workers_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_workers_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_workers_desc)
+
+    def _store_pdf_workers(text):
+        raw_value = str(text or '').strip()
+        stored_value = 'auto' if raw_value.lower() in {
+            '', 'auto', 'automatic', 'default', '0'
+        } else raw_value
+        self.pdf_extraction_workers_var = stored_value
+        self.config['pdf_extraction_workers'] = stored_value
+        os.environ['PDF_EXTRACTION_WORKERS'] = stored_value
+
+        if stored_value == 'auto':
+            pdf_workers_desc.setText(
+                f"Auto uses half of the available CPU count ({pdf_auto_workers} workers).\n"
+                "This setting only affects PDF input extraction."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet("")
+            return
+        try:
+            numeric_value = int(stored_value)
+        except (TypeError, ValueError):
+            numeric_value = 0
+        if 1 <= numeric_value <= pdf_cpu_cores:
+            pdf_workers_desc.setText(
+                f"Using {numeric_value} of {pdf_cpu_cores} available CPU cores.\n"
+                "This setting only affects PDF input extraction."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet("")
+        else:
+            pdf_workers_desc.setText(
+                f"Enter 1-{pdf_cpu_cores}, or click Auto ({pdf_auto_workers} workers)."
+            )
+            self.pdf_extraction_workers_entry.setStyleSheet(
+                "QLineEdit { border: 1px solid #e0a000; }"
+            )
+
+    def _normalize_pdf_workers():
+        raw_value = self.pdf_extraction_workers_entry.text().strip().lower()
+        if raw_value in {'', 'auto', 'automatic', 'default', '0'}:
+            normalized = 'auto'
+        else:
+            try:
+                normalized = str(max(1, min(int(raw_value), pdf_cpu_cores)))
+            except (TypeError, ValueError):
+                normalized = 'auto'
+        self.pdf_extraction_workers_entry.setText(normalized)
+        _store_pdf_workers(normalized)
+
+    self.pdf_extraction_workers_entry.textChanged.connect(_store_pdf_workers)
+    self.pdf_extraction_workers_entry.editingFinished.connect(
+        _normalize_pdf_workers
+    )
+    pdf_workers_auto_button.clicked.connect(
+        lambda: self.pdf_extraction_workers_entry.setText('auto')
+    )
+    _store_pdf_workers(self.pdf_extraction_workers_entry.text())
 
     # PDF section separation: outline/bookmarks by default, legacy pages on demand.
     if not hasattr(self, 'pdf_use_toc_sections_var'):

@@ -8,15 +8,21 @@ from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
 from pdf_fast_extractor import (
     PDFExtractionCancelled,
     _fast_pdf_worker_count,
+    apply_pdf_image_rename_logic,
     extract_pdf_fast,
     extract_pdf_page_range_for_reader,
+    resolve_pdf_extraction_workers,
 )
 from workspace_reader import (
     build_workspace_reader_manifest,
     ensure_pdf_raw_section,
 )
 from _pdf_extraction_worker import run_pdf_extraction
-from TransateKRtoEN import FileUtilities, ProgressManager
+from TransateKRtoEN import (
+    FileUtilities,
+    ProgressManager,
+    retroactive_update_image_references,
+)
 from txt_processor import TextFileProcessor
 
 
@@ -83,6 +89,140 @@ def test_fast_semantic_deduplicates_repeated_images(tmp_path, monkeypatch):
     }
     assert len(filenames) == 1
     assert len(list((output_dir / "images").glob("pdfimg_*"))) == 1
+
+
+def test_fast_pdf_images_receive_chapter_names_without_breaking_cache(
+        tmp_path, monkeypatch):
+    pdf_path = tmp_path / "book.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+
+    pages, _images_by_page = extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        extract_images=True,
+        page_by_page=True,
+    )
+    chapters = [
+        {
+            "num": page_number,
+            "filename": f"pdf_section_{page_number}.html",
+            "body": page_html,
+        }
+        for page_number, page_html in pages
+    ]
+
+    apply_pdf_image_rename_logic(chapters, str(output_dir))
+
+    image_names = sorted(path.name for path in (output_dir / "images").iterdir())
+    assert image_names == ["pdf_section_1_img_1.png"]
+    assert all("pdfimg_" not in chapter["body"] for chapter in chapters)
+    assert all("pdf_section_1_img_1.png" in chapter["body"] for chapter in chapters)
+    rename_map = json.loads(
+        (output_dir / "image_rename_map.json").read_text(encoding="utf-8")
+    )
+    assert set(rename_map.values()) == {"pdf_section_1_img_1.png"}
+
+    cached_pages, cached_images = extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        extract_images=True,
+        page_by_page=True,
+    )
+    assert _manifest(output_dir)["stats"]["reused_pages"] == 3
+    assert all("pdf_section_1_img_1.png" in html for _page, html in cached_pages)
+    assert {
+        image["filename"]
+        for page_images in cached_images.values()
+        for image in page_images
+    } == {"pdf_section_1_img_1.png"}
+
+    legacy_chapter = {
+        "num": 1,
+        "filename": "pdf_section_1.html",
+        "body": cached_pages[0][1].replace(
+            "pdf_section_1_img_1.png", "page_1_img_1.png"
+        ),
+    }
+    apply_pdf_image_rename_logic([legacy_chapter], str(output_dir))
+    assert "page_1_img_1.png" not in legacy_chapter["body"]
+    assert "pdf_section_1_img_1.png" in legacy_chapter["body"]
+
+
+def test_text_processor_automatically_applies_pdf_image_rename_logic(
+        tmp_path, monkeypatch):
+    pdf_path = tmp_path / "book.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    monkeypatch.setenv("PDF_RENDER_MODE", "fast_semantic")
+    monkeypatch.setenv("PDF_EXTRACT_IMAGES", "1")
+    monkeypatch.setenv("PDF_GENERATE_CSS", "0")
+    monkeypatch.setenv("PDF_USE_TOC_SECTIONS", "1")
+
+    chapters = TextFileProcessor(str(pdf_path), str(output_dir)).extract_chapters()
+
+    assert [chapter["filename"] for chapter in chapters] == [
+        "pdf_section_1.html",
+        "pdf_section_2.html",
+    ]
+    assert sorted(path.name for path in (output_dir / "images").iterdir()) == [
+        "pdf_section_1_img_1.png"
+    ]
+    assert all("pdfimg_" not in chapter["body"] for chapter in chapters)
+    assert sorted(
+        path.name for path in (output_dir / "word_count" / "images").iterdir()
+    ) == ["pdf_section_1_img_1.png"]
+
+    canonical = output_dir / "images" / "pdf_section_1_img_1.png"
+    response_named = output_dir / "images" / "pdf_section_stableid_img_1.png"
+    canonical.rename(response_named)
+    response_html = output_dir / "response_pdf_section_stableid.html"
+    response_html.write_text(
+        '<img src="images/pdf_section_stableid_img_1.png">',
+        encoding="utf-8",
+    )
+    rename_map_path = output_dir / "image_rename_map.json"
+    rename_map = json.loads(rename_map_path.read_text(encoding="utf-8"))
+    rename_map["pdf_section_1_img_1.png"] = "pdf_section_stableid_img_1.png"
+    rename_map_path.write_text(json.dumps(rename_map), encoding="utf-8")
+
+    apply_pdf_image_rename_logic(
+        chapters,
+        str(output_dir),
+        word_count_dir=str(output_dir / "word_count"),
+    )
+
+    assert canonical.is_file()
+    assert not response_named.exists()
+    assert "pdf_section_1_img_1.png" in response_html.read_text(encoding="utf-8")
+
+
+def test_epub_image_repair_does_not_rename_pdf_section_images(tmp_path):
+    workspace = tmp_path / "Book"
+    images = workspace / "images"
+    images.mkdir(parents=True)
+    source_pdf = tmp_path / "Book.pdf"
+    source_pdf.write_bytes(b"pdf")
+    (workspace / "source_epub.txt").write_text(
+        str(source_pdf), encoding="utf-8"
+    )
+    canonical_name = "pdf_section_1_img_1.png"
+    (images / canonical_name).write_bytes(b"image")
+    response = workspace / "response_pdf_section_stableid.html"
+    response.write_text(
+        f'<html><body><img src="images/{canonical_name}"></body></html>',
+        encoding="utf-8",
+    )
+
+    retroactive_update_image_references(str(workspace))
+
+    assert (images / canonical_name).is_file()
+    assert not (images / "pdf_section_stableid_img_1.png").exists()
+    assert canonical_name in response.read_text(encoding="utf-8")
 
 
 def test_fast_layout_externalizes_images_without_base64(tmp_path, monkeypatch):
@@ -233,6 +373,7 @@ def test_fast_pdf_worker_count_uses_configured_parallel_capacity(monkeypatch):
     import pdf_fast_extractor as fast_extractor
 
     monkeypatch.setattr(fast_extractor.os, "cpu_count", lambda: 16)
+    monkeypatch.delenv("PDF_EXTRACTION_WORKERS", raising=False)
     monkeypatch.delenv("EXTRACTION_WORKERS", raising=False)
     monkeypatch.delenv("PDF_FAST_MAX_WORKERS", raising=False)
     assert _fast_pdf_worker_count(816, 68) == 8
@@ -240,10 +381,15 @@ def test_fast_pdf_worker_count_uses_configured_parallel_capacity(monkeypatch):
     monkeypatch.setenv("EXTRACTION_WORKERS", "6")
     assert _fast_pdf_worker_count(816, 68) == 6
 
-    monkeypatch.setenv("EXTRACTION_WORKERS", "12")
+    monkeypatch.setenv("PDF_EXTRACTION_WORKERS", "auto")
+    assert _fast_pdf_worker_count(816, 68) == 8
+
+    monkeypatch.setenv("PDF_EXTRACTION_WORKERS", "12")
     monkeypatch.setenv("PDF_FAST_MAX_WORKERS", "10")
     assert _fast_pdf_worker_count(816, 68) == 10
 
+    assert resolve_pdf_extraction_workers("auto", cpu_count=28) == 14
+    assert resolve_pdf_extraction_workers("40", cpu_count=28) == 28
     assert _fast_pdf_worker_count(7, 7) == 1
 
 
@@ -375,6 +521,11 @@ def test_other_settings_exposes_new_modes_and_legacy_fallback():
     assert "preserve_fast_pdf_images" in translation_source
     assert "or preserve_fast_pdf_images" in translation_source
     assert "PDF_EXTRACTION_STOP_FILE" in gui_source
+    assert 'QLabel("PDF Input Settings")' in settings_source
+    assert "pdf_extraction_workers_var" in settings_source
+    assert 'QPushButton("Auto")' in settings_source
+    assert "CPU cores:" in settings_source
+    assert "PDF_EXTRACTION_WORKERS" in gui_source
 
 
 def test_unchanged_bookmark_sections_keep_stable_identity_when_one_is_added():
