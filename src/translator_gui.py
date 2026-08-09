@@ -34868,7 +34868,10 @@ Important rules:
             from pdf_workspace_compiler import compile_pdf_workspace
 
             compiled_path = compile_pdf_workspace(
-                self.pdf_folder, log_callback=self.append_log)
+                self.pdf_folder,
+                log_callback=self.append_log,
+                stop_callback=lambda: bool(self.stop_requested),
+            )
             if compiled_path and os.path.isfile(compiled_path):
                 QTimer.singleShot(
                     0,
@@ -35835,6 +35838,18 @@ Important rules:
         self._last_stop_was_graceful = graceful_stop
         
         self.stop_requested = True
+
+        # PDF extraction has no API request to preserve. Graceful and immediate
+        # stops both halt it at the next page/image boundary, including child
+        # process workers.
+        try:
+            pdf_stop_file = os.environ.get('PDF_EXTRACTION_STOP_FILE')
+            if pdf_stop_file:
+                os.makedirs(os.path.dirname(pdf_stop_file) or '.', exist_ok=True)
+                with open(pdf_stop_file, 'w', encoding='utf-8') as f:
+                    f.write('stop')
+        except Exception:
+            pass
 
         # Touch stop file for cross-process glossary workers (only for immediate stop)
         if not graceful_stop:

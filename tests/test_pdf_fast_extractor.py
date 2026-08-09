@@ -1,16 +1,22 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
 
 from pdf_extractor import build_pdf_toc_section_plan, group_pdf_pages_by_toc
-from pdf_fast_extractor import extract_pdf_fast, extract_pdf_page_range_for_reader
+from pdf_fast_extractor import (
+    PDFExtractionCancelled,
+    extract_pdf_fast,
+    extract_pdf_page_range_for_reader,
+)
 from workspace_reader import (
     build_workspace_reader_manifest,
     ensure_pdf_raw_section,
 )
 from _pdf_extraction_worker import run_pdf_extraction
 from TransateKRtoEN import FileUtilities, ProgressManager
+from txt_processor import TextFileProcessor
 
 
 def _make_image_pdf(path: Path, page_count=3):
@@ -222,6 +228,83 @@ def test_parallel_page_range_pool_returns_pages_in_source_order(tmp_path, monkey
     assert len(list((output_dir / "images").glob("pdfimg_*"))) == 1
 
 
+def test_fast_extractor_reports_job_progress(tmp_path, monkeypatch, capsys):
+    pdf_path = tmp_path / "progress.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path, page_count=4)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    monkeypatch.setenv("PDF_FAST_CHUNK_PAGES", "2")
+    monkeypatch.setenv("PDF_PROGRESS_HEARTBEAT_SECONDS", "0.05")
+    import pdf_fast_extractor as fast_extractor
+
+    real_extract_range = fast_extractor._extract_page_range
+
+    def slow_extract_range(args):
+        time.sleep(0.08)
+        return real_extract_range(args)
+
+    monkeypatch.setattr(fast_extractor, "_extract_page_range", slow_extract_range)
+
+    extract_pdf_fast(
+        str(pdf_path),
+        str(output_dir),
+        mode="fast_semantic",
+        page_by_page=True,
+    )
+
+    output = capsys.readouterr().out
+    assert "Fast PDF phase: fingerprinting source and reading bookmarks" in output
+    assert "Fast PDF extraction heartbeat:" in output
+    assert "Fast PDF progress: 2/4 pages (50%)" in output
+    assert "Fast PDF progress: 4/4 pages (100%)" in output
+
+
+def test_fast_extractor_stop_callback_cancels_and_cleans_stop_file(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "cancel.pdf"
+    output_dir = tmp_path / "output"
+    _make_image_pdf(pdf_path, page_count=4)
+    monkeypatch.setenv("EXTRACTION_WORKERS", "1")
+    monkeypatch.delenv("PDF_EXTRACTION_STOP_FILE", raising=False)
+
+    with pytest.raises(PDFExtractionCancelled):
+        extract_pdf_fast(
+            str(pdf_path),
+            str(output_dir),
+            mode="fast_semantic",
+            page_by_page=True,
+            stop_callback=lambda: True,
+        )
+
+    assert "PDF_EXTRACTION_STOP_FILE" not in __import__("os").environ
+    assert not (
+        output_dir / ".pdf_extraction_cache" / "active_extraction.stop"
+    ).exists()
+
+
+def test_text_processor_does_not_swallow_pdf_cancellation(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "cancel.pdf"
+    pdf_path.write_bytes(b"placeholder")
+
+    def cancelled_extraction(*_args, **_kwargs):
+        raise PDFExtractionCancelled("stopped")
+
+    monkeypatch.setattr(
+        "txt_processor.extract_pdf_with_formatting",
+        cancelled_extraction,
+    )
+    processor = TextFileProcessor(
+        str(pdf_path),
+        str(tmp_path / "output"),
+        stop_callback=lambda: True,
+    )
+
+    with pytest.raises(PDFExtractionCancelled):
+        processor.extract_chapters()
+
+
 def test_pdf_worker_groups_fast_pages_into_bookmark_entries(tmp_path, monkeypatch):
     pdf_path = tmp_path / "worker.pdf"
     output_dir = tmp_path / "output"
@@ -261,12 +344,18 @@ def test_other_settings_exposes_new_modes_and_legacy_fallback():
     root = Path(__file__).resolve().parents[1]
     settings_source = (root / "src" / "other_settings.py").read_text(encoding="utf-8")
     gui_source = (root / "src" / "translator_gui.py").read_text(encoding="utf-8")
+    translation_source = (root / "src" / "TransateKRtoEN.py").read_text(
+        encoding="utf-8"
+    )
 
     assert '("Fast Semantic", "fast_semantic")' in settings_source
     assert '("Fast Layout", "fast_layout")' in settings_source
     assert '("Legacy Layout", "legacy_layout")' in settings_source
     assert "self.config.get('pdf_render_mode', 'fast_semantic')" in gui_source
     assert "self.config['pdf_fast_engine_migrated'] = True" in gui_source
+    assert "preserve_fast_pdf_images" in translation_source
+    assert "or preserve_fast_pdf_images" in translation_source
+    assert "PDF_EXTRACTION_STOP_FILE" in gui_source
 
 
 def test_unchanged_bookmark_sections_keep_stable_identity_when_one_is_added():

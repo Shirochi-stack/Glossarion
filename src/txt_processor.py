@@ -18,10 +18,11 @@ import shutil
 class TextFileProcessor:
     """Process plain text files for translation"""
     
-    def __init__(self, file_path: str, output_dir: str, cache_suffix: str = ''):
+    def __init__(self, file_path: str, output_dir: str, cache_suffix: str = '', stop_callback=None):
         self.file_path = file_path
         self.output_dir = output_dir
         self.file_base = os.path.splitext(os.path.basename(file_path))[0]
+        self.stop_callback = stop_callback
         self.cache_suffix = cache_suffix  # e.g. '_glossary' → split_glossary.cache
         
         # Initialize chapter splitter
@@ -51,7 +52,8 @@ class TextFileProcessor:
                         self.file_path, 
                         self.output_dir, 
                         extract_images=self.pdf_extract_images,
-                        page_by_page=True  # Get pages separately
+                        page_by_page=True,  # Get pages separately
+                        stop_callback=self.stop_callback,
                     )
                     is_html_content = True
 
@@ -132,6 +134,8 @@ class TextFileProcessor:
                             content = self._html_to_markdown(content)
                         print(f"✅ Converted HTML to Markdown")
             except Exception as e:
+                if e.__class__.__name__ == 'PDFExtractionCancelled':
+                    raise
                 print(f"❌ Failed to extract text from PDF: {e}")
                 content = "" # Handle empty content gracefully
         else:

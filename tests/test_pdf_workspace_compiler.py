@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import fitz
@@ -99,6 +100,82 @@ def test_compile_pdf_workspace_has_one_bookmark_per_response(tmp_path, monkeypat
     assert "First body." in page_text
     assert "Second body." in page_text
     assert "Body sentence heading" not in toc_titles
+
+
+def test_compile_pdf_repairs_legacy_page_images_from_only_requested_pages(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "Illustrated.pdf"
+    document = fitz.open()
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 20, 20), False)
+    pixmap.clear_with(0x336699)
+    image_bytes = pixmap.tobytes("png")
+    for page_number in range(1, 5):
+        page = document.new_page(width=240, height=320)
+        page.insert_text((20, 30), f"Page {page_number}")
+        if page_number == 4:
+            page.insert_image(fitz.Rect(20, 50, 120, 150), stream=image_bytes)
+    document.save(source)
+    document.close()
+
+    workspace = tmp_path / "Illustrated_PDF"
+    write_workspace_source_reference(workspace, source)
+    response = workspace / "response_pdf_section_1.html"
+    response.write_text(
+        '<html><body><p>Translated</p><img src="images/page_4_img_1.png"></body></html>',
+        encoding="utf-8",
+    )
+    (workspace / "translation_progress.json").write_text(
+        json.dumps({
+            "chapters": {
+                "pdf:first": {
+                    "actual_num": 1,
+                    "status": "completed",
+                    "output_file": response.name,
+                    "pdf_section_title": "Illustrated",
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_create_pdf_from_html(
+        html_content, output_path, css_path=None, images_dir=None
+    ):
+        del css_path
+        soup = BeautifulSoup(html_content, "html.parser")
+        src = soup.find("img")["src"]
+        captured["src"] = src
+        captured["image_exists"] = Path(images_dir, Path(src).name).is_file()
+        time.sleep(0.08)
+        output = fitz.open()
+        output.new_page()
+        output.save(output_path)
+        output.close()
+        return True
+
+    import pdf_extractor
+
+    monkeypatch.setattr(
+        pdf_extractor, "create_pdf_from_html", fake_create_pdf_from_html
+    )
+    monkeypatch.setenv("PDF_COMPILE_HEARTBEAT_SECONDS", "0.05")
+    logs = []
+    output = compile_pdf_workspace(str(workspace), log_callback=logs.append)
+
+    assert Path(output).is_file()
+    assert captured["src"].startswith("images/pdfimg_")
+    assert captured["image_exists"] is True
+    assert any("1 specifically referenced PDF page" in message for message in logs)
+    assert any("1 reference(s) repaired, 0 unresolved" in message for message in logs)
+    assert any("PDF renderer heartbeat:" in message for message in logs)
+    targeted = workspace / ".pdf_extraction_cache" / "targeted_images"
+    assert len(list(targeted.glob("*_page_000004.json"))) == 1
+    assert not list(targeted.glob("*_page_000001.json"))
+    assert not list(targeted.glob("*_page_000002.json"))
+    assert not list(targeted.glob("*_page_000003.json"))
 
 
 def test_library_compile_action_is_pdf_aware():

@@ -21405,6 +21405,16 @@ def main(log_callback=None, stop_callback=None):
         is_pdf_file
         and config.OUTPUT_MODE == "vision"
     )
+    preserve_fast_pdf_images = (
+        is_pdf_file
+        and os.getenv("PDF_RENDER_MODE", "fast_semantic").strip().lower()
+        in ("fast_semantic", "fast_layout")
+    )
+    if preserve_fast_pdf_images:
+        print(
+            "♻️ Preserving content-addressed PDF images so the fast page "
+            "cache remains reusable"
+        )
     preserve_remote_image_cache = _should_preserve_remote_image_cache(
         input_path,
         out,
@@ -21421,6 +21431,7 @@ def main(log_callback=None, stop_callback=None):
             out,
             preserve_images=(
                 preserve_pdf_ocr_images
+                or preserve_fast_pdf_images
                 or preserve_remote_image_cache
             ),
         )
@@ -21829,7 +21840,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Build chapters from extracted content
                     file_base = os.path.splitext(os.path.basename(input_path))[0]
-                    txt_processor = TextFileProcessor(input_path, out)
+                    txt_processor = TextFileProcessor(input_path, out, stop_callback=check_stop)
                     
                     if _is_page_list and isinstance(_content, list):
                         # Content is list of [page_num, html] pairs
@@ -21890,7 +21901,7 @@ def main(log_callback=None, stop_callback=None):
                     raise RuntimeError("PDF extraction succeeded but result file not found")
             else:
                 # Non-GUI mode: use in-process extraction
-                txt_processor = TextFileProcessor(input_path, out)
+                txt_processor = TextFileProcessor(input_path, out, stop_callback=check_stop)
                 chapters = txt_processor.extract_chapters()
                 txt_processor.save_original_structure()
             
@@ -21905,6 +21916,9 @@ def main(log_callback=None, stop_callback=None):
                 log_callback(f"❌ Error: PDF processor not available: {e}")
             return
         except Exception as e:
+            if e.__class__.__name__ == 'PDFExtractionCancelled':
+                print("🛑 PDF extraction stopped by user")
+                return
             print(f"❌ Error processing PDF file: {e}")
             if log_callback:
                 log_callback(f"❌ Error processing PDF file: {e}")

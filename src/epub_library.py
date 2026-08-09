@@ -2187,7 +2187,10 @@ def _is_gallery_filename(name: str) -> bool:
     return stem == "gallery"
 
 
-_PROGRESS_SIDECAR_FILENAMES = frozenset({"source_epub.txt"})
+_PROGRESS_SIDECAR_FILENAMES = frozenset({
+    "source_epub.txt",
+    "image_rename_map.json",
+})
 
 
 def _is_progress_sidecar_entry(key, entry: dict | None = None) -> bool:
@@ -14271,9 +14274,9 @@ class _BookDetailsLoader(QThread):
             # Resolve each spine chapter to a translation status.
             chapters_info = []
             all_prog_chapters = (prog or {}).get("chapters", {}) or {}
-            # source_epub.txt is a durable workspace pointer, not readable
-            # content. It must not become a synthesized Book Details row when
-            # a TXT/PDF source has no EPUB spine to supply the chapter list.
+            # Workspace sidecars are bookkeeping, not readable content. They
+            # must not become synthesized Book Details rows when a TXT/PDF
+            # source has no EPUB spine to supply the chapter list.
             prog_chapters = {
                 key: info
                 for key, info in all_prog_chapters.items()

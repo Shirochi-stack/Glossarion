@@ -1558,7 +1558,7 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
         return '\n\n'.join(p[1] for p in pages), images_by_page
 
 
-def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
+def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True, page_by_page: bool = False, stop_callback=None) -> Tuple[str, Dict[int, List[Dict]]]:
     """
     Extract PDF content with HTML formatting and images.
     Preserves font types, alignment, and table of contents.
@@ -1593,6 +1593,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 mode=render_mode,
                 extract_images=extract_images,
                 page_by_page=page_by_page,
+                stop_callback=stop_callback,
             )
 
         if render_mode in ("legacy_layout", "legacy_xhtml"):

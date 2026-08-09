@@ -26,22 +26,141 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 FAST_EXTRACTOR_VERSION = 2
 FAST_MODES = {"fast_semantic", "fast_layout"}
 
 
-def _stop_requested() -> bool:
+class PDFExtractionCancelled(RuntimeError):
+    """Raised when the active PDF extraction receives a stop request."""
+
+
+_PROCESS_PDF_DOCUMENT = None
+_PROCESS_PDF_PATH = ""
+_PROCESS_STREAM_CACHE: Dict[int, str] = {}
+
+
+def _stop_requested(stop_callback: Optional[Callable[[], bool]] = None) -> bool:
+    if stop_callback:
+        try:
+            if stop_callback():
+                return True
+        except Exception:
+            pass
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return True
     stop_file = os.environ.get("PDF_EXTRACTION_STOP_FILE", "")
     return bool(stop_file and os.path.exists(stop_file))
+
+
+def _signal_stop_file() -> None:
+    stop_file = os.environ.get("PDF_EXTRACTION_STOP_FILE", "")
+    if not stop_file:
+        return
+    try:
+        Path(stop_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(stop_file).write_text("stop", encoding="utf-8")
+    except OSError:
+        pass
+
+
+class _ExtractionProgressMonitor:
+    """Emit time-based heartbeats and bridge GUI cancellation to workers."""
+
+    def __init__(self, stop_callback, stop_file: Path, owns_stop_file: bool):
+        self.stop_callback = stop_callback
+        self.stop_file = stop_file
+        self.owns_stop_file = owns_stop_file
+        self.started = time.perf_counter()
+        self.total_pages = 0
+        self.completed_pages = 0
+        self.completed_jobs = 0
+        self.total_jobs = 0
+        self.phase = "initializing"
+        try:
+            self.heartbeat_seconds = max(
+                0.05,
+                float(os.environ.get("PDF_PROGRESS_HEARTBEAT_SECONDS", "3")),
+            )
+        except (TypeError, ValueError):
+            self.heartbeat_seconds = 3.0
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="pdf-fast-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def configure(self, total_pages: int, total_jobs: int, phase: str = "extracting") -> None:
+        with self._lock:
+            self.total_pages = max(0, int(total_pages or 0))
+            self.total_jobs = max(0, int(total_jobs or 0))
+            self.phase = phase
+
+    def update(self, *, pages: int = 0, jobs: int = 0, phase: Optional[str] = None) -> None:
+        with self._lock:
+            self.completed_pages += max(0, int(pages or 0))
+            self.completed_jobs += max(0, int(jobs or 0))
+            if phase:
+                self.phase = phase
+
+    def _run(self) -> None:
+        next_heartbeat = time.perf_counter() + self.heartbeat_seconds
+        poll_seconds = min(0.2, self.heartbeat_seconds)
+        while not self._closed.wait(poll_seconds):
+            if _stop_requested(self.stop_callback):
+                _signal_stop_file()
+            now = time.perf_counter()
+            if now < next_heartbeat:
+                continue
+            with self._lock:
+                total_pages = self.total_pages
+                completed_pages = self.completed_pages
+                completed_jobs = self.completed_jobs
+                total_jobs = self.total_jobs
+                phase = self.phase
+            elapsed = max(0, int(now - self.started))
+            if total_pages:
+                percent = min(100, int(completed_pages * 100 / total_pages))
+                print(
+                    f"⏳ Fast PDF extraction heartbeat: {phase}, "
+                    f"{completed_pages}/{total_pages} pages ({percent}%), "
+                    f"{completed_jobs}/{total_jobs or '?'} jobs, {elapsed}s elapsed"
+                )
+            else:
+                print(f"⏳ Fast PDF extraction heartbeat: {phase}, {elapsed}s elapsed")
+            next_heartbeat = now + self.heartbeat_seconds
+
+    def close(self) -> None:
+        self._closed.set()
+        self._thread.join(timeout=0.5)
+        if self.owns_stop_file:
+            try:
+                self.stop_file.unlink()
+            except OSError:
+                pass
+
+
+def _initialize_pdf_worker(pdf_path: str) -> None:
+    """Open one persistent document per worker instead of once per job."""
+    global _PROCESS_PDF_DOCUMENT, _PROCESS_PDF_PATH, _PROCESS_STREAM_CACHE
+    import fitz
+
+    _PROCESS_PDF_PATH = os.path.abspath(pdf_path)
+    _PROCESS_PDF_DOCUMENT = fitz.open(pdf_path)
+    _PROCESS_STREAM_CACHE = {}
 
 
 def _sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            if _stop_requested():
+                raise PDFExtractionCancelled("PDF extraction cancelled")
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -151,6 +270,8 @@ def _page_source_signature(doc, page, stream_cache: Dict[int, str]) -> str:
         pass
 
     for xref in page.get_contents() or []:
+        if _stop_requested():
+            raise PDFExtractionCancelled("PDF extraction cancelled")
         try:
             digest.update(f"content:{int(xref)}:".encode("ascii"))
             digest.update(_stream_digest(doc, int(xref), stream_cache).encode("ascii"))
@@ -162,6 +283,8 @@ def _page_source_signature(doc, page, stream_cache: Dict[int, str]) -> str:
     except Exception:
         image_xrefs = []
     for xref in image_xrefs:
+        if _stop_requested():
+            raise PDFExtractionCancelled("PDF extraction cancelled")
         digest.update(f"image:{xref}:".encode("ascii"))
         digest.update(_stream_digest(doc, xref, stream_cache).encode("ascii"))
 
@@ -212,28 +335,76 @@ def _bookmark_jobs(toc_entries: Sequence[Sequence], total_pages: int, chunk_page
 
 
 def _image_occurrences(page) -> List[Dict]:
-    try:
-        raw_items = page.get_image_info(hashes=True, xrefs=True) or []
-    except Exception:
-        raw_items = []
+    """Return displayed image placements without decoding every image hash.
+
+    ``get_image_info(hashes=True)`` decodes and hashes every image before the
+    extractor immediately decodes it again for output.  PDFs with thousands of
+    illustrations spend most of their time in that duplicated work.  Resource
+    xrefs plus ``get_image_rects`` provide the same displayed placements; the
+    final extracted bytes remain content-hashed by :func:`_extract_asset`.
+    """
 
     items = []
+    try:
+        resources = page.get_images(full=True) or []
+    except Exception:
+        resources = []
+
+    seen_xrefs = set()
+    for resource_index, resource in enumerate(resources):
+        try:
+            xref = int(resource[0] or 0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if xref <= 0 or xref in seen_xrefs:
+            continue
+        seen_xrefs.add(xref)
+        try:
+            rectangles = page.get_image_rects(xref) or []
+        except Exception:
+            rectangles = []
+        try:
+            width = int(resource[2] or 0)
+            height = int(resource[3] or 0)
+            has_mask = bool(int(resource[1] or 0))
+        except (TypeError, ValueError, IndexError):
+            width = height = 0
+            has_mask = False
+        for rectangle in rectangles:
+            items.append(
+                {
+                    "index": len(items),
+                    "number": len(items),
+                    "resource_index": resource_index,
+                    "xref": xref,
+                    "source_digest": f"xref:{xref}",
+                    "bbox": _rect_list(rectangle),
+                    "width": width,
+                    "height": height,
+                    "has_mask": has_mask,
+                }
+            )
+
+    if items:
+        return items
+
+    # Narrow fallback for inline images, which have no reusable xref.
+    try:
+        raw_items = page.get_image_info(hashes=False, xrefs=False) or []
+    except Exception:
+        raw_items = []
     for index, item in enumerate(raw_items):
-        digest = item.get("digest")
-        if isinstance(digest, bytes):
-            digest = digest.hex()
-        items.append(
-            {
-                "index": index,
-                "number": int(item.get("number", index)),
-                "xref": int(item.get("xref") or 0),
-                "source_digest": str(digest or ""),
-                "bbox": _rect_list(item.get("bbox")),
-                "width": int(item.get("width") or 0),
-                "height": int(item.get("height") or 0),
-                "has_mask": bool(item.get("has-mask", False)),
-            }
-        )
+        items.append({
+            "index": index,
+            "number": int(item.get("number", index)),
+            "resource_index": index,
+            "xref": 0,
+            "source_digest": f"inline:{page.number}:{index}",
+            "bbox": _rect_list(item.get("bbox")),
+            "width": int(item.get("width") or 0),
+            "height": int(item.get("height") or 0),
+            "has_mask": bool(item.get("has-mask", False)),
+        })
     return items
 
 
@@ -315,6 +486,8 @@ def _materialize_images(doc, page, occurrences, images_dir: Path, xref_map_dir: 
     local_assets = {}
     materialized = []
     for occurrence in occurrences:
+        if _stop_requested():
+            raise PDFExtractionCancelled("PDF extraction cancelled")
         key = (occurrence.get("xref"), occurrence.get("source_digest"))
         asset = local_assets.get(key)
         if asset is None:
@@ -515,7 +688,9 @@ def _extract_page_range(args):
         xref_map_dir_text,
         prior_pages,
         section_titles,
+        *optional,
     ) = args
+    stop_callback = optional[0] if optional else None
 
     import fitz
 
@@ -524,10 +699,24 @@ def _extract_page_range(args):
     xref_map_dir = Path(xref_map_dir_text)
     results = []
     stream_cache: Dict[int, str] = {}
-    with fitz.open(pdf_path) as doc:
+    global _PROCESS_PDF_DOCUMENT, _PROCESS_PDF_PATH
+    normalized_pdf_path = os.path.abspath(pdf_path)
+    if (
+        _PROCESS_PDF_DOCUMENT is not None
+        and _PROCESS_PDF_PATH == normalized_pdf_path
+        and not getattr(_PROCESS_PDF_DOCUMENT, "is_closed", True)
+    ):
+        doc = _PROCESS_PDF_DOCUMENT
+        owns_document = False
+        stream_cache = _PROCESS_STREAM_CACHE
+    else:
+        doc = fitz.open(pdf_path)
+        owns_document = True
+    try:
         for page_index in range(start_page, end_page):
-            if _stop_requested():
-                raise RuntimeError("PDF extraction cancelled")
+            if _stop_requested(stop_callback):
+                _signal_stop_file()
+                raise PDFExtractionCancelled("PDF extraction cancelled")
             page_number = page_index + 1
             page = doc[page_index]
             signature = _page_source_signature(doc, page, stream_cache)
@@ -571,13 +760,24 @@ def _extract_page_range(args):
                     "reused": False,
                 }
             )
+    finally:
+        if owns_document:
+            doc.close()
     return results
 
 
-def _load_results(cache_root: Path, page_entries: Dict[str, Dict], total_pages: int):
+def _load_results(
+    cache_root: Path,
+    page_entries: Dict[str, Dict],
+    total_pages: int,
+    stop_callback: Optional[Callable[[], bool]] = None,
+):
     pages = []
     images_by_page: Dict[int, List[Dict]] = {}
     for page_number in range(1, total_pages + 1):
+        if _stop_requested(stop_callback):
+            _signal_stop_file()
+            raise PDFExtractionCancelled("PDF extraction cancelled")
         entry = page_entries.get(str(page_number)) or {}
         cache_file = cache_root / str(entry.get("cache_file") or "")
         result = _load_json(cache_file, {}) or {}
@@ -663,13 +863,15 @@ def extract_pdf_page_range_for_reader(
     return page_items
 
 
-def extract_pdf_fast(
+def _extract_pdf_fast_impl(
     pdf_path: str,
     output_dir: str,
     *,
     mode: str = "fast_semantic",
     extract_images: bool = True,
     page_by_page: bool = False,
+    stop_callback: Optional[Callable[[], bool]] = None,
+    progress_monitor: Optional[_ExtractionProgressMonitor] = None,
 ):
     """Extract a PDF using the modern cached pipeline."""
 
@@ -690,6 +892,11 @@ def extract_pdf_fast(
     with fitz.open(pdf_path) as doc:
         total_pages = len(doc)
         toc_entries = doc.get_toc(simple=True) or []
+    if progress_monitor:
+        progress_monitor.configure(total_pages, 0, "checking the page cache")
+    if _stop_requested(stop_callback):
+        _signal_stop_file()
+        raise PDFExtractionCancelled("PDF extraction cancelled")
     outline_hash = _outline_digest(toc_entries)
 
     settings = {
@@ -707,11 +914,27 @@ def extract_pdf_fast(
         and previous.get("source", {}).get("sha256") == source_hash
         and int(previous.get("page_count") or -1) == total_pages
     )
-    if exact_source and all(
-        _cache_entry_is_usable(cache_root, previous_pages.get(str(page_number), {}))
-        for page_number in range(1, total_pages + 1)
-    ):
-        pages, images_by_page = _load_results(cache_root, previous_pages, total_pages)
+    exact_cache_usable = exact_source
+    if exact_cache_usable:
+        for page_number in range(1, total_pages + 1):
+            if _stop_requested(stop_callback):
+                _signal_stop_file()
+                raise PDFExtractionCancelled("PDF extraction cancelled")
+            if not _cache_entry_is_usable(
+                cache_root,
+                previous_pages.get(str(page_number), {}),
+            ):
+                exact_cache_usable = False
+                break
+    if exact_cache_usable:
+        if progress_monitor:
+            progress_monitor.configure(total_pages, 1, "loading cached pages")
+        pages, images_by_page = _load_results(
+            cache_root,
+            previous_pages,
+            total_pages,
+            stop_callback,
+        )
         previous["outline_digest"] = outline_hash
         previous["stats"] = {
             "reused_pages": total_pages,
@@ -719,6 +942,8 @@ def extract_pdf_fast(
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
         _atomic_write_json(manifest_path, previous)
+        if progress_monitor:
+            progress_monitor.update(pages=total_pages, jobs=1, phase="complete")
         print(f"Fast PDF cache hit: reused {total_pages}/{total_pages} pages")
         if page_by_page:
             return pages, images_by_page
@@ -729,6 +954,8 @@ def extract_pdf_fast(
     except ValueError:
         chunk_pages = 16
     jobs, section_titles = _bookmark_jobs(toc_entries, total_pages, chunk_pages)
+    if progress_monitor:
+        progress_monitor.configure(total_pages, len(jobs), "extracting pages")
     try:
         requested_workers = int(os.environ.get("EXTRACTION_WORKERS", "2"))
     except ValueError:
@@ -764,14 +991,83 @@ def extract_pdf_fast(
         f"{worker_count} worker(s), mode={mode}"
     )
     extracted_entries = []
+
+    def _record_job_result(result, start_page, end_page):
+        extracted_entries.extend(result)
+        completed_pages = len(result)
+        if progress_monitor:
+            progress_monitor.update(pages=completed_pages, jobs=1)
+            done_pages = progress_monitor.completed_pages
+            done_jobs = progress_monitor.completed_jobs
+        else:
+            done_pages = len(extracted_entries)
+            done_jobs = 0
+        percent = int(done_pages * 100 / total_pages) if total_pages else 100
+        reused = sum(1 for entry in result if entry.get("reused"))
+        print(
+            f"📄 Fast PDF progress: {done_pages}/{total_pages} pages ({percent}%), "
+            f"job pages {start_page + 1}-{end_page} complete, "
+            f"{reused}/{completed_pages} page(s) reused"
+        )
+
     if worker_count == 1:
-        for task in tasks:
-            extracted_entries.extend(_extract_page_range(task))
+        global _PROCESS_PDF_DOCUMENT, _PROCESS_PDF_PATH, _PROCESS_STREAM_CACHE
+        _PROCESS_PDF_PATH = os.path.abspath(pdf_path)
+        _PROCESS_PDF_DOCUMENT = fitz.open(pdf_path)
+        _PROCESS_STREAM_CACHE = {}
+        try:
+            for task in tasks:
+                if _stop_requested(stop_callback):
+                    _signal_stop_file()
+                    raise PDFExtractionCancelled("PDF extraction cancelled")
+                direct_task = (*task, stop_callback)
+                result = _extract_page_range(direct_task)
+                _record_job_result(result, task[1], task[2])
+        finally:
+            _PROCESS_PDF_DOCUMENT.close()
+            _PROCESS_PDF_DOCUMENT = None
+            _PROCESS_PDF_PATH = ""
+            _PROCESS_STREAM_CACHE = {}
     else:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_extract_page_range, task) for task in tasks]
-            for future in concurrent.futures.as_completed(futures):
-                extracted_entries.extend(future.result())
+        executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_initialize_pdf_worker,
+            initargs=(pdf_path,),
+        )
+        futures = {
+            executor.submit(_extract_page_range, task): (task[1], task[2])
+            for task in tasks
+        }
+        pending = set(futures)
+        cancelled = False
+        try:
+            while pending:
+                if _stop_requested(stop_callback):
+                    cancelled = True
+                    _signal_stop_file()
+                    for future in pending:
+                        future.cancel()
+                    raise PDFExtractionCancelled("PDF extraction cancelled")
+                done, pending = concurrent.futures.wait(
+                    pending,
+                    timeout=0.25,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    start_page, end_page = futures[future]
+                    result = future.result()
+                    _record_job_result(result, start_page, end_page)
+        except PDFExtractionCancelled:
+            cancelled = True
+            _signal_stop_file()
+            for future in pending:
+                future.cancel()
+            raise
+        finally:
+            # Keep the stop file alive until every running worker reaches its
+            # next cooperative cancellation boundary. Otherwise removing it in
+            # the outer cleanup can let a late worker continue after Stop.
+            executor.shutdown(wait=True, cancel_futures=cancelled)
 
     page_entries = {
         str(entry["page_number"]): {
@@ -804,7 +1100,14 @@ def extract_pdf_fast(
         },
     }
     _atomic_write_json(manifest_path, manifest)
-    pages, images_by_page = _load_results(cache_root, page_entries, total_pages)
+    if progress_monitor:
+        progress_monitor.update(phase="assembling bookmark sections")
+    pages, images_by_page = _load_results(
+        cache_root,
+        page_entries,
+        total_pages,
+        stop_callback,
+    )
     print(
         f"Fast PDF extraction complete: {total_pages - reused_pages} extracted, "
         f"{reused_pages} reused"
@@ -812,6 +1115,139 @@ def extract_pdf_fast(
     if page_by_page:
         return pages, images_by_page
     return "\n\n".join(page_html for _, page_html in pages), images_by_page
+
+
+def extract_pdf_fast(
+    pdf_path: str,
+    output_dir: str,
+    *,
+    mode: str = "fast_semantic",
+    extract_images: bool = True,
+    page_by_page: bool = False,
+    stop_callback: Optional[Callable[[], bool]] = None,
+):
+    """Extract a PDF with visible progress and cooperative cancellation."""
+
+    existing_stop_file = os.environ.get("PDF_EXTRACTION_STOP_FILE", "").strip()
+    owns_stop_file = not existing_stop_file
+    stop_file = Path(existing_stop_file) if existing_stop_file else (
+        Path(output_dir) / ".pdf_extraction_cache" / "active_extraction.stop"
+    )
+    if owns_stop_file:
+        try:
+            stop_file.unlink()
+        except OSError:
+            pass
+        os.environ["PDF_EXTRACTION_STOP_FILE"] = str(stop_file)
+
+    monitor = _ExtractionProgressMonitor(stop_callback, stop_file, owns_stop_file)
+    try:
+        print("📄 Fast PDF phase: fingerprinting source and reading bookmarks")
+        result = _extract_pdf_fast_impl(
+            pdf_path,
+            output_dir,
+            mode=mode,
+            extract_images=extract_images,
+            page_by_page=page_by_page,
+            stop_callback=stop_callback,
+            progress_monitor=monitor,
+        )
+        return result
+    except PDFExtractionCancelled:
+        print("🛑 Fast PDF extraction stopped by user")
+        raise
+    finally:
+        monitor.close()
+        if owns_stop_file:
+            os.environ.pop("PDF_EXTRACTION_STOP_FILE", None)
+
+
+def ensure_pdf_page_images(
+    pdf_path: str,
+    output_dir: str,
+    page_numbers: Sequence[int],
+    *,
+    stop_callback: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Dict[int, List[Dict]]:
+    """Materialize images only for specifically requested 1-based pages.
+
+    The PDF compiler uses this to repair legacy ``page_N_img_M`` references.
+    It never walks intervening pages, so a missing image on page 700 does not
+    cause pages 1-699 to be scanned.
+    """
+
+    def report(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+        else:
+            print(message)
+
+    import fitz
+
+    output_path = Path(output_dir)
+    images_dir = output_path / "images"
+    cache_root = output_path / ".pdf_extraction_cache"
+    targeted_root = cache_root / "targeted_images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    targeted_root.mkdir(parents=True, exist_ok=True)
+
+    source_stat = os.stat(pdf_path)
+    source_token = hashlib.sha256(
+        f"{os.path.abspath(pdf_path)}\0{source_stat.st_size}\0{source_stat.st_mtime_ns}".encode(
+            "utf-8", "replace"
+        )
+    ).hexdigest()[:24]
+    xref_map_dir = cache_root / "xref_maps" / f"targeted_{source_token}"
+
+    requested = sorted({int(page) for page in page_numbers if int(page) > 0})
+    results: Dict[int, List[Dict]] = {}
+    with fitz.open(pdf_path) as doc:
+        requested = [page for page in requested if page <= len(doc)]
+        total = len(requested)
+        for position, page_number in enumerate(requested, 1):
+            if _stop_requested(stop_callback):
+                _signal_stop_file()
+                raise PDFExtractionCancelled("PDF image recovery cancelled")
+
+            targeted_path = targeted_root / f"{source_token}_page_{page_number:06d}.json"
+            cached = _load_json(targeted_path, {}) or {}
+            cached_images = cached.get("images") if isinstance(cached, dict) else []
+            if cached_images and all(
+                os.path.isfile(str(item.get("path") or ""))
+                for item in cached_images
+            ):
+                results[page_number] = cached_images
+                reused = True
+            else:
+                page = doc[page_number - 1]
+                occurrences = _image_occurrences(page)
+                page_images = _materialize_images(
+                    doc,
+                    page,
+                    occurrences,
+                    images_dir,
+                    xref_map_dir,
+                )
+                results[page_number] = page_images
+                _atomic_write_json(
+                    targeted_path,
+                    {
+                        "source_token": source_token,
+                        "page_number": page_number,
+                        "images": page_images,
+                    },
+                )
+                reused = False
+
+            percent = int(position * 100 / total) if total else 100
+            report(
+                f"🖼️ PDF image recovery: {position}/{total} requested page(s) "
+                f"({percent}%), page {page_number}, "
+                f"{len(results[page_number])} image(s)"
+                + (" reused" if reused else " extracted")
+            )
+    return results
 
 
 def extract_pdf_images_deduplicated(pdf_path: str, output_dir: str) -> Dict[int, List[Dict]]:

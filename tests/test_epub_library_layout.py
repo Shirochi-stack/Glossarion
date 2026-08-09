@@ -957,6 +957,8 @@ def test_book_details_never_lists_source_epub_sidecar(qapp, tmp_path):
     raw_pdf.write_bytes(b"%PDF-test")
     (workspace / "source_epub.txt").write_text(
         str(raw_pdf), encoding="utf-8")
+    (workspace / "image_rename_map.json").write_text(
+        "{}", encoding="utf-8")
     (workspace / "response_chapter_001.html").write_text(
         "<h1>Chapter One</h1>", encoding="utf-8")
     progress_file = workspace / "translation_progress.json"
@@ -966,6 +968,12 @@ def test_book_details_never_lists_source_epub_sidecar(qapp, tmp_path):
                 "actual_num": 0,
                 "original_basename": "source_epub.txt",
                 "output_file": "source_epub.txt",
+                "status": "completed",
+            },
+            "special_image_rename_map": {
+                "actual_num": 0,
+                "original_basename": "image_rename_map.json",
+                "output_file": "image_rename_map.json",
                 "status": "completed",
             },
             "chapter_001": {
