@@ -10853,46 +10853,211 @@ class EpubLibraryDialog(QDialog):
         self._scanner_thread.start()
 
     def _on_auto_scan_done(self, in_progress: list[dict], completed: list[dict]):
-        """Receive auto-refresh scan; rebuild cards if anything visible changed.
+        """Apply a background scan without needlessly rebuilding the shelf.
 
-        Previously we diffed only the set of ``book['path']`` values,
-        which meant an in-progress book whose chapter count advanced
-        (e.g. 0 → 3 translated) kept the same card signature and never
-        re-rendered — so the user saw "Not started" / "0 KB" frozen on
-        disk long after the translator had made real progress. We now
-        diff a richer per-book signature covering progress counts,
-        translation state, mtime, and resolved raw-source path so any
-        visible field drift triggers a refresh.
+        Translation normally changes files *inside* one existing output
+        workspace. That advances the progress/size/mtime rendered by one card,
+        but it does not change the Library's structure. Keep the existing grid
+        mounted and replace only cards whose payload changed. A full refresh
+        remains the fallback when a workspace is added/removed, moves between
+        tabs, or crosses the active search/format filter.
+
+        Date/size sorting is intentionally not re-applied for content-only
+        updates: an output folder changes mtime and size for every translated
+        chapter. Explicit refreshes, pagination, and sort changes still
+        calculate the latest order.
         """
-        def _sig(books):
-            return {
-                (b.get("path", "") or ""): (
-                    int(b.get("completed_chapters", 0) or 0),
-                    int(b.get("total_chapters", 0) or 0),
-                    int(b.get("failed_chapters", 0) or 0),
-                    int(b.get("pending_chapters", 0) or 0),
-                    str(b.get("translation_state", "") or ""),
-                    bool(b.get("has_compiled_output", False)),
-                    bool(b.get("missing_raw_file", False)),
-                    str(b.get("raw_source_path", "") or ""),
-                    float(b.get("mtime", 0) or 0),
-                    int(b.get("size", 0) or 0),
-                    len(b.get("compiled_conflicts") or []),
-                    _book_library_tag_values(b),
-                )
-                for b in books
-            }
-        ip_new_sig = _sig(in_progress)
-        ip_old_sig = _sig(self._in_progress_books)
-        comp_new_sig = _sig(completed)
-        comp_old_sig = _sig(self._completed_books)
-        if ip_new_sig != ip_old_sig or comp_new_sig != comp_old_sig:
-            self._in_progress_books = in_progress
-            self._completed_books = completed
+        old_by_tab = {
+            "ip": self._books_by_path(self._in_progress_books),
+            "comp": self._books_by_path(self._completed_books),
+        }
+        new_by_tab = {
+            "ip": self._books_by_path(in_progress),
+            "comp": self._books_by_path(completed),
+        }
+
+        structure_changed = any(
+            set(old_by_tab[key]) != set(new_by_tab[key])
+            for key in ("ip", "comp")
+        )
+        changed_by_tab: dict[str, set[str]] = {"ip": set(), "comp": set()}
+        if not structure_changed:
+            query = self._search.text().strip()
+            for tab_key in ("ip", "comp"):
+                for path, new_book in new_by_tab[tab_key].items():
+                    old_book = old_by_tab[tab_key][path]
+                    if self._card_signature(old_book) == self._card_signature(new_book):
+                        continue
+                    changed_by_tab[tab_key].add(path)
+
+                    # A changed title/tag/format can make a card enter or
+                    # leave the current filtered result. That changes page
+                    # membership, so targeted replacement is no longer safe.
+                    old_matches = self._book_matches_current_filters(
+                        old_book, query=query)
+                    new_matches = self._book_matches_current_filters(
+                        new_book, query=query)
+                    if old_matches != new_matches:
+                        structure_changed = True
+                        break
+                    if (
+                        self._sort_mode == SORT_NAME
+                        and str(old_book.get("name", "")).casefold()
+                        != str(new_book.get("name", "")).casefold()
+                    ):
+                        structure_changed = True
+                        break
+                if structure_changed:
+                    break
+
+        self._in_progress_books = in_progress
+        self._completed_books = completed
+        if structure_changed:
             self._refresh_view()
+        else:
+            for tab_key in ("ip", "comp"):
+                fresh_by_path = new_by_tab[tab_key]
+                # A scan can finish while a page is being streamed. Update its
+                # not-yet-mounted payloads instead of restarting the stream.
+                state = self._card_stream_states.get(tab_key)
+                if state is not None:
+                    state["books"] = [
+                        fresh_by_path.get(book.get("path", ""), book)
+                        for book in state.get("books", [])
+                    ]
+                for card in self._cards_for_tab_key(tab_key):
+                    card_path = str(card.book.get("path", "") or "")
+                    if card_path not in changed_by_tab[tab_key]:
+                        card.book = fresh_by_path.get(card_path, card.book)
+                for path in changed_by_tab[tab_key]:
+                    self._replace_mounted_library_card(
+                        tab_key, fresh_by_path[path])
         # Always refresh the Organize / Undo counters — origins registry may
         # have changed even when the card list didn't (e.g. after undo).
         self._update_organize_counts()
+
+    @staticmethod
+    def _books_by_path(books: list[dict]) -> dict[str, dict]:
+        """Return scan rows keyed by their stable Library path."""
+        return {
+            str(book.get("path", "") or ""): book
+            for book in books
+            if book.get("path", "")
+        }
+
+    def _book_matches_current_filters(
+        self, book: dict, *, query: str | None = None
+    ) -> bool:
+        """Return whether *book* belongs to the currently filtered shelf."""
+        if query is None:
+            query = self._search.text().strip()
+        if query and not _book_matches_library_query(book, query):
+            return False
+        return (
+            self._format_filter == FORMAT_ALL
+            or self._format_of_book(book) == self._format_filter
+        )
+
+    def _replace_mounted_library_card(self, tab_key: str, book: dict) -> bool:
+        """Replace one mounted card in its existing grid cell.
+
+        Off-page cards have no widget under the paginated cache and therefore
+        require no UI work; the fresh payload is already in the backing list.
+        """
+        path = str(book.get("path", "") or "")
+        cache = getattr(
+            self, "_comp_card_cache" if tab_key == "comp" else "_ip_card_cache",
+            None,
+        )
+        cards = self._comp_cards if tab_key == "comp" else self._ip_cards
+        grid_layout = (
+            self._comp_grid_layout if tab_key == "comp" else self._ip_grid_layout
+        )
+        selected_paths = (
+            self._selected_paths_comp if tab_key == "comp"
+            else self._selected_paths_ip
+        )
+        if not path or not cache or path not in cache:
+            return False
+
+        cached = cache[path]
+        old_card = cached[0]
+        try:
+            card_index = cards.index(old_card)
+        except ValueError:
+            # The cache can be detached while this tab is midway through a
+            # stream. The caller updated the stream's pending payloads.
+            return False
+        layout_index = grid_layout.indexOf(old_card)
+        if layout_index < 0:
+            return False
+        row, column, row_span, column_span = grid_layout.getItemPosition(
+            layout_index)
+
+        try:
+            preset_key = cached[2]
+            size_key, card_width = preset_key
+        except (IndexError, TypeError, ValueError):
+            size_key = self._card_size
+            card_width = _SIZE_PRESETS[size_key]["card_w"]
+            preset_key = (size_key, card_width)
+        preset = dict(_SIZE_PRESETS.get(size_key, _SIZE_PRESETS[self._card_size]))
+        preset["card_w"] = int(card_width)
+        show_raw_title = bool(cached[3]) if len(cached) > 3 else bool(
+            self._show_raw_titles)
+
+        card = _BookCard(
+            book, preset=preset, show_raw_title=show_raw_title)
+        card.clicked.connect(self._on_card_clicked)
+        card.context_menu_requested.connect(self._show_context_menu)
+        card.select_requested.connect(self._on_card_select_requested)
+        card.hover_changed.connect(self._on_card_hover_changed)
+        card._library_hover_connected = True
+        self._install_library_drop_target(card, recursive=True)
+        card.set_selected(path in selected_paths)
+
+        cached_cover = self._cover_path_cache.get(path)
+        if (
+            cached_cover
+            and cached_cover != "_none_"
+            and os.path.isfile(cached_cover)
+        ):
+            # A single card can reuse its resolved thumbnail immediately; the
+            # batching queue is only needed when populating a whole page.
+            card.set_cover(cached_cover)
+        elif cached_cover is None:
+            self._queue_cover_load(
+                book, priority=(tab_key == self._active_card_tab_key()))
+
+        was_hovered = (
+            getattr(self, "_hovered_card", None) is old_card
+            or bool(getattr(old_card, "_hovered", False))
+        )
+        grid_widget = grid_layout.parentWidget()
+        updates_were_enabled = None
+        if grid_widget is not None:
+            updates_were_enabled = grid_widget.updatesEnabled()
+            grid_widget.setUpdatesEnabled(False)
+        try:
+            grid_layout.removeWidget(old_card)
+            grid_layout.addWidget(
+                card, row, column, row_span, column_span,
+                Qt.AlignTop | Qt.AlignLeft,
+            )
+            cards[card_index] = card
+            cache[path] = (
+                card, self._card_signature(book), preset_key, show_raw_title)
+            if was_hovered:
+                self._hovered_card = card
+                card.set_hovered(True)
+            old_card.setParent(None)
+            old_card.deleteLater()
+            card.show()
+        finally:
+            if grid_widget is not None and updates_were_enabled is not None:
+                grid_widget.setUpdatesEnabled(updates_were_enabled)
+                grid_widget.update()
+        return True
 
     def _load_books(self):
         """Kick off an async scan of both tabs and show the loading spinner.
@@ -10948,6 +11113,7 @@ class EpubLibraryDialog(QDialog):
         return (
             book.get("path", "") or "",
             book.get("name", "") or "",
+            _card_raw_title(book),
             int(book.get("completed_chapters", 0) or 0),
             int(book.get("total_chapters", 0) or 0),
             int(book.get("failed_chapters", 0) or 0),
@@ -10958,6 +11124,8 @@ class EpubLibraryDialog(QDialog):
             bool(book.get("has_compiled_output", False)),
             str(book.get("workspace_kind", "") or ""),
             str(book.get("type", "") or ""),
+            str(book.get("raw_source_path", "") or ""),
+            str(book.get("original_path", "") or ""),
             float(book.get("mtime", 0) or 0),
             int(book.get("size", 0) or 0),
             len(book.get("compiled_conflicts") or []),

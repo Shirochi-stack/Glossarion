@@ -27,6 +27,10 @@ from html_tag_entities import (
     looks_like_valid_html_tag as _looks_like_valid_html_tag,
     unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
 )
+from pdf_bookmarks import (
+    remove_pdf_source_page_break_markers,
+    replace_with_chapter_bookmarks,
+)
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # Import the lightweight compression worker for ProcessPoolExecutor.
@@ -8248,9 +8252,13 @@ img {
 
         # Add image styles for PDF rendering
         styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
-        # Suppress all heading-generated sidebar bookmarks; only .pdf-bm elements create them
-        styles += " h1, h2, h3, h4, h5, h6 { bookmark-level: none; } "
-        styles += " h1.pdf-bm { bookmark-level: 1; font-size: 0 !important; line-height: 0 !important; margin: 0 !important; padding: 0 !important; height: 0 !important; overflow: hidden !important; } "
+        # Imported EPUB CSS can assign bookmark-level to paragraphs or arbitrary
+        # elements. Render no CSS-derived outline entries; one bookmark per
+        # source HTML file is injected from chapter anchors after rendering.
+        styles += " body * { bookmark-level: none !important; } "
+        # Neutralize legacy per-source-page markers in already translated
+        # bookmark-section HTML (the body cleaner removes their standard form).
+        styles += " .pdf-toc-page-break { display: none !important; break-before: auto !important; page-break-before: auto !important; break-after: auto !important; page-break-after: auto !important; } "
         
         # Page number CSS
         alignment = settings['page_number_alignment']
@@ -8389,6 +8397,7 @@ img {
                 
                 # Extract just the body content to avoid nested <html><body> structures
                 body_content = _extract_body_content(content)
+                body_content = remove_pdf_source_page_break_markers(body_content)
 
                 # Convert EPUB-style relative hrefs to PDF internal anchors
                 body_content = _rewrite_epub_hrefs(body_content, epub_file_map)
@@ -8405,16 +8414,14 @@ img {
                         _bm_title = ''
                     else:
                         _seen_bm_titles.add(_bm_key)
-                _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
-                          if _bm_title else '')
                 if i > 0:
-                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
+                    body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
                 else:
-                    body_content = f'<div id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
+                    body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
                 
                 # Add to combined HTML
                 all_chapters_html += body_content
-                chapters_order.append((html_file, chap_num))
+                chapters_order.append((html_file, chap_num, _bm_title))
                 
                 if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
                     self.log(f"  [{i+1}/{len(html_files)}] Added to document")
@@ -8444,6 +8451,11 @@ img {
                 _render_elapsed = _time.time() - _render_start
                 self.log(f"  ✅ Rendering complete ({_render_elapsed:.1f}s)")
                 documents.append(chapters_doc)
+
+                # Discard any source-derived outline entries and add exactly
+                # one compiler-owned bookmark at each HTML wrapper anchor.
+                replace_with_chapter_bookmarks(
+                    chapters_doc.pages, chapters_order)
                 
                 # Resolve accurate page numbers using WeasyPrint's Page.anchors.
                 # Each chapter div has id="chapter-{chap_num}"; iterate rendered
@@ -8454,7 +8466,7 @@ img {
                         if _aid not in _anchor_to_page:
                             _anchor_to_page[_aid] = _pidx + 1
                 _fallback_page = 1
-                for _html_file, _chap_num in chapters_order:
+                for _html_file, _chap_num, _bm_title in chapters_order:
                     _pg_num = _anchor_to_page.get(f'chapter-{_chap_num}')
                     if _pg_num is not None:
                         chapter_page_map[_html_file] = _pg_num
@@ -8544,6 +8556,7 @@ img {
             '<html><head><style>'
             'body { font-family: serif; margin: 40px; }'
             'h1 { text-align: center; margin-bottom: 30px; }'
+            '* { bookmark-level: none !important; }'
             'ul { list-style-type: none; padding: 0; margin: 0; }'
             'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; }'
             'a { text-decoration: none; color: #333; display: flex; justify-content: space-between; }'

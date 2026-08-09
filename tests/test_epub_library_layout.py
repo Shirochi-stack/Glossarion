@@ -170,6 +170,80 @@ def test_library_pagination_only_builds_current_card_page(qapp):
         qapp.processEvents()
 
 
+def test_auto_scan_replaces_only_changed_mounted_card(qapp):
+    dialog = _make_dialog(qapp, 1100, 450)
+    try:
+        books = _books("targeted-auto-refresh", 20)
+        for book in books:
+            book.update({
+                "type": "in_progress",
+                "workspace_kind": "txt",
+                "completed_chapters": 1,
+                "total_chapters": 20,
+                "translation_state": "in_progress",
+            })
+        dialog._in_progress_books = books
+        dialog._cover_path_cache.update(
+            {book["path"]: "_none_" for book in books}
+        )
+        dialog._populate_tab("ip")
+        _pump_events(qapp)
+
+        cards_before = {card.book["path"]: card for card in dialog._ip_cards}
+        changed_path = books[5]["path"]
+        changed_before = cards_before[changed_path]
+        dialog._selected_paths_ip.add(changed_path)
+        changed_before.set_selected(True)
+        dialog._set_hovered_card(changed_before)
+        generation_before = dialog._card_stream_generation["ip"]
+
+        bar = dialog._ip_scroll.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(min(90, bar.maximum()))
+        scroll_before = bar.value()
+
+        fresh = [dict(book) for book in books]
+        fresh[5]["completed_chapters"] = 2
+        fresh[5]["size"] = 4096
+        fresh[5]["mtime"] = 10_000.0
+        dialog._on_auto_scan_done(fresh, [])
+
+        cards_after = {card.book["path"]: card for card in dialog._ip_cards}
+        assert cards_after[changed_path] is not changed_before
+        assert cards_after[changed_path].book["completed_chapters"] == 2
+        assert cards_after[changed_path]._selected is True
+        assert dialog._hovered_card is cards_after[changed_path]
+        assert cards_after[changed_path]._hovered is True
+        qapp.processEvents()
+        for path, old_card in cards_before.items():
+            if path != changed_path:
+                assert cards_after[path] is old_card
+        assert dialog._card_stream_generation["ip"] == generation_before
+        assert not dialog._is_card_stream_active("ip")
+        assert bar.value() == scroll_before
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
+def test_auto_scan_new_workspace_keeps_full_refresh_fallback(qapp):
+    dialog = _make_dialog(qapp, 900, 600)
+    try:
+        books = _books("auto-refresh-structure", 3)
+        dialog._in_progress_books = books
+        refresh_calls = []
+        dialog._refresh_view = lambda: refresh_calls.append(True)
+
+        fresh = [*books, _books("new-workspace", 1)[0]]
+        dialog._on_auto_scan_done(fresh, [])
+
+        assert refresh_calls == [True]
+        assert dialog._in_progress_books == fresh
+    finally:
+        dialog.close()
+        qapp.processEvents()
+
+
 def test_library_page_size_is_shared_and_filter_resets_page(qapp):
     dialog = _make_dialog(qapp, 1100, 700)
     try:

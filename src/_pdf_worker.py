@@ -30,6 +30,11 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from pdf_bookmarks import (
+    remove_pdf_source_page_break_markers,
+    replace_with_chapter_bookmarks,
+)
+
 
 def log(msg):
     """Output a progress message to stdout for the manager to read."""
@@ -52,6 +57,7 @@ def _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map):
         '<html><head><style>'
         'body { font-family: serif; margin: 40px; }'
         'h1 { text-align: center; margin-bottom: 30px; }'
+        '* { bookmark-level: none !important; }'
         'ul { list-style-type: none; padding: 0; margin: 0; }'
         'li { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px dotted #ccc; }'
         'a { text-decoration: none; color: #333; display: flex; justify-content: space-between; }'
@@ -91,8 +97,6 @@ def _build_pdf_toc_html(chapter_titles_info, settings, chapter_page_map):
 
 def run_pdf_generation(config_path):
     """Main PDF generation logic, extracted from epub_converter._generate_pdf."""
-    import html as html_module
-
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
@@ -428,8 +432,14 @@ def run_pdf_generation(config_path):
 
     styles += " @page { margin: 15mm; } "
     styles += " img { max-width: 100%; height: auto; display: block; margin: 10px auto; } "
-    styles += " h1, h2, h3, h4, h5, h6 { bookmark-level: none; } "
-    styles += ' h1.pdf-bm { bookmark-level: 1; font-size: 0 !important; line-height: 0 !important; margin: 0 !important; padding: 0 !important; height: 0 !important; overflow: hidden !important; } '
+    # Imported EPUB CSS can assign bookmark-level to paragraphs or arbitrary
+    # elements. Render no CSS-derived outline entries; one bookmark per source
+    # HTML file is injected from the chapter anchors after rendering.
+    styles += " body * { bookmark-level: none !important; } "
+    # Backward compatibility for already translated TOC-section HTML. The
+    # empty marker is normally removed from the body, and this rule neutralizes
+    # any formatting variant the conservative marker parser does not match.
+    styles += " .pdf-toc-page-break { display: none !important; break-before: auto !important; page-break-before: auto !important; break-after: auto !important; page-break-after: auto !important; } "
 
     alignment = settings['page_number_alignment']
     page_position = f'@bottom-{alignment}' if alignment != 'center' else '@bottom-center'
@@ -564,6 +574,7 @@ def run_pdf_generation(config_path):
 
             content = _embed_images_in_html(content)
             body_content = _extract_body_content(content)
+            body_content = remove_pdf_source_page_break_markers(body_content)
             body_content = _rewrite_epub_hrefs(body_content, epub_file_map)
 
             _bm_title = chapter_titles_info.get(chap_num, ('', 0, ''))[0]
@@ -575,15 +586,13 @@ def run_pdf_generation(config_path):
                     _bm_title = ''
                 else:
                     _seen_bm_titles.add(_bm_key)
-            _bm_h1 = (f'<h1 class="pdf-bm">{html_module.escape(str(_bm_title))}</h1>'
-                       if _bm_title else '')
             if i > 0:
-                body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
+                body_content = f'<div style="page-break-before: always;" id="chapter-{chap_num}">{body_content}</div>'
             else:
-                body_content = f'<div id="chapter-{chap_num}">{_bm_h1}{body_content}</div>'
+                body_content = f'<div id="chapter-{chap_num}">{body_content}</div>'
 
             all_chapters_parts.append(body_content)
-            chapters_order.append((html_file, chap_num))
+            chapters_order.append((html_file, chap_num, _bm_title))
 
             if (i + 1) % 10 == 0 or (i + 1) == len(html_files):
                 log(f"  [{i+1}/{len(html_files)}] Added to document")
@@ -622,12 +631,18 @@ def run_pdf_generation(config_path):
                 batch_doc = WeasyHTML(string=batch_html, base_url=output_dir).render()
                 documents.append(batch_doc)
 
+                # Source markup may contain hundreds of CSS-generated outline
+                # entries. Replace all of them with the compiler-owned chapter
+                # anchors: at most one bookmark for each source HTML file.
+                replace_with_chapter_bookmarks(
+                    batch_doc.pages, batch_order)
+
                 # Resolve page numbers for this batch
                 for _pidx, _pg in enumerate(batch_doc.pages):
                     for _aid in _pg.anchors:
                         if _aid not in chapter_page_map:
                             pass  # just track anchors below
-                for _html_file, _chap_num in batch_order:
+                for _html_file, _chap_num, _bm_title in batch_order:
                     _found = False
                     for _pidx, _pg in enumerate(batch_doc.pages):
                         if f'chapter-{_chap_num}' in _pg.anchors:

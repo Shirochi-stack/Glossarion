@@ -1,14 +1,162 @@
 import json
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
 
+import pytest
+
+from pdf_bookmarks import (
+    remove_pdf_source_page_break_markers,
+    replace_with_chapter_bookmarks,
+)
 from pdf_extractor import (
     build_pdf_toc_section_plan,
     extract_pdf_toc_section_plan,
     group_pdf_pages_by_toc,
     group_pdf_page_texts_by_toc,
 )
+
+
+class _FakeBookmarkPage:
+    def __init__(self, anchors=None, bookmarks=None):
+        self.anchors = anchors or {}
+        self.bookmarks = list(bookmarks or [])
+
+
+def test_legacy_toc_source_page_break_marker_is_removed_before_pdf_render():
+    html = (
+        "<p>Page one text</p>"
+        '<div data-next-pdf-page="2" '
+        'class="page-break pdf-toc-page-break"></div>'
+        "<p>Page two text</p>"
+    )
+
+    cleaned = remove_pdf_source_page_break_markers(html)
+
+    assert "pdf-toc-page-break" not in cleaned
+    assert "Page one text" in cleaned
+    assert "Page two text" in cleaned
+
+
+def test_pdf_bookmarks_replace_sentences_with_one_entry_per_html_file():
+    pages = [
+        _FakeBookmarkPage(
+            anchors={"chapter-1": (10, 20)},
+            bookmarks=[
+                (1, "Chapter One", (10, 20), "open"),
+                (2, "First sentence", (10, 40), "open"),
+                (3, "Second sentence", (10, 60), "open"),
+            ],
+        ),
+        _FakeBookmarkPage(
+            anchors={"chapter-2": (10, 20)},
+            bookmarks=[
+                (1, "Another heading", (10, 20), "open"),
+                (4, "Paragraph promoted by EPUB CSS", (10, 40), "open"),
+            ],
+        ),
+    ]
+
+    added = replace_with_chapter_bookmarks(
+        pages,
+        [
+            ("chapter-1.html", 1, "Chapter One"),
+            ("chapter-2.html", 2, "Chapter Two"),
+        ],
+    )
+
+    assert added == 2
+    assert pages[0].bookmarks == [(1, "Chapter One", (10, 20), "open")]
+    assert pages[1].bookmarks == [(1, "Chapter Two", (10, 20), "open")]
+
+
+def test_pdf_worker_writes_only_html_file_bookmarks(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    output_dir = tmp_path / "output"
+    images_dir = output_dir / "images"
+    css_dir = output_dir / "css"
+    images_dir.mkdir(parents=True)
+    css_dir.mkdir()
+    (css_dir / "hostile-outline.css").write_text(
+        "p, div { bookmark-level: 4 !important; }"
+        ".page-break { page-break-before: always; break-before: page; }",
+        encoding="utf-8",
+    )
+    (output_dir / "chapter-1.html").write_text(
+        """<html><body>
+        <h1 style="bookmark-level: 2 !important">First sentence</h1>
+        <p style="bookmark-level: 3 !important">Second sentence</p>
+        <div class="page-break pdf-toc-page-break"></div>
+        <p>Third sentence</p>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    (output_dir / "chapter-2.html").write_text(
+        """<html><body>
+        <h2 style="bookmark-level: 2 !important">Fourth sentence</h2>
+        <p style="bookmark-level: 5 !important">Fifth sentence</p>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "pdf-config.json"
+    config_path.write_text(
+        json.dumps({
+            "output_dir": str(output_dir),
+            "images_dir": str(images_dir),
+            "css_dir": str(css_dir),
+            "html_files": ["chapter-1.html", "chapter-2.html"],
+            "chapter_titles_info": {
+                "1": ["Chapter One", 1.0, "chapter-1.html"],
+                "2": ["Chapter Two", 1.0, "chapter-2.html"],
+            },
+            "processed_images": {},
+            "cover_file": None,
+            "metadata": {"title": "Outline Fixture"},
+            "env_vars": {
+                "PDF_PAGE_NUMBERS": "0",
+                "PDF_GENERATE_TOC": "1",
+                "PDF_TOC_PAGE_NUMBERS": "0",
+                "PDF_RENDER_BATCH_SIZE": "50",
+                "PDF_FAST_RENDERING": "0",
+                "ENABLE_IMAGE_COMPRESSION": "0",
+                "DEDUPLICATE_TOC": "0",
+            },
+        }),
+        encoding="utf-8",
+    )
+    worker_env = os.environ.copy()
+    for key in ("FONTCONFIG_FILE", "FONTCONFIG_PATH", "FC_CONFIG_FILE"):
+        worker_env.pop(key, None)
+    worker_path = Path(__file__).parents[1] / "src" / "_pdf_worker.py"
+
+    result = subprocess.run(
+        [sys.executable, str(worker_path), str(config_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=worker_env,
+        timeout=60,
+        check=False,
+    )
+
+    # Some Windows WeasyPrint builds exit with a native-library teardown code
+    # after emitting a successful result and closing the complete PDF. The
+    # worker protocol's RESULT record and the reopened file are authoritative.
+    assert '"success": true' in result.stdout.lower(), result.stdout + result.stderr
+    pdf_files = list(output_dir.glob("*.pdf"))
+    assert len(pdf_files) == 1
+    with fitz.open(pdf_files[0]) as document:
+        outline = document.get_toc(simple=True)
+        assert document.page_count == 3
+        preview = document[0].get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+        assert preview.width > 0 and preview.height > 0
+    assert [(level, title) for level, title, _page in outline] == [
+        (1, "Chapter One"),
+        (1, "Chapter Two"),
+    ]
 
 
 def test_toc_plan_uses_deepest_bookmark_and_keeps_front_matter():
@@ -60,7 +208,7 @@ def test_real_pymupdf_outline_is_read_as_section_ranges(tmp_path):
     ]
 
 
-def test_toc_sections_preserve_page_boundaries_and_styles():
+def test_toc_sections_preserve_source_markers_without_hard_page_breaks():
     pages = [
         (
             page_num,
@@ -88,7 +236,8 @@ def test_toc_sections_preserve_page_boundaries_and_styles():
     assert "Page 1" in grouped[0]["html"]
     assert "Page 2" in grouped[0]["html"]
     assert "Page 3" not in grouped[0]["html"]
-    assert grouped[0]["html"].count("pdf-toc-page-break") >= 1
+    assert grouped[0]["html"].count("data-pdf-page=") == 2
+    assert "pdf-toc-page-break" not in grouped[0]["html"]
     assert grouped[0]["html"].count(".page-text{color:black}") == 1
 
 

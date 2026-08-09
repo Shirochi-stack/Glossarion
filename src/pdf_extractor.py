@@ -1113,7 +1113,7 @@ def extract_pdf_toc_section_plan(pdf_path: str, total_pages: Optional[int] = Non
 
 
 def _combine_pdf_section_html(page_items, section: Dict) -> str:
-    """Combine extracted page documents into one translatable section document."""
+    """Combine source pages into one continuously flowing bookmark section."""
     title = str(section.get("title") or f"Section {section.get('num', 1)}")
     try:
         from bs4 import BeautifulSoup
@@ -1128,15 +1128,10 @@ def _combine_pdf_section_html(page_items, section: Dict) -> str:
         combined.head.append(meta)
 
         marker_style = combined.new_tag("style")
-        marker_style.string = (
-            ".pdf-toc-source-page{display:block;}"
-            ".pdf-toc-page-break{break-before:page;page-break-before:always;"
-            "height:0;margin:0;padding:0;}"
-        )
+        marker_style.string = ".pdf-toc-source-page{display:block;}"
         combined.head.append(marker_style)
 
         seen_head_nodes = set()
-        appended = 0
         for page_num, raw_html in page_items:
             page_soup = BeautifulSoup(str(raw_html or ""), "html.parser")
             if page_soup.head:
@@ -1153,19 +1148,12 @@ def _combine_pdf_section_html(page_items, section: Dict) -> str:
             fragment_html = source.decode_contents() if hasattr(source, "decode_contents") else str(source)
             fragment = BeautifulSoup(fragment_html, "html.parser")
 
-            if appended:
-                page_break = combined.new_tag("div")
-                page_break["class"] = ["page-break", "pdf-toc-page-break"]
-                page_break["data-next-pdf-page"] = str(page_num)
-                combined.body.append(page_break)
-
             wrapper = combined.new_tag("div")
             wrapper["class"] = ["pdf-toc-source-page"]
             wrapper["data-pdf-page"] = str(page_num)
             for child in list(fragment.contents):
                 wrapper.append(child)
             combined.body.append(wrapper)
-            appended += 1
 
         return str(combined)
     except Exception:
@@ -1175,9 +1163,7 @@ def _combine_pdf_section_html(page_items, section: Dict) -> str:
             f'<meta name="glossarion-pdf-section" content="{escaped_title}">',
             "</head><body>",
         ]
-        for index, (page_num, raw_html) in enumerate(page_items):
-            if index:
-                pieces.append('<div class="page-break pdf-toc-page-break"></div>')
+        for page_num, raw_html in page_items:
             pieces.append(f'<div class="pdf-toc-source-page" data-pdf-page="{page_num}">')
             pieces.append(str(raw_html or ""))
             pieces.append("</div>")
